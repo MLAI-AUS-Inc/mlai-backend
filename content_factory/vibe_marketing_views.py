@@ -12580,6 +12580,13 @@ def _bootstrap_workflow_run_ref(serialized_run):
     return {key: serialized_run.get(key) for key in _BOOTSTRAP_WORKFLOW_RUN_FIELDS}
 
 
+def _article_improvements_payload(context, request=None):
+    """The optional checklist is a safe projection, never an admission decision."""
+    from .founder_improvements import summary
+    receipt = summary(context.organization, user=getattr(request, "user", None))
+    return {"articleImprovements": receipt} if receipt is not None else {}
+
+
 def _compute_bootstrap_payload(context, request=None, *, view="summary", config=None, latest_runs=None, defer_workflow_progress=False):
     compact = view == "summary"
     if config is None:
@@ -12709,6 +12716,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
             "articleVoice": article_voice_payload(getattr(config, "pillar_strategy", None)),
         },
         "startupProfile": _serialize_startup_profile(context.organization),
+        **_article_improvements_payload(context, request),
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
         "googleBaselineConnection": google_status,
         "checks": checks,
@@ -15968,9 +15976,16 @@ class VibeMarketingAuthorPhotoPreviewView(APIView):
 
         if not _company_id_from_request(request):
             return Response({"detail": "Choose a startup.", "field": "companyId"}, status=400)
-        _profile, _company, error = _resolve_profile_company_or_response(request)
+        _profile, company, error = _resolve_profile_company_or_response(request)
         if error:
             return error
+        uploaded = getattr(request, "FILES", {}).get("photo")
+        if uploaded is not None:
+            from content_factory.author_photos import upload_photo
+            try:
+                return Response({"photoUrl": upload_photo(uploaded, company_id=company.pk)}, status=200)
+            except AuthorPhotoError as exc:
+                return Response({"detail": str(exc), "code": exc.code}, status=exc.status)
         url = str(request.data.get("url") or "").strip()
         if len(url) > 2048 or not needs_copy(url):
             return Response({"detail": "Use a full https:// link to the photo.",
@@ -16886,50 +16901,68 @@ def _baseline_published_articles(organization, *, limit=8):
     return articles
 
 
+def _website_baseline_payload(*, context, config, user):
+    """Build the same scoped, free-check inputs for manual and scheduled starts."""
+    return {
+        "domain": context.organization.domain,
+        "company_name": context.company.name,
+        "brand_name": config.brand_name or context.organization.name,
+        "seed_keywords": list(context.organization.seed_keywords or []),
+        "competitors": list(context.organization.competitors or []),
+        "published_articles": _baseline_published_articles(context.organization),
+        "slack_user_id": founder_actor_id_for_user(user),
+        "requested_by_slack_user_id": founder_actor_id_for_user(user),
+        "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
+    }
+
+
+def _start_website_baseline(*, context, config, user, payload=None, background_reserved=False):
+    """Start one check; only the internal scheduler may supply a reserved free envelope.
+
+    The manual path retains its funds-floor/free-cap behavior. Background work
+    requires the live free action and a durable scheduler reservation, never a
+    paid fallback or a body-supplied bypass.
+    """
+    if background_reserved:
+        from content_factory.billing import free_setup_actions
+        if 'website_baseline' not in free_setup_actions() or not isinstance(payload, dict):
+            raise ValueError('A free website check reservation is required.')
+        if (payload.get('domain') != context.organization.domain
+                or payload.get('slack_user_id') != founder_actor_id_for_user(user)
+                or not payload.get('client_request_id')):
+            raise ValueError('The website check owner or domain changed.')
+        gate_balance = None
+        payload = copy.deepcopy(payload)
+    else:
+        gate_response, gate_balance = _require_roo_points_for_ai_agent(user,
+            domain=context.organization.domain, action='website_baseline')
+        if gate_response is not None:
+            return None, gate_response
+        config.baseline_skipped_at = None
+        config.baseline_skip_reason = ''
+        config.save(update_fields=['baseline_skipped_at', 'baseline_skip_reason', 'updated_at'])
+        payload = _website_baseline_payload(context=context, config=config, user=user)
+        _mark_roo_points_gate_authorized(payload, domain=context.organization.domain,
+            action='website_baseline', current_balance=gate_balance)
+    run = _queue_content_factory_run(endpoint='baseline', workflow='website_baseline',
+        context=context, config=config, payload=payload)
+    if not background_reserved:
+        _record_free_setup_research(user, action='website_baseline', gate_balance=gate_balance, run=run)
+    if run.status == ContentFactoryRunStatus.COMPLETED:
+        _persist_baseline_snapshot_from_payload(organization=context.organization, run=run)
+    return run, None
+
+
 class VibeMarketingBaselineView(APIView):
     def post(self, request):
         context, error_response = _resolve_context_or_response(request)
         if error_response:
             return error_response
-        config = _get_config(context.organization)
-        gate_response, gate_balance = _require_roo_points_for_ai_agent(
-            request.user,
-            domain=context.organization.domain,
-            action="website_baseline",
-        )
-        if gate_response is not None:
-            return gate_response
-        config.baseline_skipped_at = None
-        config.baseline_skip_reason = ""
-        config.save(update_fields=["baseline_skipped_at", "baseline_skip_reason", "updated_at"])
-        payload = {
-            "domain": context.organization.domain,
-            "company_name": context.company.name,
-            "brand_name": config.brand_name or context.organization.name,
-            "seed_keywords": list(context.organization.seed_keywords or []),
-            "competitors": list(context.organization.competitors or []),
-            "published_articles": _baseline_published_articles(context.organization),
-            "slack_user_id": founder_actor_id_for_user(request.user),
-            "requested_by_slack_user_id": founder_actor_id_for_user(request.user),
-            "request_source": CONTENT_FACTORY_REQUEST_SOURCE,
-        }
-        _mark_roo_points_gate_authorized(
-            payload,
-            domain=context.organization.domain,
-            action="website_baseline",
-            current_balance=gate_balance,
-        )
-        run = _queue_content_factory_run(
-            endpoint="baseline",
-            workflow="website_baseline",
-            context=context,
-            config=config,
-            payload=payload,
-        )
-        _record_free_setup_research(request.user, action="website_baseline", gate_balance=gate_balance, run=run)
-        if run.status == ContentFactoryRunStatus.COMPLETED:
-            _persist_baseline_snapshot_from_payload(organization=context.organization, run=run)
-        return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
+        run, error_response = _start_website_baseline(context=context,
+            config=_get_config(context.organization), user=request.user)
+        if error_response is not None:
+            return error_response
+        return Response({'run_id': run.run_id, 'runId': run.run_id, 'status': run.status}, status=status.HTTP_202_ACCEPTED)
 
 
 class VibeMarketingBaselineSkipView(APIView):

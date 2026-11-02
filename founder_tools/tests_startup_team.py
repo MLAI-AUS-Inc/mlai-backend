@@ -145,6 +145,13 @@ class TeamTests(TransactionTestCase):
         teams.update_member(organization=self.org, user=self.owner, member_id=row['memberId'], remove=True)
         self.assertEqual(resolve_content_billing_user(self.member, self.org.domain).pk, self.member.pk)
 
+    def test_missing_team_package_never_promotes_an_owner_over_a_retained_pin(self):
+        from content_factory.self_heal_testing import missing_provider
+        from .services import organization_owner_user_id
+        self.approve()
+        with missing_provider('founder_tools.startup_team'):
+            self.assertIsNone(organization_owner_user_id(self.org))
+
     def test_billing_summary_matches_live_spend_rights_without_other_account_email(self):
         from content_factory.company_billing import billing_summary
         self.org.billing_user = self.owner

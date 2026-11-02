@@ -244,10 +244,21 @@ def organization_owner_user_id(organization) -> int | None:
     """
     if organization is None:
         return None
-    from .startup_team import pinned_owner
-    pinned, owner_id = pinned_owner(organization)
-    if pinned:
-        return owner_id
+    try:
+        from .startup_team import pinned_owner
+    except (ImportError, AttributeError):
+        # Partial rollouts keep legacy owner reads available only when there
+        # is no team pin to interpret. Missing code must never promote a
+        # replacement owner over a retained/frozen team record.
+        from content_factory.models import OrganizationContentConfig
+        if (getattr(organization, '_state', None) is None or organization._state.adding
+                or OrganizationContentConfig.objects.filter(organization=organization,
+                    pillar_strategy__has_key='startup_team').exists()):
+            return None
+    else:
+        pinned, owner_id = pinned_owner(organization)
+        if pinned:
+            return owner_id
     live, stale = _organization_claims(organization)
     first = (live or stale or [None])[0]
     return first.profile.user_id if first else None
