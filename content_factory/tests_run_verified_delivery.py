@@ -172,6 +172,27 @@ class VerifiedDeliveryTests(TransactionTestCase):
         _sync_content_factory_run_snapshot(run_id=self.run.run_id, data=payload, step_states=payload["step_states"])
         self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), verified)
 
+    def test_legacy_cancellation_receipt_cannot_project_owned_lifecycle(self):
+        from .service_views import _apply_cancellation_receipt
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        response = _apply_cancellation_receipt(self.run.run_id,
+            {"domain": self.org.domain, "status": "cancelled", "result": {"cancelled": True}})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), before)
+
+    def test_reservation_only_wire_keeps_its_original_legacy_observation_boundary(self):
+        from .run_owned_observations import maybe_receive_owned_observation
+        with override_settings(ARTICLES_RUN_FACT_AUTHORITY_ENABLED=False, ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=False):
+            run = reserve_admitted_run(organization=self.org,
+                principal=user_principal(self.user.pk, f"mlai_user:{self.user.pk}"), workflow="article_generation",
+                payload={"domain": self.org.domain, "client_request_id": "reservation-only-boundary"})
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        with patch("content_factory.run_verified_delivery.project_verified_delivery") as bridge:
+            self.assertIsNone(maybe_receive_owned_observation({"run_id": run.run_id,
+                WIRE_REQUEST_KEY: wire_identity(owner_receipt(run)), WIRE_EXECUTION_KEY: current_execution_ticket(run)}))
+        bridge.assert_not_called()
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before)
+
     def test_no_remote_read_inside_sql_and_projection_failure_rolls_history_and_entitlement_back(self):
         with transaction.atomic(), patch("requests.get") as get, self.assertRaises(ArtifactObservationInvalid):
             project_verified_delivery(self.run.run_id)

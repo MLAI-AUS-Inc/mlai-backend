@@ -8,7 +8,7 @@ from urllib.parse import quote
 from django.db import connection, transaction
 from django.utils import timezone
 
-from .run_artifact_observations import ArtifactObservationInvalid, _digest, fetch_evidence, validate_evidence
+from .run_artifact_observations import ArtifactObservationInvalid, _digest, _hash, _timestamp, fetch_evidence
 from .run_ownership import (VERIFIED_DELIVERY_RESULT_KEY, WIRE_EXECUTION_KEY, WIRE_REQUEST_KEY,
     current_execution_ticket, owner_receipt, require_event_execution, require_event_identity, wire_identity)
 
@@ -19,19 +19,24 @@ MAX_PROOFS = 1024
 def verified_delivery_receipt(run):
     """Previously verified value survives later failed or superseded tickets."""
     owner = owner_receipt(run)
-    state = (getattr(run, "result", None) or {}).get(VERIFIED_DELIVERY_RESULT_KEY)
+    result = getattr(run, "result", None)
+    state = result.get(VERIFIED_DELIVERY_RESULT_KEY) if isinstance(result, dict) else None
     if (owner is None or not isinstance(state, dict) or type(state.get("schema_version")) is not int
             or state["schema_version"] != 1 or state.get("admission_digest") != _digest(wire_identity(owner))
             or not isinstance(state.get("proofs"), dict) or len(state["proofs"]) > MAX_PROOFS):
         return None
     for proof in state["proofs"].values():
-        if (not isinstance(proof, dict) or proof.get("delivered") is not True
-                or proof.get("proof_sha256") != _digest({key: value for key, value in proof.items() if key != "proof_sha256"})):
-            continue
         try:
+            if (not isinstance(proof, dict) or proof.get("delivered") is not True
+                    or type(proof.get("schema_version")) is not int or proof["schema_version"] != 1
+                    or proof.get("run_id") != run.run_id or proof.get("kind") not in {"article_body_v1", "publish_pr_v1"}
+                    or not all(_hash(proof.get(field)) for field in ("evidence_sha256", "source_sha256", "payload_sha256", "proof_sha256"))
+                    or not _timestamp(proof.get("observed_at")) or not _timestamp(proof.get("verified_at"))
+                    or proof["proof_sha256"] != _digest({key: value for key, value in proof.items() if key != "proof_sha256"})):
+                continue
             require_event_identity(run, proof)
             require_event_execution(run, proof)
-        except (ValueError, TypeError, KeyError):
+        except (ValueError, TypeError, KeyError, RecursionError, UnicodeError):
             continue
         return deepcopy(proof)
     return None
@@ -48,10 +53,13 @@ def verified_draft_ready(run):
     result = getattr(run, "result", None) or {}
     ready = result.get("draft_ready_v1")
     proofs = result[VERIFIED_DELIVERY_RESULT_KEY]["proofs"]
-    return isinstance(ready, dict) and any(isinstance(proof, dict) and proof.get("kind") == "draft_ready_v1"
-        and proof.get("payload_sha256") == _digest(ready)
-        and proof.get("proof_sha256") == _digest({key: value for key, value in proof.items() if key != "proof_sha256"})
-        for proof in proofs.values())
+    try:
+        return isinstance(ready, dict) and any(isinstance(proof, dict) and proof.get("kind") == "draft_ready_v1"
+            and proof.get("payload_sha256") == _digest(ready)
+            and proof.get("proof_sha256") == _digest({key: value for key, value in proof.items() if key != "proof_sha256"})
+            for proof in proofs.values())
+    except (TypeError, ValueError, RecursionError, UnicodeError):
+        return False
 
 
 def _fetch_review(run):
@@ -63,16 +71,17 @@ def _fetch_review(run):
     config = _content_factory_remote_config()
     if not config.get("enabled"):
         raise ArtifactObservationInvalid("The canonical article is unavailable.")
+    deadline = monotonic() + 15
     response = requests.get(config["base_url"].rstrip("/") + "/api/runs/" + quote(run.run_id, safe="") + "/article-review",
         headers=_content_factory_headers(), timeout=(3, 10), stream=True, allow_redirects=False)
     try:
         if response.status_code != 200:
             raise ArtifactObservationInvalid("The canonical article is unavailable.")
-        raw, deadline = bytearray(), monotonic() + 15
-        for chunk in response.iter_content(chunk_size=16_384):
-            raw.extend(chunk)
-            if len(raw) > MAX_REVIEW_BYTES or monotonic() > deadline:
+        raw = bytearray()
+        for chunk in response.iter_content(chunk_size=1):
+            if len(raw) + len(chunk) > MAX_REVIEW_BYTES or monotonic() > deadline:
                 raise ArtifactObservationInvalid("The canonical article exceeds its read bound.")
+            raw.extend(chunk)
         value = json.loads(raw)
         if not isinstance(value, dict):
             raise ArtifactObservationInvalid("The canonical article is unavailable.")

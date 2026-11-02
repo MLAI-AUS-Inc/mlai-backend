@@ -16,7 +16,6 @@ def maybe_receive_owned_observation(payload, *, run_id=None, expected_kind=None)
     """
     from workflow_runs.models import ContentFactoryRun
     from .run_reconciliation import authoritative_run
-    from .run_artifact_observations import ArtifactObservationInvalid
     from .run_verified_delivery import project_verified_delivery
     from .setup_delivery_contract import DeliveryContractError, validate_envelope
     from .setup_delivery_receiver import acknowledgement

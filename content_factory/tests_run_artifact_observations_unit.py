@@ -3,7 +3,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase
 
@@ -36,6 +36,22 @@ def rehash(value):
 
 
 class TypedArtifactCandidateTests(SimpleTestCase):
+    def test_trickling_evidence_and_canonical_reads_stop_at_total_deadline_and_close(self):
+        from .run_artifact_observations import fetch_evidence
+        from .run_verified_delivery import _fetch_review
+        run = owner(fixture())
+        for fetch, module in ((fetch_evidence, "run_artifact_observations"), (_fetch_review, "run_verified_delivery")):
+            response = Mock(status_code=200)
+            response.iter_content.side_effect = lambda **kwargs: iter([b"{", b'"'])
+            with self.subTest(fetch=module), \
+                    patch("content_factory.vibe_marketing_views._content_factory_remote_config", return_value={"enabled": True, "base_url": "https://cf.fixture.invalid"}), \
+                    patch("requests.get", return_value=response), \
+                    patch("content_factory." + module + ".monotonic", side_effect=[0, 1, 16]), \
+                    self.assertRaises(ArtifactObservationInvalid):
+                fetch(run)
+            response.close.assert_called_once()
+            self.assertEqual(response.iter_content.call_args.kwargs["chunk_size"], 1)
+
     def test_actual_cf_wrapper_only_reaches_typed_bridge_and_never_the_v1_projector(self):
         from .run_owned_observations import maybe_receive_owned_observation
         value = json.loads((Path(__file__).parent / "fixtures/r3_owned_delivery_wrapper.json").read_text())["body"]

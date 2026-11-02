@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+from time import monotonic
 from urllib.parse import quote
 
 from .run_ownership import (
@@ -122,6 +123,7 @@ def fetch_evidence(run):
     config = _content_factory_remote_config()
     if not config.get("enabled"):
         raise ArtifactObservationInvalid("The current evidence source is unavailable.")
+    deadline = monotonic() + 15
     try:
         response = requests.get(config["base_url"].rstrip("/") + "/api/runs/" + quote(run.run_id, safe="") + "/evidence",
             headers=_content_factory_headers(), timeout=(3, 10), stream=True, allow_redirects=False)
@@ -131,10 +133,10 @@ def fetch_evidence(run):
         if response.status_code != 200:
             raise ArtifactObservationInvalid("The current evidence source is unavailable.")
         raw = bytearray()
-        for part in response.iter_content(chunk_size=16_384):
-            raw.extend(part)
-            if len(raw) > MAX_BYTES:
+        for part in response.iter_content(chunk_size=1):
+            if len(raw) + len(part) > MAX_BYTES or monotonic() > deadline:
                 raise ArtifactObservationInvalid("The evidence source exceeds its bound.")
+            raw.extend(part)
         return validate_evidence(run, json.loads(raw))
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise ArtifactObservationInvalid("The current evidence source is not readable.") from exc
