@@ -780,7 +780,15 @@ jobs:
           content_factory.tests_p2_policy_review \
           content_factory.tests_p2_notify \
           content_factory.tests_founder_funnel_journey \
+          content_factory.tests_founder_funnel_review \
+          content_factory.tests_founder_funnel_report \
           content_factory.tests_founder_website_checks \
+          content_factory.tests_free_baseline_reservations \
+          content_factory.tests_p3_website_check_boundaries \
+          content_factory.tests_p3_dispatch_identity_boundary \
+          content_factory.tests_hosted_publish_authority \
+          content_factory.tests_p3_improvements \
+          roo.tests_startup_checkout_return \
           content_factory.tests_p2_runs \
           content_factory.tests_p2_staff \
           founder_tools.tests_startup_team --noinput --verbosity 2
