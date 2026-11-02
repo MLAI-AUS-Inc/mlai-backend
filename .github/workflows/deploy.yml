@@ -736,6 +736,23 @@ jobs:
     - name: Verify CRM blasts, senders and listmonk feedback on PostgreSQL
       run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database --verbosity 2
 
+    - name: Verify Founder recovery policy and authority on PostgreSQL
+      run: |
+        python manage.py test \
+          content_factory.tests_p2_registry_alerts \
+          content_factory.tests_p2_registry_contract \
+          content_factory.tests_p2_registry_foundation \
+          content_factory.tests_p2_registry_runtime \
+          content_factory.tests_p2_registry_website_status \
+          content_factory.tests.test_p2_authority_connections \
+          content_factory.tests.test_p2_authority_events \
+          content_factory.tests.test_p2_authority_lineage \
+          content_factory.tests.test_p2_authority_repin \
+          content_factory.tests_p2_merge_worker \
+          content_factory.tests_p2_policy \
+          content_factory.tests_p2_runs \
+          content_factory.tests_p2_staff --noinput --verbosity 2
+
     - name: Verify PostgreSQL search infrastructure
       run: |
         python manage.py check_org_memory_search --require-vector

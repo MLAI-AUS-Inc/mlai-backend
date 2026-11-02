@@ -15,6 +15,8 @@ until ``MY_STARTUP_CANONICAL_ACTION_IDS_ENABLED`` is on.
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from django.conf import settings
 
@@ -34,10 +36,32 @@ LEGACY_WIRE_ACTION_IDS: dict[str, str | None] = {
 }
 WORKING = "working"
 STOPPED = "stopped"
+_read_view = ContextVar('p2_registry_read_view', default=None)
 
 
 def _policy_v2_for(organization) -> bool:
+    snapshot = _read_view.get()
+    if snapshot is not None and organization is not None and snapshot[0] == organization.pk:
+        return snapshot[1]
     return organization is not None and p2_foundation.policy_v2_applies(organization)
+
+
+@contextmanager
+def organization_read_scope(organization, config):
+    """Reuse a joined config for one decision, without caching mutation authority."""
+    applies = bool(getattr(settings, 'ARTICLES_FAILURE_POLICY_V2_ENABLED', False) and cohort_for_report(organization, config))
+    token = _read_view.set((getattr(organization, 'pk', None), applies))
+    try:
+        yield applies
+    finally:
+        _read_view.reset(token)
+
+
+def cohort_for_report(organization, config):
+    """Read cohort membership from a bounded report snapshot, without any writes."""
+    from .founder_journey_cohort import is_new_journey
+    return bool(organization and (organization.pk in p2_foundation.legacy_opt_in_ids()
+                                  or is_new_journey(organization, config=config)))
 
 
 def effective_entry(code: str | None, organization=None) -> dict | None:
@@ -160,3 +184,13 @@ def limits() -> dict:
     retry = registry["policies"]["retry_same_step"]
     return {**deepcopy(registry.get("limits", {})), "backoff_minutes": list(retry["backoff_minutes"]),
             "max_elapsed_hours": retry["max_elapsed_hours"]}
+
+
+def report_entry(code):
+    """Read the prospective P2 view for a read-only report, without changing gates."""
+    return deepcopy(load_registry()['by_code_v2'].get(code)) if isinstance(code, str) else None
+
+
+def policy_details(name):
+    """Return shared executor metadata for a registered policy name."""
+    return deepcopy(load_registry()['policies'].get(name, {}))

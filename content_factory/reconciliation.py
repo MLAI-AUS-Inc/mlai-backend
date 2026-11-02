@@ -639,6 +639,9 @@ def _stop_stalled_article(run, *, base_url, headers, now):
 
 
 def _refund_failed_run(run, *, reason):
+    from .no_delivery_refunds import enabled, refund_decision, apply_refund_decision
+    if enabled():
+        return apply_refund_decision(run, refund_decision(run))
     from .billing_lineage import ARTICLE_CHARGE_PREFIX, original_article_spend_for_run, paid_article_request
     from .article_publication_evidence import refund_reconciliation_reason
     from integrations.services.article_generation import refund_content_factory_request_for_user
@@ -759,6 +762,10 @@ def _queue_unrecoverable_article_refunds(*, limit, now):
         updated_at__lt=now - _stale_after(), result__article_terminal_refund__isnull=True).filter(
         _legacy_delivery_rows("run_request")).order_by("updated_at")[:limit]
     for candidate in candidates:
+        from .no_delivery_refunds import enabled, refund_decision, apply_refund_decision
+        if enabled():
+            apply_refund_decision(candidate, refund_decision(candidate, now=now), now=now)
+            continue
         code = unrecoverable_refund_code(candidate)
         if not code:
             continue
@@ -863,6 +870,15 @@ def _settle_exhausted_article_runs(*, limit, now):
         updated_at__lt=now - _stale_after()).filter(
         Q(reconciled_at__isnull=True) | Q(reconciled_at__lt=now - _probe_interval())).order_by("updated_at")[:limit]
     for run in candidates:
+        from .no_delivery_refunds import enabled, refund_decision, apply_refund_decision
+        if enabled():
+            decision = refund_decision(run, now=now)
+            if decision.get('why') in {'retry_pending', 'policy_pending', 'goal_settlement_owned'}:
+                continue
+            apply_refund_decision(run, decision, now=now)
+            # Publication-unknown still needs the original bound stop protocol.
+            if decision.get('why') != 'publication_unresolved':
+                continue
         if not exhausted_article_candidate(run):
             continue
         original_result = deepcopy(run.result)
@@ -1101,6 +1117,8 @@ def _redrive_fixed_runs(*, limit, now):
         return 0
     candidates = list(ContentFactoryRun.objects.filter(status="blocked", updated_at__lt=now - timedelta(minutes=10),
         workflow__in=DURABLY_READABLE_WORKFLOWS).filter(_legacy_delivery_rows("run_request")).filter(Q(result__sweep_redrive_attempted__isnull=True) | Q(result__sweep_redrive_attempted=False))[:limit])
+    from .failure_policy_engine import policy_mode
+    candidates = [run for run in candidates if policy_mode(run.organization) != 'policy']
     if not candidates:
         return 0
     try:

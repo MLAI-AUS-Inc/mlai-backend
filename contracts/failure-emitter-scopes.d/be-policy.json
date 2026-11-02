@@ -1,0 +1,65 @@
+{
+  "dynamic_adapters": [
+    {
+      "path": "content_factory/failure_policy_engine.py",
+      "function": "apply",
+      "field": "code",
+      "expression": "_code(result)",
+      "site_sha256": "ea31ea937b7a0c0a97cb585fb5e9ed4e7a442c09f1eae381ed2766904d4e5f75",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.website_reconciliation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Saved run or goal causal code projected into a private recovery receipt or read-only report. Executor selection separately reads the authenticated organization registry view; unknown observations cannot authorize repository writes.",
+      "test": "content_factory.tests_p2_policy.PolicyTests.test_legacy_dry_run_never_changes_runs_or_calls_providers"
+    },
+    {
+      "path": "content_factory/failure_policy_engine.py",
+      "function": "apply",
+      "field": "code",
+      "expression": "_code(mapping(current.result))",
+      "site_sha256": "d04771ce2244452f0570dd2eed6c9c1e0401b13cda45434b80ddddddba063991",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.website_reconciliation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Saved run or goal causal code projected into a private recovery receipt or read-only report. Executor selection separately reads the authenticated organization registry view; unknown observations cannot authorize repository writes.",
+      "test": "content_factory.tests_p2_policy.PolicyTests.test_legacy_dry_run_never_changes_runs_or_calls_providers"
+    },
+    {
+      "path": "content_factory/failure_policy_engine.py",
+      "function": "apply",
+      "field": "code",
+      "expression": "receipt['code']",
+      "site_sha256": "1999b84ed706508190e9b4c98d262d2b213e3f1b6dc3202f62cfb8bd1b9e7f24",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.website_reconciliation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Saved run or goal causal code projected into a private recovery receipt or read-only report. Executor selection separately reads the authenticated organization registry view; unknown observations cannot authorize repository writes.",
+      "test": "content_factory.tests_p2_policy.PolicyTests.test_legacy_dry_run_never_changes_runs_or_calls_providers"
+    },
+    {
+      "path": "content_factory/failure_policy_engine.py",
+      "function": "_apply_operation",
+      "field": "code",
+      "expression": "_code(subject)",
+      "site_sha256": "d027733fbb498f54a2e27e948ec474b73f6f0c955e0d7937573cdbd43ad8460f",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.website_reconciliation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Saved run or goal causal code projected into a private recovery receipt or read-only report. Executor selection separately reads the authenticated organization registry view; unknown observations cannot authorize repository writes.",
+      "test": "content_factory.tests_p2_policy.PolicyTests.test_legacy_dry_run_never_changes_runs_or_calls_providers"
+    },
+    {
+      "path": "content_factory/failure_policy_engine.py",
+      "function": "dry_run_report",
+      "field": "code",
+      "expression": "_code(mapping(run.result))",
+      "site_sha256": "213315de058ba3bd69174a2b6ec6b78619038bb96806949aba7deaa77fcdfde3",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.website_reconciliation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Saved run or goal causal code projected into a private recovery receipt or read-only report. Executor selection separately reads the authenticated organization registry view; unknown observations cannot authorize repository writes.",
+      "test": "content_factory.tests_p2_policy.PolicyTests.test_legacy_dry_run_never_changes_runs_or_calls_providers"
+    }
+  ],
+  "nonfailure_sites": []
+}
