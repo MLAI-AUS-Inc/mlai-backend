@@ -1,0 +1,103 @@
+{
+  "method": "POST",
+  "path": "/api/runs/withdraw-dispatch",
+  "request": {
+    "backend_run_admission_v1": {
+      "dispatch_key": "dispatch-1",
+      "domain": "example.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "42",
+      "principal": {
+        "actor_id": "U_FIXTURE",
+        "kind": "user",
+        "user_id": "7"
+      },
+      "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "article_generation"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "ece8e1471e2e83e6ad3ec60bbdaa8e2eb222a674f4c599e6ca2eff169d531dd1",
+      "execution_id": "admit:ece8e1471e2e83e6ad3ec60bbdaa8e2eb222a674f4c599e6ca2eff169d531dd1",
+      "generation": 0,
+      "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "client_request_id": "dispatch-1",
+    "schema_version": 1
+  },
+  "response": {
+    "backend_run_admission_v1": {
+      "dispatch_key": "dispatch-1",
+      "domain": "example.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "42",
+      "principal": {
+        "actor_id": "U_FIXTURE",
+        "kind": "user",
+        "user_id": "7"
+      },
+      "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "article_generation"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "ece8e1471e2e83e6ad3ec60bbdaa8e2eb222a674f4c599e6ca2eff169d531dd1",
+      "execution_id": "admit:ece8e1471e2e83e6ad3ec60bbdaa8e2eb222a674f4c599e6ca2eff169d531dd1",
+      "generation": 0,
+      "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "client_request_id": "dispatch-1",
+    "closed_at": "2026-11-02T16:46:25.211801+00:00",
+    "receipt_sha256": "2ae65d468a8887b9aed13649cfa08d3380b5191d862cb2a43a44c598e0c7e4a0",
+    "schema_version": 1,
+    "status": "closed_no_effects"
+  }
+}
