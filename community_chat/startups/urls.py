@@ -24,6 +24,7 @@ urlpatterns = [
     path("runs/active/", views.ActiveRunView.as_view()),
     path("runs/<str:run_id>/", views.RunView.as_view()),
     path("runs/<str:run_id>/results/", views.ResultsView.as_view()),
+    path("runs/<str:run_id>/retry/", views.ResumeView.as_view()),
     path("runs/<str:run_id>/cancel/", views.CancelView.as_view()),
     path("documents/", views.DocumentsView.as_view()),
     path("documents/session/", views.UploadSessionView.as_view()),

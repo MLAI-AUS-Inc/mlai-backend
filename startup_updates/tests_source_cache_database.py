@@ -146,15 +146,18 @@ class LinearBackfillMultiProjectTests(StartupUpdateApiTestCase):
         StartupProfile.objects.create(organization=self.organization)
         binding = UserStartupBinding.objects.create(user=self.user, organization=self.organization,
             google_connection=self.google_connection)
-        self.run = create_startup_update_run(organization=self.organization, binding=binding, target_month=date(2026, 3, 1))
-        self.run.run_request.update(input_sources=["linear"], linear_project_ids=["one", "two", "three"])
-        self.run.save(update_fields=["run_request", "updated_at"])
         self.linear = ExternalServiceConnection.objects.create(provider=ExternalServiceProvider.LINEAR,
             user=self.user, organization=self.organization, access_token="synthetic-linear-token",
             status=ExternalServiceConnectionStatus.CONNECTED)
         for index, project_id in enumerate(("one", "two", "three")):
             LinearProjectSelection.objects.create(organization=self.organization, connection=self.linear, user=self.user,
                 linear_project_id=project_id, project_name=f"{index} {project_id}", selected=True)
+        self.run = create_startup_update_run(organization=self.organization, binding=binding,
+            target_month=date(2026, 3, 1), input_sources=["linear"])
+        # These cursor tests begin after source admission. The real all-source
+        # endpoint and stale-worker barrier are covered by tests_generation_reliability.
+        self.run.run_request.update(source_preflight_complete=True, linear_project_ids=["one", "two", "three"])
+        self.run.save(update_fields=["run_request", "updated_at"])
 
     def post(self):
         with self._with_key():

@@ -20,7 +20,7 @@ from integrations.services.luma import LumaAPIError, LumaAttendeeReportService, 
 from .models import EventDiscountOffer, EventDiscountQuote, EventDiscountRedemption, PointsAccount, RewardsCatalog
 from .permissions import InsufficientBalanceError
 from .services import PointsService
-from .event_ticket_policy import EVENT_TICKET_POINTS
+from .event_ticket_policy import EVENT_TICKET_POINTS, EVENT_HALF_TICKET_POINTS
 
 
 class EventDiscountError(ValueError):
@@ -45,6 +45,30 @@ def feature_enabled():
 def _enabled():
     if not feature_enabled():
         raise EventDiscountError("event_discounts_disabled", "Event discounts are not available yet.", 503)
+
+
+def account_perks_enabled():
+    """Direct member redemption needs provider access and supervised recovery."""
+    return bool(getattr(settings, "ROO_EVENT_DISCOUNTS_ENABLED", False)
+        and getattr(settings, "ROO_EVENT_DISCOUNT_WORKER_ENABLED", False)
+        and str(getattr(settings, "LUMA_API_KEY", "") or "").strip())
+
+
+def _account_scope(user):
+    """Namespace an authenticated account independently of Slack conversations."""
+    _member(user)
+    return {"team_id": "COMMUNITY_CHAT", "channel_id": "M" + hashlib.sha256(str(user.pk).encode()).hexdigest()[:24], "thread_ts": ""}
+
+
+def member_perk_terms(offer, perk):
+    """Derive the two server-priced tiers from an enabled full-ticket offer."""
+    if not isinstance(perk, str) or perk not in {"half_price", "free_ticket"}:
+        raise EventDiscountError("invalid_perk", "Choose a half-price or free ticket.", 400)
+    if offer.discount_type != "percent" or offer.percent_off != 100 or offer.reward.cost_points != EVENT_TICKET_POINTS:
+        raise EventDiscountError("offer_unavailable", "Member perks are not available for this event.", 404)
+    terms = _offer_terms(offer)
+    terms["discount"] = {"discount_type": "percent", "percent_off": 50 if perk == "half_price" else 100}
+    return terms, EVENT_HALF_TICKET_POINTS if perk == "half_price" else EVENT_TICKET_POINTS
 
 
 def _scope(scope):
@@ -148,6 +172,7 @@ def serialize_redemption(row):
     fulfilled = row.status == EventDiscountRedemption.Status.FULFILLED
     return {
         "id": str(row.pk), "status": row.status,
+        "needs_review": row.needs_review,
         "event_id": row.event_id, "event_name": snapshot["name"],
         "event": {key: snapshot[key] for key in ("id", "name", "url", "starts_at")},
         "points_cost": snapshot["points_cost"],
@@ -169,10 +194,14 @@ class EventDiscountService:
     """Coordinate quote, reserve, provider reconciliation, and exact settlement."""
 
     @staticmethod
-    def quote(*, user, event_query, scope):
-        _enabled()
+    def quote(*, user, event_query, scope=None, account_perk=None):
+        if account_perk is not None:
+            if not account_perks_enabled():
+                raise EventDiscountError("event_discounts_disabled", "Member perks are not available yet.", 503)
+        else:
+            _enabled()
         _member(user)
-        scope = _scope(scope)
+        scope = _account_scope(user) if account_perk is not None else _scope(scope)
         if not isinstance(event_query, str) or not 1 <= len(event_query.strip()) <= 300:
             raise EventDiscountError("invalid_event", "Name an event or provide its Luma event ID.", 400)
         query = event_query.strip()
@@ -191,11 +220,14 @@ class EventDiscountService:
         if EventDiscountRedemption.objects.filter(user=user, event_id=offer.event_id, status__in=("processing", "fulfilled")).exists():
             raise EventDiscountError("already_redeemed", "You already have a redemption for this event. Ask Roo to show your event discounts.")
         fingerprint = _fingerprint(offer)
+        terms, points_cost = member_perk_terms(offer, account_perk) if account_perk is not None else (_offer_terms(offer), offer.reward.cost_points)
         try:
-            snapshot = LumaEventDiscountService().validate_offer(_offer_terms(offer), now=now)
+            snapshot = LumaEventDiscountService().validate_offer(terms, now=now)
         except LumaEventDiscountError as exc:
             raise EventDiscountError(exc.code, exc.message, 503 if exc.retryable else 409) from exc
-        snapshot.update(points_cost=offer.reward.cost_points, reward_code=offer.reward_id)
+        snapshot.update(points_cost=points_cost, reward_code=offer.reward_id)
+        if account_perk is not None:
+            snapshot["member_perk"] = account_perk
         snapshot["discount_description"] = _description(snapshot)
         # Freeze a fresh policy check after the upstream read. No points or stock
         # are reserved by a quote; concurrent changes are checked again on confirm.
@@ -217,10 +249,14 @@ class EventDiscountService:
 
     @staticmethod
     @transaction.atomic
-    def reserve(*, user, quote_id, request_id, scope):
-        _enabled()
+    def reserve(*, user, quote_id, request_id, scope=None, account_authenticated=False):
+        if account_authenticated:
+            if not account_perks_enabled():
+                raise EventDiscountError("event_discounts_disabled", "Member perks are not available yet.", 503)
+        else:
+            _enabled()
         _member(user)
-        scope = _scope(scope)
+        scope = _account_scope(user) if account_authenticated else _scope(scope)
         if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", request_id):
             raise EventDiscountError("invalid_request_id", "A stable redemption request ID is required.", 400)
         try:
@@ -392,7 +428,7 @@ class EventDiscountService:
                         row.pk, token, "coupon_result_unknown", review=row.attempts >= 6,
                     )
                 _member(row.user)
-                if not feature_enabled():
+                if not (account_perks_enabled() if snapshot.get("member_perk") else feature_enabled()):
                     return EventDiscountService._fail(row.pk, token, "event_discounts_disabled")
                 gateway.validate_offer(snapshot, now=timezone.now())
                 if not EventDiscountService._checkpoint_attempt(row.pk, token):
