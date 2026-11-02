@@ -4,11 +4,13 @@ The key is additive and present only while V2 is on. For each of the five
 named legacy organisations, the bootstrap with every P1 flag on equals the
 flags-off bootstrap apart from that key, whose cohort is legacy.
 """
+from copy import deepcopy
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import TestCase, override_settings
+from rest_framework.response import Response
 from rest_framework.test import APIClient
 
 from community_chat import my_startup_views
@@ -194,6 +196,36 @@ class FounderJourneyProfileTests(_Client, TestCase):
 
     def test_the_facade_inherits_the_profile_and_bootstrap_reads(self):
         self.assertTrue(issubclass(my_startup_views.ProfileView, founder_views.FounderToolsProfileView))
-        self.assertIs(my_startup_views.ProfileView.get, founder_views.FounderToolsProfileView.get)
+        # The facade adds a team capability only while its flag is on. Its
+        # flag-off contract is unchanged delegation, not method identity.
+        view, request = my_startup_views.ProfileView(), object()
+        legacy = Response({"companies": [{"id": "owned"}], "role": "founder"},
+                          headers={"ETag": '"legacy-profile"'})
+        original = deepcopy(legacy.data)
+        with override_settings(MY_STARTUP_TEAM_ENABLED=False), patch.object(
+                founder_views.FounderToolsProfileView, "get", autospec=True, return_value=legacy) as base:
+            response = view.get(request)
+        base.assert_called_once_with(view, request)
+        self.assertIs(response, legacy)
+        self.assertEqual(response.data, original)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["ETag"], '"legacy-profile"')
+
+        # Exercise the persisted owner profile through both HTTP compositions;
+        # turning the team flag off must not add another owner's company.
+        built = make_new_journey_org("facade-owner.studio")
+        foreign = make_new_journey_org("facade-foreign.studio")
+        client = self.client_for(built.owner)
+        with override_settings(MY_STARTUP_TEAM_ENABLED=False), patch(
+                "founder_tools.startup_team.member_companies") as members:
+            base_response = client.get(PROFILE_URL)
+            facade_response = client.get("/api/v1/my-startup/founder-tools/profile/")
+        self.assertEqual(base_response.status_code, 200)
+        self.assertEqual(facade_response.status_code, 200)
+        self.assertEqual(facade_response.data, base_response.data)
+        self.assertEqual({row["id"] for row in facade_response.data["companies"]}, {str(built.company.pk)})
+        self.assertNotIn(str(foreign.company.pk), {row["id"] for row in facade_response.data["companies"]})
+        self.assertNotIn("teamAvailable", facade_response.data)
+        members.assert_not_called()
         self.assertIs(my_startup_views.BootstrapView.get,
                       my_startup_views.marketing.VibeMarketingBootstrapView.get)
