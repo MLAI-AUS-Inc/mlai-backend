@@ -4853,7 +4853,7 @@ def _persist_live_preview_payload(run, payload):
         if event_owned(run):
             from copy import deepcopy
             from .run_provider_facts import save_provider_result
-            baseline = deepcopy(run.result or {})
+            baseline = copy.deepcopy(run.result or {})
             return save_provider_result(run, {**baseline, "livePreview": payload}, baseline=baseline,
                 legacy_fields=["result", "updated_at"])
         if _portable_preview_rearm_enabled() and run.workflow in ARTICLE_WORKFLOWS and getattr(run, "pk", None):
@@ -6329,15 +6329,60 @@ def _publish_child_for_run_state(run, *, context=None):
     return _local_publish_child_for_run(run, context=context)
 
 
+def _save_publish_observation(run, proposed, *, baseline):
+    """Merge a presentation observation without replacing execution or its clocks."""
+    from .run_provider_facts import save_provider_result
+    return save_provider_result(run, proposed, baseline=baseline,
+        legacy_fields=["result", "updated_at"])
+
+
+def _admitted_publish_child_for_source(source, child_run_id):
+    """Resolve a retained backend admission, never a worker-suggested child."""
+    from .run_ownership import (CHILDREN_RESULT_KEY, RunOwnershipConflict,
+        current_execution_ticket, owner_receipt, require_admission_identity,
+        require_event_execution, wire_identity)
+    from .website_contract import evidence_digest
+    child = ContentFactoryRun.objects.filter(run_id=child_run_id,
+        organization_id=source.organization_id).prefetch_related("steps").first()
+    if child is None or owner_receipt(child) is None:
+        return None
+    saved = _run_mapping(_run_mapping(child.result).get(CHILDREN_RESULT_KEY)).get("source_dispatch")
+    evidence = _run_mapping(child.run_request).get("reviewed_publication_source_v1")
+    fresh_source = ContentFactoryRun.objects.get(pk=source.pk)
+    receipt = owner_receipt(fresh_source)
+    if (receipt is None or not isinstance(saved, dict) or not isinstance(evidence, dict)
+            or child.workflow != "article_generation"
+            or child.run_request.get("source_run_id") != fresh_source.run_id
+            or evidence.get("source_run_id") != fresh_source.run_id
+            or evidence.get("source_admission_digest") != evidence_digest(wire_identity(receipt))
+            or evidence.get("source_ticket_digest") != evidence_digest(current_execution_ticket(fresh_source))
+            or child.run_request.get("requested_child_run_id") != child.run_id
+            or not isinstance(saved.get("dispatch"), dict)
+            or saved["dispatch"].get("reviewed_publication_source_v1") != evidence):
+        return None
+    try:
+        require_admission_identity(child, saved["dispatch"])
+        require_event_execution(child, saved["dispatch"])
+    except RunOwnershipConflict:
+        return None
+    return child
+
+
 def _annotate_publish_child_state(run, *, context=None):
     if not run or run.workflow not in ARTICLE_WORKFLOWS:
         return run
     child = _publish_child_for_run_state(run, context=context)
     if not child:
         return run
+    from .website_run_authority import event_owned
+    if event_owned(run):
+        child = _admitted_publish_child_for_source(run, child.run_id)
+        if child is None:
+            return run
     recoverable = _publish_child_run_recoverable(child)
     wait_reason = _publish_child_wait_reason(child)
-    result = dict(run.result or {})
+    baseline = copy.deepcopy(run.result or {})
+    result = copy.deepcopy(baseline)
     updates = {
         "publish_child_run_id": child.run_id,
         "promoted_publish_job_id": child.run_id,
@@ -6373,8 +6418,7 @@ def _annotate_publish_child_state(run, *, context=None):
             result[key] = value
             changed = True
     if changed:
-        run.result = result
-        run.save(update_fields=["result", "updated_at"])
+        _save_publish_observation(run, result, baseline=baseline)
     return run
 
 
@@ -6603,7 +6647,7 @@ def _setup_blocked_article_run_ids(run):
 def _persist_setup_merged_verification(run, metadata):
     from copy import deepcopy
     from .run_provider_facts import save_provider_result
-    baseline = deepcopy(run.result or {})
+    baseline = copy.deepcopy(run.result or {})
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
     clean_metadata = sanitize_json_for_postgres(metadata if isinstance(metadata, dict) else {})
@@ -6786,7 +6830,7 @@ def _save_setup_merge_result(run, *, checks_status, merge_response=None, merged_
     """
     from copy import deepcopy
     from .run_provider_facts import save_provider_result
-    baseline = deepcopy(run.result or {})
+    baseline = copy.deepcopy(run.result or {})
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
     pr_url = _pull_request_url_from_run(run)
@@ -6841,7 +6885,7 @@ def _save_setup_merge_result(run, *, checks_status, merge_response=None, merged_
 def _mark_setup_merge_blocked(*, run, config, reason="", status_value="manual_merge_required", checks_source=None):
     from copy import deepcopy
     from .run_provider_facts import save_provider_result
-    baseline = deepcopy(run.result or {})
+    baseline = copy.deepcopy(run.result or {})
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
     status_value = str(status_value or "manual_merge_required").strip()
@@ -6917,7 +6961,7 @@ def _apply_setup_auto_merge_pending(*, run, config, reason=""):
     reason = str(reason or "Publishing to production. GitHub will merge automatically once required checks pass.").strip()
     from copy import deepcopy
     from .run_provider_facts import save_provider_result
-    baseline = deepcopy(run.result or {})
+    baseline = copy.deepcopy(run.result or {})
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
     for target in (result, setup):
@@ -6984,7 +7028,7 @@ def _mark_setup_pr_changes_checking(*, run, config):
     """Show the publish as in flight while Content Factory re-verifies the new head."""
     from copy import deepcopy
     from .run_provider_facts import save_provider_result
-    baseline = deepcopy(run.result or {})
+    baseline = copy.deepcopy(run.result or {})
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
     for payload in (result, setup):
@@ -7613,7 +7657,7 @@ def _check_and_merge_publish_pr(*, run, context):
     """
     from copy import deepcopy
     from .run_provider_facts import save_provider_result
-    baseline = deepcopy(run.result or {})
+    baseline = copy.deepcopy(run.result or {})
     from .p2_foundation import run_merge_policy, BACKEND_WORKER
     if run_merge_policy(run) == BACKEND_WORKER:
         return {"outcome": "pending", "detail": "Waiting for the publication worker.", "checks": {"state": "pending"}}
@@ -8364,7 +8408,7 @@ def _restart_article_run(*, run, context):
         return None, reservation_error
     from copy import deepcopy
     from .run_provider_facts import save_provider_result
-    baseline = deepcopy(run.result or {})
+    baseline = copy.deepcopy(run.result or {})
     try:
         restarted_run = _queue_content_factory_run(
             endpoint="article", workflow="article_generation", context=context, config=config, payload=payload)
@@ -8386,7 +8430,7 @@ def _restart_article_run(*, run, context):
     run.result = {**(run.result or {}), "restart_receipt": receipt, "restart_child_run_id": restarted_run.run_id,
                   "restart_requested_at": requested_at, "user_action_count": actions}
     save_provider_result(run, run.result, baseline=baseline, legacy_fields=["result", "updated_at"])
-    child_baseline = deepcopy(restarted_run.result or {})
+    child_baseline = copy.deepcopy(restarted_run.result or {})
     restarted_run.result = {**(restarted_run.result or {}), "user_action_count": actions}
     save_provider_result(restarted_run, restarted_run.result, baseline=child_baseline, legacy_fields=["result", "updated_at"])
 
@@ -9267,15 +9311,15 @@ def _reset_publish_auto_merge_block(run):
     """Clear a blocked auto-merge so a manual merge retry starts fresh."""
     if not run:
         return run
-    result = dict(run.result or {})
+    baseline = copy.deepcopy(run.result or {})
+    result = copy.deepcopy(baseline)
     changed = False
     for key in ("publish_auto_merge_state", "publish_auto_merge_started_at", "publish_auto_merge_last_error"):
         if result.get(key):
             result.pop(key, None)
             changed = True
     if changed:
-        run.result = result
-        run.save(update_fields=["result", "updated_at"])
+        _save_publish_observation(run, result, baseline=baseline)
     return run
 
 
@@ -9285,6 +9329,11 @@ def _mark_publish_handoff_pending(*, run, remote_run=None, action="promote-bundl
     updated = []
     for candidate in (run, remote_run):
         if candidate is None or any(existing.pk == candidate.pk for existing in updated):
+            continue
+        from .website_run_authority import event_owned
+        if event_owned(candidate):
+            # The admitted command path records its own exact child receipt.
+            # A legacy pending hint cannot change its immutable recipe.
             continue
         result = dict(candidate.result or {})
         result["publish_handoff_pending"] = True
@@ -9347,7 +9396,8 @@ def _annotate_publish_handoff_staleness(run):
     if not run or run.workflow not in ARTICLE_WORKFLOWS:
         return run
     stale = _publish_handoff_stale_for_run(run)
-    result = dict(run.result or {})
+    baseline = copy.deepcopy(run.result or {})
+    result = copy.deepcopy(baseline)
     if bool(result.get("publish_handoff_stale")) == stale:
         return run
     result["publish_handoff_stale"] = stale
@@ -9355,8 +9405,7 @@ def _annotate_publish_handoff_staleness(run):
         result["publish_handoff_status"] = "stale"
     elif result.get("publish_handoff_status") == "stale":
         result["publish_handoff_status"] = "pending"
-    run.result = result
-    run.save(update_fields=["result", "updated_at"])
+    _save_publish_observation(run, result, baseline=baseline)
     return run
 
 
@@ -9364,14 +9413,17 @@ def _attach_publish_child_to_run(run, child_run_id):
     child_run_id = str(child_run_id or "").strip()
     if not run or not child_run_id:
         return run
-    result = dict(run.result or {})
+    from .website_run_authority import event_owned
+    if event_owned(run) and _admitted_publish_child_for_source(run, child_run_id) is None:
+        return run
+    baseline = copy.deepcopy(run.result or {})
+    result = copy.deepcopy(baseline)
     result["publish_child_run_id"] = child_run_id
     result["promoted_publish_job_id"] = child_run_id
     result["publish_handoff_pending"] = False
     result["publish_handoff_stale"] = False
     result["publish_handoff_status"] = "queued"
-    run.result = result
-    run.save(update_fields=["result", "updated_at"])
+    _save_publish_observation(run, result, baseline=baseline)
     return run
 
 
@@ -9379,7 +9431,11 @@ def _mark_publish_child_missing_remote_on_run(run, child_run_id):
     child_run_id = str(child_run_id or "").strip()
     if not run or not child_run_id:
         return run
-    result = dict(run.result or {})
+    from .website_run_authority import event_owned
+    if event_owned(run) and _admitted_publish_child_for_source(run, child_run_id) is None:
+        return run
+    baseline = copy.deepcopy(run.result or {})
+    result = copy.deepcopy(baseline)
     result["publish_child_run_id"] = child_run_id
     result["promoted_publish_job_id"] = child_run_id
     result["publish_child_status"] = "missing"
@@ -9388,8 +9444,7 @@ def _mark_publish_child_missing_remote_on_run(run, child_run_id):
     result["publish_handoff_status"] = "recoverable_missing_child"
     result["publish_handoff_pending"] = False
     result["publish_handoff_stale"] = True
-    run.result = result
-    run.save(update_fields=["result", "updated_at"])
+    _save_publish_observation(run, result, baseline=baseline)
     return run
 
 
@@ -9420,6 +9475,12 @@ def _sync_confirmed_remote_publish_child(
 def _refresh_publish_child_remote_state(child_run, *, context=None):
     if not child_run or not _run_belongs_to_context(child_run, context):
         return child_run
+    from .website_run_authority import event_owned
+    if event_owned(child_run):
+        from .run_reconciliation import reconcile_authoritative_run
+        reconcile_authoritative_run(child_run.run_id, refresh=True)
+        child_run.refresh_from_db()
+        return child_run
     if _publish_child_missing_remote(child_run) or _publish_child_run_recoverable(child_run):
         return child_run
     if _run_has_publish_pr_or_preview_evidence(child_run) or _publish_child_has_real_approval_gate(child_run):
@@ -9444,6 +9505,13 @@ def _ensure_local_publish_child_from_known_id(
 ):
     child_run_id = str(child_run_id or "").strip()
     if not child_run_id or not source_run:
+        return None
+    from .website_run_authority import event_owned
+    if event_owned(source_run):
+        return _admitted_publish_child_for_source(source_run, child_run_id)
+    existing = ContentFactoryRun.objects.filter(run_id=child_run_id).first()
+    if existing is not None and event_owned(existing):
+        # A legacy recovery hint cannot adopt or rewrite an admitted child.
         return None
     config = _get_config(context.organization)
     from .incident_guards import publish_child_binding
@@ -9508,6 +9576,9 @@ def _sync_publish_child_from_control_response(
             record_publish_handoff(run=source, child=child, pending=pending)
         child.refresh_from_db()
         return child
+    from .website_run_authority import event_owned
+    if event_owned(run) or event_owned(remote_run):
+        return None
     child_run_id = str(
         remote_data.get("run_id")
         or remote_data.get("runId")
@@ -9530,6 +9601,8 @@ def _sync_publish_child_from_control_response(
     if publish_run is None:
         return None
 
+    if event_owned(publish_run):
+        return None
     publish_request = dict(publish_run.run_request or {})
     request_changed = False
     for key, value in (
@@ -9640,6 +9713,10 @@ def _recover_publish_child_for_run(run, *, request, context):
     if not run or run.workflow not in ARTICLE_WORKFLOWS:
         return None
     publish_source_run = _accepted_component_revision_for_publish(run, context) or run
+    from .website_run_authority import event_owned
+    if event_owned(run) or event_owned(publish_source_run):
+        known = _publish_child_run_id_for_run(run) or _publish_child_run_id_for_run(publish_source_run)
+        return _admitted_publish_child_for_source(publish_source_run, known) if known else None
     known_child_id = _publish_child_run_id_for_run(run) or _publish_child_run_id_for_run(publish_source_run)
     def binding_allowed(child=None):
         from .incident_guards import publish_child_binding
@@ -9650,12 +9727,14 @@ def _recover_publish_child_for_run(run, *, request, context):
                 publish_child_binding(config, child, {}, {}, reviewed_source=publish_source_run)
             return True
         except WebsiteAuthorityError as exc:
-            run.result = {**(run.result or {}), "approval_blocker": {"code": exc.code, "message": str(exc), "retryable": False},
+            baseline = copy.deepcopy(run.result or {})
+            proposed = {**baseline, "approval_blocker": {"code": exc.code, "message": str(exc), "retryable": False},
                 "publish_handoff_pending": False, "publish_handoff_status": "blocked", "publish_child_status": "blocked", "publish_auto_merge_state": "blocked"}
-            run.save(update_fields=["result", "updated_at"])
+            _save_publish_observation(run, proposed, baseline=baseline)
             if child is not None:
-                child.result = {**(child.result or {}), "approval_blocker": {"code": exc.code, "message": str(exc), "retryable": False}, "publish_auto_merge_state": "blocked"}
-                child.save(update_fields=["result", "updated_at"])
+                baseline = copy.deepcopy(child.result or {})
+                proposed = {**baseline, "approval_blocker": {"code": exc.code, "message": str(exc), "retryable": False}, "publish_auto_merge_state": "blocked"}
+                _save_publish_observation(child, proposed, baseline=baseline)
             return False
     if (known_child_id or _publish_handoff_pending_for_run(run) or _publish_handoff_pending_for_run(publish_source_run)) and not binding_allowed():
         return None
@@ -18895,6 +18974,7 @@ class VibeMarketingRunView(APIView):
                     # setup child does not. Use that parent poll to retry a
                     # transient post-merge continuation and to observe the
                     # terminal verification result.
+                    verification_projection_baseline = copy.deepcopy(run.result or {})
                     existing_verification = _run_mapping(
                         (repair_setup_run.result or {}).get(SETUP_MERGED_VERIFICATION_KEY)
                     )
@@ -18973,8 +19053,8 @@ class VibeMarketingRunView(APIView):
                         if verification_scan_id:
                             projected["repair_run_id"] = verification_scan_id
                             projected["scan_run_id"] = verification_scan_id
-                        run.result = sanitize_json_for_postgres(projected)
-                        run.save(update_fields=["result", "updated_at"])
+                        _save_publish_observation(run, sanitize_json_for_postgres(projected),
+                            baseline=verification_projection_baseline)
                     elif project_verification_error:
                         projected = dict(run.result or {})
                         projected.update(
@@ -18990,8 +19070,8 @@ class VibeMarketingRunView(APIView):
                                 SETUP_MERGED_VERIFICATION_KEY: verification,
                             }
                         )
-                        run.result = sanitize_json_for_postgres(projected)
-                        run.save(update_fields=["result", "updated_at"])
+                        _save_publish_observation(run, sanitize_json_for_postgres(projected),
+                            baseline=verification_projection_baseline)
         if run.workflow == "article_system_setup":
             refreshed_run, setup_pr_refreshed = _refresh_pending_article_system_setup_pr_status(context=context, run=run)
             if setup_pr_refreshed and refreshed_run is not None:
