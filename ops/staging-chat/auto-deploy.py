@@ -19,6 +19,7 @@ import time
 
 REPOSITORY='git@github.com:MLAI-AUS-Inc/mlai-backend.git'
 REF='refs/heads/staging'
+COMPONENT='backend'
 HOST='ubuntu-s-4vcpu-8gb-syd1'
 CONFIG=Path('/etc/mlai-backend-staging-auto-deploy/config.json')
 SHA=re.compile(r'[0-9a-f]{40}')
@@ -68,7 +69,36 @@ class Controller:
     def load(self):
         path=self.root/'state.json';private_file(path)
         return json.loads(path.read_text())
-    def save(self,state):self.write_json(self.root/'state.json',state)
+    def save(self,state):
+        self.write_json(self.root/'state.json',state)
+        if self.cfg.get('status_dir'):
+            receipt={key:state.get(key) for key in ['active_sha','desired_sha','outcome','reason','readiness','last_successful_sha','last_successful_at','last_checked_at']}
+            receipt.update(component=COMPONENT,observed_at=self.clock(),paused=self.paused.exists(),recovery_pending=self.journal.exists())
+            self.write_json(Path(self.cfg['status_dir'])/(COMPONENT+'.json'),receipt)
+
+    def smoke(self):
+        path=Path('/etc/mlai-staging-smoke/smoke.py')
+        if path.is_symlink() or path.stat().st_uid!=0 or path.stat().st_mode & 0o022 or hashlib.sha256(path.read_bytes()).hexdigest()!=self.cfg.get('smoke_hash'):
+            raise Failure('installed-smoke')
+        # Both deployments verify the current API, with browser cookies and exact Origin.
+        backend=Path('/opt/mlai-backend-staging/ops/staging-chat/.env')
+        if COMPONENT=='backend':sha=self.values(self.env)['STAGING_API_SOURCE_SHA']
+        else:
+            private_file(backend)
+            lines=dict(line.split('=',1) for line in backend.read_text().splitlines() if '=' in line and not line.startswith('#'))
+            sha=lines['STAGING_API_SOURCE_SHA']
+        if not SHA.fullmatch(sha):raise Failure('smoke-release')
+        self.run(['python3',str(path),'--sha',sha],timeout=150)
+
+    def verify_current(self,state):
+        try:self.health()
+        except Failure:
+            # Repair the pinned current containers once; never change accounts/origins.
+            self.activate(self.env);self.health()
+        if self.clock()-state.get('last_smoke_at',0)>=300 or not state.get('last_smoke_at'):
+            self.smoke();state['last_smoke_at']=self.clock()
+        state.update(readiness='ready',last_checked_at=self.clock(),reason='')
+
 
     @contextlib.contextmanager
     def locked(self,blocking=False,host=True):
@@ -115,6 +145,7 @@ class Controller:
             if Path(name).name!=name:raise Failure('helper-name')
             path=self.profile/name
             if path.is_symlink() or path.stat().st_uid!=0 or hashlib.sha256(path.read_bytes()).hexdigest()!=digest:raise Failure('installed-helper')
+        if self.cfg.get('status_dir')!='/var/lib/mlai-staging-status' or not re.fullmatch(r'[0-9a-f]{64}',self.cfg.get('smoke_hash','')):raise Failure('readiness-config')
         values=self.values(self.env)
         if values['COMMUNITY_CHAT_STAGING_PASSWORD_ENABLED']!='true' or values['COMMUNITY_CHAT_FEDERATION_STAGING_ENABLED']!='false':raise Failure('runtime-mode')
 
@@ -227,7 +258,7 @@ class Controller:
             if result!='200':raise Failure('https-health')
 
     def mark_failure(self,state,sha,outcome):
-        state.update(desired_sha=sha,outcome=outcome,failed_sha=sha,retry_at=self.clock()+600)
+        state.update(desired_sha=sha,outcome=outcome,failed_sha=sha,retry_at=self.clock()+600,readiness='needs-attention',last_checked_at=self.clock(),reason='deployment-or-readiness-check')
         self.save(state)
 
     def recover(self):
@@ -249,13 +280,14 @@ class Controller:
                 try:self.recover()
                 except (Failure,ValueError,OSError,KeyError):
                     self.write_bytes(self.paused,b'recovery-failed\n');return 'paused'
-            if self.peer_recovery_pending():return 'peer-recovery'
-            if self.paused.exists():return 'paused'
+            if self.peer_recovery_pending() or self.paused.exists():
+                state=self.load();result='paused' if self.paused.exists() else 'peer-recovery'
+                state.update(outcome=result,readiness='needs-attention',last_checked_at=self.clock(),reason=result);self.save(state);return result
             state=self.load();sha=state.get('desired_sha','')
             try:
                 sha=self.fetch();state['desired_sha']=sha
                 if sha==state['active_sha']:
-                    self.running(self.values(self.env));state['outcome']='unchanged';self.save(state);return 'unchanged'
+                    self.verify_current(state);state['outcome']='unchanged';self.save(state);return 'unchanged'
                 if sha==state.get('incompatible_sha'):return 'incompatible'
                 if sha==state.get('failed_sha') and self.clock()<state.get('retry_at',0):return 'waiting'
                 if shutil.disk_usage(self.root).free < 5*1024**3:raise Failure('disk-capacity')
@@ -273,11 +305,11 @@ class Controller:
                 previous=release/'previous.env';self.write_bytes(previous,self.env.read_bytes())
                 old=self.values(previous)
                 self.write_json(self.journal,{'previous_env':str(previous),'candidate_env':str(candidate),'previous_sha':old['STAGING_API_SOURCE_SHA'],'previous_image':old['STAGING_API_IMAGE_ID'],'candidate_sha':sha,'candidate_image':values['STAGING_API_IMAGE_ID'],'previous_state':state})
-                self.install_env(candidate);self.activate(self.env);self.health()
-                state.update(active_sha=sha,active_image=values['STAGING_API_IMAGE_ID'],previous={'sha':old['STAGING_API_SOURCE_SHA'],'image':old['STAGING_API_IMAGE_ID'],'env':str(previous)},outcome='deployed',failed_sha='',retry_at=0,incompatible_sha='')
-                self.save(state);self.journal.unlink();self.cleanup();return 'deployed'
+                self.install_env(candidate);self.activate(self.env);self.health();self.smoke()
+                state.update(active_sha=sha,active_image=values['STAGING_API_IMAGE_ID'],previous={'sha':old['STAGING_API_SOURCE_SHA'],'image':old['STAGING_API_IMAGE_ID'],'env':str(previous)},outcome='deployed',failed_sha='',retry_at=0,incompatible_sha='',reason='',readiness='ready',last_successful_sha=sha,last_successful_at=self.clock(),last_checked_at=self.clock(),last_smoke_at=self.clock())
+                self.save(state);self.journal.unlink();self.save(state);self.cleanup();return 'deployed'
             except Incompatible as exc:
-                state.update(desired_sha=sha,incompatible_sha=sha,outcome='incompatible',reason=str(exc));self.save(state);return 'incompatible'
+                state.update(desired_sha=sha,incompatible_sha=sha,outcome='incompatible',reason=str(exc),readiness='needs-attention',last_checked_at=self.clock());self.save(state);return 'incompatible'
             except (Failure,ValueError,OSError,KeyError):
                 if self.journal.exists():
                     try:self.recover()
@@ -330,7 +362,7 @@ class Controller:
 
     def status(self):
         state=self.load()
-        return {key:state.get(key) for key in ['active_sha','active_image','desired_sha','outcome','retry_at','reason']} | {'paused':self.paused.exists(),'recovery_pending':self.journal.exists()}
+        return {key:state.get(key) for key in ['active_sha','active_image','desired_sha','outcome','retry_at','reason','readiness','last_successful_sha','last_successful_at','last_checked_at']} | {'paused':self.paused.exists(),'recovery_pending':self.journal.exists()}
 
 
 def main():

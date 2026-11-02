@@ -16,3 +16,37 @@ On host restart, reviewed `mlai-staging-network-policy.service` restores owned a
 The API has Docker restart policy `no`. Its installed `mlai-backend-staging-api.service` starts only after Docker and successful firewall installation, and `start-api.py` verifies the complete installed helper inventory, network identity, effective rule order and peer recovery under the shared lock before starting the pinned current image. A45second readiness timer repairs that same approved image; it never fetches/builds code. This also covers a process exit without permitting Docker to bypass the gate after reboot. Stop both readiness timer and service before intentional API maintenance. Full host reboot remains outside the focused acceptance run; inspect actual restart policy/systemd dependencies and exercise the startup gate directly instead.
 
 Both isolated profiles explicitly disable Tokenmaxer federation and real Apple purchases. Hosted reporter/callback URLs point to api-staging; local reporter/API/relay URLs are loopback. Read-only digital wallet GET is authenticated and returns real seeded balances with available:false; transaction verification/notifications stay unavailable. Client destination guards accept canonical same-origin `/api/` namespaces (including v2); existing relative paths still use v1.
+
+### Automatic signed-in readiness (no CI)
+
+The installed controller checks the current runtime on each two-minute tick and
+repairs its pinned containers once if container/HTTPS health fails. After a new
+release passes basic health, the pinned `/etc/mlai-staging-smoke/smoke.py` signs in
+with an existing synthetic staging account, checks account/home/mentor reads and
+the exact API revision, rotates its cookie session, and signs out. A failed new
+release rolls back through the existing activation journal. The same signed-in
+probe runs at most once per five minutes on unchanged releases. It never creates
+bookings, changes member roles, grants credits, or relaxes Origin restrictions.
+The normal API repair timer continues to handle container recovery.
+
+Install the reviewed smoke helper on the host (not from an unreviewed moving
+checkout) and pin its SHA-256 in both private controller configs as `smoke_hash`.
+Its owner-only `/etc/mlai-staging-smoke/credentials.json` contains the existing
+synthetic `email`, `password`, `public_key` and `installation_id`. Preserve that
+account's normal permissions; use its existing device identity. Do not put this
+file or any session cookies in Git or logs. Sessions are signed out after probes.
+No credential is sent to a nonstaging destination and redirects are refused.
+
+Both private controller configs use `status_dir=/var/lib/mlai-staging-status`.
+Only allowlisted readiness receipts are written there. The API mounts this exact
+directory read-only at `/run/mlai-staging-status`; authenticated, staging-only
+`GET /api/v1/points/development/status/` exposes a sanitized summary. Reports older
+than ten minutes are shown as stale. In the staging browser, open Your profile →
+Profile to see readiness and revision details; it refreshes automatically.
+
+Operational/schema gates still require their reviewed rollout. These checks
+verify supported sign-in/refresh and core reads, not every new feature or browser
+interaction. They do not fix arbitrary application bugs or prove external
+integrations, which stay disabled. Missing credentials, expired/disabled accounts
+or a blocked deployment are reported for the operator rather than silently
+changing security settings. No GitHub Actions or CI gate is involved.

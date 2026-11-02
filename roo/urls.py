@@ -1,5 +1,5 @@
 from django.urls import path, include
-from .development import DevelopmentBuildView
+from .development import DevelopmentBuildView, DevelopmentStatusView
 from rest_framework.routers import DefaultRouter
 from .views import (
     PointsAdminViewSet, MinterViewSet, TaskViewSet, UserBalanceViewSet,
@@ -39,6 +39,7 @@ router.register(r'requests', PointsRequestViewSet, basename='points-request')
 router.register(r'purchases', PointsPurchaseViewSet, basename='points-purchase')
 
 urlpatterns = [
+    path('development/status/', DevelopmentStatusView.as_view(), name='development-status'),
     path('development/build/', DevelopmentBuildView.as_view(), name='development-build'),
     path('kimi/calls/admit/', CodingCallAdmitView.as_view(), name='kimi-call-admit'),
     path('kimi/calls/dispatch/', CodingCallDispatchView.as_view(), name='kimi-call-dispatch'),

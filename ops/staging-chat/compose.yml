@@ -50,7 +50,9 @@ services:
       au.mlai.environment: chat-staging-api
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
-    volumes: [api-media:/app/staging-media]
+    volumes:
+      - api-media:/app/staging-media
+      - /var/lib/mlai-staging-status:/run/mlai-staging-status:ro
     networks:
       default:
         ipv4_address: 172.28.240.10

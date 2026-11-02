@@ -34,6 +34,7 @@ class AutoDeployTests(unittest.TestCase):
         self.c.compatible=lambda path:None
         self.c.running=lambda values:None
         self.c.health=lambda:None
+        self.c.smoke=lambda:None
         self.c.cleanup=lambda:None
         self.c.build=self.build
         self.c.activate=self.activate
@@ -256,3 +257,78 @@ class RequiredHelperInventoryTests(unittest.TestCase):
         stat=type('Stat',(),{'st_uid':0,'st_mode':0o700})()
         with patch.object(module.os,'geteuid',return_value=0),patch.object(module.socket,'gethostname',return_value=module.HOST),patch.object(module.Path,'read_text',return_value='f'*32),patch.object(module.Path,'stat',return_value=stat),patch.object(module.Path,'is_symlink',return_value=False),patch.object(module.Path,'is_dir',return_value=True),patch.object(module,'private_file'):
             with self.assertRaisesRegex(module.Failure,'missing-helper-inventory'):c.validate()
+
+
+class ReadinessTests(AutoDeployTests):
+    def test_success_evidence_survives_unchanged_ticks(self):
+        self.c.tick();self.now=1100;self.c.tick()
+        status=self.c.status()
+        self.assertEqual(status['last_successful_sha'],'a'*40)
+        self.assertEqual(status['last_successful_at'],1000)
+        self.assertEqual(status['last_checked_at'],1100)
+        self.assertEqual(status['readiness'],'ready')
+
+    def test_signed_in_failure_rolls_back_new_release(self):
+        calls=[]
+        def smoke():
+            calls.append(1)
+            if len(calls)==1:raise module.Failure('signed-in-check')
+        self.c.smoke=smoke
+        self.assertEqual(self.c.tick(),'failed')
+        self.assertEqual(self.c.load()['active_sha'],'0'*40)
+        self.assertEqual(self.env.read_text(),'old-private-config')
+        self.assertNotEqual(self.c.status().get('last_successful_sha'),'a'*40)
+
+    def test_current_runtime_repairs_once_then_reports_ready(self):
+        self.c.tick();calls=[]
+        def health():
+            calls.append(1)
+            if len(calls)==1:raise module.Failure('health')
+        self.c.health=health
+        self.assertEqual(self.c.tick(),'unchanged')
+        self.assertEqual(len(calls),2)
+        self.assertEqual(self.c.status()['readiness'],'ready')
+
+    def test_current_auth_failure_is_visible_without_rolling_back_or_changing_accounts(self):
+        self.c.tick();self.now=1400;self.activations.clear()
+        self.c.smoke=lambda:(_ for _ in ()).throw(module.Failure('signed-in-check'))
+        self.assertEqual(self.c.tick(),'failed')
+        self.assertEqual(self.c.load()['active_sha'],'a'*40)
+        self.assertEqual(self.c.status()['readiness'],'needs-attention')
+        self.assertEqual(self.activations,[])
+
+    def test_failed_candidate_preserves_previous_success_receipt(self):
+        self.c.tick();self.tip='b'*40;self.bad.add(self.tip);self.c.tick()
+        self.assertEqual(self.c.status()['last_successful_sha'],'a'*40)
+        self.assertEqual(self.c.status()['outcome'],'failed')
+
+    def test_obsolete_failure_reason_is_cleared_on_success(self):
+        state=self.c.load();state['reason']='operational-inputs';self.c.save(state)
+        self.c.tick();self.assertEqual(self.c.status()['reason'],'')
+
+    def test_legacy_state_is_not_falsely_verified(self):
+        self.assertIsNone(self.c.status().get('last_successful_at'))
+        self.assertNotEqual(self.c.status().get('readiness'),'ready')
+
+    def test_public_receipt_contains_no_private_state_and_paused_is_visible(self):
+        directory=self.root/'receipts';directory.mkdir()
+        self.c.cfg['status_dir']=str(directory)
+        state=self.c.load();state['private']='secret-never-publish';self.c.save(state)
+        self.c.tick()
+        path=directory/(module.COMPONENT+'.json')
+        result=json.loads(path.read_text())
+        self.assertNotIn('secret-never-publish',path.read_text())
+        self.assertEqual(result['readiness'],'ready')
+        self.c.pause();self.c.tick()
+        self.assertTrue(json.loads(path.read_text())['paused'])
+
+    def test_smoke_helper_is_hash_pinned_and_checks_expected_api_sha(self):
+        import hashlib
+        check=module.Controller({**self.cfg,'smoke_hash':hashlib.sha256(b'approved helper').hexdigest()})
+        check.values=lambda path: {'STAGING_API_SOURCE_SHA':'a'*40}
+        check.run=lambda args,**kw: self.assertEqual(args[-2:],['--sha','a'*40]) or ''
+        stat=type('Stat',(),{'st_uid':0,'st_mode':0o600})()
+        with patch.object(module.Path,'is_symlink',return_value=False),patch.object(module.Path,'stat',return_value=stat),patch.object(module.Path,'read_bytes',return_value=b'approved helper'),patch.object(module.Path,'read_text',return_value='STAGING_API_SOURCE_SHA='+'a'*40),patch.object(module,'private_file'):
+            check.smoke()
+            check.cfg['smoke_hash']='0'*64
+            with self.assertRaisesRegex(module.Failure,'installed-smoke'):check.smoke()
