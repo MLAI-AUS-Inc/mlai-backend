@@ -532,6 +532,16 @@ class TeamTests(TransactionTestCase):
         self.assertTrue(self.roster()['frozen'])
         self.assertIsNone(organization_owner_user_id(self.org))
 
+    def test_unicode_company_snapshot_and_member_names_round_trip(self):
+        self.fixture.company.name = 'Café founder’s studio'
+        self.fixture.company.save(update_fields=['name'])
+        self.member.first_name = 'Zoë'
+        self.member.save(update_fields=['first_name'])
+        self.approve()
+        self.assertEqual(self.roster()['company']['name'], 'Café founder’s studio')
+        payload = teams.team_payload(organization=self.org, user=self.owner)
+        self.assertEqual(payload['members'][0]['firstName'], 'Zoë')
+
 
 class DomainRulesTests(SimpleTestCase):
     def test_T6_public_suffix_wildcards_exceptions_idna_and_private_hosts(self):
