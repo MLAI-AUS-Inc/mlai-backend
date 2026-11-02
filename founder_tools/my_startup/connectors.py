@@ -54,14 +54,14 @@ class MyStartupConnectorConnectView(MyStartupViewMixin, APIView):
         if not company_id:
             return Response({"detail": "A startup is required."}, status=400)
         runtime = request.data.get('return_runtime', 'browser')
-        if not isinstance(runtime, str) or runtime not in {'browser', 'tauri'}:
+        if not isinstance(runtime, str) or runtime not in {'browser', 'tauri', 'tauri-dev'}:
             return Response({'detail': 'Choose a valid My startup return URL.'}, status=400)
-        if runtime == 'tauri':
+        if runtime in {'tauri', 'tauri-dev'}:
             from integrations.services.chat_oauth_return import safe_chat_startup_return_path
             path = safe_chat_startup_return_path(request.data.get('return_path'), company_id=company_id)
             if not path:
                 return Response({'detail': 'Choose a valid My startup return URL.'}, status=400)
-            next_url = 'mlaichat:/'+path
+            next_url = ('mlaichat-dev:/' if runtime == 'tauri-dev' else 'mlaichat:/')+path
         raw = request._request
         # DRF selected the Chat account. The existing OAuth views see exactly
         # that account, regardless of an unrelated JWT or Django session.
