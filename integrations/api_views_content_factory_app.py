@@ -903,6 +903,19 @@ class ContentFactoryAppRunControlView(APIView):
                 if owner_receipt(run) is not None and run.workflow in {"scan", "repo_scan", "content_factory_scan"}:
                     admitted_child = prepare_scan_child_dispatch(run=run, user=request.user,
                         actor_id=actor_id, payload=control_payload)
+            elif action == "resume":
+                from content_factory.run_ownership import owner_receipt
+                if (owner_receipt(run) or {}).get("authority", {}).get("event_protocol") == 1:
+                    from content_factory.website_connections import scoped_run_contract
+                    from content_factory.website_contract import connection_contract
+                    if connection_contract(scoped_run_contract(run)):
+                        from content_factory.website_operations import advance_workflow_attempt
+                        control_payload.update(advance_workflow_attempt(run))
+                    from content_factory.run_user_resume import user_resume_payload
+                    command_key = request.headers.get("Idempotency-Key") or next((request.data.get(key) for key in
+                        ("idempotency_key", "idempotencyKey", "clientRequestId") if request.data.get(key)), None)
+                    control_payload = user_resume_payload(run=run, user=request.user,
+                        command_key=command_key, payload=control_payload)
             response = _content_factory_request("post", f"/api/runs/{run_id}/{action}", payload=control_payload)
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
@@ -918,6 +931,17 @@ class ContentFactoryAppRunControlView(APIView):
         if admitted_child is not None:
             from content_factory.run_child_admission import accept_scan_child_response
             accept_scan_child_response(admitted_child, payload, status_code=response.status_code)
+        from content_factory.run_ownership import owner_receipt
+        if (owner_receipt(run) or {}).get("authority", {}).get("event_protocol") == 1:
+            # A transport acknowledgement cannot become lifecycle authority.
+            # The appended typed events own status/steps and execution clocks.
+            if action == "deny":
+                # This stop is the authenticated user's explicit command,
+                # independently of any lifecycle label in the remote answer.
+                ContentFactoryRun.objects.filter(pk=run.pk).update(
+                    status=ContentFactoryRunStatus.DENIED, resume_available=False)
+            run.refresh_from_db()
+            return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
         remote_run = _sync_remote_run_payload(run_id, payload)
         if remote_run:
             return Response(_serialize_content_factory_run(remote_run), status=status.HTTP_200_OK)

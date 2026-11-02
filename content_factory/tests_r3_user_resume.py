@@ -113,3 +113,46 @@ class UserResumeTests(TestCase):
                 self.assertEqual(result["status"], "queued")
         self.assertEqual(observed[0], observed[1])
         self.assertEqual(len(self.run.result[OWNER_EXECUTION_KEY]["tickets"]), 2)
+
+    def test_authenticated_app_keeps_command_header_and_does_not_project_ack_status_or_clocks(self):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from integrations import api_views_content_factory_app as views
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        observed = []
+
+        def remote(method, path, *, payload):
+            self.run.refresh_from_db()
+            self.assertEqual(payload[WIRE_EXECUTION_KEY], current_execution_ticket(self.run))
+            observed.append(deepcopy(payload))
+            response = Mock(status_code=202, content=b"{}")
+            response.json.return_value = {"run_id": self.run.run_id, "status": "running", "current_step": "worker-claim"}
+            return response
+
+        with patch.object(views, "_content_factory_request", side_effect=remote):
+            for _ in range(2):
+                request = APIRequestFactory().post("/app/owned/resume", {}, format="json",
+                    HTTP_IDEMPOTENCY_KEY="saved-app-command")
+                force_authenticate(request, user=self.user)
+                response = views.ContentFactoryAppRunControlView.as_view()(request, run_id=self.run.run_id, action="resume")
+                self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(observed[0], observed[1])
+        after = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        self.assertEqual(len(after["result"][OWNER_EXECUTION_KEY]["tickets"]), 2)
+        for field in before.keys() - {"result"}:
+            self.assertEqual(after[field], before[field], field)
+
+    def test_authenticated_app_denial_is_an_explicit_local_stop_without_worker_status_or_clock_authority(self):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from integrations import api_views_content_factory_app as views
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        remote = Mock(status_code=202, content=b"{}")
+        remote.json.return_value = {"run_id": self.run.run_id, "status": "completed"}
+        request = APIRequestFactory().post("/app/owned/deny", {}, format="json")
+        force_authenticate(request, user=self.user)
+        with patch.object(views, "_content_factory_request", return_value=remote):
+            response = views.ContentFactoryAppRunControlView.as_view()(request, run_id=self.run.run_id, action="deny")
+        self.assertEqual(response.status_code, 200, response.data)
+        after = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        self.assertEqual(after["status"], "denied")
+        for field in before.keys() - {"status", "resume_available"}:
+            self.assertEqual(after[field], before[field], field)
