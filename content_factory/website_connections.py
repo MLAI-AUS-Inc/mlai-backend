@@ -322,13 +322,9 @@ def check_source_identity(connection, payload, *, required=False):
 
 def read_repository_native_target(connection):
     """Read immutable identity and the provider's current default branch."""
-    from integrations import http_client
-    from integrations.services.github_app import create_installation_access_token
     try:
-        credential = create_installation_access_token(installation_id=connection.installation_id,
-            repository=connection.github_repo, repository_id=connection.repository_id, permission_mode="read")
-        response = http_client.get(f"https://api.github.com/repos/{connection.github_repo}",
-            headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
+        from integrations.services.github_connections import read_bound_repository
+        response = read_bound_repository(connection, f"https://api.github.com/repos/{connection.github_repo}")
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
@@ -368,12 +364,10 @@ def verify_repository_head(connection, expected_sha):
     """Recheck GitHub's selected branch before promoting publication readiness."""
     from urllib.parse import quote
     from .website_contract import SHA_PATTERN
-    from integrations import http_client
-    from integrations.services.github_app import create_installation_access_token
     try:
-        credential = create_installation_access_token(installation_id=connection.installation_id, repository=connection.github_repo, repository_id=connection.repository_id, permission_mode="read")
-        response = http_client.get(f"https://api.github.com/repos/{connection.github_repo}/commits/{quote(connection.branch, safe='')}",
-            headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
+        from integrations.services.github_connections import read_bound_repository
+        response = read_bound_repository(connection,
+            f"https://api.github.com/repos/{connection.github_repo}/commits/{quote(connection.branch, safe='')}")
         response.raise_for_status()
         payload = response.json()
         from .website_github_failure import taxonomy_active
@@ -389,7 +383,8 @@ def verify_repository_head(connection, expected_sha):
 
 
 @contextmanager
-def authority_guard(data, *, action="read", domain="", github_repo="", require_selected=True):
+def authority_guard(data, *, action="read", domain="", github_repo="", require_selected=True,
+                    require_current_head=False):
     """Verify provider evidence outside locks, then conditionally fence persistence.
 
     The second phase repeats consent and operation checks. A concurrent revoke,
@@ -449,7 +444,7 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         retains_publication_proof = action == "config_write" and bool(expected) and candidate.targets.filter(
             generation=candidate.generation, source_sha=expected, verified_at__isnull=False,
             capabilities__publishingReady=True).exists()
-        needs_head = needs_head or target_promotion or retains_publication_proof
+        needs_head = needs_head or target_promotion or retains_publication_proof or require_current_head
         if needs_native or needs_head:
             require_unlocked_remote_call()
         if needs_native:
@@ -719,7 +714,7 @@ def invalidate_repository_config(config, *, archive_templates=True):
     WebsiteDesignSnapshot.objects.filter(organization=config.organization, is_active=True).update(is_active=False, status="superseded")
 
 
-def verify_repository_access(*, user, repo):
+def verify_repository_access(*, user, repo, organization=None):
     """Verify exact selected-repo access and immutable identity before binding."""
     from integrations import http_client
     from integrations.services.github_installations import installation_for_repo
@@ -728,8 +723,14 @@ def verify_repository_access(*, user, repo):
     if inst is None:
         raise WebsiteAuthorityError("github_authorization_required", "Authorize the GitHub App for this repository first.")
     try:
-        credential = create_installation_access_token(installation_id=inst.installation_id, repository=repo, permission_mode="read")
-        response = http_client.get(f"https://api.github.com/repos/{repo}", headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
+        if organization is not None:
+            from types import SimpleNamespace
+            from integrations.services.github_connections import read_bound_repository
+            response = read_bound_repository(SimpleNamespace(installation_id=inst.installation_id,
+                github_repo=repo, repository_id=None, organization=organization), f"https://api.github.com/repos/{repo}")
+        else:
+            credential = create_installation_access_token(installation_id=inst.installation_id, repository=repo, permission_mode="read")
+            response = http_client.get(f"https://api.github.com/repos/{repo}", headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
         response.raise_for_status()
         metadata = response.json()
         from .website_github_failure import taxonomy_active
@@ -768,8 +769,14 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
     if branch and (len(branch) > 255 or branch.startswith(("-", "/")) or branch.endswith(("/", ".", ".lock")) or any(piece in branch for piece in ("..", "@{", "\\", " ", "~", "^", ":", "?", "*", "[")) or any(ord(char) < 32 for char in branch)):
         raise WebsiteAuthorityError("invalid_repository_branch", "Use a valid branch name for the selected repository.", status=400)
     from .website_failure_scope import failure_scope
+    from django.conf import settings
+    from .p2_foundation import p2_applies
     with failure_scope(config.organization_id):
-        metadata = verify_repository_access(user=user, repo=repo)
+        if (getattr(settings, "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
+                and p2_applies(config.organization)):
+            metadata = verify_repository_access(user=user, repo=repo, organization=config.organization)
+        else:
+            metadata = verify_repository_access(user=user, repo=repo)
     if new_journey and branch and branch.removeprefix("refs/heads/") == metadata["branch"]:
         # D-09: naming the repository's default branch is the same as leaving it empty.
         branch = ""
@@ -797,7 +804,13 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
                 current.save(update_fields=["installation_id", "authorized_by", "updated_at"])
             return current
         if same and current.state != "connected" and not reconnect:
-            raise WebsiteAuthorityError("website_reconnect_required", "Explicitly reconnect this website before continuing.")
+            from django.conf import settings
+            from .p2_foundation import p2_applies
+            if (getattr(settings, "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
+                    and p2_applies(config.organization)):
+                reconnect = True
+            else:
+                raise WebsiteAuthorityError("website_reconnect_required", "Explicitly reconnect this website before continuing.")
         if current:
             archive_repository_templates(config, current)
         elif any(getattr(config, key) for key in ("article_template", "design_guide", "resource_prompt")):

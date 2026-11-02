@@ -20,7 +20,7 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 EVENTS_RESULT_KEY = "run_events_v1"
-EVENT_TYPES = frozenset({"step_started", "step_done", "failure", "artifact", "cost"})
+EVENT_TYPES = frozenset({"step_started", "step_done", "failure", "artifact", "cost", "source_repinned"})
 DONE_STATUSES = frozenset({"completed", "skipped", "failed", "blocked", "cancelled"})
 MAX_BATCH = 100
 MAX_SEQ = 2 ** 53
@@ -106,7 +106,16 @@ def clean_event(raw):
     at = _timestamp(raw.get("at"))
     if at:
         event["at"] = at
-    if kind == "step_done":
+    if kind == "source_repinned":
+        before, after = raw.get("from_sha"), raw.get("to_sha")
+        count, key, reason = raw.get("repins"), raw.get("repin_key"), raw.get("reason")
+        if (not isinstance(before, str) or not re.fullmatch(r"[a-f0-9]{40}", before)
+                or not isinstance(after, str) or not re.fullmatch(r"[a-f0-9]{40}", after) or before == after
+                or type(count) is not int or not 1 <= count <= 2 or _token(key) is None
+                or not isinstance(reason, str) or reason not in {"source_changed_mid_run", "setup_start_moved", "resume_latest"}):
+            return None
+        event.update(from_sha=before, to_sha=after, repins=count, repin_key=key, reason=reason)
+    elif kind == "step_done":
         status = raw.get("status") or "completed"
         if status not in DONE_STATUSES:
             return None
