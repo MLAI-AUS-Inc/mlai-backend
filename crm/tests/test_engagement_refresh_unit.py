@@ -97,9 +97,15 @@ class ApplyObservationTests(SimpleTestCase):
     def test_unassessable_new_contact_stays_unrated(self):
         sources = {source: {"status": "unavailable", "expected": False} for source in SOURCES}
         result, status = apply({"marketing_review_hold": True}, sources=sources, observations=[])
-        self.assertEqual(status, "deferred")
+        self.assertEqual(status, "preserved_no_data")
         self.assertNotIn("engagement_rating", result)
-        self.assertEqual(result["engagement_refresh"]["status"], "deferred")
+        self.assertEqual(result["engagement_refresh"]["status"], "preserved_no_data")
+
+    def test_excluded_identity_does_not_retry_forever_with_no_source_coverage(self):
+        result, status = apply({"engagement_rating": previous_rating()}, sources={}, observations=[])
+        self.assertEqual(status, "preserved_no_data")
+        self.assertEqual(result["engagement_rating"], previous_rating())
+        self.assertNotIn("retry_at", result["engagement_refresh"])
 
     def test_permanently_missing_provider_permits_partial_refresh(self):
         result, status = apply({"engagement_rating": previous_rating()}, sources=coverage(
@@ -154,7 +160,7 @@ class SchedulerTests(SimpleTestCase):
             refresh, "refresh_ratings", side_effect=RuntimeError("synthetic sensitive provider detail"),
         ):
             self.assertEqual(refresh.run_engagement_refresh_scheduler(), {
-                "status": "deferred", "reason": "activity_source_unavailable",
+                "status": "deferred", "reason": "activity_source_unavailable", "error_type": "RuntimeError",
             })
 
 

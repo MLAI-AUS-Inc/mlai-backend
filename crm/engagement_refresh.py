@@ -54,6 +54,8 @@ def apply_observation(attributes: dict, *, activities, coverage: dict, now) -> t
     status = "updated"
     if previous and previous["as_of"][:10] > day:
         status = "preserved_newer"
+    elif rating is None and not any(entry.get("expected", True) for entry in coverage.values()):
+        status = "preserved_no_data"
     elif rating is None or not rating["coverage"]["refresh_safe"]:
         status = "deferred"
         if previous:
