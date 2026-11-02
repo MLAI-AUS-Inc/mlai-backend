@@ -3796,6 +3796,36 @@
         "status"
       ],
       "x-wire-project": true
+    },
+    "FounderRunRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contractVersion": {
+          "const": 2
+        },
+        "companyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "runId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,100}$"
+        },
+        "kind": {
+          "enum": [
+            "article",
+            "advanced"
+          ]
+        }
+      },
+      "required": [
+        "contractVersion",
+        "companyId",
+        "runId",
+        "kind"
+      ]
     }
   }
 }
