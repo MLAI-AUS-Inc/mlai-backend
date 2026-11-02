@@ -8,7 +8,7 @@ from core.models import User
 from organizations.models import Organization
 from roo.models import Ledger
 from roo.services import PointsService
-from workflow_runs.models import ContentFactoryRun
+from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStepAttempt
 from .backend_fact_projection import backend_fact_projection
 from .models import ContentFactoryJob
 from .run_backend_facts import create_job_facts, save_job_facts
@@ -201,3 +201,90 @@ class RunFactGuardTests(TransactionTestCase):
         job.delete()
         run.delete()
         self.assertFalse(ContentFactoryJob.objects.filter(pk=job.pk).exists())
+
+    def history(self, run=None):
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_event_authority import batch
+        run = run or self.run
+        response = receive_authoritative_run_events(batch(run, [
+            {"type": "step_started", "step": "write", "attempt": 1},
+            {"type": "step_done", "step": "write", "attempt": 1, "status": "completed"}]))
+        self.assertEqual(response.status_code, 200)
+        step = run.steps.get(step_key="write")
+        return step, step.attempt_history.get(attempt=1)
+
+    def legacy_history(self, key="legacy-history"):
+        run = ContentFactoryRun.objects.create(run_id=key, workflow="article_generation", domain="history.example")
+        step = ContentFactoryRunStep.objects.create(run=run, step_key="write")
+        attempt = ContentFactoryRunStepAttempt.objects.create(step=step, attempt=1)
+        return run, step, attempt
+
+    def test_owned_step_and_attempt_direct_queryset_deletes_preserve_real_event_history(self):
+        step, attempt = self.history()
+        before = self.snapshot()
+        for remove in (step.delete, lambda: ContentFactoryRunStep.objects.filter(pk=step.pk).delete(),
+                       attempt.delete, lambda: ContentFactoryRunStepAttempt.objects.filter(pk=attempt.pk).delete()):
+            with self.subTest(remove=remove), backend_fact_projection(), self.assertRaises(RunFactHistoryProtected):
+                remove()
+            self.assertEqual(self.snapshot(), before)
+            self.assertTrue(ContentFactoryRunStep.objects.filter(pk=step.pk).exists())
+            self.assertTrue(ContentFactoryRunStepAttempt.objects.filter(pk=attempt.pk).exists())
+
+    def test_step_and_attempt_deletion_rechecks_saved_parent_after_in_memory_parent_changes(self):
+        step, attempt = self.history()
+        legacy, legacy_step, _ = self.legacy_history()
+        before = self.snapshot()
+        step.run, attempt.step = legacy, legacy_step
+        for row in (step, attempt):
+            with self.subTest(model=type(row).__name__), self.assertRaises(RunFactHistoryProtected):
+                row.delete()
+        self.assertEqual(ContentFactoryRunStep.objects.get(pk=step.pk).run_id, self.run.pk)
+        self.assertEqual(ContentFactoryRunStepAttempt.objects.get(pk=attempt.pk).step_id, step.pk)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_existing_steps_cannot_reparent_from_or_into_a_canonical_fact_owner(self):
+        step, _ = self.history()
+        legacy, legacy_step, _ = self.legacy_history()
+        step.run, legacy_step.run = legacy, self.run
+        for row in (step, legacy_step):
+            with self.subTest(proposed=row.run_id), self.assertRaises(RunFactHistoryProtected):
+                row.save(update_fields=["run"])
+        self.assertEqual(ContentFactoryRunStep.objects.get(pk=step.pk).run_id, self.run.pk)
+        self.assertEqual(ContentFactoryRunStep.objects.get(pk=legacy_step.pk).run_id, legacy.pk)
+
+    def test_existing_attempts_cannot_reparent_from_or_into_owned_steps(self):
+        step, attempt = self.history()
+        _, legacy_step, legacy_attempt = self.legacy_history()
+        attempt.step, legacy_attempt.step = legacy_step, step
+        for row in (attempt, legacy_attempt):
+            with self.subTest(proposed=row.step_id), self.assertRaises(RunFactHistoryProtected):
+                row.save(update_fields=["step"])
+        self.assertEqual(ContentFactoryRunStepAttempt.objects.get(pk=attempt.pk).step_id, step.pk)
+        self.assertEqual(ContentFactoryRunStepAttempt.objects.get(pk=legacy_attempt.pk).step_id, legacy_step.pk)
+
+    def test_flag_off_still_retains_owned_attempt_and_step_but_unmarked_cascade_stays_legacy(self):
+        step, attempt = self.history()
+        legacy, legacy_step, legacy_attempt = self.legacy_history()
+        with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False, ARTICLES_RUN_FACT_AUTHORITY_ENABLED=False,
+                               ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=False):
+            for row in (step, attempt):
+                with self.subTest(model=type(row).__name__), self.assertRaises(RunFactHistoryProtected):
+                    row.delete()
+            legacy.delete()
+        self.assertTrue(ContentFactoryRunStep.objects.filter(pk=step.pk).exists())
+        self.assertTrue(ContentFactoryRunStepAttempt.objects.filter(pk=attempt.pk).exists())
+        self.assertFalse(ContentFactoryRunStep.objects.filter(pk=legacy_step.pk).exists())
+        self.assertFalse(ContentFactoryRunStepAttempt.objects.filter(pk=legacy_attempt.pk).exists())
+
+    def test_new_current_ticket_events_still_append_history_and_keep_prior_attempts(self):
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_event_authority import advance_ticket, batch
+        step, first = self.history()
+        self.run.refresh_from_db()
+        ticket = advance_ticket(self.run, generation=1)
+        payload = batch(self.run, [{"seq": 3, "state_version": 3, "type": "step_started", "step": "write", "attempt": 1},
+            {"seq": 4, "state_version": 4, "type": "step_done", "step": "write", "attempt": 1, "status": "completed"}], ticket)
+        self.assertEqual(receive_authoritative_run_events(payload).status_code, 200)
+        self.assertEqual(list(step.attempt_history.order_by("attempt").values_list("attempt", "status")),
+                         [(1, "completed"), (2, "completed")])
+        self.assertTrue(ContentFactoryRunStepAttempt.objects.filter(pk=first.pk).exists())

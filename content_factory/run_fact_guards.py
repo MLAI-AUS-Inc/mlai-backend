@@ -42,6 +42,51 @@ def protect_run_history(sender, instance, using, **kwargs):
         raise RunFactHistoryProtected("Canonical Run fact history cannot be deleted.", [instance])
 
 
+def _owned_parent(run_ids, *, using):
+    from workflow_runs.models import ContentFactoryRun
+    return any(owns_backend_facts(run) for run in ContentFactoryRun.objects.using(using).filter(
+        pk__in={key for key in run_ids if key is not None}))
+
+
+@receiver(pre_delete, sender="workflow_runs.ContentFactoryRunStep", dispatch_uid="r3_step_fact_delete_guard")
+def protect_step_history(sender, instance, using, **kwargs):
+    """Retain owned steps using saved parent identity, even after local changes."""
+    saved = sender.objects.using(using).filter(pk=instance.pk).values_list("run_id", flat=True).first()
+    if _owned_parent({saved, instance.run_id}, using=using):
+        raise RunFactHistoryProtected("Canonical Run step history cannot be deleted.", [instance])
+
+
+@receiver(pre_save, sender="workflow_runs.ContentFactoryRunStep", dispatch_uid="r3_step_fact_reparent_guard")
+def protect_step_parent(sender, instance, using, **kwargs):
+    """Refuse reparenting which could detach or import existing owned history."""
+    saved = sender.objects.using(using).filter(pk=instance.pk).values_list("run_id", flat=True).first()
+    if saved is not None and saved != instance.run_id and _owned_parent({saved, instance.run_id}, using=using):
+        raise RunFactHistoryProtected("Canonical Run steps cannot change their owner.", [instance])
+
+
+def _attempt_run_ids(sender, instance, *, using):
+    from workflow_runs.models import ContentFactoryRunStep
+    saved = sender.objects.using(using).filter(pk=instance.pk).values_list("step_id", flat=True).first()
+    steps = {key for key in {saved, instance.step_id} if key is not None}
+    return saved, ContentFactoryRunStep.objects.using(using).filter(pk__in=steps).values_list("run_id", flat=True)
+
+
+@receiver(pre_delete, sender="workflow_runs.ContentFactoryRunStepAttempt", dispatch_uid="r3_attempt_fact_delete_guard")
+def protect_attempt_history(sender, instance, using, **kwargs):
+    """Keep owned immutable attempts before either direct or collector deletion."""
+    _, run_ids = _attempt_run_ids(sender, instance, using=using)
+    if _owned_parent(run_ids, using=using):
+        raise RunFactHistoryProtected("Canonical Run attempt history cannot be deleted.", [instance])
+
+
+@receiver(pre_save, sender="workflow_runs.ContentFactoryRunStepAttempt", dispatch_uid="r3_attempt_fact_reparent_guard")
+def protect_attempt_parent(sender, instance, using, **kwargs):
+    """Keep actual attempt identity attached to its original owned step."""
+    saved, run_ids = _attempt_run_ids(sender, instance, using=using)
+    if saved is not None and saved != instance.step_id and _owned_parent(run_ids, using=using):
+        raise RunFactHistoryProtected("Canonical Run attempts cannot change their owner.", [instance])
+
+
 @receiver(pre_delete, sender="roo.Ledger", dispatch_uid="r3_ledger_fact_delete_guard")
 def protect_charge_history(sender, instance, using, **kwargs):
     """Retain pinned original spends and their refunds before collector SET_NULL."""
