@@ -225,3 +225,47 @@ class PolicyReviewTests(TransactionTestCase):
                 self.assertEqual(engine._execute_run(run, decision, now=self.now)['dispatch_state'], 'pending')
         with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', return_value={'status': 'queued', 'self_heal_resume': ack}):
             self.assertEqual(engine._execute_run(run, decision, now=self.now)['self_heal_resume'], ack)
+
+    def test_real_bound_policy_resume_retains_clock_and_operation_identity(self):
+        from types import SimpleNamespace
+        from .website_models import WebsiteConnection, WebsiteConnectionOperation
+        from . import vibe_marketing_views as views
+        website = WebsiteConnection.objects.create(organization=self.org, repository_id=42,
+            github_repo='fixture/site', installation_id='99', generation=1, branch='main',
+            authorized_by=self.helper.fixture.owner, verified_sha='a'*40)
+        self.helper.fixture.config.website_connection = website
+        self.helper.fixture.config.github_repo = website.github_repo
+        self.helper.fixture.config.save(update_fields=['website_connection', 'github_repo'])
+        run = self.helper.run_for(workflow='direct_generate', run_request={**contract_for(website),
+            'domain': self.org.domain, 'github_repo': website.github_repo, 'expected_source_sha': 'a'*40})
+        operation = WebsiteConnectionOperation.objects.create(connection=website, generation=1, action='workflow',
+            state='failed', idempotency_key='policy-clock-operation', payload={'run_id': run.run_id, 'attempt': 1})
+        run.domain, run.github_repo = self.org.domain, website.github_repo
+        run.run_request.update(operation_id=str(operation.pk), operation_attempt=1, deletion_epoch=0)
+        run.save(update_fields=['domain', 'github_repo', 'run_request'])
+        clock = run.updated_at
+        response = SimpleNamespace(status_code=200, content=b'{}', json=lambda: {'status': 'queued',
+            'self_heal_resume': {'version': 1, 'run_id': run.run_id, 'key': f'{run.run_id}:1', 'intent': 'resume', 'state': 'accepted'}})
+        with patch.object(views, '_content_factory_remote_config', return_value={'enabled': True, 'base_url': 'https://fixture.invalid'}), \
+                patch.object(views, '_content_factory_headers', return_value={}), \
+                patch.object(views.http_client, 'post', return_value=response) as remote, \
+                patch('content_factory.website_connections.read_repository_native_target', return_value={'id': 42, 'full_name': website.github_repo, 'default_branch': 'main'}):
+            outcome = engine._execute_run(run, engine.Decision('retry', None, None, 1, None, 'policy'), now=self.now)
+            self.assertIn('self_heal_resume', outcome, outcome)
+            self.assertEqual(outcome['self_heal_resume']['state'], 'accepted')
+            operation.refresh_from_db(); run.refresh_from_db()
+            self.assertEqual(operation.payload['attempt'], 2)
+            self.assertEqual(run.run_request['operation_attempt'], 2)
+            self.assertEqual(run.updated_at, clock)
+            self.assertEqual(remote.call_args.kwargs['json']['self_heal_key'], f'{run.run_id}:1')
+            self.assertEqual(remote.call_args.kwargs['json']['website_connection_id'], str(website.pk))
+            # A retransmission reserves no third execution or clock update.
+            engine._execute_run(run, engine.Decision('retry', None, None, 1, None, 'policy'), now=self.now)
+            operation.refresh_from_db(); run.refresh_from_db()
+            self.assertEqual(operation.payload['attempt'], 2)
+            self.assertEqual(run.updated_at, clock)
+            # Revocation is still checked before dispatching the original tuple.
+            website.state = 'disconnected'; website.save(update_fields=['state'])
+            refused = engine._execute_run(run, engine.Decision('retry', None, None, 1, None, 'policy'), now=self.now)
+            self.assertEqual(refused['dispatch_state'], 'pending')
+            self.assertEqual(remote.call_count, 2)

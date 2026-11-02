@@ -15163,6 +15163,7 @@ def _call_content_factory_run_action(
     workflow="article_generation",
     timeout=(3, 15),
     transport_errors_are_pending=False,
+    preserve_run_clock=False,
 ):
     require_unlocked_remote_call()
     if action not in {"cancel", "deny"}:
@@ -15174,7 +15175,8 @@ def _call_content_factory_run_action(
                 saved = scoped_run_contract(scoped_run)
                 if action == "resume":
                     from .website_operations import advance_workflow_attempt
-                    payload.update(advance_workflow_attempt(scoped_run))
+                    payload.update(advance_workflow_attempt(scoped_run, preserve_run_clock=True)
+                        if preserve_run_clock else advance_workflow_attempt(scoped_run))
                     saved = scoped_run_contract(scoped_run)
                 from .website_connections import run_action_authority
                 operation = run_action_authority(scoped_run, action)

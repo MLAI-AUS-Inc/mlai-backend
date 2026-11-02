@@ -68,7 +68,7 @@ def switch_to_copy_ready(*, run, reason, now=None):
             from .vibe_marketing_views import _call_content_factory_run_action
             response = _call_content_factory_run_action(run_id=current.run_id, workflow=current.workflow, action='resume',
                 payload={'channel_switch': {'delivery_mode': 'content_only', 'key': f'{current.run_id}:copy-ready'}},
-                transport_errors_are_pending=True)
+                transport_errors_are_pending=True, preserve_run_clock=True)
             acknowledgement = mapping(mapping(response).get('channel_switch'))
             if (type(acknowledgement.get('version')) is int and acknowledgement['version'] == 1
                     and acknowledgement.get('run_id') == current.run_id

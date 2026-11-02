@@ -471,8 +471,8 @@ def observe_workflow_status(run, payload=None):
         wake_prepare_after_commit(op.connection_id)
 
 
-def advance_workflow_attempt(run):
-    """Fence a resumed worker attempt before dispatch, retaining charge identity."""
+def advance_workflow_attempt(run, *, preserve_run_clock=False):
+    """Fence a resumed attempt; policy commands keep the original activity clock."""
     from .website_connections import authority_guard, scoped_run_contract, contract_for, extend_owner_operation_contract
     binding = scoped_run_contract(run)
     with authority_guard(binding, action="read") as website:
@@ -515,6 +515,6 @@ def advance_workflow_attempt(run):
         from .setup_delivery_enrollment import enroll_setup_delivery
         if enroll_setup_delivery(op, run.run_request, website, getattr(run, "workflow", "")):
             op.save(update_fields=["payload", "updated_at"])
-        run.save(update_fields=["run_request", "updated_at"])
+        run.save(update_fields=["run_request"] if preserve_run_clock else ["run_request", "updated_at"])
         extend_owner_operation_contract(fields)
         return fields

@@ -343,7 +343,7 @@ def _execute_run(run, decision, *, now):
         if decision.action == 'rescan':
             payload['self_heal_rescan'] = True
         outcome = _call_content_factory_run_action(run_id=run.run_id, workflow=run.workflow,
-            action='resume', payload=payload, transport_errors_are_pending=True)
+            action='resume', payload=payload, transport_errors_are_pending=True, preserve_run_clock=True)
         ack = mapping(mapping(outcome).get('self_heal_resume'))
         intent = 're_pin' if decision.action == 're_pin' else 'rescan' if decision.action == 'rescan' else 'resume'
         if ack != {'version': 1, 'run_id': run.run_id, 'key': payload['self_heal_key'],
