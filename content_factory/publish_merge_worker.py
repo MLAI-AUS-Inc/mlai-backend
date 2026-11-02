@@ -323,7 +323,7 @@ def _checks(connection, token, sha, required):
 
 def _ask(run, token, receipt, reason, *, now, code=None):
     key = str(receipt["number"]) + ":" + reason
-    state = {"reason": reason, "ask_key": key, "next_at": (now + timedelta(hours=1)).isoformat()}
+    state = {"reason": reason, "ask_key": key, "next_at": (now + timedelta(minutes=1)).isoformat()}
     fields = {"merge_status": "manual_merge_required", "user_action": {"id": "approve_on_github", "url": receipt["pr_url"]}}
     if code == "BRANCH_PROTECTION_APPROVAL_REQUIRED":
         fields.update(error_code="BRANCH_PROTECTION_APPROVAL_REQUIRED", failure_class="needs_user")
@@ -354,7 +354,7 @@ def _wait(run, token, reason, *, now, rejected=False):
 def _authority(run, *, watch=False):
     payload = scoped_run_contract(run)
     if watch:
-        payload = {key: value for key, value in payload.items() if key not in {"expected_source_sha", "source_sha", "repo_head_sha", "last_scanned_sha"}}
+        payload = {key: value for key, value in payload.items() if key not in {"expected_source_sha", "source_sha", "repo_head_sha", "last_scanned_sha", "configuration_revision"}}
     kind = _mapping(_mapping(run.result).get("publish_pr_v1")).get("kind")
     with authority_guard(payload, action="read" if watch else "setup" if kind in {"setup", "scaffold", "proxy"} else "merge") as connection:
         if (connection.organization_id != run.organization_id
@@ -364,13 +364,13 @@ def _authority(run, *, watch=False):
         return connection
 
 
-def _recheck(run, token, receipt, *, now):
-    """Reload both authority and approver rights immediately before HTTP merge."""
+def _recheck(run, token, receipt, *, now, observed=False):
+    """Reload current authority and approver rights before mutation or attestation."""
     from organizations.models import Organization
     from .models import OrganizationContentConfig
     from .website_models import WebsiteConnection
     from workflow_runs.models import ContentFactoryRun
-    connection = _authority(run)
+    connection = _authority(run, watch=observed)
     with transaction.atomic():
         org = Organization.objects.select_for_update().get(pk=run.organization_id)
         locked_connection = WebsiteConnection.objects.select_for_update().get(pk=connection.pk)
@@ -383,6 +383,7 @@ def _recheck(run, token, receipt, *, now):
         state = _state(current)
         if (not getattr(settings, "ARTICLES_MERGE_WORKER_ENABLED", False) or not foundation.p2_applies(org)
                 or current.organization_id != org.pk or current.status in {"cancelled", "denied"} or current.result.get("merge_v1")
+                or (state.get("manual") is True and not observed)
                 or state.get("claim") != token or (_moment(state.get("lease_until")) or now) <= now
                 or _mapping(current.result).get("publish_pr_v1") != receipt
                 or foundation.run_merge_policy(current) != foundation.BACKEND_WORKER):
@@ -398,7 +399,10 @@ def merge_run(run, token, *, now):
     """Evaluate one claimed stamped run; GitHub's exact-head CAS is the only merge."""
     receipt = deepcopy(_mapping(_mapping(run.result).get("publish_pr_v1")))
     try:
-        connection = _authority(run)
+        # A merge (including a manual GitHub merge) moves the base head. Read
+        # that existing effect under current identity, without granting a new
+        # mutation lease on a replacement source. _recheck stays strict below.
+        connection = _authority(run, watch=True)
         if not _owned(receipt, connection):
             return _wait(run, token, "merge_unowned_pr", now=now)
         from .website_setup_merge_policy import p2_setup_example_candidate_allowed
@@ -428,9 +432,12 @@ def merge_run(run, token, *, now):
         if _mapping(pull.get("head")).get("sha") != receipt["head_sha"]:
             return _ask(run, token, receipt, "merge_head_moved", now=now)
         if pull.get("merged") is True:
+            _, consent, approval = _recheck(run, token, receipt, now=timezone.now(), observed=True)
             merged = {"sha": pull.get("merge_commit_sha"), "merged": True}
             method = "observed"
         else:
+            if _state(run).get("manual") is True:
+                return _ask(run, token, receipt, "merge_manual_owner_required", now=now)
             if pull.get("state") != "open" or pull.get("mergeable") is False:
                 return _wait(run, token, "merge_rejected", now=now, rejected=True)
             required, unknown, reviews = _policy(connection, read_token)
@@ -611,16 +618,16 @@ def record_owner_approval(*, run, organization, user, choice):
                 or not SHA.fullmatch(str(receipt.get("head_sha") or ""))
                 or not _approver(org, getattr(user, "pk", None), owner_only=True)):
             return False
-        if choice == "manual":
-            result = dict(current.result or {})
-            result.pop("owner_merge_approval_v1", None)
-            _update_locked(current, result)
-            run.result = current.result
-            return True
+        state = deepcopy(_state(current))
+        state.update(next_at=timezone.now().isoformat(), manual=choice == "manual")
+        state.pop("claim", None)
+        state.pop("lease_until", None)
+        result = {**_mapping(current.result), "self_heal_v1": {
+            **_mapping(_mapping(current.result).get("self_heal_v1")), "merge_worker": state}}
         record = {"version": 1, "kind": receipt["kind"], "pr_url": receipt.get("pr_url"),
             "head_sha": receipt["head_sha"], "approved_by_user_id": user.pk,
             "approved_at": timezone.now().isoformat()}
-        _update_locked(current, {**_mapping(current.result), "owner_merge_approval_v1": record})
+        _update_locked(current, {**result, "owner_merge_approval_v1": record})
         run.result = current.result
         return True
 

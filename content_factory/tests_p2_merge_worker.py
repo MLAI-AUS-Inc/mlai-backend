@@ -247,16 +247,17 @@ class MergeWorkerTests(TransactionTestCase):
                 self.assertEqual(self.sweep()["merged"], 0)
             run.delete()
 
-    def test_owner_click_records_head_and_manual_choice_revokes_worker_receipt(self):
+    def test_owner_click_records_head_and_manual_choice_revokes_worker_merge_authority(self):
         run = self.run_fixture(kind="setup", approved=False)
         from .website_setup_owner_approval import on_owner_setup_approve
         self.assertEqual(on_owner_setup_approve(organization=self.org, user=self.owner, run=run, data={}), {"merge": "auto"})
         run.refresh_from_db()
         self.assertEqual(run.result["owner_merge_approval_v1"]["head_sha"], HEAD)
-        with self.providers():self.assertEqual(self.sweep()["merged"], 1)
+        with self.providers():self.assertEqual(worker.run_merge_sweep()["merged"], 1)
         on_owner_setup_approve(organization=self.org, user=self.owner, run=run, data={"merge": "manual"})
         run.refresh_from_db()
-        self.assertNotIn("owner_merge_approval_v1", run.result)
+        self.assertEqual(run.result["owner_merge_approval_v1"]["head_sha"], HEAD)
+        self.assertIs(worker._state(run)["manual"], True)
 
     def test_member_cannot_record_owner_setup_consent(self):
         from core.models import User
@@ -538,4 +539,98 @@ class MergeWorkerTests(TransactionTestCase):
         remote.assert_not_called()
         run.refresh_from_db()
         self.assertEqual(run.result["owner_merge_approval_v1"]["kind"], "proxy")
-        with self.providers():self.assertEqual(self.sweep()["merged"], 1)
+        with self.providers():self.assertEqual(worker.run_merge_sweep()["merged"], 1)
+
+    def test_delivery_mode_requires_completed_cf_conversion_and_real_export_evidence(self):
+        run = self.run_fixture()
+        run.run_request["delivery_mode"] = "review_draft"
+        run.result["channel_v1"] = {"version": 1, "channel": "copy_ready", "dispatch_state": "pending"}
+        self.assertEqual(views._run_delivery_mode(run), "review_draft")
+        run.result["channel_v1"]["dispatch_state"] = "accepted"
+        run.result["channel_switch_cf_v1"] = {"version": 1, "run_id": run.run_id, "key": run.run_id + ":copy-ready", "delivery_mode": "content_only", "state": "applied"}
+        self.assertEqual(views._run_delivery_mode(run), "review_draft")
+        run.result["channel_switch_cf_v1"]["state"] = "completed"
+        self.assertEqual(views._run_delivery_mode(run), "review_draft")
+        run.result["content_package"] = {"article_markdown": "Exact saved article"}
+        self.assertEqual(views._run_delivery_mode(run), "content_only")
+        run.result["channel_switch_cf_v1"]["run_id"] = "foreign"
+        self.assertEqual(views._run_delivery_mode(run), "review_draft")
+
+    def test_owner_click_brings_waiting_worker_due_now_without_resetting_caps_or_rejections(self):
+        run = self.run_fixture(kind="proxy", approved=False)
+        with self.providers():
+            self.assertEqual(self.sweep()["merged"], 0)
+        run.refresh_from_db()
+        prior = worker._state(run)
+        self.assertGreater(worker._moment(prior["next_at"]), self.now)
+        worker.record_owner_approval(run=run, organization=self.org, user=self.owner, choice="auto")
+        run.refresh_from_db()
+        self.assertEqual(worker._state(run)["attempts"], prior["attempts"])
+        self.assertEqual(worker._state(run)["rejections"], prior["rejections"])
+        with self.providers():
+            self.assertEqual(worker.run_merge_sweep()["merged"], 1)
+
+    def test_manual_owner_choice_never_puts_but_attests_same_owned_github_merge(self):
+        run = self.run_fixture(kind="proxy", approved=False)
+        worker.record_owner_approval(run=run, organization=self.org, user=self.owner, choice="manual")
+        with self.providers():
+            self.assertEqual(worker.run_merge_sweep()["merged"], 0)
+        self.assertFalse(any(method == "PUT" for method, _, _ in self.calls))
+        self.pull.update(merged=True, state="closed", merge_commit_sha=MERGED)
+        with self.providers():
+            self.assertEqual(self.sweep(minutes=2)["merged"], 1)
+        run.refresh_from_db()
+        self.assertEqual(run.result["merge_v1"]["method"], "observed")
+        self.assertEqual(run.result["merge_v1"]["approved_by_user_id"], self.owner.pk)
+        self.assertFalse(any(method == "PUT" for method, _, _ in self.calls))
+
+    def test_manual_choice_during_token_mint_revokes_the_old_claim_without_put(self):
+        run = self.run_fixture(kind="proxy")
+        def mint(**kwargs):
+            if kwargs["permission_mode"] == "write":
+                self.assertTrue(worker.record_owner_approval(
+                    run=run, organization=self.org, user=self.owner, choice="manual"))
+            return self.mint(**kwargs)
+        with self.providers(), patch.object(worker, "create_installation_access_token", side_effect=mint):
+            self.assertEqual(self.sweep()["merged"], 0)
+        run.refresh_from_db()
+        self.assertIs(worker._state(run)["manual"], True)
+        self.assertNotIn("claim", worker._state(run))
+        self.assertNotIn("merge_v1", run.result)
+        self.assertFalse(any(method == "PUT" for method, _, _ in self.calls))
+
+    def test_manual_observation_rechecks_consent_after_provider_read(self):
+        run = self.run_fixture(kind="proxy")
+        self.pull.update(merged=True, state="closed", merge_commit_sha=MERGED)
+        def api(*args, **kwargs):
+            result = self.api(*args, **kwargs)
+            if args[3] == "/pulls/12":
+                ContentFactoryRun.objects.filter(pk=run.pk).update(result={**run.result, "owner_merge_approval_v1": {}})
+            return result
+        with self.providers(), patch.object(worker, "_api", side_effect=api):
+            self.assertEqual(self.sweep()["merged"], 0)
+        run.refresh_from_db()
+        self.assertNotIn("merge_v1", run.result)
+        self.assertFalse(any(method == "PUT" for method, _, _ in self.calls))
+
+    def test_existing_merge_observation_omits_old_source_pins_but_new_merge_requires_them(self):
+        run = self.run_fixture(kind="proxy")
+        calls = []
+        @contextmanager
+        def guard(payload, *, action):
+            calls.append((deepcopy(payload), action))
+            if "expected_source_sha" in payload:
+                raise worker.WebsiteAuthorityError("source_changed", "Source moved.")
+            yield self.website
+        with patch.object(worker, "authority_guard", side_effect=guard):
+            self.assertEqual(worker._authority(run, watch=True), self.website)
+            with self.assertRaises(worker.WebsiteAuthorityError):
+                worker._authority(run)
+        self.assertEqual(calls[0][1], "read")
+        self.assertNotIn("expected_source_sha", calls[0][0])
+        self.assertEqual(calls[1][1], "setup")
+        self.assertEqual(calls[1][0]["expected_source_sha"], "a" * 40)
+        for payload, _ in calls:
+            self.assertEqual(payload["website_connection_id"], str(self.website.pk))
+            self.assertEqual(payload["connection_generation"], 1)
+            self.assertEqual(payload["repository_id"], 42)
