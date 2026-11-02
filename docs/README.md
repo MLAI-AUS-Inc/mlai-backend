@@ -29,6 +29,7 @@ subsystem-specific contracts and runbooks.
 ## Content Factory
 
 - [Job to Run cutover](run-job-cutover.md) — parity, copied identity, historical coverage and rollback
+- [Topic discovery reconciliation](discovery-reconciliation.md) — bounded cohort preview, saved scope and activation boundary
 
 - [19 October backend consolidation audit](articles-backend-rollup-audit-2026-10-19.md) — retained reliability fixes, deferred prototypes, exact component heads and release boundaries
 
