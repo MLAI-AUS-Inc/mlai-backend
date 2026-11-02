@@ -88,7 +88,7 @@ def startup_row(org, company, run, *, now):
     workflow = getattr(run, "workflow", "")
     stage = ("setup" if workflow == "article_system_setup" else "website" if workflow in {"scan", "startup_autofill", "website_scan"}
              else "review" if delivered else "writing" if run else "first_article" if config and config.website_connection_id else "website")
-    copy_id = "ask_"+ask if ask else "done_copy_ready" if delivered else registry_policy.founder_copy_id(code)
+    copy_id = "ask_"+ask if ask else None if delivered else registry_policy.founder_copy_id(code)
     if entry and status in {"failed", "blocked", "denied", "stopped"} and not ask and not (heal.get("mode") == "policy" and heal.get("next_at") and not heal.get("capped")):
         copy_id = "stopped"
     alerts = [r for r in _alerts(org) if open_alert(r)]

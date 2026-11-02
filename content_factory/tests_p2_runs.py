@@ -395,6 +395,22 @@ class ProfileIdempotencyTests(TestCase):
         self.assertEqual(second["Idempotent-Replayed"], "true")
 
 
+class PublishSnapshotAuthorityTests(TestCase):
+    def test_publish_body_scope_and_lifecycle_survive_omitted_snapshot_and_reject_forgery(self):
+        request = {"approved_body": "Exact saved body", "approved_body_sha256": "a"*64, "approval": {"by_user_id": 1},
+            "new_run_id": "publish", "run_id": "publish", "source_run_id": "source", "source_revision": "revision1",
+            "hosted_site_id": "site1", "body_format": "markdown", "original_billing_source_run_id": "source"}
+        receipt = {"article_approval_v1": {"source": "publish_reviewed"}, "publish_reviewed_v1": {"source_run_id": "source"},
+                   "publish_dispatch_v1": {"accepted_at": timezone.now().isoformat()}}
+        merged = service_views._merge_django_owned_run_request(request, {}, backend_result=receipt)
+        self.assertEqual(merged, request)
+        for field in request:
+            with self.subTest(field=field), self.assertRaises(EditorialRunConflict):
+                service_views._merge_django_owned_run_request(request, {field: "forged"}, backend_result=receipt)
+        self.assertEqual(service_views._merge_django_owned_run_result(receipt, {}), receipt)
+        self.assertEqual(service_views._merge_django_owned_run_result({}, {k: v for k,v in receipt.items() if k != "article_approval_v1"}), {})
+
+
 class ConcurrencyTests(TransactionTestCase):
     """PostgreSQL proves row locking and actual duplicate request exclusion."""
     @override_settings(**ALL_FLAGS_ON)

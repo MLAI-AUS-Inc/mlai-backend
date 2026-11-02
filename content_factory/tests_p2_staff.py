@@ -91,6 +91,12 @@ class StaffTests(TestCase):
         self.assertEqual(response.data["owner"]["email"], self.built.owner.email)
         self.assertNotIn("fixture-secret", str(response.data))
 
+    def test_completed_staff_row_keeps_the_closed_founder_copy_vocabulary(self):
+        self.new_run(status="completed", result={"draft_ready_v1": {"version": 1}})
+        row = console.startup_list({})["results"][0]
+        self.assertEqual(row["state"], "done")
+        self.assertIsNone(row["copyId"])
+
     def test_detail_doctor_uses_saved_scoped_sha_and_cost_receipts(self):
         from .website_models import WebsiteConnection, WebsiteConnectionOperation
         from .website_goal import scope_for, new_goal
