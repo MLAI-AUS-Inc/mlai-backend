@@ -115,6 +115,14 @@ class WebsiteCheckTests(TransactionTestCase):
         self.assertEqual(self.sweep(now=tomorrow+timedelta(minutes=5))['queued'], 0)
         self.assertEqual(len(self.queued),1)
 
+    def test_nightly_waits_until_two_in_the_organization_timezone(self):
+        from zoneinfo import ZoneInfo
+        self.deliver()
+        WebsiteBaselineSnapshot.objects.create(organization=self.org, status='completed', collected_at=self.now)
+        before = (self.now+timedelta(days=2)).astimezone(ZoneInfo('Australia/Melbourne')).replace(hour=1, minute=0, second=0)
+        self.assertEqual(self.sweep(now=before)['queued'], 0)
+        self.assertEqual(self.sweep(now=before+timedelta(hours=2))['queued'], 1)
+
     def test_live_owner_freeze_or_domain_change_refuses_pending_retry(self):
         self.deliver()
         with patch.object(views, '_queue_content_factory_run', side_effect=TimeoutError): self.sweep()
@@ -157,3 +165,7 @@ class WebsiteChecksOffTests(SimpleTestCase):
     @override_settings(MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED=False)
     def test_off_does_not_touch_database_or_providers(self):
         self.assertEqual(checks.run_founder_website_check_sweep()['visited'],0)
+
+    @override_settings(**{**FLAGS, 'MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED': False})
+    def test_journey_kill_switch_prevents_database_and_provider_reads(self):
+        self.assertEqual(checks.run_founder_website_check_sweep()['visited'], 0)
