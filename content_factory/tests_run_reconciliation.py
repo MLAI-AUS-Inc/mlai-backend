@@ -73,7 +73,9 @@ class AuthoritativeReconciliationTests(TransactionTestCase):
     def test_terminal_rows_legacy_254_and_reservation_only_stay_untouched_with_flags_off(self):
         for status in sorted(reconcile.TERMINAL):
             run = self.admit(f"terminal-{status}")
-            ContentFactoryRun.objects.filter(pk=run.pk).update(status=status)
+            # A completed current projection is quiescent. A terminal label
+            # without its current ticket's history still needs reconciliation.
+            self.assertEqual(receive_authoritative_run_events(batch(run, [{"status": status}])).status_code, 200)
         with override_settings(ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=False):
             self.admit("reservation-only")
         ContentFactoryRun.objects.bulk_create([ContentFactoryRun(run_id=f"historical-{n}",
@@ -84,6 +86,52 @@ class AuthoritativeReconciliationTests(TransactionTestCase):
             self.assertEqual(self.sweep()["checked"], 0)
         get.assert_not_called()
         self.assertEqual(list(ContentFactoryRun.objects.order_by("pk").values()), before)
+
+    def test_new_backend_ticket_recovers_lost_callback_despite_prior_terminal_status_and_flags_off(self):
+        from .run_execution_control import append_execution_ticket
+        run = self.admit("resumed-without-callback")
+        old = batch(run, [{"status": "failed"}])
+        with patch.object(reconcile.requests, "get", return_value=response(page(run, old))):
+            self.assertEqual(self.sweep()["history_received"], 1)
+        run.refresh_from_db()
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        with transaction.atomic():
+            locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+            ticket = append_execution_ticket(locked, control_key="f" * 64, reason="user_resume")
+        run.refresh_from_db()
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(run.result[RECONCILIATION_RESULT_KEY]["cursor"], 1)
+        fresh = batch(run, [{"status": "running", "seq": 2, "state_version": 2}], ticket)
+        with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False, ARTICLES_RUN_FACT_AUTHORITY_ENABLED=False,
+                               ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=False), \
+                patch.object(reconcile.requests, "get", return_value=response(page(run, fresh))) as get:
+            self.assertEqual(self.sweep(now=self.now + timedelta(minutes=3))["history_received"], 1)
+        self.assertEqual(get.call_args.kwargs["params"], {"after_seq": 1, "limit": 100})
+        run.refresh_from_db()
+        self.assertEqual(run.status, "running")
+        self.assertEqual(run.result[RECONCILIATION_RESULT_KEY]["cursor"], 2)
+        self.assertEqual(len(run.result[EVENT_RESULT_KEY]["events"]), 2)
+        for field in ("run_request", "created_at", "updated_at", "last_event_emitted_at", "reconciled_at"):
+            self.assertEqual(getattr(run, field), before[field], field)
+
+    def test_missing_projection_is_pulled_without_inventing_status_or_compacting_saved_history(self):
+        run = self.admit("missing-derived-projection")
+        terminal = batch(run, [{"status": "failed"}])
+        self.assertEqual(receive_authoritative_run_events(terminal).status_code, 200)
+        run.refresh_from_db()
+        result = deepcopy(run.result)
+        result[EVENT_RESULT_KEY].pop("projection")
+        ContentFactoryRun.objects.filter(pk=run.pk).update(result=result)
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False, ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=False), \
+                patch.object(reconcile.requests, "get", return_value=response(page(run, terminal))) as get:
+            self.assertEqual(self.sweep()["history_received"], 1)
+        self.assertEqual(get.call_args.kwargs["params"], {"after_seq": 0, "limit": 100})
+        run.refresh_from_db()
+        self.assertEqual(run.result[EVENT_RESULT_KEY]["events"], result[EVENT_RESULT_KEY]["events"])
+        self.assertEqual(run.result[RECONCILIATION_RESULT_KEY]["cursor"], 1)
+        for field in ("status", "run_request", "created_at", "updated_at", "last_event_emitted_at", "reconciled_at"):
+            self.assertEqual(getattr(run, field), before[field], field)
 
     def test_existing_owner_continues_with_new_admission_flags_off_and_preserves_source_clocks(self):
         run = self.admit()
@@ -300,6 +348,73 @@ class AuthoritativeReconciliationTests(TransactionTestCase):
             with self.assertRaisesRegex(reconcile.RunReconciliationError, "http_under_database_lock"):
                 reconcile._fetch_page("https://fixture.test", {}, claim)
         get.assert_not_called()
+
+    def test_corrupt_metadata_is_retained_and_does_not_starve_later_lost_callback_ticket(self):
+        from .run_execution_control import append_execution_ticket
+        from .run_ownership import HISTORY_TRANSPORT_RESULT_KEY, public_run_value
+        damaged, resumed = self.admit("opaque-history"), self.admit("later-ticket")
+        old = batch(resumed, [{"status": "failed"}])
+        with patch.object(reconcile.requests, "get", return_value=response(page(resumed, old))):
+            self.assertEqual(reconcile.reconcile_authoritative_run(resumed.run_id, now=self.now)["cursor"], 1)
+        with transaction.atomic():
+            locked = ContentFactoryRun.objects.select_for_update().get(pk=resumed.pk)
+            ticket = append_execution_ticket(locked, control_key="e" * 64, reason="user_resume")
+        resumed.refresh_from_db()
+        fresh = batch(resumed, [{"seq": 2, "state_version": 2, "status": "running"}], ticket)
+        corruptions = ["opaque history: do not reset", None, ["retained", 7], {"cursor": True}]
+        for corrupt in corruptions:
+            with self.subTest(corrupt=corrupt):
+                damaged.refresh_from_db()
+                result = deepcopy(damaged.result)
+                result.pop(HISTORY_TRANSPORT_RESULT_KEY, None)
+                result[RECONCILIATION_RESULT_KEY] = corrupt
+                ContentFactoryRun.objects.filter(pk=damaged.pk).update(result=result)
+                before = ContentFactoryRun.objects.values().get(pk=damaged.pk)
+                with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False, ARTICLES_RUN_FACT_AUTHORITY_ENABLED=False,
+                                       ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=False), patch.object(reconcile.requests, "get") as get:
+                    self.assertEqual(self.sweep(limit=1)["errors"], 1)
+                    get.assert_not_called()
+                damaged.refresh_from_db()
+                self.assertEqual(damaged.result, {**before["result"],
+                    HISTORY_TRANSPORT_RESULT_KEY: damaged.result[HISTORY_TRANSPORT_RESULT_KEY]})
+                self.assertEqual(damaged.result[HISTORY_TRANSPORT_RESULT_KEY]["last_outcome"],
+                    "admission_invalid" if isinstance(corrupt, dict) else "metadata_invalid")
+                for field, value in before.items():
+                    if field != "result":
+                        self.assertEqual(getattr(damaged, field), value, field)
+                self.assertNotIn(HISTORY_TRANSPORT_RESULT_KEY, public_run_value(damaged.result))
+                self.assertIsNone(reconcile.no_effect_dispatch_proof(damaged))
+        with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False, ARTICLES_RUN_FACT_AUTHORITY_ENABLED=False,
+                               ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=False), \
+                patch.object(reconcile.requests, "get", return_value=response(page(resumed, fresh))) as get:
+            self.assertEqual(self.sweep(now=self.now + timedelta(minutes=3), limit=1)["history_received"], 1)
+        self.assertEqual(get.call_args.kwargs["params"]["after_seq"], 1)
+        resumed.refresh_from_db()
+        self.assertEqual(resumed.status, "running")
+        self.assertEqual(resumed.result[RECONCILIATION_RESULT_KEY]["cursor"], 2)
+        self.assertEqual(len(resumed.result[EVENT_RESULT_KEY]["events"]), 2)
+
+    def test_metadata_corrupted_during_http_holds_without_repair_or_projection(self):
+        from .run_ownership import HISTORY_TRANSPORT_RESULT_KEY
+        run = self.admit("corrupt-during-io")
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+
+        def get(*args, **kwargs):
+            current = ContentFactoryRun.objects.get(pk=run.pk)
+            ContentFactoryRun.objects.filter(pk=run.pk).update(result={**current.result,
+                RECONCILIATION_RESULT_KEY: "opaque-after-claim"})
+            return response(page(run, batch(run, [{"status": "completed"}])))
+
+        with patch.object(reconcile.requests, "get", side_effect=get):
+            result = reconcile.reconcile_authoritative_run(run.run_id, now=self.now, refresh=True)
+        self.assertEqual((result["status"], result["outcome"], result["cursor"]), ("pending", "metadata_invalid", None))
+        run.refresh_from_db()
+        self.assertEqual(run.result[RECONCILIATION_RESULT_KEY], "opaque-after-claim")
+        self.assertNotIn(EVENT_RESULT_KEY, run.result)
+        self.assertEqual(run.result[HISTORY_TRANSPORT_RESULT_KEY]["last_outcome"], "metadata_invalid")
+        for field, value in before.items():
+            if field != "result":
+                self.assertEqual(getattr(run, field), value, field)
 
     def test_one_run_control_refresh_bypasses_only_cadence_and_returns_drained_cursor(self):
         run = self.admit()

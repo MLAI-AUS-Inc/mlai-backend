@@ -21,7 +21,8 @@ from django.utils.dateparse import parse_datetime
 
 from .run_event_authority import RunEventInvalid, validate_authoritative_envelope, receive_authoritative_run_events
 from .run_ownership import (
-    DISPATCH_RESULT_KEY, EVENT_RESULT_KEY, OWNER_RESULT_KEY, RECONCILIATION_RESULT_KEY, WIRE_EXECUTION_KEY, WIRE_REQUEST_KEY,
+    DISPATCH_RESULT_KEY, EVENT_RESULT_KEY, OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, RECONCILIATION_RESULT_KEY,
+    HISTORY_TRANSPORT_RESULT_KEY, WIRE_EXECUTION_KEY, WIRE_REQUEST_KEY,
     RunOwnershipConflict, bind_admitted_run, current_execution_ticket, owner_receipt,
     require_event_execution, require_event_identity, wire_identity,
 )
@@ -70,7 +71,36 @@ def _time(value):
 def _metadata(run):
     result = run.result if isinstance(run.result, dict) else {}
     saved = result.get(RECONCILIATION_RESULT_KEY)
+    if RECONCILIATION_RESULT_KEY in result and not isinstance(saved, dict):
+        raise RunReconciliationError("invalid_reconciliation_metadata")
     return deepcopy(saved) if isinstance(saved, dict) else {}
+
+
+def _history_transport(run):
+    result = run.result if isinstance(run.result, dict) else {}
+    value = result.get(HISTORY_TRANSPORT_RESULT_KEY)
+    if (not isinstance(value, dict) or set(value) != {"schema_version", "last_attempt_at", "next_at", "last_outcome"}
+            or type(value.get("schema_version")) is not int or value["schema_version"] != 1
+            or _time(value.get("last_attempt_at")) is None or _time(value.get("next_at")) is None
+            or value.get("last_outcome") not in {"admission_invalid", "metadata_invalid"}):
+        return {}
+    return deepcopy(value)
+
+
+def _throttle_invalid_history(pk, now, *, outcome):
+    """Neutral fair cadence, without rewriting opaque history or authority."""
+    from workflow_runs.models import ContentFactoryRun
+    with transaction.atomic():
+        run = ContentFactoryRun.objects.select_for_update().filter(pk=pk).first()
+        result = getattr(run, "result", None)
+        marker = result.get(OWNER_RESULT_KEY) if isinstance(result, dict) else None
+        authority = marker.get("authority") if isinstance(marker, dict) else None
+        if (not isinstance(authority, dict) or authority.get("backend_facts") is not True
+                or type(authority.get("event_protocol")) is not int or authority["event_protocol"] != 1):
+            return
+        value = {"schema_version": 1, "last_attempt_at": _stamp(now),
+            "next_at": _stamp(now + timedelta(seconds=MAX_RETRY_SECONDS)), "last_outcome": outcome}
+        ContentFactoryRun.objects.filter(pk=run.pk).update(result={**result, HISTORY_TRANSPORT_RESULT_KEY: value})
 
 
 def _cursor(meta):
@@ -100,8 +130,24 @@ def _grace_deadline(run):
 
 
 def _eligible(run):
-    return authoritative_run(run) and (run.status in NONTERMINAL_STATUSES or _pending(run)
-                                      or _metadata(run).get("has_more") is True)
+    if not authoritative_run(run):
+        return False
+    if run.status in NONTERMINAL_STATUSES or _pending(run) or _needs_ticket_history(run):
+        return True
+    try:
+        return _metadata(run).get("has_more") is True
+    except RunReconciliationError:
+        return True
+
+
+def _needs_ticket_history(run):
+    """A granted execution must recover even while the prior status is terminal."""
+    result = run.result if isinstance(run.result, dict) else {}
+    execution, ledger = result.get(OWNER_EXECUTION_KEY), result.get(EVENT_RESULT_KEY)
+    current = execution.get("current_execution_id") if isinstance(execution, dict) else None
+    projection = ledger.get("projection") if isinstance(ledger, dict) else None
+    projected = projection.get("execution_id") if isinstance(projection, dict) else None
+    return type(current) is not str or type(projected) is not str or current != projected
 
 
 def _write_meta(run, meta, *, extra_result=None):
@@ -117,9 +163,21 @@ def _claim(pk, now, *, refresh=False):
     from workflow_runs.models import ContentFactoryRun
     with transaction.atomic():
         run = ContentFactoryRun.objects.select_for_update().filter(pk=pk).first()
-        if run is None or not authoritative_run(run) or (not refresh and not _eligible(run)):
+        if run is None:
             return None
-        meta = _metadata(run)
+        skip = _time(_history_transport(run).get("next_at"))
+        if not refresh and skip is not None and skip > now:
+            return None
+        if not authoritative_run(run):
+            _throttle_invalid_history(run.pk, now, outcome="admission_invalid")
+            return {"invalid": True}
+        if not refresh and not _eligible(run):
+            return None
+        try:
+            meta = _metadata(run)
+        except RunReconciliationError:
+            _throttle_invalid_history(run.pk, now, outcome="metadata_invalid")
+            return {"invalid": True}
         due = _time(meta.get("next_at"))
         if due is not None and due > now and (meta.get("claim") or not refresh):
             return None
@@ -133,9 +191,7 @@ def _claim(pk, now, *, refresh=False):
         except (RunOwnershipConflict, RunReconciliationError, TypeError, KeyError):
             # A damaged owner cannot consume every bounded tick ahead of
             # healthy executions. Keep its cursor and history unchanged.
-            meta.update(last_attempt_at=_stamp(now), last_outcome="admission_invalid",
-                        next_at=_stamp(now + timedelta(seconds=MAX_RETRY_SECONDS)))
-            _write_meta(run, meta)
+            _throttle_invalid_history(run.pk, now, outcome="admission_invalid")
             return {"invalid": True}
         claim = {"nonce": uuid4().hex, "run_id": run.run_id, "cursor": cursor,
                  "at": _stamp(now), "execution_id": ticket["execution_id"]}
@@ -160,7 +216,11 @@ def _locked_claim(claim):
 
 def _finish(claim, *, outcome, now, retry=False):
     with transaction.atomic():
-        run, meta = _locked_claim(claim)
+        try:
+            run, meta = _locked_claim(claim)
+        except RunReconciliationError:
+            _throttle_invalid_history(claim["pk"], now, outcome="metadata_invalid")
+            return "metadata_invalid"
         if run is None:
             return "superseded"
         errors = meta.get("errors", 0)
@@ -223,7 +283,7 @@ def _fetch_page(base_url, headers, claim):
         if response.status_code != 200:
             raise RunReconciliationError("history_unavailable")
         raw = bytearray()
-        for chunk in response.iter_content(chunk_size=65_536):
+        for chunk in response.iter_content(chunk_size=1):
             if monotonic() > deadline:
                 raise RunReconciliationError("history_read_deadline")
             raw.extend(chunk)
@@ -323,7 +383,10 @@ def no_effect_dispatch_proof(run):
     This is not a refund instruction. That controller still verifies the exact
     original ledger, entitlement, retained authority and absence of effects.
     """
-    meta = _metadata(run)
+    try:
+        meta = _metadata(run)
+    except RunReconciliationError:
+        return None
     proofs = meta.get("no_effect_proofs", {})
     proof = proofs.get(meta.get("current_no_effect_id")) if isinstance(proofs, dict) else None
     if not authoritative_run(run) or not _pending(run) or not isinstance(proof, dict):
@@ -363,7 +426,11 @@ def _read_state(pk, *, outcome, now):
     run = ContentFactoryRun.objects.filter(pk=pk).first()
     if run is None:
         return {"status": "pending", "outcome": "run_not_found"}
-    meta = _metadata(run)
+    try:
+        meta = _metadata(run)
+    except RunReconciliationError:
+        return {"status": "pending", "outcome": "metadata_invalid", "run_id": run.run_id,
+                "cursor": None, "has_more": None, "active_claim": False, "current_execution_id": None}
     due = _time(meta.get("next_at"))
     active = bool(meta.get("claim") and due and due > now)
     try:
@@ -423,14 +490,22 @@ def run_authoritative_reconciliation_sweep(*, limit=10, now=None):
     if not base_url or not headers.get("X-API-KEY"):
         return {**summary, "skipped": "remote_not_configured"}
     prefix = f"result__{RECONCILIATION_RESULT_KEY}"
+    transport = f"result__{HISTORY_TRANSPORT_RESULT_KEY}"
+    current_ticket = f"result__{OWNER_EXECUTION_KEY}__current_execution_id"
+    projected_ticket = f"result__{EVENT_RESULT_KEY}__projection__execution_id"
+    unprojected_ticket = Q(**{current_ticket + "__isnull": False}) & (
+        Q(**{projected_ticket + "__isnull": True}) | Q(**{projected_ticket: None})
+        | ~Q(**{projected_ticket: F(current_ticket)}))
     candidates = ContentFactoryRun.objects.filter(
         **{f"result__{OWNER_RESULT_KEY}__schema_version": 1,
            f"result__{OWNER_RESULT_KEY}__identity__schema_version": 1,
            f"result__{OWNER_RESULT_KEY}__authority__backend_facts": True,
            f"result__{OWNER_RESULT_KEY}__authority__event_protocol": 1}).filter(
         Q(status__in=sorted(NONTERMINAL_STATUSES)) | Q(**{f"result__{DISPATCH_RESULT_KEY}__state": "pending_resolution"})
-        | Q(**{prefix + "__has_more": True})).filter(
-        Q(**{prefix + "__next_at__isnull": True}) | Q(**{prefix + "__next_at__lte": _stamp(now)})).order_by(
+        | Q(**{prefix + "__has_more": True}) | unprojected_ticket).filter(
+        Q(**{prefix + "__next_at__isnull": True}) | Q(**{prefix + "__next_at__lte": _stamp(now)})).filter(
+        Q(**{transport + "__next_at__isnull": True}) | Q(**{transport + "__next_at": None})
+        | Q(**{transport + "__next_at__lte": _stamp(now)})).order_by(
         F(prefix + "__last_attempt_at").asc(nulls_first=True), "created_at", "pk")
     identifiers = list(candidates.values_list("pk", flat=True)[:limit])
     deadline = monotonic() + MAX_SWEEP_SECONDS

@@ -314,6 +314,9 @@ def refund_authority_matches(*, user, article_request, resolved_domain):
     from .billing import normalize_content_factory_domain
     from .website_contract import evidence_digest
     scope = _refund_authority.get()
+    if scope is None:
+        from .run_terminal_settlement import terminal_refund_authority_matches
+        return terminal_refund_authority_matches(user=user, article_request=article_request, resolved_domain=resolved_domain)
     if not isinstance(scope, dict) or not connection.in_atomic_block or not isinstance(article_request, dict):
         return False
     if (normalize_content_factory_domain(resolved_domain) != normalize_content_factory_domain(scope["domain"])
@@ -343,6 +346,9 @@ def dispatch_closed_without_effects(run):
     """
     from .article_publication_evidence import publication_state
     from .no_delivery_refunds import _direct_delivery, points_receipt
+    from .run_terminal_settlement import terminal_closed_without_effects
+    if terminal_closed_without_effects(run):
+        return True
     try:
         return (_original_request_intact(run) and _closed(run) is not None
             and not (run.result or {}).get(EVENT_RESULT_KEY, {}).get("events")

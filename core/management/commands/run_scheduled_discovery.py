@@ -16,6 +16,7 @@ from content_factory.founder_website_checks import scheduled_founder_website_che
 from content_factory.self_heal_sweeps import scheduled_self_heal_sweeps
 from content_factory.reconciliation import run_content_factory_reconciliation_sweep
 from content_factory.run_reconciliation import run_authoritative_reconciliation_sweep
+from content_factory.run_terminal_settlement import run_terminal_settlement_sweep
 from content_factory.website_reconciliation import process_website_connection_operations
 from content_factory.dispatch_outbox import process_dispatch_outbox
 from content_factory.services.island_refresh_scheduler import run_island_refresh_scheduler
@@ -107,6 +108,7 @@ class Command(BaseCommand):
             # Explicit backend event admission owns every workflow and
             # nonterminal status, even after new admission is switched off.
             ("authoritative_run_reconciliation", run_authoritative_reconciliation_sweep),
+            ("authoritative_terminal_settlement", run_terminal_settlement_sweep),
             ("content_factory_reconciliation", run_content_factory_reconciliation_sweep),
             # Tells ops once per stuck founder (run stopped or blocked, no
             # draft 24 h after a startup is created, Your turn for 72 h), for

@@ -1,0 +1,768 @@
+{
+  "fixture_version": 1,
+  "producer": "Actual PostgreSQL admission -> actual initialized, started, failed CF run -> authenticated cancel and history GET",
+  "fixture_boundary": "Disposable local data; only preview stop is an offline response. No production execution or refund occurred.",
+  "original_backend_fixture": {
+    "fixture_version": 1,
+    "producer": "actual PostgreSQL original PointsService SPEND + reserve_admitted_run + bind_admitted_run + canonical billing projection",
+    "run_id": "paid-terminal-worker",
+    "workflow": "article_generation",
+    "domain": "paid-terminal-fixture.example.test",
+    "github_repo": "",
+    "run_request": {
+      "topic": "Retained paid article",
+      "domain": "paid-terminal-fixture.example.test",
+      "free_domain": false,
+      "delivery_mode": "content_only",
+      "roo_points_cost": 12,
+      "client_request_id": "paid-terminal-original",
+      "roo_points_action": "article_generation",
+      "expected_cost_points": 12,
+      "roo_points_ledger_id": "1032",
+      "roo_points_authorized": true,
+      "delivery_mode_confirmed": true,
+      "backend_run_admission_v1": {
+        "scope": {
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "deletion_epoch": null,
+          "operation_attempt": null,
+          "expected_source_sha": null,
+          "connection_target_id": null,
+          "connection_generation": null,
+          "website_connection_id": null
+        },
+        "domain": "paid-terminal-fixture.example.test",
+        "workflow": "article_generation",
+        "principal": {
+          "kind": "user",
+          "user_id": "965",
+          "actor_id": "mlai_user:965"
+        },
+        "github_repo": "",
+        "dispatch_key": "paid-terminal-original",
+        "event_protocol": 1,
+        "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+        "schema_version": 1,
+        "organization_id": "2292"
+      },
+      "backend_run_execution_v1": {
+        "scope": {
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "deletion_epoch": null,
+          "operation_attempt": null,
+          "expected_source_sha": null,
+          "connection_target_id": null,
+          "connection_generation": null,
+          "website_connection_id": null
+        },
+        "generation": 0,
+        "execution_id": "admit:cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+        "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+        "schema_version": 1,
+        "admission_digest": "cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98"
+      },
+      "roo_points_billing_status": "charged",
+      "roo_points_billing_user_id": 965
+    },
+    "admission": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "paid-terminal-fixture.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "965",
+        "actor_id": "mlai_user:965"
+      },
+      "github_repo": "",
+      "dispatch_key": "paid-terminal-original",
+      "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+      "schema_version": 1,
+      "organization_id": "2292",
+      "event_protocol": 1
+    },
+    "execution": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+      "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+      "schema_version": 1,
+      "admission_digest": "cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98"
+    },
+    "original_spend": {
+      "id": 1032,
+      "user_id": 965,
+      "kind": "SPEND",
+      "source": "CONTENT_FACTORY",
+      "idempotency_key": "content_factory:charge:paid-terminal-original",
+      "reference_type": "CONTENT_FACTORY",
+      "reference_id": "paid-terminal-original",
+      "delta_microroo": -12000000
+    }
+  },
+  "source_request": {
+    "topic": "Retained paid article",
+    "domain": "paid-terminal-fixture.example.test",
+    "free_domain": false,
+    "delivery_mode": "content_only",
+    "roo_points_cost": 12,
+    "client_request_id": "paid-terminal-original",
+    "roo_points_action": "article_generation",
+    "expected_cost_points": 12,
+    "roo_points_ledger_id": "1032",
+    "roo_points_authorized": true,
+    "delivery_mode_confirmed": true,
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "paid-terminal-fixture.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "965",
+        "actor_id": "mlai_user:965"
+      },
+      "github_repo": "",
+      "dispatch_key": "paid-terminal-original",
+      "event_protocol": 1,
+      "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+      "schema_version": 1,
+      "organization_id": "2292"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+      "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+      "schema_version": 1,
+      "admission_digest": "cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98"
+    },
+    "roo_points_billing_status": "charged",
+    "roo_points_billing_user_id": 965,
+    "github_repo": ""
+  },
+  "cancel_request": {
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "paid-terminal-fixture.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "965",
+        "actor_id": "mlai_user:965"
+      },
+      "github_repo": "",
+      "dispatch_key": "paid-terminal-original",
+      "event_protocol": 1,
+      "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+      "schema_version": 1,
+      "organization_id": "2292"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+      "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+      "schema_version": 1,
+      "admission_digest": "cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98"
+    },
+    "cancellation_reason": "system_stop",
+    "cancelled_by": "system",
+    "expected_cancellation_v1": {
+      "version": 1,
+      "run_id": "paid-terminal-worker",
+      "goal_id": null,
+      "scope": {
+        "github_repo": "",
+        "client_request_id": "paid-terminal-original"
+      }
+    }
+  },
+  "cancel_response": {
+    "status": "cancelled",
+    "job_id": "paid-terminal-worker",
+    "run_id": "paid-terminal-worker",
+    "workflow": "direct_generate",
+    "current_step": "cancelled",
+    "message": "Article run cancelled.",
+    "cleanup": {
+      "artifacts": {
+        "deleted_paths": [
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-terminal-settlement-qlzhkh04/paid-terminal-worker/steps",
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-terminal-settlement-qlzhkh04/paid-terminal-worker/verification_summary.json",
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-terminal-settlement-qlzhkh04/paid-terminal-worker/tool_calls.jsonl"
+        ],
+        "errors": []
+      },
+      "live_preview": {
+        "status": "stopped",
+        "attempts": 1,
+        "cleanup_pending": false,
+        "reason": "preview_stopped",
+        "retain_repository_branch": true
+      }
+    },
+    "reconciliation_required": false,
+    "article_cancellation_v1": {
+      "version": 1,
+      "purpose": "article_cancellation",
+      "run_id": "paid-terminal-worker",
+      "goal_id": null,
+      "scope": {
+        "github_repo": "",
+        "client_request_id": "paid-terminal-original"
+      },
+      "generation": 0,
+      "state_version": 7,
+      "outcome": "no_article_effect",
+      "cancelled": true,
+      "watermark": {
+        "operation_id": null,
+        "attempt": null,
+        "cancelled": true
+      },
+      "delivered_value": false,
+      "receipt_id": "6a6757817d76efe2daaced1b5724bad4766843a54941aea085d6a70844abb247"
+    },
+    "publication_evidence_v1": null,
+    "job_url": "/api/runs/paid-terminal-worker",
+    "action": "cancel",
+    "accepted": true,
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "paid-terminal-fixture.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "965",
+        "actor_id": "mlai_user:965"
+      },
+      "github_repo": "",
+      "dispatch_key": "paid-terminal-original",
+      "event_protocol": 1,
+      "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+      "schema_version": 1,
+      "organization_id": "2292"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+      "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+      "schema_version": 1,
+      "admission_digest": "cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98"
+    },
+    "terminal_settlement_v1": {
+      "schema_version": 1,
+      "run_id": "paid-terminal-worker",
+      "backend_run_admission_v1": {
+        "scope": {
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "deletion_epoch": null,
+          "operation_attempt": null,
+          "expected_source_sha": null,
+          "connection_target_id": null,
+          "connection_generation": null,
+          "website_connection_id": null
+        },
+        "domain": "paid-terminal-fixture.example.test",
+        "workflow": "article_generation",
+        "principal": {
+          "kind": "user",
+          "user_id": "965",
+          "actor_id": "mlai_user:965"
+        },
+        "github_repo": "",
+        "dispatch_key": "paid-terminal-original",
+        "event_protocol": 1,
+        "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+        "schema_version": 1,
+        "organization_id": "2292"
+      },
+      "backend_run_execution_v1": {
+        "scope": {
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "deletion_epoch": null,
+          "operation_attempt": null,
+          "expected_source_sha": null,
+          "connection_target_id": null,
+          "connection_generation": null,
+          "website_connection_id": null
+        },
+        "generation": 0,
+        "execution_id": "admit:cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+        "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+        "schema_version": 1,
+        "admission_digest": "cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98"
+      },
+      "status": "closed_no_effects",
+      "event_cursor": 12,
+      "closed_at": "2026-11-02T19:40:57.826295+00:00",
+      "receipt_sha256": "00353095a4ffa20cf03d7c4eb783717a63d0416f495460dc955c1136ef615ae6"
+    }
+  },
+  "replay_response": {
+    "status": "cancelled",
+    "job_id": "paid-terminal-worker",
+    "run_id": "paid-terminal-worker",
+    "action": "cancel",
+    "accepted": true,
+    "backend_run_admission_v1": {
+      "dispatch_key": "paid-terminal-original",
+      "domain": "paid-terminal-fixture.example.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "2292",
+      "principal": {
+        "actor_id": "mlai_user:965",
+        "kind": "user",
+        "user_id": "965"
+      },
+      "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "article_generation"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+      "execution_id": "admit:cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+      "generation": 0,
+      "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "terminal_settlement_v1": {
+      "backend_run_admission_v1": {
+        "dispatch_key": "paid-terminal-original",
+        "domain": "paid-terminal-fixture.example.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "2292",
+        "principal": {
+          "actor_id": "mlai_user:965",
+          "kind": "user",
+          "user_id": "965"
+        },
+        "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "article_generation"
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+        "execution_id": "admit:cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+        "generation": 0,
+        "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "closed_at": "2026-11-02T19:40:57.826295+00:00",
+      "event_cursor": 12,
+      "receipt_sha256": "00353095a4ffa20cf03d7c4eb783717a63d0416f495460dc955c1136ef615ae6",
+      "run_id": "paid-terminal-worker",
+      "schema_version": 1,
+      "status": "closed_no_effects"
+    },
+    "reconciliation_required": false,
+    "article_cancellation_v1": {
+      "version": 1,
+      "purpose": "article_cancellation",
+      "run_id": "paid-terminal-worker",
+      "goal_id": null,
+      "scope": {
+        "github_repo": "",
+        "client_request_id": "paid-terminal-original"
+      },
+      "generation": 0,
+      "state_version": 7,
+      "outcome": "no_article_effect",
+      "cancelled": true,
+      "watermark": {
+        "operation_id": null,
+        "attempt": null,
+        "cancelled": true
+      },
+      "delivered_value": false,
+      "receipt_id": "6a6757817d76efe2daaced1b5724bad4766843a54941aea085d6a70844abb247"
+    },
+    "cleanup": {
+      "artifacts": {
+        "deleted_paths": [
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-terminal-settlement-qlzhkh04/paid-terminal-worker/steps",
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-terminal-settlement-qlzhkh04/paid-terminal-worker/verification_summary.json",
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-terminal-settlement-qlzhkh04/paid-terminal-worker/tool_calls.jsonl"
+        ],
+        "errors": []
+      },
+      "live_preview": {
+        "status": "stopped",
+        "attempts": 1,
+        "cleanup_pending": false,
+        "reason": "preview_stopped",
+        "retain_repository_branch": true
+      }
+    },
+    "job_url": "/api/runs/paid-terminal-worker"
+  },
+  "events_response": {
+    "schema_version": 1,
+    "run_id": "paid-terminal-worker",
+    "batches": [
+      {
+        "event": "run_events_v2",
+        "event_type": "run_events_v2",
+        "schema_version": 1,
+        "run_id": "paid-terminal-worker",
+        "backend_run_admission_v1": {
+          "dispatch_key": "paid-terminal-original",
+          "domain": "paid-terminal-fixture.example.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "2292",
+          "principal": {
+            "actor_id": "mlai_user:965",
+            "kind": "user",
+            "user_id": "965"
+          },
+          "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "article_generation"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+          "execution_id": "admit:cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+          "generation": 0,
+          "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "events": [
+          {
+            "at": "2026-11-02T19:40:57.756517+00:00",
+            "digest": "29c6c4db1e53ca7c555ce84f455574f45974be24175392f0ce1dd8e07a86e278",
+            "generation": 0,
+            "seq": 1,
+            "state_version": 1,
+            "status": "queued",
+            "step": "plan_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:40:57.764852+00:00",
+            "digest": "b087ebc636be6bdd2f251de3ba6637bbc576f2155c928cec4fbbf989c9db8904",
+            "generation": 0,
+            "seq": 2,
+            "state_version": 2,
+            "status": "running",
+            "step": "plan_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:40:57.764852+00:00",
+            "attempt": 1,
+            "digest": "085cc4ccc345d23cf20e8153288549eca1ec85026c92493d33bf86c9837aaf7b",
+            "generation": 0,
+            "seq": 3,
+            "state_version": 2,
+            "step": "plan_article",
+            "type": "step_started"
+          },
+          {
+            "at": "2026-11-02T19:40:57.771955+00:00",
+            "digest": "b08c5e89abeb099f34e3555e68476168e2aa0ab9c2f979161d365a5daeb0207e",
+            "generation": 0,
+            "seq": 4,
+            "state_version": 3,
+            "status": "running",
+            "step": "plan_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:40:57.771955+00:00",
+            "attempt": 1,
+            "digest": "c9b77ba19cc0121d840eaf5af70fda8502c0d71ae163b56845c6696fc62a146f",
+            "generation": 0,
+            "seq": 5,
+            "state_version": 3,
+            "status": "failed",
+            "step": "plan_article",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T19:40:57.777832+00:00",
+            "digest": "224b11980d49e14c8184b693adbf11b0600072964cdfe8670c4178706d0c7092",
+            "generation": 0,
+            "seq": 6,
+            "state_version": 4,
+            "status": "failed",
+            "step": "plan_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:40:57.784886+00:00",
+            "digest": "c8496a831be64c5b8a1f5eaa7a7bc38bca1b44b362aced4aa5802f86f1755609",
+            "generation": 0,
+            "seq": 7,
+            "state_version": 5,
+            "status": "failed",
+            "step": "plan_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:40:57.812001+00:00",
+            "digest": "e91fa519dbaf802261443617bfafac7465dd45982e8da1c194fe4969bdbf9929",
+            "generation": 0,
+            "seq": 8,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "cancelled",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:40:57.812001+00:00",
+            "attempt": 1,
+            "digest": "3db8eba4fc92c6b4decca56a99442471f44344dec2f574822b7feb4311a0783d",
+            "generation": 0,
+            "seq": 9,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "plan_article",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T19:40:57.812001+00:00",
+            "attempt": 0,
+            "digest": "c32773c6ef1c1877e27c0ea89804658d902b86e4b4b7253604fa0dc6f493375c",
+            "generation": 0,
+            "seq": 10,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "assemble_article",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T19:40:57.812001+00:00",
+            "attempt": 0,
+            "digest": "aecf77abc75db64c67bc22330ddc87058c16dd3f9cd0f2fde4b8dd8d6f255c8f",
+            "generation": 0,
+            "seq": 11,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "render_article",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T19:40:57.819381+00:00",
+            "digest": "6dd9cf90d097ab72da4430ea71a91902c760fa0d2c37beb82d08aa73e90332de",
+            "generation": 0,
+            "seq": 12,
+            "state_version": 7,
+            "status": "cancelled",
+            "step": "cancelled",
+            "type": "run_state"
+          }
+        ],
+        "event_id": "b194d7f34b226a2fd4cd2e40450579b2f750c520a7dacce1ebb193f8a4d65e3e",
+        "emitted_at": "2026-11-02T19:40:57.819381+00:00"
+      }
+    ],
+    "next_cursor": 12,
+    "has_more": false
+  },
+  "evidence_response": {
+    "schema_version": 1,
+    "run_id": "paid-terminal-worker",
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "paid-terminal-fixture.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "965",
+        "actor_id": "mlai_user:965"
+      },
+      "github_repo": "",
+      "dispatch_key": "paid-terminal-original",
+      "event_protocol": 1,
+      "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+      "schema_version": 1,
+      "organization_id": "2292"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98",
+      "request_digest": "6121ed31a9fdee7299c91c94f2689cc132a186c12d97955e9f34dc4959279720",
+      "schema_version": 1,
+      "admission_digest": "cbc60721cd49280b1f708d2e456dbcf2e1c85c95229c7f6737414100f2097d98"
+    },
+    "evidence": []
+  }
+}

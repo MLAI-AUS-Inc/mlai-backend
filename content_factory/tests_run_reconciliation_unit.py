@@ -72,3 +72,26 @@ class HistoryContractTests(SimpleTestCase):
             with self.assertRaisesRegex(reconcile.RunReconciliationError, "history_read_deadline"):
                 reconcile._fetch_page("https://fixture.test", {}, {"run_id": "worker", "cursor": 0})
         remote.close.assert_called_once()
+
+    def test_real_requests_raw_stream_stops_trickle_before_buffering_64k(self):
+        from .tests_run_control_transport_unit import TrickleResponse
+        stream = TrickleResponse(json.dumps(page()).encode(), step=9)
+        with patch.object(reconcile.requests, "get", return_value=stream.response()), \
+                patch.object(reconcile, "monotonic", side_effect=lambda: stream.now):
+            with self.assertRaisesRegex(reconcile.RunReconciliationError, "history_read_deadline"):
+                reconcile._fetch_page("https://fixture.test", {}, {"run_id": "worker", "cursor": 0})
+        self.assertEqual((stream.read, stream.requested_chunk_sizes), (2, [1]))
+        self.assertTrue(stream.closed)
+
+    def test_real_requests_fast_page_and_strict_utf8_read_release_connections(self):
+        from .tests_run_control_transport_unit import TrickleResponse
+        for body, valid in ((json.dumps(page()).encode(), True), (b"\xff", False)):
+            stream = TrickleResponse(body, step=0)
+            with self.subTest(valid=valid), patch.object(reconcile.requests, "get", return_value=stream.response()), \
+                    patch.object(reconcile, "monotonic", side_effect=lambda: stream.now):
+                if valid:
+                    self.assertEqual(reconcile._fetch_page("https://fixture.test", {}, {"run_id": "worker", "cursor": 0}), page())
+                else:
+                    with self.assertRaisesRegex(reconcile.RunReconciliationError, "invalid_history_json"):
+                        reconcile._fetch_page("https://fixture.test", {}, {"run_id": "worker", "cursor": 0})
+            self.assertEqual(stream.released, 1)
