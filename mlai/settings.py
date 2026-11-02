@@ -2588,6 +2588,11 @@ COMMUNITY_CHAT_INVITE_RESOLVE_RATE = os.getenv("COMMUNITY_CHAT_INVITE_RESOLVE_RA
 COMMUNITY_CHAT_DEVICE_AUTH_MAX_LIFETIME_SECONDS = int(os.getenv("COMMUNITY_CHAT_DEVICE_AUTH_MAX_LIFETIME_SECONDS", "3600"))
 REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["community_chat_invite_resolve"] = COMMUNITY_CHAT_INVITE_RESOLVE_RATE
 
+# P3 founder journey (optional improvements). These switches are separate from
+# the P2 rollout and never participate in drafting or publication admission.
+MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED = _env_is_true("MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED", False)
+MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED", False)
+
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort
 # (content_factory.p2_foundation.p2_applies) unless the P2 contract names an
@@ -2617,9 +2622,6 @@ ARTICLES_GITHUB_INSTALLATION_WAKES_ENABLED = _env_is_true("ARTICLES_GITHUB_INSTA
 ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED", False)
 MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
 MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)
-# Optional P3 improvements never participate in drafting or publication admission.
-MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED = _env_is_true("MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED", False)
-MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED", False)
 ARTICLES_HOSTED_AUTO_REGISTER_ENABLED = _env_is_true("ARTICLES_HOSTED_AUTO_REGISTER_ENABLED", False)
 # Comma-separated organisation ids, or * for every P2-cohort organisation.
 ARTICLES_HOSTED_RUNG_ORGANIZATIONS = os.getenv("ARTICLES_HOSTED_RUNG_ORGANIZATIONS", "").strip()
