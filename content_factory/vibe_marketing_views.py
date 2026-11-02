@@ -950,7 +950,9 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
                 quote_error = _quoted_price_response(request, cost_points=original_cost)
         if quote_error is not None:
             return None, None, None, quote_error
-    _normalize_portable_article_payload(payload)
+    from .run_ownership import WIRE_REQUEST_KEY, admission_enabled
+    if admission_enabled() or WIRE_REQUEST_KEY in payload:
+        _normalize_portable_article_payload(payload)
     editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
     if editorial_error is not None:
         return None, None, None, editorial_error
