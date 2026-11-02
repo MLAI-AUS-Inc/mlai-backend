@@ -203,7 +203,8 @@ def founder_draft_review(*, context, run, user):
     if organization is None or not cohort.is_new_journey(organization):
         return {}, None
     config = _config(organization)
-    copy_while_pending = copy_without_preview_enabled() and is_content_only(run)
+    from .founder_journey_p2 import ready_before_preview
+    copy_while_pending = copy_without_preview_enabled() and (is_content_only(run) or ready_before_preview(run, organization))
     record = posted_record(config, run.run_id)
     profile = _site_profile(config)
     blog_url = public_export_url(profile.get("blogUrl")) or None

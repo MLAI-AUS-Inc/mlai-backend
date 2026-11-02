@@ -20,6 +20,8 @@ class NotificationFenced(RuntimeError):
 
 def enabled(connection):
     """An independent default-off rollout also requires server goal enrollment."""
+    from .founder_transitions import owns_notifications
+    if owns_notifications(getattr(connection, "organization", None)):return False
     return getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False) and goals.enrolled(connection.organization_id)
 
 
