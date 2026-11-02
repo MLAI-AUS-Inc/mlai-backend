@@ -4849,6 +4849,13 @@ def _persist_live_preview_payload(run, payload):
         raw = payload
         payload = _normalize_live_preview_payload(payload)
         payload = _rewrite_live_preview_payload_for_browser(run.run_id, payload)
+        from .website_run_authority import event_owned
+        if event_owned(run):
+            from copy import deepcopy
+            from .run_provider_facts import save_provider_result
+            baseline = deepcopy(run.result or {})
+            return save_provider_result(run, {**baseline, "livePreview": payload}, baseline=baseline,
+                legacy_fields=["result", "updated_at"])
         if _portable_preview_rearm_enabled() and run.workflow in ARTICLE_WORKFLOWS and getattr(run, "pk", None):
             # This run was loaded before the Content Factory call, and a status
             # mirror may have saved newer result keys since. Write livePreview
@@ -6589,6 +6596,9 @@ def _setup_blocked_article_run_ids(run):
 
 @guarded_setup_merge_observation
 def _persist_setup_merged_verification(run, metadata):
+    from copy import deepcopy
+    from .run_provider_facts import save_provider_result
+    baseline = deepcopy(run.result or {})
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
     clean_metadata = sanitize_json_for_postgres(metadata if isinstance(metadata, dict) else {})
@@ -6596,7 +6606,7 @@ def _persist_setup_merged_verification(run, metadata):
     setup[SETUP_MERGED_VERIFICATION_KEY] = clean_metadata
     result["article_system_setup"] = setup
     run.result = sanitize_json_for_postgres(result)
-    run.save(update_fields=["result", "updated_at"])
+    save_provider_result(run, run.result, baseline=baseline, legacy_fields=["result", "updated_at"])
     return run
 
 
@@ -8269,7 +8279,8 @@ def _reserve_article_restart(*, run, context, payload, receipt):
         receipt["dispatch_payload"] = {key: value for key, value in payload.items() if key not in SECRET_KEYS}
         run.result = {**(current.result or {}), "restart_receipt": receipt}
         current.result = run.result
-        current.save(update_fields=["result", "updated_at"])
+        from .website_run_authority import event_owned
+        current.save(update_fields=["result"] if event_owned(current) else ["result", "updated_at"])
     return None
 
 
@@ -8346,6 +8357,9 @@ def _restart_article_run(*, run, context):
     reservation_error = _reserve_article_restart(run=run, context=context, payload=payload, receipt=receipt)
     if reservation_error is not None:
         return None, reservation_error
+    from copy import deepcopy
+    from .run_provider_facts import save_provider_result
+    baseline = deepcopy(run.result or {})
     try:
         restarted_run = _queue_content_factory_run(
             endpoint="article", workflow="article_generation", context=context, config=config, payload=payload)
@@ -8358,7 +8372,7 @@ def _restart_article_run(*, run, context):
         receipt.update(state="failed", reused_authorization="released", error_code="dispatch_rejected",
                        finished_at=timezone.now().isoformat())
         run.result = {**(run.result or {}), "restart_receipt": receipt}
-        run.save(update_fields=["result", "updated_at"])
+        save_provider_result(run, run.result, baseline=baseline, legacy_fields=["result", "updated_at"])
         return None, Response({"detail": "The restart could not start. Try again.", "code": "dispatch_rejected",
                                "charged": False}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
     receipt.update(state="completed", child_run_id=restarted_run.run_id, reused_authorization="accepted",
@@ -8366,9 +8380,10 @@ def _restart_article_run(*, run, context):
     actions = receipt["user_action_count"]
     run.result = {**(run.result or {}), "restart_receipt": receipt, "restart_child_run_id": restarted_run.run_id,
                   "restart_requested_at": requested_at, "user_action_count": actions}
-    run.save(update_fields=["result", "updated_at"])
+    save_provider_result(run, run.result, baseline=baseline, legacy_fields=["result", "updated_at"])
+    child_baseline = deepcopy(restarted_run.result or {})
     restarted_run.result = {**(restarted_run.result or {}), "user_action_count": actions}
-    restarted_run.save(update_fields=["result", "updated_at"])
+    save_provider_result(restarted_run, restarted_run.result, baseline=child_baseline, legacy_fields=["result", "updated_at"])
 
     if restarted_run.status not in FAILED_RUN_STATUSES:
         _mark_keyword_in_progress(context.organization, payload["target_keyword"])
@@ -19988,6 +20003,9 @@ def _setup_pr_creation_failure_view(run):
 def _project_setup_pr_creation_failure(run, config, remote_data):
     """Retain approved preview evidence while exposing failed PR creation."""
     detail, result, failure = _setup_pr_creation_failure_result(run, remote_data)
+    from .website_run_authority import event_owned
+    if event_owned(run):
+        return detail
     run.result = result
     run.status = ContentFactoryRunStatus.BLOCKED
     run.current_step = "create_pull_request"

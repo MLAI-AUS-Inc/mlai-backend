@@ -257,6 +257,90 @@ class OwnedNativeVerificationTests(WebsiteDatabaseFixture, TransactionTestCase):
                 legacy_fields=["result", "updated_at"])
         self.assertEqual(ContentFactoryRun.objects.values().get(pk=fresh.pk), before)
 
+    def test_preview_and_pr_failure_acknowledgements_do_not_project_execution(self):
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_event_authority import batch
+        from .vibe_marketing_views import _persist_live_preview_payload, _project_setup_pr_creation_failure
+        response = receive_authoritative_run_events(batch(self.run, [{"status": "running"}]))
+        self.assertEqual(response.status_code, 200, response.data)
+        self.run.refresh_from_db()
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        preview = {"available": False, "status": "failed", "error": "Synthetic browser failure"}
+        _persist_live_preview_payload(self.run, preview)
+        after = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        self.assertEqual(after["result"], {**before["result"], "livePreview": preview})
+        for field in set(before) - {"result"}:
+            self.assertEqual(after[field], before[field], field)
+        config_before = type(self.config).objects.values().get(pk=self.config.pk)
+        detail = _project_setup_pr_creation_failure(self.run, self.config,
+            {"status": "setup_pr_create_failed", "error": "Synthetic PR refusal"})
+        self.assertEqual(detail, "Synthetic PR refusal")
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), after)
+        self.assertEqual(type(self.config).objects.values().get(pk=self.config.pk), config_before)
+
+    def test_restart_reservation_preserves_typed_history_and_original_execution_clocks(self):
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_event_authority import batch
+        from .vibe_marketing_views import _reserve_article_restart
+        response = receive_authoritative_run_events(batch(self.run, [{"status": "running"}]))
+        self.assertEqual(response.status_code, 200, response.data)
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        receipt = {"state": "pending", "client_request_id": "restart-child"}
+        self.assertIsNone(_reserve_article_restart(run=self.run, context=self.context,
+            payload={"topic": "Synthetic saved topic"}, receipt=receipt))
+        after = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        self.assertEqual(after["result"]["run_owner_events_v1"], before["result"]["run_owner_events_v1"])
+        self.assertEqual(after["result"]["restart_receipt"]["user_action_count"], 1)
+        for field in set(before) - {"result"}:
+            self.assertEqual(after[field], before[field], field)
+
+    def test_source_wake_retains_non_goal_owned_child_without_reopening_or_dispatch(self):
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_event_authority import batch
+        from .website_models import WebsiteConnectionOperation
+        from .website_prepare import wake_prepare_for_source
+        response = receive_authoritative_run_events(batch(self.run, [{"status": "failed"}]))
+        self.assertEqual(response.status_code, 200, response.data)
+        operation = WebsiteConnectionOperation.objects.create(connection=self.website,
+            generation=self.website.generation, action="prepare", state="needs_user",
+            idempotency_key="legacy-prepare-owned-child", receipt={"child_run_id": self.run.run_id},
+            payload={"company_id": str(self.context.company.pk), "requested_by_user_id": str(self.user.pk), "attempt": 1})
+        before = WebsiteConnectionOperation.objects.values().get(pk=operation.pk)
+        run_before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        self.website.verified_sha = "b" * 40
+        self.website.save(update_fields=["verified_sha"])
+        with patch("content_factory.website_prepare.start_prepare") as start, \
+                patch("content_factory.website_prepare._adopt_source_checks") as adopt:
+            result = wake_prepare_for_source(self.website.pk, organization_id=self.org.pk)
+        start.assert_not_called()
+        adopt.assert_not_called()
+        self.assertEqual(result.pk, operation.pk)
+        self.assertEqual(WebsiteConnectionOperation.objects.values().get(pk=operation.pk), before)
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), run_before)
+
+    def test_provider_verified_setup_merge_metadata_preserves_owned_execution(self):
+        from .vibe_marketing_views import _persist_setup_merged_verification, SETUP_MERGED_VERIFICATION_KEY
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_event_authority import batch
+        ContentFactoryRun.objects.filter(pk=self.run.pk).update(result={**self.run.result,
+            "pr_url": "https://github.com/example/site/pull/42", "pr_number": 42})
+        self.run.refresh_from_db()
+        response = receive_authoritative_run_events(batch(self.run, [{"status": "running"}]))
+        self.assertEqual(response.status_code, 200, response.data)
+        self.run.refresh_from_db()
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        repo = {"id": self.website.repository_id, "full_name": self.website.github_repo}
+        pull = {"number": 42, "merged": True, "html_url": "https://github.com/example/site/pull/42",
+            "merge_commit_sha": "e" * 40, "head": {"sha": "d" * 40, "repo": repo},
+            "base": {"ref": "main", "repo": repo}}
+        with patch("content_factory.website_connections.read_setup_merge_pull", return_value=pull):
+            _persist_setup_merged_verification(self.run, {"accepted": True, "status": "verified"})
+        after = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        self.assertEqual(after["result"][SETUP_MERGED_VERIFICATION_KEY], {"accepted": True, "status": "verified"})
+        self.assertEqual(after["result"]["run_owner_events_v1"], before["result"]["run_owner_events_v1"])
+        for field in set(before) - {"result"}:
+            self.assertEqual(after[field], before[field], field)
+
     def test_owned_selection_release_changes_only_selection_fact_not_run_clocks(self):
         from .run_event_authority import receive_authoritative_run_events
         from .tests_run_event_authority import batch

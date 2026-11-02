@@ -59,6 +59,24 @@ class RunGoalAuthorityTests(WebsiteDatabaseFixture, TestCase):
         self.assertEqual(self.op.state, "needs_user")
         self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), before)
 
+    def test_non_goal_prepare_retry_retains_owned_child_and_dispatch_key(self):
+        self.state("failed")
+        self.op.idempotency_key = f"{self.website.pk}:prepare:{self.website.generation}"
+        self.op.receipt.pop("goal")
+        self.op.state = "needs_attention"
+        self.op.save(update_fields=["idempotency_key", "receipt", "state"])
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        payload = deepcopy(self.op.payload)
+        with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False, ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=False), \
+                patch("content_factory.website_prepare._cancel_prepare_child") as cancel:
+            result = prepare.start_prepare(self.config, company_id=9, retry=True)
+        cancel.assert_not_called()
+        self.assertEqual(result.pk, self.op.pk)
+        self.assertEqual(result.payload, payload)
+        self.assertEqual(result.receipt["child_run_id"], self.run.run_id)
+        self.assertEqual(result.state, "needs_user")
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), before)
+
     def test_goal_planner_stops_before_any_independent_failure_recovery(self):
         self.state("blocked")
         context = SimpleNamespace(company=SimpleNamespace(pk=9))

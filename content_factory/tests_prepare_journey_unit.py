@@ -247,7 +247,8 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.op.state = "needs_user"
         self.op.receipt = {"current_step": "merge", "child_run_id": "existing-pr-child"}
         with patch.object(prepare, "authority_guard", return_value=nullcontext(self.op.connection)), \
-                patch.object(prepare.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)):
+                patch.object(prepare.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)), \
+                patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=[]):
             prepare.start_prepare(self.config, expected={}, retry=True)
         self.assertEqual(self.op.receipt["child_run_id"], "existing-pr-child")
         self.assertEqual(self.op.state, "pending")

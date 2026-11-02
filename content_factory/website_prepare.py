@@ -229,6 +229,13 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
                 "receipt": {"status": "working", "current_step": "verify-access", "message": "Preparing your website for articles."}})
         if op.action != "prepare" or op.generation != current.generation:
             raise WebsiteAuthorityError("operation_key_conflict", "The saved preparation belongs to another website.")
+        if not created and retry:
+            from .website_run_authority import owned_goal_child, wait_for_execution
+            owned_child = owned_goal_child(op, include_completed=False)
+            if owned_child is not None:
+                wait_for_execution(op, owned_child, now=timezone.now())
+                op.save(update_fields=["state", "next_attempt_at", "receipt", "updated_at"])
+                return op
         if not created and retry and op.state in {"needs_attention", "needs_user", "cancelled", "stopped"}:
             cleanup_retry = (op.state == "needs_user" and op.receipt.get("reason_code") == SETUP_EXAMPLE_CLEANUP_CODE
                 and _setup_example_cleanup_action(op.receipt.get("user_action"), current) is not None)
@@ -976,6 +983,10 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 op.state, op.next_attempt_at = "pending", now + timedelta(minutes=1)
                 return _finish_prepare(op, now=now)
             if child and child.status in {"failed", "blocked", "cancelled", "denied"}:
+                from .website_run_authority import event_owned, wait_for_execution
+                if event_owned(child):
+                    wait_for_execution(op, child, now=now)
+                    return _finish_prepare(op, now=now)
                 if _retain_setup_example_cleanup(op, child):
                     return _finish_prepare(op, now=now)
                 result = child.result or {}
@@ -1146,6 +1157,10 @@ def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_i
     # source work. A new first article requires an explicit owner submission.
     if latest and terminal_first_article_goal(latest):
         return None
+    if latest:
+        from .website_run_authority import owned_goal_child
+        if owned_goal_child(latest, include_completed=False) is not None:
+            return latest
     if enrolled(connection.organization_id) and latest and owns_goal(latest):
         return wake_goal_for_source(config, company_id=company.pk, user=connection.authorized_by, now=timezone.now())
     op = start_prepare(config, company_id=company.pk, user=connection.authorized_by)

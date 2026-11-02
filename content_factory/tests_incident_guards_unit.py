@@ -1185,6 +1185,9 @@ class IncidentBillingReplays(SimpleTestCase):
         from roo.services import PointsService
         from .models import ContentFactoryJob
         from workflow_runs.models import ContentFactoryRun
+        class LegacyRows(list):
+            def iterator(self):
+                return iter(self)
         user = SimpleNamespace(pk=8)
         run = SimpleNamespace(run_id="paid-draft", run_request={"client_request_id": "draft-identity"}, save=Mock())
         original = SimpleNamespace(id=9, delta_microroo=-12_000_000)
@@ -1193,7 +1196,7 @@ class IncidentBillingReplays(SimpleTestCase):
                 patch.object(ContentFactoryJob.objects, "filter") as jobs, \
                 patch.object(ContentFactoryRun.objects, "filter") as runs:
             ledgers.return_value.first.return_value = original
-            runs.return_value.filter.return_value = [run]
+            runs.return_value.filter.return_value = LegacyRows([run])
             generation._refund_content_factory_request(user=user, slack_user_id="founder", article_request={"client_request_id": "draft-identity"}, resolved_domain="paid.example", reason="No saved delivery")
             self.assertEqual(run.run_request["roo_points_billing_status"], "refunded")
             self.assertFalse(run.run_request["roo_points_authorized"])
