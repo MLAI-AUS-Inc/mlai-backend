@@ -24,10 +24,11 @@ RECONCILIATION_RESULT_KEY = "run_owner_reconciliation_v1"
 CONTROL_RESULT_KEY = "run_owner_control_v1"
 WIRE_REQUEST_KEY = "backend_run_admission_v1"
 WIRE_EXECUTION_KEY = "backend_run_execution_v1"
+BUDGET_KEY = "backend_run_budget_v1"
 R3_BACKEND_RESULT_KEYS = frozenset({OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, EVENT_RESULT_KEY,
                                   DISPATCH_RESULT_KEY, HOSTED_OBSERVATION_KEY,
                                   RECONCILIATION_RESULT_KEY, CONTROL_RESULT_KEY})
-R3_BACKEND_REQUEST_KEYS = frozenset({WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY})
+R3_BACKEND_REQUEST_KEYS = frozenset({WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY})
 SCOPE_FIELDS = (*CONNECTION_FIELDS, *OPERATION_FIELDS, "expected_source_sha", "source_run_id")
 SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation", "hosted_auto_register"})
 WORKER_WORKFLOW_ALIASES = {
@@ -268,6 +269,24 @@ def reservation_run_id(dispatch_key):
     return dispatch_key if len(dispatch_key) <= 100 else "r3-key:" + evidence_digest({"dispatch_key": dispatch_key})
 
 
+def _admission_budget(payload, *, workflow, existing=None):
+    """Freeze a backend cap once; worker/caller values cannot grant a budget."""
+    request = deepcopy(payload)
+    if existing is None:
+        if BUDGET_KEY in request:
+            raise RunOwnershipConflict("An external request cannot grant an execution budget.")
+        from .run_execution_control import initial_control_budget
+        budget = initial_control_budget(workflow)
+    else:
+        saved = existing.run_request if isinstance(existing.run_request, dict) else {}
+        budget = saved.get(BUDGET_KEY)
+        if BUDGET_KEY in request and (BUDGET_KEY not in saved or not _exact(request[BUDGET_KEY], budget)):
+            raise RunOwnershipConflict("The original execution budget cannot change.")
+    if budget is not None:
+        request[BUDGET_KEY] = deepcopy(budget)
+    return request
+
+
 def reserve_admitted_run(*, organization, principal, workflow, payload, reserved_run_id=None):
     """Reserve before dispatch, after the caller's existing permission checks.
 
@@ -279,31 +298,37 @@ def reserve_admitted_run(*, organization, principal, workflow, payload, reserved
     if not admitting and WIRE_REQUEST_KEY not in payload:
         return None
     from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
-    identity, request = _identity(organization=organization, principal=principal, workflow=workflow, payload=payload)
-    initial_id = reserved_run_id or reservation_run_id(identity["dispatch_key"])
+    key = payload.get("client_request_id")
+    if type(key) is not str or not key or key != key.strip() or len(key) > 255:
+        raise RunOwnershipConflict("An exact bounded dispatch key is required.")
+    initial_id = reserved_run_id or reservation_run_id(key)
     if (type(initial_id) is not str or not initial_id or len(initial_id) > 100
             or initial_id != initial_id.strip()):
         raise RunOwnershipConflict("A bounded backend reservation identity is required.")
     facts = getattr(settings, "ARTICLES_RUN_FACT_AUTHORITY_ENABLED", False) is True
     events = getattr(settings, "ARTICLES_RUN_EVENT_AUTHORITY_ENABLED", False) is True
-    receipt = {"schema_version": 1, "identity": identity,
-               "authority": {"backend_facts": facts, "event_protocol": 1 if events else None}}
-    if initial_id != identity["dispatch_key"] or reserved_run_id is not None:
-        receipt.update(reservation_run_id=initial_id, fixed_run_id=reserved_run_id is not None)
-    wire = wire_identity(receipt)
-    ticket = {"schema_version": 1, "execution_id": "admit:" + evidence_digest(wire), "generation": 0,
-              "admission_digest": evidence_digest(wire), "request_digest": identity["request_digest"],
-              "scope": deepcopy(identity["scope"])}
     with transaction.atomic():
         # Serialize retries even after the initial key has been renamed to its
         # worker ID; run_id uniqueness alone no longer guards that lookup.
         type(organization).objects.select_for_update().get(pk=organization.pk)
-        run = admitted_run_for_key(identity["dispatch_key"], lock=True)
+        run = admitted_run_for_key(key, lock=True)
+        # Resolve an exact retry before consulting mutable backend budget
+        # settings. The original cap remains part of the immutable digest.
+        prepared = _admission_budget(payload, workflow=workflow, existing=run)
+        identity, request = _identity(organization=organization, principal=principal, workflow=workflow, payload=prepared)
         if run is None:
             if not admitting:
                 raise RunOwnershipConflict("New Run admission is disabled.")
             if events and not facts:
                 raise RunOwnershipConflict("Event authority requires the complete backend fact owner.")
+            receipt = {"schema_version": 1, "identity": identity,
+                       "authority": {"backend_facts": facts, "event_protocol": 1 if events else None}}
+            if initial_id != key or reserved_run_id is not None:
+                receipt.update(reservation_run_id=initial_id, fixed_run_id=reserved_run_id is not None)
+            wire = wire_identity(receipt)
+            ticket = {"schema_version": 1, "execution_id": "admit:" + evidence_digest(wire), "generation": 0,
+                      "admission_digest": evidence_digest(wire), "request_digest": identity["request_digest"],
+                      "scope": deepcopy(identity["scope"])}
             run, created = ContentFactoryRun.objects.select_for_update().get_or_create(
                 run_id=initial_id, defaults={"organization": organization,
                     "workflow": workflow, "domain": organization.domain, "github_repo": identity["github_repo"],
@@ -323,6 +348,8 @@ def reserve_admitted_run(*, organization, principal, workflow, payload, reserved
         ticket = current_execution_ticket(run)
     payload[WIRE_REQUEST_KEY] = wire
     payload[WIRE_EXECUTION_KEY] = ticket
+    if BUDGET_KEY in request:
+        payload[BUDGET_KEY] = deepcopy(request[BUDGET_KEY])
     return run
 
 
@@ -357,6 +384,7 @@ def seal_new_run_admission(run, *, created, principal):
             or locked.steps.exists() or ContentFactoryJob.objects.filter(job_id=locked.run_id).exists()):
         raise RunOwnershipConflict("A previously active or enrolled Run cannot become a new admission.")
     request.setdefault("client_request_id", locked.run_id)
+    request = _admission_budget(request, workflow=locked.workflow)
     identity, request = _identity(organization=locked.organization, principal=principal,
                                   workflow=locked.workflow, payload=request)
     if identity["github_repo"] != locked.github_repo:

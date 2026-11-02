@@ -22,13 +22,13 @@ FLAGS = {**ALL_FLAGS_ON, "ARTICLES_RUN_OWNERSHIP_ENABLED": True,
 BUDGET = {"schema_version": 1, "runtime": "article", "max_model_usd": "5.00", "max_model_tokens": 50000}
 
 
-@override_settings(**FLAGS)
+@override_settings(**FLAGS, ARTICLES_RUN_CONTROL_MODEL_USD="5.00", ARTICLES_RUN_CONTROL_MODEL_TOKENS=50000)
 class ExecutionTicketTests(TestCase):
     def setUp(self):
         self.fixture = make_p2_org()
         self.org, self.user = self.fixture.organization, self.fixture.owner
         self.payload = {"domain": self.org.domain, "client_request_id": "control-original",
-            "topic": "Keep this approved topic", "approved_body_sha256": "b" * 64, BUDGET_KEY: deepcopy(BUDGET)}
+            "topic": "Keep this approved topic", "approved_body_sha256": "b" * 64}
         self.run = reserve_admitted_run(organization=self.org, workflow="article_generation", payload=self.payload,
             principal=user_principal(self.user.pk, f"mlai_user:{self.user.pk}"))
         self.original = ContentFactoryRun.objects.values().get(pk=self.run.pk)
