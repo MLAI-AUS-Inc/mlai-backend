@@ -3216,7 +3216,6 @@ class VibeRaisingEmailDraftStartView(APIView):
                 # Refreshing source context advances updated_at; retain the
                 # stale-queue decision from before that write on this attempt.
                 redispatch_existing = _should_dispatch_existing_run(existing_run)
-                from startup_updates.revisions import RevisionConflict
                 original = existing_run.run_request or {}
                 if (set(original.get("input_sources", [])) != set(input_sources)
                     or sorted(original.get("manual_document_ids", [])) != sorted(manual_document_ids)
