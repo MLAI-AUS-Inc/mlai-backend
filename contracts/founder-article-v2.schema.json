@@ -3036,6 +3036,38 @@
           "type": "integer",
           "minimum": 2000,
           "maximum": 60000
+        },
+        "preferences": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "voice": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "canEdit": {
+                  "type": "boolean"
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/FounderArticleVoice"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "canEdit",
+                "value"
+              ]
+            }
+          },
+          "required": [
+            "voice"
+          ]
         }
       },
       "required": [
@@ -3511,12 +3543,41 @@
         "expectedRevision": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 200
+          "maxLength": 200,
+          "x-wire-name": "reviewedRevision"
+        },
+        "waivedComments": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "body": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 10000
+              }
+            },
+            "required": [
+              "id",
+              "body"
+            ]
+          }
+        },
+        "acceptDisplayedRevision": {
+          "type": "boolean"
         }
       },
       "required": [
         "operationId"
-      ]
+      ],
+      "x-wire-project": false
     },
     "FounderArticlePublishRequest": {
       "type": "object",
@@ -4575,6 +4636,177 @@
         "cancelCopy",
         "denyCopy",
         "cancelOutcome"
+      ]
+    },
+    "FounderArticleVoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "updatedAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "preset": {
+          "enum": [
+            "builder_peer",
+            "calm_guide",
+            "challenger",
+            "trusted_expert",
+            "upbeat_coach",
+            null
+          ]
+        },
+        "category": {
+          "enum": [
+            "general",
+            "health",
+            "finance",
+            "legal"
+          ]
+        },
+        "dimensions": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "register": {
+              "enum": [
+                -2,
+                -1,
+                0,
+                1,
+                2
+              ]
+            },
+            "stance": {
+              "enum": [
+                -2,
+                -1,
+                0,
+                1,
+                2
+              ]
+            },
+            "energy": {
+              "enum": [
+                -2,
+                -1,
+                0,
+                1,
+                2
+              ]
+            },
+            "humour": {
+              "enum": [
+                -2,
+                -1,
+                0,
+                1,
+                2
+              ]
+            },
+            "convention": {
+              "enum": [
+                -2,
+                -1,
+                0,
+                1,
+                2
+              ]
+            }
+          },
+          "required": [
+            "register",
+            "stance",
+            "energy",
+            "humour",
+            "convention"
+          ]
+        },
+        "readerExpertise": {
+          "enum": [
+            "newcomer",
+            "practitioner",
+            "expert"
+          ]
+        },
+        "narrator": {
+          "enum": [
+            "brand_we",
+            "founder_i",
+            "impersonal"
+          ]
+        },
+        "voiceCard": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "is": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              },
+              "isNot": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              }
+            },
+            "required": [
+              "is",
+              "isNot"
+            ]
+          }
+        },
+        "stances": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "avoidWords": {
+          "type": "array",
+          "maxItems": 15,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        },
+        "preferWords": {
+          "type": "array",
+          "maxItems": 15,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "preset",
+        "category",
+        "dimensions",
+        "readerExpertise",
+        "narrator",
+        "voiceCard",
+        "stances",
+        "avoidWords",
+        "preferWords"
       ]
     }
   }
