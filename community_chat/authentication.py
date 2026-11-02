@@ -118,7 +118,7 @@ class CommunityChatAccountAuthentication(BaseAuthentication):
         else:
             return None
         try:
-            if cookie_authenticated:
+            if cookie_authenticated and request.headers.get("X-MLAI-Public-Key") is not None:
                 session = authenticate_access_token(
                     raw_token, required_public_key=request.headers.get("X-MLAI-Public-Key")
                 )
