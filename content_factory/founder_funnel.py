@@ -65,8 +65,79 @@ def has_first_draft(organization):
     return any(draft_time(run) for run in runs.only('status', 'result'))
 
 
+MAX_DRAFT_PROOFS = 64
+
+
+def _add_draft_proof(proofs, run_id, *, at=None, created_at=None):
+    """Join clocks only for the same source run; never date one run from another."""
+    if not isinstance(run_id, str) or not 0 < len(run_id) <= 100:
+        return
+    old = proofs.get(run_id, {})
+    known = [value for value in (timestamp(old.get('at')), timestamp(at)) if value is not None]
+    bounds = [value for value in (timestamp(old.get('createdAt')), timestamp(created_at)) if value is not None]
+    proofs[run_id] = {'at': min(known).isoformat() if known else None,
+                     'createdAt': min(bounds).isoformat() if bounds else None}
+
+
+def _marker_draft_proofs(marker, proofs):
+    if type(marker.get('version')) is not int or marker['version'] != 1:
+        return
+    rows = mapping(marker.get('proofs'))
+    if rows:
+        for run_id, row in rows.items():
+            _add_draft_proof(proofs, run_id, at=mapping(row).get('at'), created_at=mapping(row).get('createdAt'))
+    elif type(marker.get('version')) is int and marker['version'] == 1:
+        # An older deleted source without a clock or lower bound stays unknown.
+        _add_draft_proof(proofs, marker.get('runId'), at=marker.get('at'), created_at=marker.get('createdAt'))
+
+
+def _first_draft_marker(proofs, *, overflow=False):
+    """An exact earliest clock needs proof no unknown delivery could precede it."""
+    known = [(timestamp(row.get('at')), run_id) for run_id, row in proofs.items() if timestamp(row.get('at'))]
+    earliest, known_id = min(known) if known else (None, None)
+    unknown = {run_id: row for run_id, row in proofs.items() if not timestamp(row.get('at'))
+        and (earliest is None or timestamp(row.get('createdAt')) is None or timestamp(row.get('createdAt')) < earliest)}
+    # Later unknown deliveries cannot precede an already proved earliest clock.
+    # Retain competing unknown sources across deletion; a same-run proof may
+    # resolve one while another still makes the first clock unknowable.
+    retained = dict(unknown)
+    if known_id:
+        retained[known_id] = proofs[known_id]
+    if len(retained) > MAX_DRAFT_PROOFS:
+        overflow = True
+        ids = sorted(unknown, key=lambda key: (timestamp(unknown[key].get('createdAt')) is not None,
+            timestamp(unknown[key].get('createdAt')), key))
+        retained = {key: unknown[key] for key in ids[:MAX_DRAFT_PROOFS-int(known_id is not None)]}
+        if known_id:
+            retained[known_id] = proofs[known_id]
+    primary = next(iter(unknown), known_id)
+    if primary is None:
+        return {}
+    return {'version': 1, 'runId': primary,
+        'at': earliest.isoformat() if earliest and not unknown and not overflow else None,
+        'createdAt': proofs[primary].get('createdAt'), 'proofs': retained, 'unknownOverflow': bool(overflow)}
+
+
+def _organization_draft_proofs(organization_id, *, using):
+    """Read delivered source facts once when initializing historical bookkeeping."""
+    runs = list(ContentFactoryRun.objects.using(using).filter(organization_id=organization_id,
+        workflow__in=ARTICLE_WORKFLOWS).exclude(status__in=['cancelled', 'denied']).only(
+            'pk', 'run_id', 'created_at', 'status', 'result'))
+    by_id = {run.pk: run for run in runs}
+    proofs = {}
+    for run in runs:
+        at = draft_time(run)
+        if at or run.status in {'completed', 'awaiting_approval'}:
+            _add_draft_proof(proofs, run.run_id, at=at, created_at=run.created_at)
+    for step in ContentFactoryRunStep.objects.using(using).filter(run_id__in=by_id, step_key='package_content_delivery',
+            status='completed', completed_at__isnull=False).values('run_id', 'completed_at'):
+        run = by_id[step['run_id']]
+        _add_draft_proof(proofs, run.run_id, at=step['completed_at'], created_at=run.created_at)
+    return proofs
+
+
 def remember_first_draft(organization_id, *, run_id, at=None, using=DEFAULT_DB_ALIAS):
-    """Checkpoint one server-proved delivery without mutating execution clocks."""
+    """Retain delivered eligibility and exact/unknown timing without clock writes."""
     from django.db import transaction
     from organizations.models import Organization
     with transaction.atomic(using=using):
@@ -81,14 +152,16 @@ def remember_first_draft(organization_id, *, run_id, at=None, using=DEFAULT_DB_A
             config = OrganizationContentConfig.objects.using(using).create(organization_id=organization_id)
         strategy = dict(mapping(config.pillar_strategy))
         funnel = dict(mapping(strategy.get('founder_funnel')))
-        receipt = mapping(funnel.get('first_draft'))
-        known = timestamp(at)
-        # The first observed receipt is sticky. A source timestamp may fill an
-        # unknown clock, or prove an earlier delivery, without moving it back.
-        previous = timestamp(receipt.get('at'))
-        if receipt and (known is None or (previous is not None and previous <= known)):
+        previous = mapping(funnel.get('first_draft'))
+        proofs = _organization_draft_proofs(organization_id, using=using) if 'proofs' not in previous else {}
+        _marker_draft_proofs(previous, proofs)
+        created = ContentFactoryRun.objects.using(using).filter(organization_id=organization_id,
+            run_id=run_id).values_list('created_at', flat=True).first()
+        _add_draft_proof(proofs, run_id, at=at, created_at=created)
+        receipt = _first_draft_marker(proofs, overflow=previous.get('unknownOverflow') is True)
+        if not receipt or receipt == previous:
             return
-        funnel['first_draft'] = {'version': 1, 'runId': str(run_id)[:100], 'at': known.isoformat() if known else None}
+        funnel['first_draft'] = receipt
         strategy['founder_funnel'] = funnel
         OrganizationContentConfig.objects.using(using).filter(pk=config.pk).update(pillar_strategy=strategy)
 
@@ -168,13 +241,15 @@ def journey_funnel(*, since, until, using=DEFAULT_DB_ALIAS):
         workflow__in=tuple(ARTICLE_WORKFLOWS)+RESEARCH_WORKFLOWS).only(
         'pk', 'organization_id', 'run_id', 'workflow', 'created_at', 'result', 'status'))
     by_id = {run.pk: run for run in runs}
+    draft_proofs = defaultdict(dict)
+    marker_overflow = {}
     for run in runs:
         if run.workflow in ARTICLE_WORKFLOWS:
             org_mark(run.organization_id, 'first_article_started', run.created_at)
             org_mark(run.organization_id, 'queued', run.created_at)
             ready = draft_time(run)
             if ready or run.status in {'completed', 'awaiting_approval'}:
-                org_mark(run.organization_id, 'draft_ready', ready)
+                _add_draft_proof(draft_proofs[run.organization_id], run.run_id, at=ready, created_at=run.created_at)
         elif run.status == 'completed':
             org_mark(run.organization_id, 'research_done', timestamp(mapping(run.result).get('completed_at')))
     for step in ContentFactoryRunStep.objects.using(using).filter(run_id__in=by_id,
@@ -182,7 +257,7 @@ def journey_funnel(*, since, until, using=DEFAULT_DB_ALIAS):
         run = by_id[step['run_id']]
         if run.workflow in ARTICLE_WORKFLOWS and run.status not in {'cancelled', 'denied'}:
             if step['step_key'] == 'package_content_delivery':
-                org_mark(run.organization_id, 'draft_ready', step['completed_at'])
+                _add_draft_proof(draft_proofs[run.organization_id], run.run_id, at=step['completed_at'], created_at=run.created_at)
     research_times = defaultdict(list)
     for step in ContentFactoryRunStep.objects.using(using).filter(run_id__in=[r.pk for r in runs
             if r.workflow in RESEARCH_WORKFLOWS and r.status == 'completed'], status='completed',
@@ -194,11 +269,25 @@ def journey_funnel(*, since, until, using=DEFAULT_DB_ALIAS):
             'organization_id', 'pillar_strategy'):
         first_draft = mapping(mapping(mapping(row['pillar_strategy']).get('founder_funnel')).get('first_draft'))
         if type(first_draft.get('version')) is int and first_draft['version'] == 1 and first_draft.get('runId'):
-            org_mark(row['organization_id'], 'draft_ready', first_draft.get('at'))
+            _marker_draft_proofs(first_draft, draft_proofs[row['organization_id']])
+            marker_overflow[row['organization_id']] = first_draft.get('unknownOverflow') is True
         for receipt in mapping(mapping(row['pillar_strategy']).get('founder_posted_articles')).values():
             copied = timestamp(mapping(receipt).get('copiedAt'))
             if copied:
                 org_mark(row['organization_id'], 'copied', copied)
+    # The cohort counts people. An unknown earlier delivery at any startup
+    # they founded can precede a known clock at another startup as well.
+    user_proofs = defaultdict(dict)
+    user_overflow = defaultdict(bool)
+    for org_id, proofs in draft_proofs.items():
+        for user_id in owners.get(org_id, ()):
+            for run_id, proof in proofs.items():
+                _add_draft_proof(user_proofs[user_id], run_id, at=proof.get('at'), created_at=proof.get('createdAt'))
+            user_overflow[user_id] |= marker_overflow.get(org_id, False)
+    for user_id, proofs in user_proofs.items():
+        first = _first_draft_marker(proofs, overflow=user_overflow[user_id])
+        if first:
+            mark(user_id, 'draft_ready', first.get('at'))
     for row in WrittenArticle.objects.using(using).filter(organization_id__in=owners, publish_status='live').values(
             'organization_id', 'live_verified_at'):
         org_mark(row['organization_id'], 'published', row['live_verified_at'])

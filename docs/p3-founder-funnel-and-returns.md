@@ -14,7 +14,13 @@ Conversions are distinct non-staff signup accounts. Startup facts are attributed
 to recorded founder accounts, not inferred team membership. Readiness timing comes
 from a revision-bound `draft_ready_v1.at` receipt or completed
 `package_content_delivery` step. A legacy delivered run without a source timestamp
-counts as reached but has unknown timing, never zero. Mutable `updated_at` is not a
+counts as reached but has unknown timing, never zero. A later article or revision
+cannot supply another source's missing first-draft time. Exact timing requires
+that no unknown delivered source (across the founder's startups) could be earlier,
+using its immutable creation time as a lower bound. Same-run source proof can fill
+its own missing clock. Private source bookkeeping retains uncertainty after normal
+draft deletion, without changing run or config activity clocks. History is bounded
+to 64 competing sources; an overflow remains conservatively unknown. Mutable `updated_at` is not a
 completion clock. Current startup interests prove current intent only; their historic
 selection time is unknown. No workshop exclusion or production outcome is inferred.
 
