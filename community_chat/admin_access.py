@@ -49,7 +49,11 @@ def admin_sections(request) -> list[str]:
     # Imported here: ``crm.access`` imports this module for its gate.
     from crm.access import crm_enabled
 
-    return ["crm"] if crm_enabled() else []
+    from django.conf import settings
+    sections = ["crm"] if crm_enabled() else []
+    if getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False) and getattr(request.user, "is_staff", False):
+        sections.append("startups")
+    return sections
 
 
 def require_mlai_admin(user) -> None:
