@@ -858,6 +858,9 @@ def decide_scan_scaffold(
             from content_factory.run_child_admission import prepare_scan_child_dispatch
             from integrations.services.github_installations import resolve_user_for_actor_id
             parent = ContentFactoryRun.objects.filter(run_id=scan_run_id).first()
+            from content_factory.run_ownership import admission_enabled
+            if parent is None and admission_enabled():
+                raise ScanError("Run a fresh website scan before approving this setup.")
             if parent is not None:
                 if parent.domain != domain:
                     raise ScanError("The approved scan belongs to a different startup.")
