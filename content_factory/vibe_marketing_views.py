@@ -13891,6 +13891,11 @@ def _merge_job_billing_into_run_request(run) -> None:
     persisted at run materialization. Additive only: never overwrites an existing authorization, only
     fills it in from a real (charged/reused) job charge. Best-effort; never raises.
     """
+    from .run_ownership import owner_receipt
+    if owner_receipt(run) is not None:
+        # Initial admission already froze the complete original charge. Later
+        # billing facts/receipts cannot change that request or its digest.
+        return
     try:
         run_request = run.run_request if isinstance(getattr(run, "run_request", None), dict) else {}
         if run_request.get("roo_points_authorized") and run_request.get("roo_points_ledger_id"):
@@ -13949,6 +13954,7 @@ def _persist_web_article_billing_to_job(run, payload) -> None:
 
     Additive only: never downgrades an existing charged/reused job. Best-effort; never raises.
     """
+    from content_factory.run_backend_facts import get_or_create_job_facts, save_job_facts
     try:
         billing_status = str((payload or {}).get("roo_points_billing_status") or "").strip()
         ledger_id = (payload or {}).get("roo_points_ledger_id")
@@ -13966,12 +13972,17 @@ def _persist_web_article_billing_to_job(run, payload) -> None:
 
         from content_factory.models import ContentFactoryJob
 
-        job, created = ContentFactoryJob.objects.get_or_create(
+        from .run_ownership import owns_backend_facts
+        delivery_status = run.status or "queued"
+        if owns_backend_facts(run):
+            delivery_status = {"running": "generating", "failed": "error", "denied": "cancelled",
+                               "approval_required": "awaiting_approval"}.get(delivery_status, delivery_status)
+        job, created = get_or_create_job_facts(
             job_id=run.run_id,
             defaults={
                 "domain": run.domain or (payload or {}).get("domain") or "",
                 "slack_user_id": run.slack_user_id or "",
-                "status": run.status or "queued",
+                "status": delivery_status,
                 "client_request_id": crid or None,
                 "billing_source_job_id": run.run_id,
                 "billing_amount": cost_points,
@@ -14000,7 +14011,7 @@ def _persist_web_article_billing_to_job(run, payload) -> None:
                 update_fields.append("billing_source_job_id")
         if update_fields:
             update_fields.append("updated_at")
-            job.save(update_fields=update_fields)
+            save_job_facts(job, update_fields=update_fields)
     except Exception:  # pragma: no cover - best-effort enrichment
         logger.warning(
             "Failed to persist web article billing to job for %s",

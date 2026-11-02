@@ -322,7 +322,8 @@ def _create_local_run_placeholder(*, run_id: str, workflow: str, domain: str, gi
 
 
 def _create_job_tracking(*, run_id: str, domain: str, actor_id: str, status_value: str, request_meta: dict):
-    ContentFactoryJob.objects.update_or_create(
+    from content_factory.run_backend_facts import update_or_create_job_facts
+    update_or_create_job_facts(
         job_id=run_id,
         defaults={
             "domain": domain,

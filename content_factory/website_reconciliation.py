@@ -527,6 +527,7 @@ def disable_pending_native_auto_merge(connection, urls):
 
 def _process_worker_followup(identifier, now):
     """Claim a durable follow-up, release all DB locks, then contact the worker."""
+    from content_factory.run_backend_facts import save_job_facts
     from .website_connections import authority_guard, owner_write_guard
     from .website_contract import WebsiteAuthorityError
     from integrations.services import article_generation
@@ -566,7 +567,7 @@ def _process_worker_followup(identifier, now):
                         markers.append(payload["callback_dedupe_key"])
                     actions["preview_ready_auto_approve"] = markers
                     job.request_meta = {**metadata, "publish_stage": "auto_approved", "callback_actions": actions}
-                    job.save(update_fields=["status", "request_meta", "updated_at"])
+                    save_job_facts(job, update_fields=["status", "request_meta", "updated_at"])
     except WebsiteAuthorityError as exc:
         state, receipt = "cancelled", {"status": "authority_revoked", "code": exc.code, "repository_modified": False}
         if isinstance(remote, dict) and (remote.get("run_id") or remote.get("job_id")):

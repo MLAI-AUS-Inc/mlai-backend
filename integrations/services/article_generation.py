@@ -200,6 +200,7 @@ def _maybe_notify_exhausted_block(
     recovery_attempt: Optional[int],
     recovery_exhausted: bool,
 ) -> None:
+    from content_factory.run_backend_facts import save_job_facts
     if error_code != ARTICLE_DEPENDENCY_STRATEGY_UNRESOLVED_ERROR_CODE or not recovery_exhausted:
         return
     if not job.slack_user_id:
@@ -230,7 +231,7 @@ def _maybe_notify_exhausted_block(
 
     request_meta["blocked_visible_notification_key"] = notification_key
     job.request_meta = request_meta
-    job.save(update_fields=["request_meta", "updated_at"])
+    save_job_facts(job, update_fields=["request_meta", "updated_at"])
 
 
 def sync_blocked_job_state(
@@ -240,6 +241,7 @@ def sync_blocked_job_state(
     update_card: bool = True,
     allow_visible_notification: bool = True,
 ) -> None:
+    from content_factory.run_backend_facts import save_job_facts
     error_message = result.get('error') or result.get('error_message') or 'Generation is blocked waiting for capacity'
     error_code = str(result.get("error_code") or "blocked").strip() or "blocked"
     blocked_step = str(result.get("blocked_step") or result.get("current_step") or "unknown").strip() or "unknown"
@@ -283,7 +285,7 @@ def sync_blocked_job_state(
         update_fields.append('request_meta')
 
     if update_fields:
-        job.save(update_fields=[*update_fields, 'updated_at'])
+        save_job_facts(job, update_fields=[*update_fields, 'updated_at'])
 
     if update_card:
         upsert_live_progress_card(
@@ -730,6 +732,7 @@ def _require_article_job_payment(job, *, user, domain, expected_cost_points=None
         original = None  # A paid research run does not authorize an article.
     payer = _article_billing_user(user, domain)
     if original and (original.user_id != payer.pk or getattr(job, "billing_status", "") == CONTENT_FACTORY_BILLING_STATUS_REFUNDED
+            or getattr(original, "service_refunds", None) is not None and original.service_refunds.exists()
             or Ledger.objects.filter(idempotency_key=original.idempotency_key.replace(ARTICLE_CHARGE_PREFIX, "content_factory:refund:", 1), kind="REFUND").exists()):
         raise conflict()
     original_cost = -original.delta_microroo // 1_000_000 if original else 0
@@ -1116,6 +1119,7 @@ def _refund_content_factory_request(
     resolved_domain: str,
     reason: str,
 ):
+    from content_factory.run_backend_facts import update_job_facts
     from content_factory.models import ContentFactoryJob
     from roo.services import PointsService
     from roo.models import Ledger
@@ -1160,7 +1164,7 @@ def _refund_content_factory_request(
         reference_type="CONTENT_FACTORY",
         reference_id=_ledger_reference_id(client_request_id),
     )
-    ContentFactoryJob.objects.filter(client_request_id=client_request_id).update(
+    update_job_facts(ContentFactoryJob.objects.filter(client_request_id=client_request_id),
         billing_status=CONTENT_FACTORY_BILLING_STATUS_REFUNDED,
         billing_amount=cost_points,
         billing_ledger_id=ledger.id,
@@ -1531,6 +1535,7 @@ def maybe_auto_refund_terminal_failure(
     error_message: Optional[str],
     refundable: Optional[bool] = None,
 ) -> tuple[bool, int]:
+    from content_factory.run_backend_facts import save_job_facts
     if not job:
         return False, 0
 
@@ -1656,7 +1661,7 @@ def maybe_auto_refund_terminal_failure(
             article_request=request_meta, resolved_domain=resolved_domain,
             reason=str(error_message or resolved_error_code or "Research could not complete."))
         billed_job.billing_status = CONTENT_FACTORY_BILLING_STATUS_REFUNDED
-        billed_job.save(update_fields=["billing_status", "updated_at"])
+        save_job_facts(billed_job, update_fields=["billing_status", "updated_at"])
         return True, refund_points
     refund_reason = str(error_message or resolved_error_code or "deterministic failure").strip()
     try:
@@ -1717,6 +1722,15 @@ def _charge_deferred_discovery_job_if_needed(
     require_article_activation(domain=domain, actor_id=actor, user=billing_user,
         article_request={**snapshot, "topic": custom_title or confirmed_keyword, "target_keyword": confirmed_keyword})
     from content_factory.models import ContentFactoryJob
+    from content_factory.run_backend_facts import fact_run_for_job, owned_job_transaction
+    if fact_run_for_job(source_job) is not None:
+        with owned_job_transaction(source_job) as locked:
+            still_research = (locked.request_meta or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
+            if (still_research or _job_uses_deferred_billing(locked)) and locked.request_meta != snapshot:
+                error = ArticleGenerationError("The source research changed before article confirmation.")
+                error.code = "content_factory_billing_key_conflict"
+                raise error
+            return _charge_discovery_article_locked(source_job=locked, prevalidated_admission=True, **kwargs)
     with transaction.atomic():
         locked = ContentFactoryJob.objects.select_for_update().get(pk=source_job.pk)
         still_research = (locked.request_meta or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
@@ -1730,13 +1744,20 @@ def _charge_deferred_discovery_job_if_needed(
 def _charge_discovery_article_locked(*, source_job, slack_user_id, domain, confirmed_keyword,
         custom_title=None, billing_user=None, expected_cost_points=None, client_request_id=None,
         requested_by_slack_user_id=None, prevalidated_admission=False):
+    from content_factory.run_backend_facts import save_job_facts
     if normalize_domain(source_job.domain) != normalize_domain(domain):
         error = ArticleGenerationError("The source article belongs to a different company.")
         error.code = "content_factory_billing_key_conflict"
         raise error
     research_paid = (getattr(source_job, "request_meta", {}) or {}).get("roo_points_action") == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION
+    from content_factory.run_backend_facts import fact_run_for_job
+    from content_factory.run_article_charge import require_article_charge_choice
+    owned_source = fact_run_for_job(source_job)
+    current_article_charge = require_article_charge_choice(source_job, keyword=confirmed_keyword,
+        custom_title=custom_title, request_key=client_request_id) if owned_source is not None else None
     if not _job_uses_deferred_billing(source_job) and not research_paid:
-        if client_request_id and client_request_id != source_job.client_request_id:
+        original_article_key = current_article_charge["article_request_key"] if current_article_charge else source_job.client_request_id
+        if client_request_id and client_request_id != original_article_key:
             error = ArticleGenerationError("The article request key does not match its original payment.")
             error.code = "content_factory_billing_key_conflict"
             raise error
@@ -1772,6 +1793,13 @@ def _charge_discovery_article_locked(*, source_job, slack_user_id, domain, confi
     request_meta.setdefault("request_source", CONTENT_FACTORY_REQUEST_SOURCE)
     if client_request_id:
         request_meta["client_request_id"] = client_request_id
+    elif owned_source is not None:
+        from content_factory.website_contract import evidence_digest
+        from content_factory.run_ownership import owner_receipt, wire_identity
+        request_meta["client_request_id"] = "r3-confirm:" + evidence_digest({
+            "source_admission": wire_identity(owner_receipt(owned_source)),
+            "keyword": confirmed_keyword, "custom_title": custom_title,
+            "requested_by": requested_by_slack_user_id or slack_user_id})
     else:
         request_meta.setdefault("client_request_id",
             getattr(source_job, "client_request_id", "") or f"scheduled-confirm:{source_job.job_id}")
@@ -1799,20 +1827,30 @@ def _charge_discovery_article_locked(*, source_job, slack_user_id, domain, confi
     source_job.billing_amount = charge_amount
     source_job.billing_status = CONTENT_FACTORY_BILLING_STATUS_CHARGED
     source_job.billing_ledger = charge_ledger
-    if getattr(source_job, "client_request_id", "") != request_meta.get("client_request_id"):
+    if owned_source is None and getattr(source_job, "client_request_id", "") != request_meta.get("client_request_id"):
         source_job.client_request_id = request_meta["client_request_id"]
     request_meta.update(build_roo_points_authorization_payload(domain=domain,
         action=CONTENT_FACTORY_ACTION_ARTICLE_GENERATION, cost_points=charge_amount,
         billing_status=CONTENT_FACTORY_BILLING_STATUS_CHARGED if charge_amount else "free",
         ledger_id=getattr(charge_ledger, "pk", None)))
     source_job.request_meta = request_meta
-    source_job.save(
+    if owned_source is not None:
+        from integrations.services.github_installations import resolve_user_for_actor_id
+        from content_factory.run_article_charge import record_article_charge
+        actor = requested_by_slack_user_id or _resolve_requested_by_slack_user_id(slack_user_id, request_meta)
+        requester = resolve_user_for_actor_id(actor)
+        # Seal the already authorized debit before the one-way projection, so
+        # the fact service can verify the current charge from private authority.
+        record_article_charge(source_job, ledger=charge_ledger, cost_points=charge_amount,
+            billing_user=charged_user, requester=requester, article_request_key=request_meta["client_request_id"],
+            confirmed_keyword=confirmed_keyword, custom_title=custom_title)
+    save_job_facts(source_job,
         update_fields=[
             "billing_source_job_id",
             "billing_amount",
             "billing_status",
             "billing_ledger",
-            "client_request_id",
+            *(["client_request_id"] if owned_source is None else []),
             "request_meta",
             "updated_at",
         ]
@@ -1903,6 +1941,7 @@ def _store_job_tracking_record(
     last_progress_updated_at=None,
     still_working_pinged_at=None,
 ):
+    from content_factory.run_backend_facts import get_or_create_job_facts, save_job_facts
     from content_factory.models import ContentFactoryJob
 
     resolved_root_message_ts = slack_root_message_ts or slack_thread_ts or ""
@@ -1925,7 +1964,7 @@ def _store_job_tracking_record(
         "last_progress_updated_at": last_progress_updated_at,
         "still_working_pinged_at": still_working_pinged_at,
     }
-    job, created = ContentFactoryJob.objects.get_or_create(job_id=job_id, defaults=defaults)
+    job, created = get_or_create_job_facts(job_id=job_id, defaults=defaults)
 
     if created:
         return job
@@ -1982,7 +2021,7 @@ def _store_job_tracking_record(
 
     if update_fields:
         update_fields.append("updated_at")
-        job.save(update_fields=update_fields)
+        save_job_facts(job, update_fields=update_fields)
 
     return job
 
@@ -1995,6 +2034,7 @@ def attach_progress_message(
     slack_thread_ts: str = "",
     slack_root_message_ts: str = "",
 ):
+    from content_factory.run_backend_facts import save_job_facts
     from content_factory.models import ContentFactoryJob
 
     progress_ts = str(progress_message_ts or "").strip()
@@ -2037,7 +2077,7 @@ def attach_progress_message(
 
     if update_fields:
         update_fields.append("updated_at")
-        job.save(update_fields=update_fields)
+        save_job_facts(job, update_fields=update_fields)
 
     return job
 
@@ -2909,6 +2949,7 @@ def _handle_status_failure(job_id: str, result: dict):
     Handle a failed job detected during status polling.
     Updates the local ContentFactoryJob and sends a Slack notification (once).
     """
+    from content_factory.run_backend_facts import save_job_facts
     from content_factory.models import ContentFactoryJob
     from integrations.services.slack import SlackService
 
@@ -2926,7 +2967,7 @@ def _handle_status_failure(job_id: str, result: dict):
     error_code = str(result.get("error_code") or (result.get("failure") or {}).get("code") or "UNCLASSIFIED")
     job.status = 'error'
     job.error_message = f"[{error_code}] {error_message}"
-    job.save(update_fields=['status', 'error_message', 'updated_at'])
+    save_job_facts(job, update_fields=['status', 'error_message', 'updated_at'])
     logger.info(f"Updated job {job_id} to error: {error_code}: {error_message}")
 
     auto_refunded, refund_points = maybe_auto_refund_terminal_failure(
@@ -2983,6 +3024,7 @@ def _handle_status_reviewable(job_id: str, result: dict):
     """
     Handle a reviewable terminal outcome detected during status polling.
     """
+    from content_factory.run_backend_facts import save_job_facts
     from content_factory.models import ContentFactoryJob
 
     try:
@@ -3022,7 +3064,7 @@ def _handle_status_reviewable(job_id: str, result: dict):
         update_fields.append("error_message")
 
     if len(update_fields) > 1:
-        job.save(update_fields=update_fields)
+        save_job_facts(job, update_fields=update_fields)
 
     logger.info("Updated job %s to reviewable status %s", job_id, status_value)
 
@@ -3242,6 +3284,7 @@ def promote_article_bundle(
     """
     Promote a completed content package or publish bundle into a child publish run.
     """
+    from content_factory.run_backend_facts import save_job_facts
     from content_factory.website_connections import require_unlocked_remote_call
     require_unlocked_remote_call()
     from content_factory.models import ContentFactoryJob
@@ -3322,7 +3365,7 @@ def promote_article_bundle(
                         request_meta["requested_by_slack_user_id"] = resolved_requested_by_slack_user_id
                     if request_meta != (source_job.request_meta or {}):
                         source_job.request_meta = request_meta
-                        source_job.save(update_fields=["request_meta", "updated_at"])
+                        save_job_facts(source_job, update_fields=["request_meta", "updated_at"])
 
         return payload
 
@@ -3526,6 +3569,10 @@ def confirm_topic(
     }
     if source_job and getattr(source_job, "client_request_id", None):
         payload["client_request_id"] = source_job.client_request_id
+        from content_factory.run_article_charge import article_charge_receipt
+        current_article_charge = article_charge_receipt(source_job)
+        if current_article_charge is not None:
+            payload["client_request_id"] = current_article_charge["article_request_key"]
     if isinstance(notification_context, dict) and notification_context:
         payload["notification_context"] = notification_context
     if resolved_requested_by_slack_user_id and resolved_requested_by_slack_user_id != str(slack_user_id or "").strip():
@@ -3607,7 +3654,7 @@ def confirm_topic(
                     progress_message_ts=progress_message_ts,
                     last_progress_milestone_key="queued",
                     last_progress_updated_at=timezone.now(),
-                    client_request_id=source_job.client_request_id,
+                    client_request_id=payload.get("client_request_id") if "backend_run_admission_v1" in payload else source_job.client_request_id,
                     billing_source_job_id=source_job.billing_source_job_id or source_job.job_id,
                     billing_amount=source_job.billing_amount,
                     billing_status=CONTENT_FACTORY_BILLING_STATUS_REUSED,

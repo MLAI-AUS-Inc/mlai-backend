@@ -214,6 +214,7 @@ def _write_receipt(run, *, state, points=0, original_key=None, refund_ledger_id=
 
 def apply_refund_decision(run, decision, *, now=None) -> dict:
     """Settle once under locks, rechecking evidence and the actual debit before crediting."""
+    from content_factory.run_backend_facts import save_job_facts
     from workflow_runs.models import ContentFactoryRun
     from roo.services import PointsService, IdempotencyConflictError
     if not enabled():
@@ -249,7 +250,7 @@ def apply_refund_decision(run, decision, *, now=None) -> dict:
             from .models import ContentFactoryJob
             for job in ContentFactoryJob.objects.filter(billing_ledger_id=spend.pk):
                 job.billing_status = "refunded"
-                job.save(update_fields=["billing_status"])
+                save_job_facts(job, update_fields=["billing_status"])
         elif action == "release":
             original = _original_free_run(locked)
             if original is None:

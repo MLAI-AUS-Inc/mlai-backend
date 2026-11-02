@@ -4013,6 +4013,7 @@ class ContentFactoryCallbackView(APIView):
             )
 
     def _update_content_factory_job(self, *, job_id, domain, slack_user_id, status_value, error_message=None):
+        from content_factory.run_backend_facts import save_job_facts, update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
 
         defaults = {
@@ -4037,7 +4038,7 @@ class ContentFactoryCallbackView(APIView):
         last_error = None
         for attempt in range(max_attempts):
             try:
-                job, _ = ContentFactoryJob.objects.update_or_create(
+                job, _ = update_or_create_job_facts(
                     job_id=job_id,
                     defaults=defaults,
                 )
@@ -4046,7 +4047,7 @@ class ContentFactoryCallbackView(APIView):
                     if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
                         request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
                         job.request_meta = request_meta
-                        job.save(update_fields=['request_meta', 'updated_at'])
+                        save_job_facts(job, update_fields=['request_meta', 'updated_at'])
                 if notification_context:
                     request_meta = dict(job.request_meta or {})
                     request_meta["notification_context"] = notification_context
@@ -4067,7 +4068,7 @@ class ContentFactoryCallbackView(APIView):
                                 }
                             )
                     job.request_meta = request_meta
-                    job.save(update_fields=['request_meta', 'updated_at'])
+                    save_job_facts(job, update_fields=['request_meta', 'updated_at'])
                 return job
             except OperationalError as exc:
                 last_error = exc
@@ -4136,6 +4137,7 @@ class ContentFactoryCallbackView(APIView):
         return dedupe_key in marker_list
 
     def _record_callback_marker(self, *, job, bucket, event_name, dedupe_key, extra_request_meta=None):
+        from content_factory.run_backend_facts import save_job_facts
         request_meta = dict(job.request_meta or {})
         bucket_payload = dict(request_meta.get(bucket) or {})
         marker_list = [str(item) for item in (bucket_payload.get(event_name) or []) if str(item).strip()]
@@ -4146,9 +4148,10 @@ class ContentFactoryCallbackView(APIView):
         if extra_request_meta:
             request_meta.update(extra_request_meta)
         job.request_meta = request_meta
-        job.save(update_fields=['request_meta', 'updated_at'])
+        save_job_facts(job, update_fields=['request_meta', 'updated_at'])
 
     def _store_publish_callback_state(self, *, job, data, publish_stage, status_value):
+        from content_factory.run_backend_facts import save_job_facts
         request_meta = dict(job.request_meta or {})
         request_meta['publish_stage'] = publish_stage
         for field in (
@@ -4223,7 +4226,7 @@ class ContentFactoryCallbackView(APIView):
             job.request_meta = request_meta
             update_fields.append('request_meta')
         if len(update_fields) > 1:
-            job.save(update_fields=update_fields)
+            save_job_facts(job, update_fields=update_fields)
 
     def _enrich_review_preview_payload(self, data):
         payload = dict(data or {})
@@ -4497,6 +4500,7 @@ class ContentFactoryCallbackView(APIView):
         return payload
 
     def _handle_progress_callback(self, data, *, event_name, status_value, stage_titles, response_message):
+        from content_factory.run_backend_facts import save_job_facts
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
@@ -4613,7 +4617,7 @@ class ContentFactoryCallbackView(APIView):
         job.posted_progress_ids = posted_progress_ids + [progress_id]
         if milestone_index:
             job.last_progress_milestone_index = milestone_index
-        job.save(
+        save_job_facts(job,
             update_fields=[
                 'posted_progress_ids',
                 'last_progress_milestone_index',
@@ -4673,6 +4677,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_delivery_mode_required(self, data):
+        from content_factory.run_backend_facts import save_job_facts
         from integrations.services.notification_adapters import (
             normalize_notification_context,
             send_delivery_mode_required,
@@ -4695,7 +4700,7 @@ class ContentFactoryCallbackView(APIView):
             request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
         if request_meta != (job.request_meta or {}):
             job.request_meta = request_meta
-            job.save(update_fields=['request_meta', 'updated_at'])
+            save_job_facts(job, update_fields=['request_meta', 'updated_at'])
         if normalize_notification_context(data.get("notification_context")):
             send_delivery_mode_required(data)
 
@@ -4831,6 +4836,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_generation_pr_opened(self, data):
+        from content_factory.run_backend_facts import save_job_facts
         data = self._enrich_review_preview_payload(data)
         job_id = data.get('job_id')
         domain = data.get('domain', '')
@@ -4900,7 +4906,7 @@ class ContentFactoryCallbackView(APIView):
             request_meta['artifact_links'] = data.get('artifact_links')
         if request_meta != (job.request_meta or {}):
             job.request_meta = request_meta
-            job.save(update_fields=['request_meta', 'updated_at'])
+            save_job_facts(job, update_fields=['request_meta', 'updated_at'])
 
         upsert_live_progress_card(
             job,
@@ -5004,6 +5010,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_preview_ready(self, data):
+        from content_factory.run_backend_facts import save_job_facts
         from integrations.services.article_generation import ArticleGenerationError, publish_article
 
         data = self._enrich_review_preview_payload(data)
@@ -5109,7 +5116,7 @@ class ContentFactoryCallbackView(APIView):
                 job.request_meta = request_meta
                 update_fields.append('request_meta')
             if len(update_fields) > 1:
-                job.save(update_fields=update_fields)
+                save_job_facts(job, update_fields=update_fields)
             logger.info("Ignoring duplicate preview_ready auto-approve for %s (%s)", job_id, dedupe_key)
             return Response(
                 {
@@ -5131,6 +5138,7 @@ class ContentFactoryCallbackView(APIView):
         }, status=status.HTTP_200_OK)
 
     def _handle_content_ready(self, data):
+        from content_factory.run_backend_facts import save_job_facts
         from integrations.services.notification_adapters import (
             normalize_notification_context,
             send_content_ready,
@@ -5158,7 +5166,7 @@ class ContentFactoryCallbackView(APIView):
             request_meta['source_publish_pr_url'] = data.get('publish_pr_url')
         if request_meta != (job.request_meta or {}):
             job.request_meta = request_meta
-            job.save(update_fields=['request_meta', 'updated_at'])
+            save_job_facts(job, update_fields=['request_meta', 'updated_at'])
 
         logger.info("Content-only article complete for job %s (%s)", job_id, domain)
 
@@ -5339,6 +5347,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_article_review_ready(self, data):
+        from content_factory.run_backend_facts import save_job_facts
         from integrations.services.notification_adapters import send_review_ready
 
         # Keep the pre-enrichment payload for channel fan-out: this event only
@@ -5371,7 +5380,7 @@ class ContentFactoryCallbackView(APIView):
                 request_meta[field] = data.get(field)
         if request_meta != (job.request_meta or {}):
             job.request_meta = request_meta
-            job.save(update_fields=['request_meta', 'updated_at'])
+            save_job_facts(job, update_fields=['request_meta', 'updated_at'])
 
         # Automation-driven runs notify their channels with the review link.
         # send_review_ready resolves the run by context, or falls back to the
@@ -5394,6 +5403,7 @@ class ContentFactoryCallbackView(APIView):
         Handle 'auth_required' event: notify user to re-authenticate.
         Attempts automatic token refresh first.
         """
+        from content_factory.run_backend_facts import save_job_facts, update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.github import refresh_github_token
         from integrations.services.article_generation import trigger_article_generation, confirm_topic
@@ -5416,7 +5426,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
         # Update job status
-        job, created = ContentFactoryJob.objects.update_or_create(
+        job, created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -5436,7 +5446,7 @@ class ContentFactoryCallbackView(APIView):
             if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
                 request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
                 job.request_meta = request_meta
-                job.save(update_fields=['request_meta', 'updated_at'])
+                save_job_facts(job, update_fields=['request_meta', 'updated_at'])
 
         # 1. Attempt Automatic Token Refresh
         refreshed = False
@@ -5660,6 +5670,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_scan_complete(self, data):
         """Handle scan_complete event from content-factory."""
+        from content_factory.run_backend_facts import save_job_facts
         import json as _json
         from content_factory.models import ContentFactoryJob, OrganizationContentConfig
         from organizations.models import Organization
@@ -5724,7 +5735,7 @@ class ContentFactoryCallbackView(APIView):
             )
             job.status = 'awaiting_confirmation' if approval_required else 'completed'
             job.request_meta = request_meta
-            job.save(update_fields=['status', 'request_meta', 'updated_at'])
+            save_job_facts(job, update_fields=['status', 'request_meta', 'updated_at'])
 
         _sync_scan_callback_to_run(data=data, approval_required=approval_required)
 
@@ -6142,6 +6153,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_generation_failed(self, data):
         """Handle generation_failed event from content-factory."""
+        from content_factory.run_backend_facts import update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.article_generation import (
             maybe_auto_refund_terminal_failure,
@@ -6172,7 +6184,7 @@ class ContentFactoryCallbackView(APIView):
         auto_refunded = bool(data.get('auto_refunded'))
 
         # Update job record
-        job, created = ContentFactoryJob.objects.update_or_create(
+        job, created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -6369,6 +6381,7 @@ class ContentFactoryCallbackView(APIView):
         - article_review_preview_not_available: the run cannot produce a
           preview in its current state (e.g. content-only delivery).
         """
+        from content_factory.run_backend_facts import update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
 
         job_id = data.get('job_id')
@@ -6397,7 +6410,7 @@ class ContentFactoryCallbackView(APIView):
             summary_text = error_message or 'Hosted article review preview failed.'
             stored_error = f"[{error_code}] {summary_text}" if error_code else summary_text
 
-        job, _created = ContentFactoryJob.objects.update_or_create(
+        job, _created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -6469,6 +6482,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_generation_blocked(self, data):
         """Handle generation_blocked event from content-factory."""
+        from content_factory.run_backend_facts import update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.article_generation import sync_blocked_job_state
 
@@ -6484,7 +6498,7 @@ class ContentFactoryCallbackView(APIView):
         fallback_policy = data.get('fallback_policy') or ''
         retry_after_seconds = data.get('retry_after_seconds')
 
-        job, _created = ContentFactoryJob.objects.update_or_create(
+        job, _created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -6518,6 +6532,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_scaffold_complete(self, data):
         """Handle scaffold_complete event from content-factory."""
+        from content_factory.run_backend_facts import save_job_facts
         from content_factory.models import ContentFactoryJob, OrganizationContentConfig
         from organizations.models import Organization
         from integrations.services.slack import SlackService
@@ -6552,7 +6567,8 @@ class ContentFactoryCallbackView(APIView):
             else:
                 job.status = 'completed'
                 job.pr_url = pr_url
-            job.save()
+            save_job_facts(job, update_fields=["status", "error_message" if error else "pr_url", "updated_at"],
+                           legacy_full_save=True)
 
         parent_job = ContentFactoryJob.objects.filter(job_id=parent_run_id).first() if parent_run_id else None
 
@@ -6815,6 +6831,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_topic_selection(self, data):
         """Handle topic_selection event from content-factory."""
+        from content_factory.run_backend_facts import save_job_facts, update_or_create_job_facts
         from content_factory.models import ContentFactoryJob, ScheduledDiscoveryDispatch
         from organizations.models import Organization
         from integrations.services.article_generation import (
@@ -6850,7 +6867,7 @@ class ContentFactoryCallbackView(APIView):
         options = options[:4]
         
         # Get or create job tracking record
-        job, created = ContentFactoryJob.objects.update_or_create(
+        job, created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -6867,11 +6884,11 @@ class ContentFactoryCallbackView(APIView):
             if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
                 request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
                 job.request_meta = request_meta
-                job.save(update_fields=['request_meta', 'updated_at'])
+                save_job_facts(job, update_fields=['request_meta', 'updated_at'])
         job.last_progress_milestone_key = 'awaiting_confirmation'
         job.last_progress_updated_at = timezone.now()
         job.still_working_pinged_at = None
-        job.save(update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
+        save_job_facts(job, update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
         notification_context = normalize_notification_context(data.get("notification_context"))
         if notification_context:
             request_meta = dict(job.request_meta or {})
@@ -6890,7 +6907,7 @@ class ContentFactoryCallbackView(APIView):
                         }
                     )
             job.request_meta = request_meta
-            job.save(update_fields=["request_meta", "updated_at"])
+            save_job_facts(job, update_fields=["request_meta", "updated_at"])
         dispatch = ScheduledDiscoveryDispatch.objects.filter(content_factory_job_id=job_id).first()
         scheduled_daily_job = is_scheduled_daily_job(job) or bool(dispatch)
         if scheduled_daily_job:
@@ -6905,7 +6922,7 @@ class ContentFactoryCallbackView(APIView):
             if update_fields:
                 job.request_meta = request_meta
                 update_fields.append("updated_at")
-                job.save(update_fields=update_fields)
+                save_job_facts(job, update_fields=update_fields)
 
         logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
 
@@ -6918,7 +6935,7 @@ class ContentFactoryCallbackView(APIView):
         options = options[:4]
 
         # Get or create job tracking record
-        job, created = ContentFactoryJob.objects.update_or_create(
+        job, created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -6935,11 +6952,11 @@ class ContentFactoryCallbackView(APIView):
             if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
                 request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
                 job.request_meta = request_meta
-                job.save(update_fields=['request_meta', 'updated_at'])
+                save_job_facts(job, update_fields=['request_meta', 'updated_at'])
         job.last_progress_milestone_key = 'awaiting_confirmation'
         job.last_progress_updated_at = timezone.now()
         job.still_working_pinged_at = None
-        job.save(update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
+        save_job_facts(job, update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
         notification_context = normalize_notification_context(data.get("notification_context"))
         if notification_context:
             request_meta = dict(job.request_meta or {})
@@ -6958,7 +6975,7 @@ class ContentFactoryCallbackView(APIView):
                         }
                     )
             job.request_meta = request_meta
-            job.save(update_fields=["request_meta", "updated_at"])
+            save_job_facts(job, update_fields=["request_meta", "updated_at"])
         dispatch = ScheduledDiscoveryDispatch.objects.filter(content_factory_job_id=job_id).first()
         scheduled_daily_job = is_scheduled_daily_job(job) or bool(dispatch)
         if scheduled_daily_job:
@@ -6973,7 +6990,7 @@ class ContentFactoryCallbackView(APIView):
             if update_fields:
                 job.request_meta = request_meta
                 update_fields.append("updated_at")
-                job.save(update_fields=update_fields)
+                save_job_facts(job, update_fields=update_fields)
 
         logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
 
@@ -6983,7 +7000,7 @@ class ContentFactoryCallbackView(APIView):
                 error_message='Research completed without usable topic options.', refundable=True)
             job.status = 'error'
             job.error_message = 'Research completed without usable topic options.'
-            job.save(update_fields=['status', 'error_message', 'updated_at'])
+            save_job_facts(job, update_fields=['status', 'error_message', 'updated_at'])
             if notification_context:
                 automation_run = resolve_automation_run(notification_context)
                 if automation_run and normalize_domain(automation_run.automation.organization.domain) == normalize_domain(domain):
@@ -7134,7 +7151,7 @@ class ContentFactoryCallbackView(APIView):
                     mark_scheduled_dispatch_failed(job_id=job_id, error_message=error_message)
                     job.status = 'error'
                     job.error_message = error_message
-                    job.save(update_fields=['status', 'error_message', 'updated_at'])
+                    save_job_facts(job, update_fields=['status', 'error_message', 'updated_at'])
                     return Response(
                         {
                             'status': 'processed_with_error',
@@ -7156,7 +7173,7 @@ class ContentFactoryCallbackView(APIView):
                     mark_scheduled_dispatch_failed(job_id=job_id, error_message=error_message)
                     job.status = 'error'
                     job.error_message = error_message
-                    job.save(update_fields=['status', 'error_message', 'updated_at'])
+                    save_job_facts(job, update_fields=['status', 'error_message', 'updated_at'])
                     return Response(
                         {
                             'status': 'processed_with_error',
@@ -7169,7 +7186,7 @@ class ContentFactoryCallbackView(APIView):
                 job.slack_channel_id = channel_id
                 job.slack_root_message_ts = message_ts
                 job.slack_thread_ts = message_ts
-                job.save(
+                save_job_facts(job,
                     update_fields=[
                         'slack_channel_id',
                         'slack_root_message_ts',
@@ -7212,6 +7229,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_article_complete(self, data):
         """Handle article_complete event from content-factory."""
+        from content_factory.run_backend_facts import update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.notification_adapters import (
             normalize_notification_context,
@@ -7227,7 +7245,7 @@ class ContentFactoryCallbackView(APIView):
         slack_user_id = data.get('slack_user_id', '')
 
         # Update or create job record
-        job, created = ContentFactoryJob.objects.update_or_create(
+        job, created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -7289,6 +7307,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_error(self, data):
         """Handle error event from content-factory."""
+        from content_factory.run_backend_facts import update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.notification_adapters import (
             normalize_notification_context,
@@ -7302,7 +7321,7 @@ class ContentFactoryCallbackView(APIView):
         slack_user_id = data.get('slack_user_id', '')
 
         # Update or create job record
-        job, created = ContentFactoryJob.objects.update_or_create(
+        job, created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,

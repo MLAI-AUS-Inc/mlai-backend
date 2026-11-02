@@ -369,6 +369,7 @@ def scan_github_project(
     Raises:
         ScanError: If validation fails or the external call fails.
     """
+    from content_factory.run_backend_facts import create_job_facts
     try:
         request_source = require_roo_request_source(request_source)
     except ValueError as exc:
@@ -532,7 +533,7 @@ def scan_github_project(
 
             # Create a ContentFactoryJob so callback handlers can look up thread context
             try:
-                ContentFactoryJob.objects.create(
+                create_job_facts(
                     job_id=job_id,
                     domain=resolved_domain,
                     slack_user_id=slack_user_id,
@@ -819,6 +820,7 @@ def decide_scan_scaffold(
     slack_thread_ts: str = None,
 ) -> dict:
     """Approve or deny a scaffold proposal for a repo scan run."""
+    from content_factory.run_backend_facts import save_job_facts, update_or_create_job_facts
     from content_factory.website_connections import require_unlocked_remote_call
     require_unlocked_remote_call()
     from content_factory.models import ContentFactoryJob
@@ -894,11 +896,11 @@ def decide_scan_scaffold(
                         }
                     )
                     parent_job.request_meta = parent_meta
-                    parent_job.save(update_fields=['status', 'request_meta', 'updated_at'])
+                    save_job_facts(parent_job, update_fields=['status', 'request_meta', 'updated_at'])
 
                 scaffold_job_id = data.get('scaffold_job_id')
                 if normalized_decision == 'approve' and scaffold_job_id:
-                    ContentFactoryJob.objects.update_or_create(
+                    update_or_create_job_facts(
                         job_id=scaffold_job_id,
                         defaults={
                             'domain': domain,
