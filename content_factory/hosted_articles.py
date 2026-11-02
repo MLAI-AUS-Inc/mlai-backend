@@ -243,6 +243,16 @@ def _mark_written_article_live(publication: HostedArticlePublication, now):
     article = publication.written_article or WrittenArticle.objects.filter(
         organization_id=site.organization_id, source_run_id=publication.run_id).order_by("-created_at").first()
     if article is None:
+        from workflow_runs.models import ContentFactoryRun
+        child = ContentFactoryRun.objects.filter(run_id=publication.run_id, organization_id=site.organization_id).first()
+        result = child.result if child is not None and isinstance(child.result, dict) else {}
+        request = child.run_request if child is not None and isinstance(child.run_request, dict) else {}
+        if isinstance(result.get("article_approval_v1"), dict) and result["article_approval_v1"].get("source") == "publish_reviewed":
+            source = ContentFactoryRun.objects.filter(run_id=request.get("source_run_id"), organization_id=site.organization_id).first()
+            from .publish_reviewed_draft import published_child_for_source
+            if source is not None and getattr(published_child_for_source(source), "pk", None) == child.pk:
+                article = WrittenArticle.objects.filter(organization_id=site.organization_id, source_run_id=source.run_id).order_by("-created_at").first()
+    if article is None:
         logger.info("hosted_publication_live_without_written_article run_id=%s", publication.run_id)
         return None
     article.publish_status = ArticlePublishStatus.LIVE

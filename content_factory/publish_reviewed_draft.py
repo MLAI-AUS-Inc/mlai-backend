@@ -101,6 +101,8 @@ def publish_offer(run):
     if destination is None:
         return None
     config, connection, site = destination
+    if site is not None and site.publications.filter(run_id=run.run_id, status="live").exists():
+        return None
     from .founder_draft_views import posted_record
     posted = posted_record(config, run.run_id) if config else {}
     posted_link = _mapping(posted.get('postedLink'))
@@ -350,3 +352,56 @@ def retry_publish(run):
             raise PublishReviewedError('not_offered', 'Your website changed after this publishing approval.')
     _dispatch(source, run, retry=True)
     return {'status': 'queued', 'run_id': run.run_id, 'source_run_id': source.run_id}
+
+
+def published_child_for_source(source_run):
+    """Resolve the backend's source-bound publish child for journey/live projections."""
+    marker = _mapping(_mapping(source_run.result).get('publish_offer_v1'))
+    child_id = marker.get('run_id')
+    if not child_id or source_run.organization_id is None:
+        return None
+    child = ContentFactoryRun.objects.filter(run_id=child_id, organization_id=source_run.organization_id).first()
+    if child is None:
+        return None
+    approval = _mapping(_mapping(child.result).get('article_approval_v1'))
+    identity = _mapping(_mapping(child.result).get('publish_reviewed_v1'))
+    request = _mapping(child.run_request)
+    digest = approval.get('approved_body_sha256')
+    if (not isinstance(digest, str) or len(digest) != 64 or any(char not in '0123456789abcdef' for char in digest)
+            or approval.get('source') != 'publish_reviewed' or request.get('source_run_id') != source_run.run_id
+            or identity.get('source_run_id') != source_run.run_id
+            or approval.get('approved_body_sha256') != identity.get('approved_body_sha256')
+            or request.get('approved_body_sha256') != approval.get('approved_body_sha256')):
+        return None
+    return child
+
+
+def sync_published_article(run):
+    """Project attested child deployment onto the original article without changing its source identity."""
+    from urllib.parse import urlsplit
+    from .preview_domain_claim import public_host
+    from .models import WrittenArticle, ArticlePublishStatus
+    request, result = _mapping(run.run_request), _mapping(run.result)
+    source = ContentFactoryRun.objects.filter(run_id=request.get('source_run_id'), organization_id=run.organization_id).first()
+    if source is None or getattr(published_child_for_source(source), 'pk', None) != run.pk:
+        return None
+    url = _mapping(result.get('deploy_v1')).get('url')
+    try:
+        parsed = urlsplit(url) if isinstance(url, str) else None
+    except ValueError:
+        parsed = None
+    if (parsed is None or parsed.scheme != 'https' or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or public_host(url) != public_host(source.organization.domain)):
+        return None
+    article = WrittenArticle.objects.filter(organization_id=source.organization_id, source_run_id=source.run_id).order_by('-created_at').first()
+    if article is None:
+        return None
+    now = timezone.now()
+    article.publish_status = ArticlePublishStatus.LIVE
+    article.article_url = article.live_url = article.canonical_url = url
+    article.canonical_path = parsed.path
+    article.live_checked_at = article.live_verified_at = now
+    article.published_at = article.published_at or now
+    article.save(update_fields=['publish_status', 'article_url', 'live_url', 'canonical_url', 'canonical_path',
+        'live_checked_at', 'live_verified_at', 'published_at'])
+    return article

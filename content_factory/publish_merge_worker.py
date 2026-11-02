@@ -561,8 +561,13 @@ def watch_run(run, token, *, now):
             require_unlocked_remote_call()
             body, _ = fetch_live_route(route, run.domain)
             if body:
-                _finish(run, token, state={"watch_reason": "live", "watch_next_at": None},
+                saved = _finish(run, token, state={"watch_reason": "live", "watch_next_at": None},
                     fields={"deploy_v1": {"live_at": now.isoformat(), "url": route, "provider": provider}})
+                if not saved:
+                    return "stale"
+                sync = foundation._optional("content_factory.publish_reviewed_draft", "sync_published_article")
+                if sync is not None:
+                    sync(run)
                 return "live"
     except Exception as exc:
         logger.info("deployment_watch_wait run_id=%s error_type=%s", run.run_id, type(exc).__name__)

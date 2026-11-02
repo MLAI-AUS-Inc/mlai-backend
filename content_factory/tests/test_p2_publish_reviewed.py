@@ -264,3 +264,24 @@ class ReviewedPublishingTests(TransactionTestCase):
         with self.assertRaises(service.PublishReviewedError):
             service.retry_publish(run)
         self.assertEqual(len(self.posts), 1)
+
+    def test_deployed_publish_child_updates_original_article_without_replacing_its_source(self):
+        from content_factory.models import WrittenArticle
+        article = WrittenArticle.objects.create(organization=self.org, source_run_id=self.run.run_id, slug="saved-source",
+            title="Saved source", category="guides", primary_keyword="saved")
+        run, _ = self.start()
+        self.run.refresh_from_db()
+        self.assertEqual(service.published_child_for_source(self.run).pk, run.pk)
+        run.result["deploy_v1"] = {"url": "https://"+self.org.domain+"/blog/saved-source/", "verified_at": timezone.now().isoformat()}
+        run.save(update_fields=["result"])
+        self.assertEqual(service.sync_published_article(run).pk, article.pk)
+        article.refresh_from_db()
+        self.assertEqual(article.source_run_id, self.run.run_id)
+        self.assertEqual(article.live_url, run.result["deploy_v1"]["url"])
+
+    @override_settings(ARTICLES_HOSTED_SITES_ENABLED=True)
+    def test_an_already_live_hosted_article_is_not_offered_a_duplicate_publish(self):
+        from content_factory.hosted_article_models import HostedArticleSite, HostedArticlePublication
+        site = HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain, state="active")
+        HostedArticlePublication.objects.create(site=site, run_id=self.run.run_id, status="live", slug="saved-source")
+        self.assertIsNone(service.publish_offer(self.run))
