@@ -206,6 +206,16 @@ def email_block(blast) -> Optional[str]:
         return "not_configured"
     if blast.mailbox_id is None or not blast.mailbox.enabled:
         return "mailbox_disabled"
+    from . import sender_pool
+    if sender_pool.child_parent(blast) or blast.mailbox.email in sender_pool.addresses():
+        if blast.mailbox.email not in sender_pool.addresses():
+            return "sender_removed"
+        if not sender_pool.enabled():
+            return "sender_pool_disabled"
+        if not sender_pool.child_parent(blast):
+            return "sender_pool_required"
+        if email_stats(blast).get("start_attempted_at"):
+            return "start_unconfirmed"
     if (blast.stats or {}).get("warmup"):
         from .warmup import admission_block
         return admission_block(blast, timezone.now())
@@ -270,6 +280,9 @@ def _drop_reason(blast, contact, is_banned: bool) -> Optional[str]:
         return "opted_out"
     if contact.email_status != Contact.EmailStatus.ACTIVE:
         return "bounced"
+    from .sender_pool import child_parent
+    if child_parent(blast) and contact.marketing_consent != Contact.MarketingConsent.GRANTED:
+        return "consent_changed"
     if (
         blast.purpose == Blast.Purpose.MARKETING
         and contact.marketing_consent == Contact.MarketingConsent.WITHDRAWN
@@ -447,10 +460,12 @@ def load_subscribers(blast, list_id: int, *, now, budget: int = SUBSCRIBERS_PER_
 def start_campaign(blast_id, campaign_id: int, *, now) -> str:
     """Set the campaign running unless the blast was cancelled; records ``started_at``."""
 
+    from . import sender_pool
+    candidate = Blast.objects.select_related("mailbox").get(pk=blast_id)
+    if sender_pool.child_parent(candidate) or candidate.mailbox.email in sender_pool.addresses():
+        return sender_pool.start_campaign(blast_id, campaign_id, now=now)
     with transaction.atomic():
-        from .resend_feedback import monitored_senders
-        # Feedback and admission take sender locks before blast/delivery locks.
-        list(SenderMailbox.objects.select_for_update().filter(email__in=monitored_senders()).order_by("pk"))
+        sender_pool.lock_senders(warmup=True)
         blast = Blast.objects.select_for_update().get(pk=blast_id)
         if blast.status == Blast.Status.CANCELLED:
             return listmonk.CANCELLED
@@ -574,7 +589,7 @@ def retry_cancel(blast_id, *, now) -> None:
         blast.save(update_fields=["stats", "last_error", "updated_at"])
 
 
-def send_test_email(blast_id, user) -> str:
+def send_test_email(blast_id, user, *, pool_mailbox_id=None) -> str:
     """Send the draft to the caller's own email through listmonk; returns that address."""
 
     email = normalize_contact_email(getattr(user, "email", ""))
@@ -589,6 +604,12 @@ def send_test_email(blast_id, user) -> str:
         except ListmonkError as exc:
             if not exc.conflict:
                 raise
-    blast = Blast.objects.select_related("event", "mailbox").get(pk=blast_id)
-    listmonk.test_campaign(campaign_id, campaign_payload(blast, list_id), [email])
+    with transaction.atomic():
+        blast = Blast.objects.select_for_update(of=("self",)).select_related("event", "mailbox").get(pk=blast_id)
+        from .sender_pool import addresses
+        if blast.mailbox.email in addresses() and pool_mailbox_id != blast.mailbox_id:
+            raise ListmonkError("sender_pool_required")
+        if pool_mailbox_id is not None and pool_mailbox_id != blast.mailbox_id:
+            raise ListmonkError("test_sender_changed")
+        listmonk.test_campaign(campaign_id, campaign_payload(blast, list_id), [email])
     return email

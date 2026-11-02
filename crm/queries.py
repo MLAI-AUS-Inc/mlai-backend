@@ -294,6 +294,7 @@ def events_with_last_blast():
     return CrmEvent.objects.annotate(
         last_blast_id=Subquery(
             Blast.objects.filter(event=OuterRef("pk"), sent_at__isnull=False)
+            .exclude(stats__has_key="sender_pool_child")
             .order_by("-sent_at")
             .values("pk")[:1]
         )
@@ -466,8 +467,11 @@ def blast_stats(blasts: Iterable[Blast]) -> dict:
     ids = [blast.pk for blast in blasts]
     if not ids:
         return {}
+    parent_map = {str(blast_id): blast_id for blast_id in ids}
+    child_map = dict(Blast.objects.filter(stats__sender_pool_child__parent_id__in=list(parent_map))
+                     .values_list("pk", "stats__sender_pool_child__parent_id"))
     rows = (
-        BlastDelivery.objects.filter(blast_id__in=ids)
+        BlastDelivery.objects.filter(blast_id__in=[*ids, *child_map])
         .values("blast_id", "channel")
         .annotate(
             recipients=Count("id"),
@@ -497,7 +501,16 @@ def blast_stats(blasts: Iterable[Blast]) -> dict:
     )
     stats = {blast_id: {"channels": {}, "replies": replies.get(blast_id, 0)} for blast_id in ids}
     for row in rows:
-        stats[row["blast_id"]]["channels"][row["channel"]] = row
+        parent_id = parent_map.get(child_map.get(row["blast_id"]), row["blast_id"])
+        channel = stats[parent_id]["channels"]
+        if row["channel"] not in channel:
+            channel[row["channel"]] = {**row, "blast_id": parent_id}
+        else:
+            total = channel[row["channel"]]
+            for key, value in row.items():
+                if key not in ("blast_id", "channel", "price_unit") and value is not None:
+                    total[key] = (total.get(key) or 0) + value
+            total["price_unit"] = total.get("price_unit") or row["price_unit"]
     return stats
 
 
@@ -518,7 +531,16 @@ def mailbox_sent_last_24h(mailbox_ids: Iterable, now: datetime) -> dict:
         .annotate(total=Count("id"))
         .order_by()
     )
-    return {row["blast__mailbox_id"]: row["total"] for row in rows}
+    counts = {row["blast__mailbox_id"]: row["total"] for row in rows}
+    from .sender_pool import ATTEMPT, addresses
+    from .models import SenderMailbox
+    pool_ids = list(SenderMailbox.objects.filter(pk__in=ids, email__in=addresses()).values_list("pk", flat=True))
+    attempts = dict(CrmAuditEvent.objects.filter(target_type=ATTEMPT,
+        target_id__in=[str(pk) for pk in pool_ids], created_at__gte=now-MAILBOX_WINDOW)
+        .values("target_id").annotate(total=Count("pk")).values_list("target_id", "total"))
+    for pk in pool_ids:
+        counts[pk] = attempts.get(str(pk), 0)
+    return counts
 
 
 def mailbox_remaining_today(mailbox, now: datetime) -> int:
@@ -529,7 +551,7 @@ def mailbox_remaining_today(mailbox, now: datetime) -> int:
 def blasts_queryset(*, status: str = "", event_id: str = "", channel: str = ""):
     """Blasts newest first, narrowed by status, event and channel."""
 
-    blasts = Blast.objects.select_related("event", "segment", "created_by", "whatsapp_template")
+    blasts = Blast.objects.exclude(stats__has_key="sender_pool_child").select_related("event", "segment", "created_by", "whatsapp_template")
     if status:
         blasts = blasts.filter(status=status)
     if event_id:
@@ -540,7 +562,8 @@ def blasts_queryset(*, status: str = "", event_id: str = "", channel: str = ""):
 
 
 def blast_deliveries(blast: Blast, *, channel: str = "", status: str = ""):
-    deliveries = BlastDelivery.objects.filter(blast=blast).select_related("contact")
+    from .sender_pool import delivery_filter
+    deliveries = BlastDelivery.objects.filter(delivery_filter(blast.pk)).select_related("contact")
     if channel:
         deliveries = deliveries.filter(channel=channel)
     if status:
@@ -558,7 +581,7 @@ def blast_replies(blast: Blast):
 
 def latest_sent_blast() -> Optional[Blast]:
     return (
-        Blast.objects.filter(sent_at__isnull=False)
+        Blast.objects.filter(sent_at__isnull=False).exclude(stats__has_key="sender_pool_child")
         .select_related("event", "segment", "created_by", "whatsapp_template")
         .order_by("-sent_at")
         .first()

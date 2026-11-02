@@ -746,12 +746,14 @@ def blast_progress(blast, rows: dict) -> dict:
 
 
 def blast_detail(blast, stats: Optional[dict] = None) -> dict:
+    from crm.sender_pool import describe
     stats = stats or {"channels": {}, "replies": 0}
     return {
         **blast_summary(blast, stats),
         "sms_only_without_whatsapp": blast.sms_only_without_whatsapp,
         "email": {
             "mailbox_id": str(blast.mailbox_id) if blast.mailbox_id else None,
+            "routing": describe(blast),
             "subject": blast.subject,
             "body_markdown": blast.body_markdown,
         },

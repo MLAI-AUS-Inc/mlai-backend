@@ -283,6 +283,12 @@ def save_mailbox(mailbox: Optional[SenderMailbox], data: dict, *, actor) -> Send
         if SenderMailbox.objects.filter(email=email).exists():
             raise CrmError("mailbox_exists", 409)
         mailbox = SenderMailbox(email=email, domain=domain, route=route)
+    from crm.sender_pool import DAILY_LIMIT, addresses
+    if mailbox.email in addresses():
+        if data.get("daily_limit", mailbox.daily_limit) > DAILY_LIMIT:
+            raise CrmError("sender_pool_daily_limit", maximum=DAILY_LIMIT)
+        if data.get("reply_to", mailbox.reply_to).lower() != mailbox.email.lower():
+            raise CrmError("sender_pool_reply_to_mismatch")
     switching_on = data.get("enabled") is True and (creating or not mailbox.enabled)
     for name in _MAILBOX_FIELDS:
         if name in data:
@@ -337,6 +343,8 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
         if "purpose" not in data:
             raise CrmError("invalid_request", fields={"purpose": ["required"]})
         blast = Blast(created_by=actor)
+    elif (blast.stats or {}).get("sender_pool_child"):
+        raise CrmError("internal_campaign", 409)
     elif blast.status != Blast.Status.DRAFT:
         raise CrmError("blast_not_draft", 409, blast_status=blast.status)
     if "purpose" in data:
@@ -374,6 +382,8 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
         )
     if "variables" in whatsapp:
         blast.whatsapp_variables = whatsapp["variables"]
+    from crm.sender_pool import prepare_draft
+    prepare_draft(blast)
     check_channel_rules(blast)
     with transaction.atomic():
         blast.save()

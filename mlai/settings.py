@@ -2339,6 +2339,12 @@ CRM_RESEND_MONITORED_SENDERS = tuple(
     value.strip().lower() for value in os.environ.get('CRM_RESEND_MONITORED_SENDERS', '').split(',')
     if value.strip()
 )
+CRM_CAMPAIGN_SENDERS = tuple(
+    value.strip().lower() for value in os.environ.get('CRM_CAMPAIGN_SENDERS', '').split(',')
+    if value.strip()
+)
+CRM_SENDER_POOL_ENABLED = _env_is_true('CRM_SENDER_POOL_ENABLED', False)
+CRM_SENDER_POOL_DAILY_LIMIT = int(os.environ.get('CRM_SENDER_POOL_DAILY_LIMIT', '60'))
 CRM_WARMUP_ENABLED = _env_is_true('CRM_WARMUP_ENABLED', False)
 CRM_WARMUP_RUN_ID = os.environ.get('CRM_WARMUP_RUN_ID', '').strip()
 LISTMONK_BASE_URL = os.environ.get('LISTMONK_BASE_URL', '').strip().rstrip('/')

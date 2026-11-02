@@ -13,6 +13,7 @@ from email.utils import parseaddr
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -28,6 +29,11 @@ MAX_BODY = 128 * 1024
 
 def monitored_senders():
     return tuple(getattr(settings, "CRM_RESEND_MONITORED_SENDERS", ()))
+
+
+def feedback_senders():
+    from .sender_pool import addresses
+    return tuple(dict.fromkeys((*monitored_senders(), *addresses())))
 
 
 def verify_signature(body, headers, secret, *, now=None):
@@ -61,7 +67,7 @@ def parse_event(payload):
     if not isinstance(data, dict):
         raise ValueError("invalid_data")
     sender = parseaddr(str(data.get("from", "")))[1].strip().lower()
-    if sender not in monitored_senders():
+    if sender not in feedback_senders():
         return None
     recipients = data.get("to")
     if not isinstance(recipients, list) or len(recipients) != 1 or not isinstance(recipients[0], str):
@@ -119,7 +125,7 @@ def record_event(event, message_id, *, now=None):
     with transaction.atomic():
         # Same lock order in warm-up queueing and campaign start prevents races.
         locked = list(SenderMailbox.objects.select_for_update().filter(
-            email__in=monitored_senders()).order_by("pk"))
+            email__in=feedback_senders()).order_by("pk"))
         if event["sender"] not in {mailbox.email for mailbox in locked}:
             return {"status": "ignored"}
         duplicate = CrmAuditEvent.objects.filter(target_type="resend_event", target_id=receipt).exists()
@@ -129,8 +135,10 @@ def record_event(event, message_id, *, now=None):
             if delivery is None:
                 candidates = list(BlastDelivery.objects.select_for_update().filter(
                     channel=Channel.EMAIL, address=event["recipient"], blast__mailbox__email=event["sender"],
-                    blast__subject=event["subject"], created_at__gte=now - timedelta(days=7),
-                    provider_id="",
+                    blast__subject=event["subject"], provider_id="",
+                ).filter(
+                    Q(blast__queued_at__gte=now - timedelta(days=7))
+                    | Q(blast__queued_at__isnull=True, created_at__gte=now - timedelta(days=7))
                 ).exclude(status=BlastDelivery.Status.QUEUED).order_by("-pk")[:2])
                 delivery = candidates[0] if len(candidates) == 1 else None
             if delivery and (delivery.address != event["recipient"] or delivery.blast.mailbox.email != event["sender"]):
@@ -148,7 +156,11 @@ def record_event(event, message_id, *, now=None):
                 record_email_opt_out(event["recipient"], kind, source="resend:webhook", now=now,
                                      detail={"email_id": event["email_id"], "event": event["type"]})
             if event["type"] in BAD_EVENTS and not event["test"]:
-                pause_senders(event["type"], now=now, event_id=receipt)
+                from .sender_pool import addresses, pause
+                if event["sender"] in addresses():
+                    pause(event["type"], now=now)
+                else:
+                    pause_senders(event["type"], now=now, event_id=receipt)
             CrmAuditEvent.objects.create(
                 action=CrmAuditEvent.Action.SYNC, target_type="resend_event", target_id=receipt,
                 detail={"event": event["type"], "email_id": event["email_id"],
@@ -173,7 +185,7 @@ class ResendWebhookView(APIView):
 
     def post(self, request):
         secret = getattr(settings, "CRM_RESEND_WEBHOOK_SECRET", "")
-        if not secret or not monitored_senders():
+        if not secret or not feedback_senders():
             return Response({"error": "not_configured"}, status=503)
         if int(request.META.get("CONTENT_LENGTH") or 0) > MAX_BODY:
             return Response({"error": "payload_too_large"}, status=413)

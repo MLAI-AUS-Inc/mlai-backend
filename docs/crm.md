@@ -85,7 +85,7 @@ Listmonk admin/API paths remain private.
 Subscribe to `email.sent`, `email.delivered`, `email.bounced`,
 `email.complained`, `email.failed`, `email.delivery_delayed` and
 `email.suppressed`. Only exact addresses in `CRM_RESEND_MONITORED_SENDERS`
-are handled. One SMTP recipient per message is required. The signing secret
+and `CRM_CAMPAIGN_SENDERS` are handled. One SMTP recipient per message is required. The signing secret
 is host configuration; it is never a sending API key.
 
 Feedback receipts are append-only `CrmAuditEvent` rows (`resend_event`),
@@ -527,3 +527,54 @@ Blasts and listmonk need no schema change: they use the tables in `crm.0001_init
 | Entry points | the scheduler runners (`crm_luma_guest_sync`, `crm_blast_dispatch`, `crm_listmonk_sync`), the management commands, the contacts API under `/api/v1/community-chat/crm/`, and the Twilio webhooks under `/api/v1/crm/webhooks/` |
 | Personal data | names, emails, phone numbers, employers and registration answers |
 | Retention | retention undecided |
+
+### Campaign sender pool
+
+`CRM_SENDER_POOL_ENABLED=true` makes new email drafts and newly queued drafts
+use `CRM_CAMPAIGN_SENDERS`. The rollout's `stats.warmup` drafts are excluded;
+`CRM_RESEND_MONITORED_SENDERS` continues to identify only the original warm-up
+roster. The pool is off by default and must stay off until SMTP routing,
+signed feedback and the shared quota tests pass.
+
+The requested pool is `sam`, `shan`, `partnerships`, `tech`, `sonia`, `ryan`,
+`treasurer` and `hi`, all at `mlai.au`. Each `SenderMailbox` has `reply_to`
+equal to its own address and a maximum daily limit of 30. Existing receiving
+inboxes and Google MX records remain the reply destination. CRM cannot count
+messages sent directly from those inboxes outside its campaign pipeline.
+
+Queueing snapshots explicitly opted-in, unsuppressed recipients and assigns
+each to one sender. Internal one-recipient `Blast` rows in
+`stats.sender_pool_child` reuse the existing listmonk pipeline and deterministic
+UUIDs. They are hidden from the campaign list; the parent's progress and
+recipient list aggregate them. `email.routing` describes the pool in the API.
+Queueing is idempotent, and editing internal children is refused. More than a
+day's capacity can be queued; remaining messages wait for future capacity.
+
+The scheduler admits at most one outstanding message per sender. Sender row
+locks serialize campaign start, feedback, cancellation and quota admission.
+An append-only `sender_pool_attempt` audit is committed **before** the external
+start request. Each attempt, including tests and uncertain outcomes, uses one
+of 30 slots in a rolling 24-hour window, shared across campaigns. `CRM_SENDER_POOL_DAILY_LIMIT` additionally caps the
+whole pool (default 60 per rolling 24 hours), including tests. This reserves
+40 of the current free account's 100 daily slots for the two warm-up senders.
+This account budget is checked again under the same locks before every start.
+Attempts are
+spaced at least 48 minutes apart. A crash or ambiguous start is never retried
+automatically. The original SMTP retry setting remains zero.
+
+Consent and suppression are rechecked before delivery. A bounce, complaint,
+failed/suppressed provider event, uncertain attempt, missing signed feedback,
+or missing webhook configuration stops the pool. It does not disable or expand
+the independent warm-up roster. No scheduler automatically re-enables senders
+or reassigns their recipients. Cancelling a parent also cancels pending children.
+Listmonk engagement polling uses per-campaign cursors and visits older campaigns
+fairly; global unsubscribe suppression continues independently.
+
+Deployment sequence: configure the eight mailboxes disabled, install a dedicated
+sending-only `mlai.au` SMTP credential with `from_addresses` restricted to these
+addresses, deploy the feature disabled, verify each From/Reply-To route using
+simulator recipients, verify signed feedback/suppression/replay, then enable the
+pool. Do not restart listmonk; its startup wrapper runs migrations. Never expose
+its admin/API publicly. Verify the account's total provider allowance before
+promising 240/day; the per-sender limits do not override the provider's account
+quota or establish Gmail inbox placement.

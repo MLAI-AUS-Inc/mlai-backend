@@ -35,7 +35,7 @@ from django.utils import timezone
 from community_chat.admin_access import require_mlai_admin
 from roo.permissions import is_mlai_admin_user
 
-from . import blast_email, listmonk, merge_tags, twilio
+from . import blast_email, listmonk, merge_tags, sender_pool, twilio
 from .access import channel_availability
 from .emails import normalize_contact_email
 from .listmonk import ListmonkError
@@ -307,6 +307,11 @@ def resolve_audience(blast, *, now) -> Audience:
     querysets[Channel.EMAIL], excluded[Channel.EMAIL] = evaluate(
         definition, blast.purpose, blast.event, now=now
     )
+    if sender_pool.is_parent(blast):
+        email = querysets[Channel.EMAIL]
+        missing = email.exclude(marketing_consent=Contact.MarketingConsent.GRANTED).count()
+        excluded[Channel.EMAIL]["no_consent"] = excluded[Channel.EMAIL].get("no_consent", 0) + missing
+        querysets[Channel.EMAIL] = email.filter(marketing_consent=Contact.MarketingConsent.GRANTED)
     if not twilio_allowed(blast):
         return Audience(querysets, excluded)
 
@@ -395,6 +400,8 @@ def channel_limits(blast, counts: dict, *, now) -> list:
     limits = []
     for channel in blast.channels or []:
         if channel == Channel.EMAIL:
+            if sender_pool.is_parent(blast):
+                continue  # The durable queue spreads the snapshot over future days.
             if blast.mailbox_id is None:
                 continue
             remaining = mailbox_remaining_today(blast.mailbox, now)
@@ -483,6 +490,7 @@ def queue_blast(blast_id, *, confirm: dict, idempotency_key: str, actor, now=Non
         return Blast.objects.get(pk=replay.pk)
     try:
         with transaction.atomic():
+            sender_pool.lock_senders(warmup=Blast.objects.filter(pk=blast_id, stats__has_key="warmup").exists())
             blast = (
                 Blast.objects.select_for_update(of=("self",))
                 .select_related("event", "mailbox", "segment", "whatsapp_template")
@@ -492,6 +500,7 @@ def queue_blast(blast_id, *, confirm: dict, idempotency_key: str, actor, now=Non
                 return blast
             if blast.status != Blast.Status.DRAFT:
                 raise BlastError("blast_not_draft", 409, blast_status=blast.status)
+            sender_pool.prepare_draft(blast)
             check_channels_available(blast.channels or [], status=403)
             check_ready(blast)
             audience = resolve_audience(blast, now=now)
@@ -513,6 +522,11 @@ def queue_blast(blast_id, *, confirm: dict, idempotency_key: str, actor, now=Non
             limits = channel_limits(blast, counts, now=now)
             if limits:
                 raise BlastError("daily_limit", 409, limits=limits)
+            if sender_pool.child_parent(blast):
+                raise BlastError("internal_campaign", 409)
+            if sender_pool.is_parent(blast):
+                sender_pool.snapshot(blast, recipients.get(Channel.EMAIL, []))
+                recipients = {channel: rows for channel, rows in recipients.items() if channel != Channel.EMAIL}
             BlastDelivery.objects.bulk_create(_snapshot(blast, recipients), batch_size=1000)
             blast.segment_definition = audience_definition(blast, now=now) or {}
             blast.status = Blast.Status.QUEUED
@@ -523,6 +537,8 @@ def queue_blast(blast_id, *, confirm: dict, idempotency_key: str, actor, now=Non
             blast.save(
                 update_fields=[
                     "segment_definition",
+                    "mailbox",
+                    "stats",
                     "status",
                     "queued_at",
                     "recipient_count",
@@ -555,7 +571,7 @@ def refresh_status(blast_id, *, now=None) -> str:
         return blast.status
     counts: dict = defaultdict(Counter)
     rows = (
-        BlastDelivery.objects.filter(blast=blast)
+        BlastDelivery.objects.filter(sender_pool.delivery_filter(blast.pk))
         .values("channel", "status")
         .annotate(total=Count("id"))
         .order_by()
@@ -564,7 +580,10 @@ def refresh_status(blast_id, *, now=None) -> str:
         counts[row["channel"]][row["status"]] = row["total"]
     states = {}
     for channel in blast.channels or []:
-        if channel == Channel.EMAIL:
+        if channel == Channel.EMAIL and (sender_pool.is_parent(blast) or sender_pool.child_parent(blast)):
+            blocked = False  # Disabled senders remain visibly pending, never complete early.
+            provider_failed = False
+        elif channel == Channel.EMAIL:
             started = blast_email.email_started(blast)
             blocked = not started and bool(blast_email.email_block(blast))
             provider_failed = (
@@ -634,7 +653,7 @@ def dispatch_blast(blast_id, *, now=None, twilio_budget: Optional[int] = None) -
     if not is_mlai_admin_user(blast.created_by):
         return {"status": fail_unauthorised(blast.pk, now=now), "twilio_sends": 0, "refused": NOT_AUTHORISED}
     outcome: dict[str, Any] = {"twilio_sends": 0}
-    if Channel.EMAIL in (blast.channels or []):
+    if Channel.EMAIL in (blast.channels or []) and not sender_pool.is_parent(blast):
         try:
             outcome["email"] = blast_email.dispatch_email(blast, now=now)
             # listmonk answered again, so an earlier outage note no longer applies.
@@ -661,6 +680,7 @@ def dispatch_blast(blast_id, *, now=None, twilio_budget: Optional[int] = None) -
             if isinstance(value, int) and not isinstance(value, bool)
         )
     outcome["status"] = refresh_status(blast.pk, now=now)
+    Blast.objects.filter(pk=blast.pk).update(updated_at=now)
     return outcome
 
 
@@ -677,8 +697,8 @@ def claim_blasts(*, now, limit: int = MAX_BLASTS_PER_TICK) -> list:
     with transaction.atomic():
         rows = list(
             Blast.objects.select_for_update(skip_locked=True)
-            .filter(status__in=LIVE)
-            .order_by("queued_at", "pk")
+            .filter(status__in=LIVE).exclude(stats__has_key=sender_pool.PARENT)
+            .order_by("updated_at", "queued_at", "pk")
             .values_list("pk", "status")[:limit]
         )
         queued = [pk for pk, status in rows if status == Blast.Status.QUEUED]
@@ -686,7 +706,9 @@ def claim_blasts(*, now, limit: int = MAX_BLASTS_PER_TICK) -> list:
             Blast.objects.filter(pk__in=queued, status=Blast.Status.QUEUED).update(
                 status=Blast.Status.SENDING, updated_at=now
             )
-    return [pk for pk, _ in rows]
+    parents = list(Blast.objects.filter(status__in=LIVE, stats__has_key=sender_pool.PARENT)
+                   .order_by("updated_at", "pk").values_list("pk", flat=True)[:limit])
+    return [pk for pk, _ in rows] + parents
 
 
 def run_blast_dispatch_scheduler(*, now=None) -> dict:
@@ -702,6 +724,11 @@ def run_blast_dispatch_scheduler(*, now=None) -> dict:
     if not cache.add(DISPATCH_THROTTLE_KEY, 1, timeout=settings.CRM_BLAST_DISPATCH_INTERVAL_SECONDS):
         return {"status": "skipped", "reason": "throttled"}
     now = now or timezone.now()
+    try:
+        sender_pool.admit(now)
+    except Exception as exc:
+        logger.error("crm sender pool admission deferred: %s", type(exc).__name__)
+        return {"status": "deferred", "reason": "sender_pool_admission_failed"}
     blast_ids = claim_blasts(now=now)
     budget = settings.CRM_TWILIO_SENDS_PER_TICK
     outcomes: dict[str, str] = {}
@@ -751,12 +778,19 @@ def cancel_blast(blast_id, *, actor, now=None) -> Blast:
     require_mlai_admin(actor)
     now = now or timezone.now()
     with transaction.atomic():
+        sender_pool.lock_senders(warmup=Blast.objects.filter(pk=blast_id, stats__has_key="warmup").exists())
         blast = Blast.objects.select_for_update().get(pk=blast_id)
         if blast.status == Blast.Status.CANCELLED:
             return blast
         if blast.status not in (Blast.Status.DRAFT, *LIVE):
             raise BlastError("blast_not_cancellable", 409, blast_status=blast.status)
         previous = blast.status
+        if sender_pool.is_parent(blast):
+            for child in sender_pool.children(blast.pk).filter(status__in=(Blast.Status.DRAFT, *LIVE)):
+                cancel_blast(child.pk, actor=actor, now=now)
+        if sender_pool.child_parent(blast):
+            BlastDelivery.objects.filter(blast=blast, status="queued").update(
+                status="unsubscribed", error_code="campaign_cancelled", updated_at=now)
         if previous in LIVE and Channel.EMAIL in (blast.channels or []):
             values = blast_email.cancel_campaign(blast, now=now)
             if values:
@@ -812,7 +846,10 @@ def send_tests(blast_id, channels: list, *, user, now=None) -> dict:
     sent, failed = [], []
     for channel in channels:
         if channel == Channel.EMAIL:
-            address = blast_email.send_test_email(blast.pk, user)
+            if blast.mailbox.email in sender_pool.addresses():
+                address = sender_pool.send_test(blast, actor=user, now=now or timezone.now())
+            else:
+                address = blast_email.send_test_email(blast.pk, user)
             sent.append({"channel": channel, "to": mask_address(channel, address)})
             continue
         if channel == Channel.SMS:

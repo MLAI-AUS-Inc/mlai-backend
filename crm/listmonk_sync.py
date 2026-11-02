@@ -26,7 +26,7 @@ from typing import Iterable, Optional
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 from . import blast_email, listmonk
@@ -141,7 +141,7 @@ def blasts_to_sync(now) -> list:
             | Q(sent_at__gte=recent)
             | Q(stats__email__cancel_pending=True)
         )
-        .order_by("-queued_at", "-pk")[:MAX_BLASTS]
+        .order_by(F("stats__email__feedback_synced_at").asc(nulls_first=True), "pk")[:MAX_BLASTS]
     )
 
 
@@ -231,7 +231,10 @@ def sync_blast(blast, *, since, now) -> Counter:
     counts["campaigns"] += 1
     started_at = blast_email.parse_iso(blast_email.email_stats(blast).get("started_at"))
     if started_at and started_at >= now - timedelta(days=ENGAGEMENT_DAYS):
-        counts.update(sync_engagement(blast, since=max(since, started_at - OVERLAP), now=now))
+        previous = blast_email.parse_iso(blast_email.email_stats(blast).get("feedback_synced_at"))
+        campaign_since = previous - OVERLAP if previous else started_at - OVERLAP
+        counts.update(sync_engagement(blast, since=campaign_since, now=now))
+    blast_email.merge_email_stats(blast.pk, feedback_synced_at=blast_email.iso_z(now))
     refresh_status(blast.pk, now=now)
     return counts
 
