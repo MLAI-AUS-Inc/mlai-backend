@@ -4813,6 +4813,449 @@
         "avoidWords",
         "preferWords"
       ]
+    },
+    "FounderArticleAuthor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 1000,
+          "minLength": 1
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 10000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "credentials": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 10000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bio": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 10000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "avatarUrl": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 10000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "avatarAlt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 10000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 10000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sameAs": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "label": {
+                "type": "string",
+                "maxLength": 1000
+              },
+              "href": {
+                "type": "string",
+                "maxLength": 4096
+              }
+            },
+            "required": [
+              "label",
+              "href"
+            ],
+            "x-wire-project": true
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticleActivation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "canResearch": {
+          "type": "boolean"
+        },
+        "canGeneratePortableDraft": {
+          "type": "boolean"
+        },
+        "canGenerateArticle": {
+          "type": "boolean"
+        },
+        "canPublishArticle": {
+          "type": "boolean"
+        },
+        "githubConnected": {
+          "type": "boolean"
+        },
+        "repositorySelected": {
+          "type": "boolean"
+        },
+        "repositoryAccessVerified": {
+          "type": "boolean"
+        },
+        "integrationVerified": {
+          "type": "boolean"
+        },
+        "canPublishHostedArticle": {
+          "type": "boolean"
+        },
+        "hostedSite": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "maxLength": 100
+                },
+                "baseUrl": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "proxyVerified": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "state",
+                "baseUrl",
+                "proxyVerified"
+              ],
+              "x-wire-project": true
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stage": {
+          "enum": [
+            "github",
+            "repository",
+            "integration",
+            "verifying",
+            "ready",
+            "unavailable"
+          ]
+        },
+        "accountStatus": {
+          "enum": [
+            "connected",
+            "checking",
+            "needs_action",
+            "not_connected",
+            "unavailable"
+          ]
+        },
+        "reasonCode": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publishingReasonCode": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publishingReason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "routePath": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "surfaceLabel": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nextStep": {
+          "enum": [
+            "repository",
+            "articles"
+          ]
+        },
+        "verifiedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "firstArticle": {
+          "$ref": "#/$defs/FirstArticleEntitlement"
+        },
+        "prices": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "article": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "researchTopic": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "research": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "islandResearch": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "automationResearch": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "article",
+            "researchTopic",
+            "research"
+          ],
+          "x-wire-project": true
+        }
+      },
+      "required": [
+        "version",
+        "canResearch",
+        "canGeneratePortableDraft",
+        "canGenerateArticle",
+        "canPublishArticle",
+        "githubConnected",
+        "repositorySelected",
+        "repositoryAccessVerified",
+        "integrationVerified",
+        "stage",
+        "reasonCode",
+        "reason",
+        "routePath",
+        "surfaceLabel",
+        "nextStep",
+        "prices"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticleWorkspaceInputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "company": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "maxLength": 100,
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "maxLength": 1000
+            },
+            "domain": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "domain"
+          ],
+          "x-wire-project": true
+        },
+        "settings": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "authors": {
+              "type": "array",
+              "maxItems": 100,
+              "items": {
+                "$ref": "#/$defs/FounderArticleAuthor"
+              }
+            },
+            "defaultAuthorId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "authors",
+            "defaultAuthorId"
+          ],
+          "x-wire-project": true
+        },
+        "articleCapabilities": {
+          "$ref": "#/$defs/FounderArticleActivation"
+        }
+      },
+      "required": [
+        "company",
+        "settings",
+        "articleCapabilities"
+      ],
+      "x-wire-project": true
     }
   }
 }
