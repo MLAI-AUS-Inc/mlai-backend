@@ -38,10 +38,10 @@
     },
     {
       "path": "content_factory/failure_policy_engine.py",
-      "function": "_apply_operation",
+      "function": "_apply_unowned_operation",
       "field": "code",
       "expression": "_code(subject)",
-      "site_sha256": "d027733fbb498f54a2e27e948ec474b73f6f0c955e0d7937573cdbd43ad8460f",
+      "site_sha256": "562796ff0fb9afae6de0728c95d4aa1e43176d4f64423826c01214f82caaabf7",
       "adapter": "audited_v0_observation",
       "owner": "backend.website_reconciliation",
       "allowed_codes_ref": "contracts/failure-codes.json#/codes",

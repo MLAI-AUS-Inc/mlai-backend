@@ -119,6 +119,38 @@ class ExecutionTicketTests(TestCase):
         with self.assertRaises(ExecutionControlDenied):
             self.append()
 
+    def test_current_typed_transient_with_recent_budget_can_offer_explicit_resume_without_writes(self):
+        from .run_execution_control import record_budget_observation
+        from .run_user_resume import can_request_user_resume
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_event_authority import batch
+        with transaction.atomic():
+            record_budget_observation(self.run, self.observation(uncertain_calls=0))
+        events = [{"status": "running"}, {"type": "failure", "failure": {"code": "worker_unavailable", "stage": "draft"}},
+            {"status": "failed"}]
+        self.assertEqual(receive_authoritative_run_events(batch(self.run, events)).status_code, 200)
+        self.run.refresh_from_db()
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        self.assertFalse(self.run.resume_available)
+        self.assertTrue(can_request_user_resume(self.run, user=self.user))
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), before)
+        from django.utils import timezone
+        from datetime import timedelta
+        state = self.run.result[CONTROL_KEY]["budget_observation"]
+        original = deepcopy(state)
+        state["observed_at"] = (timezone.now()-timedelta(minutes=6)).isoformat()
+        self.assertFalse(can_request_user_resume(self.run, user=self.user))
+        state.update(deepcopy(original))
+        state["payload"]["used_model_tokens"] = BUDGET["max_model_tokens"]
+        self.assertFalse(can_request_user_resume(self.run, user=self.user))
+        state.update(deepcopy(original))
+        state["payload"]["uncertain_calls"] = 1
+        self.assertFalse(can_request_user_resume(self.run, user=self.user))
+        state.update(deepcopy(original))
+        projection = self.run.result["run_owner_events_v1"]["projection"]
+        projection["failure"]["code"] = "EDITORIAL_REJECTED"
+        self.assertFalse(can_request_user_resume(self.run, user=self.user))
+
     def test_unknown_and_exhausted_budget_never_advances(self):
         for changes in ({"used_model_usd_upper_bound": None}, {"used_model_usd_upper_bound": "5.00"},
                         {"used_model_usd_upper_bound": "NaN"}, {"used_model_tokens": 50000},

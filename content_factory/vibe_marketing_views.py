@@ -12005,6 +12005,8 @@ def _serialize_run(
     original_request = _run_mapping(run.run_request)
     from .article_publish_approval import effective_approval_state
     approval_state = effective_approval_state(run)
+    from .run_user_resume import can_request_user_resume
+    resume_available = can_request_user_resume(run)
     original_mode = str(original_request.get("delivery_mode") or original_request.get("deliveryMode") or "")
     original_confirmation = original_request.get("delivery_mode_confirmed", original_request.get("deliveryModeConfirmed",
         original_request.get("delivery_mode_explicit", original_request.get("deliveryModeExplicit"))))
@@ -12086,7 +12088,7 @@ def _serialize_run(
             "currentStep": run.current_step,
             "approvalState": approval_state,
             "sourceRunId": _run_source_run_id(run) or None,
-            "resumeAvailable": run.resume_available,
+            "resumeAvailable": resume_available,
             "restartAvailable": _article_restart_available(run),
             "createdAt": run.created_at.isoformat(),
             "updatedAt": run.updated_at.isoformat(),
@@ -12129,7 +12131,7 @@ def _serialize_run(
             ) if include_workflow_progress else None,
             "result": public_run_value(_strip_missing_setup_run_refs(_compact_result_for_run(run))),
             **reliability_presentation(result, status=run.status, workflow=run.workflow,
-                                       current_step=run.current_step, resume_available=run.resume_available,
+                                       current_step=run.current_step, resume_available=resume_available,
                                        approval_state=approval_state),
             **entitlement_payload(run),
             **cancellation_payload(run.result),
@@ -12165,7 +12167,7 @@ def _serialize_run(
         "currentStep": run.current_step,
         "approvalState": approval_state,
         "sourceRunId": _run_source_run_id(run) or None,
-        "resumeAvailable": run.resume_available,
+        "resumeAvailable": resume_available,
         "restartAvailable": _article_restart_available(run),
         "createdAt": run.created_at.isoformat(),
         "updatedAt": run.updated_at.isoformat(),
@@ -12212,7 +12214,7 @@ def _serialize_run(
         ) if include_workflow_progress else None,
         "result": public_run_value(_strip_missing_setup_run_refs(response_result)),
         **reliability_presentation(result, status=run.status, workflow=run.workflow,
-                                   current_step=run.current_step, resume_available=run.resume_available,
+                                   current_step=run.current_step, resume_available=resume_available,
                                    approval_state=approval_state),
         **entitlement_payload(run),
         **cancellation_payload(run.result),
@@ -20374,7 +20376,8 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             enabled=True,
             config=config,
         )
-        result = run.result or {}
+        baseline = copy.deepcopy(run.result or {})
+        result = copy.deepcopy(baseline)
         result["daily_automation_enabled_at"] = timezone.now().isoformat()
         result["daily_automation_timezone"] = config.default_timezone
         if automation is not None:
@@ -20387,8 +20390,8 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             # No verified channel and Slack couldn't be auto-linked; the
             # legacy shared daily queue keeps serving this org.
             result["daily_automation_channel_warning"] = "no_verified_channels"
-        run.result = result
-        run.save(update_fields=["result", "updated_at"])
+        from .run_provider_facts import save_provider_result
+        save_provider_result(run, result, baseline=baseline, legacy_fields=["result", "updated_at"])
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
     if action == "merge-publish-pr":

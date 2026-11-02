@@ -279,6 +279,8 @@ def record_budget_observation(run, payload):
     control = result.setdefault(CONTROL_KEY, {"schema_version": 1, "grants": {}})
     control["budget_high_water"] = {key: deepcopy(payload[key]) for key in
         ("used_model_usd_upper_bound", "used_model_tokens", "uncertain_calls", "event_cursor")}
+    from django.utils import timezone
+    control["budget_observation"] = {"payload": deepcopy(payload), "observed_at": timezone.now().isoformat()}
     from workflow_runs.models import ContentFactoryRun
     ContentFactoryRun.objects.filter(pk=run.pk).update(result=result)
     run.result = result

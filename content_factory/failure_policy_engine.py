@@ -48,6 +48,9 @@ def policy_mode(organization):
 
 def owns_recovery(run, *, now=None):
     """Stand old recovery down only when a live P2 executor owns this item."""
+    from .website_run_authority import event_owned
+    if event_owned(run):
+        return True
     return policy_mode(run.organization) == 'policy' and decide(run, now=now).reason != 'executor_off'
 
 
@@ -118,12 +121,16 @@ def _executor(action, organization):
 
 def decide(subject, *, now=None):
     """Choose one registry action without dispatching or changing any receipt."""
+    if _event_owner(subject):
+        return Decision('observe', None, 'execution_owned', 0, None, 'observe')
     organization, _, _, _ = _parts(subject)
     with registry_policy.organization_read_scope(organization, _config(organization)):
         return _decide(subject, now=now)
 
 
 def _decide(subject, *, now=None, prospective=False):
+    if _event_owner(subject):
+        return Decision('observe', None, 'execution_owned', 0, None, 'observe')
     now = now or timezone.now()
     organization, result, request, operation = _parts(subject)
     mode = 'policy' if (getattr(settings, 'ARTICLES_SELF_HEAL_POLICY_ENABLED', False)
@@ -211,9 +218,31 @@ def _decide(subject, *, now=None, prospective=False):
     return Decision(action, at, reason, attempt, cap, mode)
 
 
+def _event_owner(subject):
+    from .website_run_authority import event_owned, owned_goal_child
+    if isinstance(subject, ContentFactoryRun):
+        return event_owned(subject)
+    operation = mapping(subject).get('_operation')
+    return operation is not None and owned_goal_child(operation) is not None
+
+
+def _fresh_owned_run(run):
+    if run.organization_id is None:
+        return False
+    from .website_run_authority import event_owned
+    with transaction.atomic():
+        current = ContentFactoryRun.objects.select_for_update(of=('self',)).select_related('organization').get(pk=run.pk)
+        return event_owned(current)
+
+
 def _write_run(run, receipt):
-    ContentFactoryRun.objects.filter(pk=run.pk).update(result={**mapping(run.result), 'self_heal_v1': receipt})
-    run.result = {**mapping(run.result), 'self_heal_v1': receipt}
+    from .website_run_authority import event_owned
+    with transaction.atomic():
+        current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if event_owned(current):
+            return
+        ContentFactoryRun.objects.filter(pk=run.pk).update(result={**mapping(run.result), 'self_heal_v1': receipt})
+        run.result = {**mapping(run.result), 'self_heal_v1': receipt}
 
 
 def _save_daily(config, day):
@@ -308,6 +337,8 @@ def record_pull_request(organization, *, pr_url, run=None, now=None):
 
 
 def _execute_run(run, decision, *, now):
+    if _fresh_owned_run(run):
+        return {'status': 'deferred', 'reason': 'execution_owned'}
     if policy_mode(run.organization) != 'policy' or not _executor(decision.action, run.organization):
         return {'status': 'refused'}
     if decision.action == 'switch_channel':
@@ -387,6 +418,16 @@ def apply(subject, decision, *, now=None):
     """Record a decision and perform its due action once per reserved attempt."""
     now = now or timezone.now()
     organization, result, request, operation = _parts(subject)
+    if isinstance(subject, ContentFactoryRun):
+        if _event_owner(subject):
+            _fresh_owned_run(subject)
+            return {'status': 'deferred', 'reason': 'execution_owned'}
+        # Observe-only legacy reports cannot mutate execution or policy state;
+        # avoid a per-row lock/query in the bounded historical batch report.
+        if decision.mode != 'observe' and _fresh_owned_run(subject):
+            return {'status': 'deferred', 'reason': 'execution_owned'}
+    elif _event_owner(subject):
+        return {'status': 'deferred', 'reason': 'execution_owned'}
     if organization is None:
         return {'status': 'refused', 'detail': 'Not available yet.'}
     if decision.mode == 'observe' or policy_mode(organization) != 'policy':
@@ -401,6 +442,9 @@ def apply(subject, decision, *, now=None):
     with transaction.atomic():
         config = _locked_config(organization)
         current = ContentFactoryRun.objects.select_for_update(of=('self',)).select_related('organization').get(pk=subject.pk)
+        from .website_run_authority import event_owned
+        if event_owned(current):
+            return {'status': 'deferred', 'reason': 'execution_owned'}
         if current.organization_id != organization.pk:
             return {'status': 'refused', 'detail': 'The startup changed.'}
         request = mapping(current.run_request)
@@ -487,6 +531,21 @@ def apply(subject, decision, *, now=None):
 
 
 def _apply_operation(subject, decision, *, now):
+    from organizations.models import Organization
+    from .website_models import WebsiteConnectionOperation
+    from .website_run_authority import owned_goal_child
+    operation = subject.get('_operation')
+    if operation is None:
+        return {'status': 'refused', 'detail': 'Not available yet.'}
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=operation.connection.organization_id)
+        current = WebsiteConnectionOperation.objects.select_for_update().select_related('connection__organization').get(pk=operation.pk)
+        if owned_goal_child(current) is not None or owned_goal_child(operation) is not None:
+            return {'status': 'deferred', 'reason': 'execution_owned'}
+        return _apply_unowned_operation(subject, decision, now=now)
+
+
+def _apply_unowned_operation(subject, decision, *, now):
     operation = subject.get('_operation')
     if operation is None:
         return {'status': 'refused', 'detail': 'Not available yet.'}
@@ -562,6 +621,9 @@ def _apply_saved_operation(subject, decision, *, now):
     original = subject.get('_operation')
     if original is None:
         return {'status': 'refused', 'detail': 'Not available yet.'}
+    from .website_run_authority import owned_goal_child
+    if owned_goal_child(original) is not None:
+        return {'status': 'deferred', 'reason': 'execution_owned'}
     with transaction.atomic():
         _locked_config(original.connection.organization)
         with authority_guard(contract_for(original.connection), action='read'):
@@ -570,6 +632,8 @@ def _apply_saved_operation(subject, decision, *, now):
                     or current.updated_at != original.updated_at
                     or not goals.valid_goal(mapping(current.receipt).get('goal'), goals.scope_for(current.connection, current.payload.get('company_id')))):
                 return {'status': 'refused', 'detail': 'The saved website goal changed.'}
+            if owned_goal_child(current) is not None:
+                return {'status': 'deferred', 'reason': 'execution_owned'}
             controller = subject.get('_controller') is True
             if current.state == 'running' and not (controller and current.updated_at == getattr(original, '_claimed_at', None)):
                 return {'status': 'refused', 'detail': 'The website controller owns this attempt.'}
@@ -608,7 +672,8 @@ def _candidates(now, limit, organization_id=None):
             new &= ~Q(organization_id__in=[int(value) for value in disabled if value.isdecimal()])
             new &= ~Q(organization__domain__in=list(disabled))
         preferred |= new
-    query = ContentFactoryRun.objects.filter(workflow__in=WORKFLOWS, organization__isnull=False,
+    from .run_reconciliation import legacy_event_rows
+    query = ContentFactoryRun.objects.filter(legacy_event_rows(), workflow__in=WORKFLOWS, organization__isnull=False,
         status__in=['failed', 'blocked', 'precondition_failed', 'preview_failed']).select_related('organization__content_config')
     if organization_id is not None:
         query = query.filter(organization_id=organization_id)

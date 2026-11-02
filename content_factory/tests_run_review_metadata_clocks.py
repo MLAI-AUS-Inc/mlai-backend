@@ -113,8 +113,11 @@ class ReviewMetadataClockTests(TransactionTestCase):
     def endpoint(self, child, **changes):
         from .vibe_marketing_views import VibeMarketingRunCommentsAcceptRevisionView
         preview = 'https://synthetic.invalid/review/' + child.run_id
-        self.result(child, livePreview={'previewUrl': preview, 'exactRender': True, 'proof': {'commitSha': 'a' * 40}, 'resume_generation': 0},
-            article_preview_quality={'status': 'passed', 'preview_url': preview, 'resume_generation': 0, 'inputs_sha256': 'b' * 64})
+        from .tests_run_current_review import project_test_review
+        project_test_review(child, {'livePreview': {'previewUrl': preview, 'exactRender': True,
+                'proof': {'commitSha': 'a' * 40}, 'resume_generation': 0},
+            'article_preview_quality': {'status': 'passed', 'preview_url': preview,
+                'resume_generation': 0, 'inputs_sha256': 'b' * 64}})
         request = APIRequestFactory().post('/synthetic/accept-review', {'company_id': str(self.fixture.company.pk),
             'reviewedRunId': child.run_id, 'reviewedPreviewUrl': preview, 'reviewedPreviewRevision': 'a' * 40, **changes}, format='json')
         force_authenticate(request, self.user)

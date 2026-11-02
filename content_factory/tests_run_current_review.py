@@ -227,6 +227,29 @@ class CurrentReviewTests(TransactionTestCase):
         self.assertEqual(ContentFactoryRun.objects.count(), 1)
         self.assertFalse(Ledger.objects.filter(kind="SPEND").exists())
 
+    def test_actual_daily_automation_command_merges_backend_facts_without_owned_clocks_or_lost_metadata(self):
+        from . import vibe_marketing_views as views
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        cost = views.get_content_factory_research_cost_points(self.org.domain, 3)
+        def automation(**kwargs):
+            current = ContentFactoryRun.objects.get(pk=self.run.pk)
+            ContentFactoryRun.objects.filter(pk=current.pk).update(result={**current.result,
+                "concurrent_provider_fact": {"retained": True}})
+            return None, []
+        with patch.object(views, "_profile_checks", return_value={"dailyAutomation": {"passed": True}}), \
+                patch("integrations.services.notification_channels.ensure_research_automation_for_org", side_effect=automation), \
+                patch.object(views.http_client, "post") as remote:
+            enabled = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/enable-daily-automation/?company_id={self.company.pk}",
+                {"expectedCostPoints": cost}, format="json")
+        self.assertEqual(enabled.status_code, 200, enabled.data)
+        remote.assert_not_called()
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result["concurrent_provider_fact"], {"retained": True})
+        self.assertIn("daily_automation_enabled_at", self.run.result)
+        after = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        for field in before.keys() - {"result"}:
+            self.assertEqual(after[field], before[field], field)
+
     def test_actual_canonical_deny_records_intent_before_http_without_applying_acknowledgement_state(self):
         from .run_reconciliation import reconcile_authoritative_run
         from .run_ownership import user_stop_intent
