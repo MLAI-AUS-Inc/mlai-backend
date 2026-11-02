@@ -484,7 +484,7 @@ class IncidentFacadeReplays(SimpleTestCase):
         from . import vibe_marketing_views as views
         connection = SimpleNamespace(pk=uuid.uuid4(), generation=3, github_repo="current/site", repository_id=42)
         config = SimpleNamespace(website_connection=connection)
-        run = SimpleNamespace(run_id="old-draft", workflow="article_generation", run_request={"website_connection_id": str(connection.pk), "connection_generation": 2}, github_repo="older/site")
+        run = SimpleNamespace(run_id="old-draft", workflow="article_generation", result={}, run_request={"website_connection_id": str(connection.pk), "connection_generation": 2}, github_repo="older/site")
         context = SimpleNamespace(organization=object())
         request = SimpleNamespace(user=SimpleNamespace(pk=8), data={})
         with patch.object(views, "_resolve_context_or_response", return_value=(context, None)), \
@@ -526,7 +526,7 @@ class IncidentFacadeReplays(SimpleTestCase):
 
     def test_portable_preview_grant_never_enters_repository_guard(self):
         request = {"delivery_mode": "content_only", "delivery_mode_confirmed": True}
-        run = SimpleNamespace(run_id="draft-1", run_request=request, domain="synthetic.test", organization_id=4)
+        run = SimpleNamespace(run_id="draft-1", run_request=request, domain="synthetic.test", organization_id=4, result={})
         intent = evidence_digest({key: request.get(key) for key in ("delivery_mode", "delivery_mode_confirmed", "source_run_id")})
         token = signing.dumps({"run": run.run_id, "organization": 4, "domain": run.domain, "portable": True, "intent_digest": intent}, salt=SALT)
         view = ArticlePreviewLeaseProxyView(); view.kwargs = {"token": token}

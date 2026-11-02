@@ -21,6 +21,9 @@ from .website_setup_consent import seal
     ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=["7"])
 class EnvironmentRecoveryTests(SimpleTestCase):
     def setUp(self):
+        from unittest.mock import MagicMock
+        from workflow_runs.models import ContentFactoryRun
+        self.enterContext(patch.object(ContentFactoryRun.objects, "filter", return_value=MagicMock()))
         fixture=hosted_fixtures.HostedBuildTests();fixture.setUp()
         self.run,self.website,self.head,self.base,self.goal=fixture.run,fixture.website,fixture.head,fixture.base,fixture.goal
         self.approve=fixture.approve
