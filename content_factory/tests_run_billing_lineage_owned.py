@@ -91,13 +91,30 @@ class OwnedBillingLineageTests(TransactionTestCase):
     def test_foreign_or_unrelated_lineage_does_not_prove_a_carried_original_charge(self):
         first, _, _ = self.paid()
         unrelated, _, _ = self.paid()
-        child, job = self.child(first, source_override=unrelated)
+        child, job = self.child(first)
+        # Admission/projection now refuses this forged lineage too. Simulate
+        # external persisted damage to exercise the independent read fence.
+        ContentFactoryRun.objects.filter(pk=child.pk).update(run_request={**child.run_request,
+            "original_billing_source_run_id": unrelated.run_id})
+        child.refresh_from_db()
         self.assertIsNone(original_spend_for_job(job))
         self.assertIsNone(original_article_spend_for_run(child))
         from organizations.models import Organization
         foreign = Organization.objects.create(name="Foreign synthetic tenant", domain="foreign-lineage.example")
         ContentFactoryRun.objects.filter(pk=unrelated.pk).update(organization=foreign)
         self.assertIsNone(original_spend_for_job(job))
+
+    def test_actual_same_company_unrelated_spend_cannot_replace_owned_billing_fact(self):
+        from .run_backend_facts import BackendFactConflict
+        run, job, original = self.paid()
+        _, _, unrelated = self.paid()
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        job.billing_ledger_id = unrelated.pk
+        with self.assertRaises(BackendFactConflict):
+            save_job_facts(job, update_fields=["billing_ledger_id"])
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before)
+        job.refresh_from_db()
+        self.assertEqual(job.billing_ledger_id, original.pk)
 
     def test_refund_retains_historical_spend_proof_but_original_authorized_flag_never_allows_reuse(self):
         source, source_job, spend = self.paid()

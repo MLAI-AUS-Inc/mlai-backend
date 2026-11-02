@@ -14,6 +14,7 @@ from .run_ownership import bind_admitted_run, reserve_admitted_run, user_princip
 from .run_backend_facts import (BackendFactConflict, create_job_facts, fact_run_for_job,
     get_or_create_job_facts, job_client_key, logical_client_request_id, save_job_facts,
     update_job_facts, update_or_create_job_facts)
+from .run_backend_facts import owned_job_transaction
 
 FLAGS = {"ARTICLES_RUN_OWNERSHIP_ENABLED": True, "ARTICLES_RUN_FACT_AUTHORITY_ENABLED": True,
          "ARTICLES_RUN_EVENT_AUTHORITY_ENABLED": True}
@@ -184,3 +185,40 @@ class BackendFactTests(TransactionTestCase):
         owned.status = "completed"
         save_job_facts(owned, update_fields=["status"], legacy_full_save=True)
         self.assertIsNone(owned.selection_reason)
+
+    def test_owned_transaction_repairs_corrupt_output_before_any_caller_reads(self):
+        job = self.create()
+        ContentFactoryJob.objects.filter(pk=job.pk).update(status="error", billing_amount=777,
+            request_meta={"corrupt_output": True})
+        with owned_job_transaction(job) as current:
+            self.assertEqual(current.status, "generating")
+            self.assertEqual(current.billing_amount, 0)
+            self.assertNotIn("corrupt_output", current.request_meta)
+        self.assert_execution_unchanged()
+
+    def test_missing_projection_rebuild_preserves_canonical_identity_clocks(self):
+        job = self.create()
+        self.run.refresh_from_db()
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        # Simulate external output damage, bypassing ordinary deletion guards.
+        ContentFactoryJob.objects.filter(pk=job.pk)._raw_delete("default")
+        with owned_job_transaction(self.run.run_id) as rebuilt:
+            self.assertEqual(rebuilt.created_at, before["job_created_at"])
+            self.assertEqual(rebuilt.updated_at, before["job_updated_at"])
+            self.assertEqual(rebuilt.status, "generating")
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), before)
+
+    def test_transaction_cannot_initialize_an_untyped_empty_owner(self):
+        with self.assertRaises(BackendFactConflict), owned_job_transaction(self.run.run_id):
+            self.fail("An uninitialized admission is not a source of backend facts")
+        self.assertFalse(ContentFactoryJob.objects.exists())
+
+    def test_foreign_ledger_cannot_be_added_to_an_unpaid_admission(self):
+        from core.models import User
+        from roo.services import PointsService
+        user = User.objects.create_user(email="unrelated-fact-ledger@example.test")
+        ledger, _ = PointsService.credit_purchased_topup(user=user, delta=12,
+            description="Unrelated synthetic credit", idempotency_key="unrelated-fact-credit")
+        with self.assertRaises(BackendFactConflict):
+            self.create(billing_ledger=ledger)
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), self.original)

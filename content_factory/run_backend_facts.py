@@ -127,6 +127,8 @@ def _validated(fields, run):
             value = getattr(value, "pk", value)
             if value is not None and (type(value) is not int or not 0 < value < 2 ** 63):
                 raise BackendFactConflict("The billing reference has an invalid type.")
+            if value is not None:
+                _require_billing_reference(run, value)
         if name == "client_request_id":
             if value not in (None, "", logical, reservation_run_id(logical)):
                 raise BackendFactConflict("The admitted logical key cannot be replaced.")
@@ -161,6 +163,32 @@ def _validated(fields, run):
     return result
 
 
+def _require_billing_reference(run, value):
+    """Keep payment facts on their verified original charge or actual reversal."""
+    from types import SimpleNamespace
+    from roo.models import Ledger
+    from .billing_lineage import original_spend_for_job
+    ledger = Ledger.objects.filter(pk=value).first()
+    if ledger is None:
+        raise BackendFactConflict("The billing reference has no retained ledger.")
+    spend = original_spend_for_job(SimpleNamespace(job_id=run.run_id, domain=run.domain))
+    if spend is not None and (ledger.pk == spend.pk or (
+            ledger.kind == "REFUND" and ledger.source == "CONTENT_FACTORY"
+            and ledger.refund_of_id == spend.pk and ledger.user_id == spend.user_id
+            and ledger.delta_microroo == -spend.delta_microroo)):
+        return
+    saved = run.run_request or {}
+    # Free grants are zero-point, company-scoped ledger facts, not paid spends.
+    from .first_article_entitlement import REFERENCE_TYPE, entitled_request
+    if (entitled_request(saved) and str(saved.get("roo_points_ledger_id")) == str(ledger.pk)
+            and ledger.kind == "ADJUST" and ledger.source == "CONTENT_FACTORY"
+            and ledger.delta_microroo == 0 and ledger.reference_type == REFERENCE_TYPE
+            and str(ledger.idempotency_key).startswith(f"content_factory:first_article:org:{run.organization_id}:")
+            and str(saved.get("roo_points_billing_user_id")) == str(ledger.user_id)):
+        return
+    raise BackendFactConflict("The billing reference does not prove this admission's charge.")
+
+
 def _project(run):
     """Produce a complete compatibility row from the already locked owner."""
     from .models import ContentFactoryJob
@@ -178,6 +206,12 @@ def _project(run):
         if created:
             initial = {name: value for name, value in values.items() if name not in {"created_at", "updated_at"}}
             job = ContentFactoryJob.objects.create(job_id=key, **initial)
+            if run.job_created_at is not None:
+                # Rebuilding a missing output cannot replace canonical identity clocks.
+                ContentFactoryJob.objects.filter(pk=job.pk).update(**values)
+                job.refresh_from_db()
+                capture_fact_baseline(job)
+                return job, created
             clocks = {"job_created_at": job.created_at, "job_updated_at": job.updated_at,
                       "job_domain": job.domain, "job_slack_user_id": job.slack_user_id,
                       "client_request_id": job.client_request_id, "delivery_phase": job.status}
@@ -276,12 +310,12 @@ def update_or_create_job_facts(*, job_id, defaults=None):
 def update_job_facts(queryset, **fields):
     """Route explicit bulk patches through each existing canonical owner."""
     entries = list(queryset.values_list("pk", "job_id"))
-    owned = [(pk, key) for pk, key in entries if fact_run_for_job(key) is not None]
+    owned = [(run.pk, pk, key) for pk, key in entries if (run := fact_run_for_job(key)) is not None]
     if not owned:
         return queryset.update(**fields)
-    owned_pks, count = {pk for pk, _ in owned}, 0
+    owned_pks, count = {pk for _, pk, _ in owned}, 0
     with transaction.atomic():
-        for pk, key in owned:
+        for _, pk, key in sorted(owned):
             run = fact_run_for_job(key, lock=True)
             if run is None or not queryset.filter(pk=pk).exists():
                 continue
@@ -298,5 +332,10 @@ def owned_job_transaction(job_or_id):
     with transaction.atomic():
         run = fact_run_for_job(job_or_id, lock=True)
         key = (run.legacy_job_id or run.run_id) if run is not None else getattr(job_or_id, "job_id", job_or_id)
-        job = ContentFactoryJob.objects.select_for_update().get(job_id=key)
+        if run is not None:
+            if run.job_created_at is None:
+                raise BackendFactConflict("The canonical backend facts are not initialized.")
+            job, _ = _project(run)
+        else:
+            job = ContentFactoryJob.objects.select_for_update().get(job_id=key)
         yield job
