@@ -16,8 +16,11 @@ from .website_operations import OPERATION_FIELDS
 OWNER_RESULT_KEY = "run_owner_v1"
 OWNER_EXECUTION_KEY = "run_owner_execution_v1"
 EVENT_RESULT_KEY = "run_owner_events_v1"
+DISPATCH_RESULT_KEY = "run_owner_dispatch_v1"
 WIRE_REQUEST_KEY = "backend_run_admission_v1"
 WIRE_EXECUTION_KEY = "backend_run_execution_v1"
+R3_BACKEND_RESULT_KEYS = frozenset({OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, EVENT_RESULT_KEY, DISPATCH_RESULT_KEY})
+R3_BACKEND_REQUEST_KEYS = frozenset({WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY})
 SCOPE_FIELDS = (*CONNECTION_FIELDS, *OPERATION_FIELDS, "expected_source_sha", "source_run_id")
 SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation"})
 WORKER_WORKFLOW_ALIASES = {
@@ -192,7 +195,7 @@ def scheduler_principal(service):
 
 def _identity(*, organization, principal, workflow, payload):
     key = payload.get("client_request_id")
-    if (type(key) is not str or not key or key != key.strip() or len(key) > 100
+    if (type(key) is not str or not key or key != key.strip() or len(key) > 255
             or type(workflow) is not str or not workflow or len(workflow) > 50
             or not getattr(organization, "pk", None) or payload.get("domain") != organization.domain):
         raise RunOwnershipConflict("An exact admitted startup, workflow and dispatch key are required.")
@@ -206,6 +209,7 @@ def _identity(*, organization, principal, workflow, payload):
                                   if key not in {WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY}})
     connection = connection_contract(request)
     scope = {field: deepcopy(connection.get(field, request.get(field))) for field in SCOPE_FIELDS}
+    scope = {field: None if type(value) is str and value == "" else value for field, value in scope.items()}
     return {"schema_version": 1, "dispatch_key": key, "organization_id": str(organization.pk),
             "principal": principal, "workflow": workflow, "domain": organization.domain,
             "github_repo": request.get("github_repo") or "", "request_digest": evidence_digest(request),
@@ -215,13 +219,18 @@ def _identity(*, organization, principal, workflow, payload):
 def admitted_run_for_key(key, *, lock=False):
     """Resolve only a pre-existing admitted Run by its original backend key."""
     from workflow_runs.models import ContentFactoryRun
-    if type(key) is not str or not key or len(key) > 100:
+    if type(key) is not str or not key or len(key) > 255:
         return None
     runs = ContentFactoryRun.objects.select_for_update() if lock else ContentFactoryRun.objects
     return runs.filter(result__run_owner_v1__identity__dispatch_key=key).first()
 
 
-def reserve_admitted_run(*, organization, principal, workflow, payload):
+def reservation_run_id(dispatch_key):
+    """Keep a long logical key traceable within the existing Run ID column."""
+    return dispatch_key if len(dispatch_key) <= 100 else "r3-key:" + evidence_digest({"dispatch_key": dispatch_key})
+
+
+def reserve_admitted_run(*, organization, principal, workflow, payload, reserved_run_id=None):
     """Reserve before dispatch, after the caller's existing permission checks.
 
     No old Run is automatically enrolled and no network call occurs here.
@@ -233,10 +242,16 @@ def reserve_admitted_run(*, organization, principal, workflow, payload):
         return None
     from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
     identity, request = _identity(organization=organization, principal=principal, workflow=workflow, payload=payload)
+    initial_id = reserved_run_id or reservation_run_id(identity["dispatch_key"])
+    if (type(initial_id) is not str or not initial_id or len(initial_id) > 100
+            or initial_id != initial_id.strip()):
+        raise RunOwnershipConflict("A bounded backend reservation identity is required.")
     facts = getattr(settings, "ARTICLES_RUN_FACT_AUTHORITY_ENABLED", False) is True
     events = getattr(settings, "ARTICLES_RUN_EVENT_AUTHORITY_ENABLED", False) is True
     receipt = {"schema_version": 1, "identity": identity,
                "authority": {"backend_facts": facts, "event_protocol": 1 if events else None}}
+    if initial_id != identity["dispatch_key"] or reserved_run_id is not None:
+        receipt.update(reservation_run_id=initial_id, fixed_run_id=reserved_run_id is not None)
     wire = wire_identity(receipt)
     ticket = {"schema_version": 1, "execution_id": "admit:" + evidence_digest(wire), "generation": 0,
               "admission_digest": evidence_digest(wire), "request_digest": identity["request_digest"],
@@ -252,7 +267,7 @@ def reserve_admitted_run(*, organization, principal, workflow, payload):
             if events and not facts:
                 raise RunOwnershipConflict("Event authority requires the complete backend fact owner.")
             run, created = ContentFactoryRun.objects.select_for_update().get_or_create(
-                run_id=identity["dispatch_key"], defaults={"organization": organization,
+                run_id=initial_id, defaults={"organization": organization,
                     "workflow": workflow, "domain": organization.domain, "github_repo": identity["github_repo"],
                     "slack_user_id": principal.get("actor_id", ""), "status": ContentFactoryRunStatus.QUEUED,
                     "current_step": "queued", "run_request": {**request, WIRE_REQUEST_KEY: wire, WIRE_EXECUTION_KEY: ticket},
@@ -263,7 +278,8 @@ def reserve_admitted_run(*, organization, principal, workflow, payload):
         saved = owner_receipt(run)
         if (saved is None or not _exact(saved["identity"], identity) or run.organization_id != organization.pk
                 or run.workflow != workflow or run.domain != organization.domain
-                or run.github_repo != identity["github_repo"]):
+                or run.github_repo != identity["github_repo"]
+                or (reserved_run_id is not None and saved.get("reservation_run_id") != reserved_run_id)):
             raise RunOwnershipConflict("The dispatch key already owns different admitted inputs.")
         wire = wire_identity(saved)
         ticket = current_execution_ticket(run)
@@ -288,14 +304,23 @@ def bind_admitted_run(run, remote_run_id):
             raise RunOwnershipConflict("Only a backend admission may bind a worker identity.")
         if locked.run_id == remote_run_id:
             return locked
-        if locked.run_id != receipt["identity"]["dispatch_key"]:
+        if receipt.get("fixed_run_id") or locked.run_id != receipt.get("reservation_run_id", receipt["identity"]["dispatch_key"]):
             raise RunOwnershipConflict("The admitted execution already has another worker identity.")
         if ContentFactoryRun.objects.filter(run_id=remote_run_id).exclude(pk=locked.pk).exists():
             raise RunOwnershipConflict("The worker identity is already occupied; admission is retained.")
+        from .models import ContentFactoryJob
+        jobs = ContentFactoryJob.objects.select_for_update()
+        carrier = jobs.filter(job_id=locked.run_id).first()
+        if carrier is not None and jobs.filter(job_id=remote_run_id).exclude(pk=carrier.pk).exists():
+            raise RunOwnershipConflict("The worker identity already has another legacy carrier.")
         try:
             with transaction.atomic():
                 ContentFactoryRun.objects.filter(pk=locked.pk).update(run_id=remote_run_id)
         except IntegrityError as exc:
             raise RunOwnershipConflict("The worker identity was concurrently occupied; admission is retained.") from exc
         locked.run_id = remote_run_id
+        if carrier is not None:
+            # Preserve billing/source identity and the exact Job clocks. This
+            # is a routing rename, not a new charge or a full Job fact mirror.
+            ContentFactoryJob.objects.filter(pk=carrier.pk).update(job_id=remote_run_id)
         return locked

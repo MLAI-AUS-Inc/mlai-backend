@@ -102,10 +102,26 @@ class RunAdmissionTests(TestCase):
 
     def test_request_key_and_domain_are_not_normalized_into_admission(self):
         for payload in (self.payload(client_request_id=" key "), self.payload(client_request_id=True),
-                        self.payload(client_request_id="x" * 101), self.payload(domain="foreign.example")):
+                        self.payload(client_request_id="x" * 256), self.payload(domain="foreign.example")):
             with self.subTest(payload=payload), self.assertRaises(RunOwnershipConflict):
                 self.reserve(payload)
         self.assertEqual(ContentFactoryRun.objects.count(), 0)
+
+    def test_long_original_key_retained_without_truncation_or_new_schema(self):
+        payload = self.payload(client_request_id="original-key:" + "x" * 150)
+        run = self.reserve(payload)
+        self.assertLessEqual(len(run.run_id), 100)
+        self.assertEqual(owner_receipt(run)["identity"]["dispatch_key"], payload["client_request_id"])
+        self.assertEqual(admitted_run_for_key(payload["client_request_id"]).pk, run.pk)
+        self.assertEqual(bind_admitted_run(run, "real-long-key-worker").pk, run.pk)
+
+    def test_preselected_backend_worker_id_is_fixed_before_remote_dispatch(self):
+        payload = self.payload(run_id="preselected-backend-child")
+        run = self.reserve(payload, reserved_run_id="preselected-backend-child")
+        self.assertEqual(run.run_id, "preselected-backend-child")
+        self.assertEqual(bind_admitted_run(run, run.run_id).pk, run.pk)
+        with self.assertRaises(RunOwnershipConflict):
+            bind_admitted_run(run, "different-child")
 
     def test_scheduler_has_explicit_service_not_substituted_owner(self):
         run = reserve_admitted_run(organization=self.org, principal=scheduler_principal("island_refresh"),
