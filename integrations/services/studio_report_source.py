@@ -76,13 +76,17 @@ def all_invoices(get, contact):
     raise SourceIncomplete("invoice_page_limit")
 
 
-def refresh_finance(snapshot, owner, invoices, get, cutoff, legacy_invoice_ids=(), contact_id=None):
+def refresh_finance(snapshot, owner, invoices, get, cutoff, legacy_invoice_ids=(), contact_id=None,
+                    credit_description_prefix=None):
     """Replace the live ledger, including revisions, deleted payments and batches.
 
     Explicitly approved historical external invoices remain distinct. A missing
     previously mapped Xero invoice is a gap, never an assumed zero or deletion.
     """
     value = deepcopy(snapshot)
+    if credit_description_prefix is not None and (not isinstance(credit_description_prefix, str)
+            or len(credit_description_prefix.strip()) < 10):
+        raise SourceIncomplete('credit_policy_invalid')
     data = value["clients"][owner]
     old_by_number = {row["number"]: row for row in data["invoices"]}
     live_numbers = {row["InvoiceNumber"] for row in invoices}
@@ -191,10 +195,22 @@ def refresh_finance(snapshot, owner, invoices, get, cutoff, legacy_invoice_ids=(
                           if part["invoice_id"] == identity)
         if status == "paid" and cutoff_paid != cents(invoice["Total"]):
             status = "authorised"
-        result.append({"id": identity, "number": number, "date": day, "status": status,
+        credit_fields = {}
+        if credit_description_prefix is not None:
+            lines = invoice.get('LineItems', [])
+            eligible = bool(lines) and all(
+                str(line.get('Description', '')).startswith(credit_description_prefix)
+                and Decimal(str(line.get('LineAmount', 0))) >= 0 for line in lines)
+            credit_fields = {'credit_eligible': eligible}
+        result.append({"id": identity, "number": number, "date": day, "status": status, **credit_fields,
             "amount_cents": cents(invoice["Total"]), "paid_cents": cutoff_paid, "evidence_ids": [evidence_id]})
     data["invoices"] = result
     data["payments"] = payments + list(groups.values())
+    if credit_description_prefix is not None:
+        eligible_ids = {row['id'] for row in result if row.get('credit_eligible', row['id'] in legacy)}
+        for payment in data['payments']:
+            payment['credit_amount_cents'] = sum(part['amount_cents'] for part in payment['allocations']
+                                                if part['invoice_id'] in eligible_ids)
     return value
 
 
@@ -234,7 +250,8 @@ def save_candidate(scope, request, response, snapshot, unknown_mail):
         return
     root = Path(directory)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    identity = digest({"owner": request["owner"], "cutoff": request["cutoff"]})
+    identity = digest({"owner": request["owner"], "cutoff": request["cutoff"],
+                       "mode": request.get('mode', 'strict')})
     fd, temporary = tempfile.mkstemp(dir=root, prefix=identity + ".")
     try:
         with os.fdopen(fd, "w") as handle:
@@ -336,7 +353,8 @@ def prepare(scope, request, *, get, mail, now=None):
             raise SourceIncomplete('finance_rate_limited')
         invoices = all_invoices(get, scope["xero_contact_id"])
         snapshot = refresh_finance(snapshot, owner, invoices, get, request["cutoff"],
-                                   scope.get("legacy_invoice_ids", []), scope["xero_contact_id"])
+                                   scope.get("legacy_invoice_ids", []), scope["xero_contact_id"],
+                                   scope.get('credit_description_prefix'))
         if digest(invoices) != digest(all_invoices(get, scope["xero_contact_id"])):
             raise SourceIncomplete("finance_changed_during_refresh")
         checks["client_invoices"] = {"checked_at": now.isoformat(), "count": len(invoices)}
@@ -360,12 +378,29 @@ def prepare(scope, request, *, get, mail, now=None):
         "status": "waiting_data" if missing else "ready"}
     if retry_at:
         response['retry_at'] = retry_at.isoformat()
-    if not missing:
+    latest = request.get('mode') == 'latest'
+    partial_allowed = {'hours_coverage_missing', 'new_invoices_require_review'}
+    usable = not missing or (latest and set(missing) <= partial_allowed)
+    if latest:
+        response['mode'] = 'latest'
+    if usable:
         dataset = snapshot["clients"][owner]
-        # Only extend the common envelope after independently verified work,
-        # mailbox and finance coverage have ALL passed the closing barrier.
+        # Latest views separate finance freshness from reviewed work coverage.
+        # Strict closing reports retain the original all-streams barrier.
         dataset["coverage"]["through"] = max(dataset["coverage"]["through"], cutoff.astimezone(TZ).date().isoformat())
         dataset["as_of"] = now.isoformat()
+        if latest:
+            response['status'] = 'partial' if missing else 'ready'
+            dataset['source_freshness'] = {
+                'finance_checked_at': now.isoformat(), 'hours_reviewed_at': reviewed.isoformat(),
+                'hours_complete_through': hours_complete.isoformat(),
+                'latest_work_date': max((row['work_end'] for row in dataset['hours']), default=None),
+                'unreviewed_invoice_count': len(unknown), 'missing': response['missing']}
+            dataset.setdefault('limitations', []).append(
+                f"Xero checked {now.isoformat()}; work reviewed {reviewed.isoformat()}. "
+                f"{len(unknown)} invoice emails await review. Later unsubmitted work is unknown.")
+        else:
+            dataset.pop('source_freshness', None)
         response["snapshot"] = snapshot
     save_candidate(scope, request, response, snapshot, unknown)
     return response
