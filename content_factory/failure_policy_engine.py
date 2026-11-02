@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 import importlib
 import logging
 from typing import Literal
+from uuid import uuid4
 
 from django.conf import settings
 from django.core.cache import cache
@@ -45,6 +46,11 @@ def policy_mode(organization):
                         and p2_foundation.policy_v2_applies(organization)) else 'observe'
 
 
+def owns_recovery(run, *, now=None):
+    """Stand old recovery down only when a live P2 executor owns this item."""
+    return policy_mode(run.organization) == 'policy' and decide(run, now=now).reason != 'executor_off'
+
+
 def _parts(subject):
     if isinstance(subject, ContentFactoryRun):
         return subject.organization, mapping(subject.result), mapping(subject.run_request), subject
@@ -69,7 +75,7 @@ def _rung(result, request):
              or request.get('strategy_pin'))
     if isinstance(value, dict):
         value = value.get('rung')
-    return value if value in {'adopt', 'native_collection', 'deterministic', 'model_adapter', 'agent', 'hosted'} else 'native_collection'
+    return value if isinstance(value, str) and value in {'adopt', 'native_collection', 'deterministic', 'model_adapter', 'agent', 'hosted'} else 'native_collection'
 
 
 def _config(organization):
@@ -128,8 +134,8 @@ def _decide(subject, *, now=None, prospective=False):
     code = _code(result)
     entry = registry_policy.report_entry(code) if prospective else registry_policy.effective_entry(code, organization)
     limits = registry_policy.limits()
-    first = stamp(receipt.get('first_failed_at')) or stamp(result.get('first_failed_at')) or now
-    started = stamp(receipt.get('last_action_at')) or first
+    first = min(stamp(receipt.get('first_failed_at')) or stamp(result.get('first_failed_at')) or now, now)
+    started = min(stamp(receipt.get('last_action_at')) or first, now)
     if _delivered(subject, result):
         return Decision('none', None, 'delivered', attempt, None, mode)
     if getattr(subject, 'status', None) in {'cancelled', 'denied'}:
@@ -144,6 +150,18 @@ def _decide(subject, *, now=None, prospective=False):
         return Decision('none', None, 'waiting', attempt, None, mode)
     if receipt.get('code') == 'pull_request_daily_cap' and (stamp(receipt.get('next_at')) or now) > now:
         return Decision('wait', stamp(receipt['next_at']), 'waiting', attempt, 'pull_request_day', mode)
+    # An uncertain effect retains financial proof, but never extends the
+    # recovery executor beyond the item wall indefinitely.
+    if now - first >= timedelta(hours=limits['wall_hours']):
+        action = 'switch_channel' if _draft(result) else 'stop'
+        if mode == 'policy' and not _executor(action, organization):
+            return Decision('observe', None, 'executor_off', attempt, 'wall', mode)
+        return Decision(action, None, 'wall' if mode == 'policy' or prospective else 'legacy_observe', attempt, 'wall', mode)
+    if entry and entry.get('retry_policy') == 'retry_same_step' and now - first >= timedelta(hours=limits['max_elapsed_hours']):
+        action = 'switch_channel' if _draft(result) else 'stop'
+        if mode == 'policy' and not _executor(action, organization):
+            return Decision('observe', None, 'executor_off', attempt, 'transient_elapsed', mode)
+        return Decision(action, None, 'cap' if mode == 'policy' or prospective else 'legacy_observe', attempt, 'transient_elapsed', mode)
     pending = mapping(receipt.get('pending_action'))
     if pending.get('state') in {'reserved', 'uncertain'} and pending.get('action') in ACTIONS:
         action = pending['action']
@@ -151,9 +169,7 @@ def _decide(subject, *, now=None, prospective=False):
             return Decision('observe', None, 'executor_off', _count(pending.get('attempt')), None, mode)
         return Decision(action, stamp(pending.get('lease_until')), pending.get('reason') or 'backoff', _count(pending.get('attempt')), pending.get('cap'), mode)
     action, reason, cap, at = 'stop', 'terminal', None, None
-    if now - first >= timedelta(hours=limits['wall_hours']):
-        action, reason, cap = ('switch_channel' if _draft(result) else 'stop'), 'wall', 'wall'
-    elif entry:
+    if entry:
         policy = entry['retry_policy']
         classification = entry['failure_class']
         if policy == 'retry_same_step' and now - first >= timedelta(hours=limits['max_elapsed_hours']):
@@ -261,7 +277,27 @@ def record_pull_request(organization, *, pr_url, run=None, now=None):
             if run is not None:
                 slots = day.get('pull_request_slots') or []
                 completions = list(day.get('pull_request_slot_completions') or [])
-                match = next((slot for slot in slots if slot.startswith(f'{run.run_id}:') and slot not in completions), None)
+                prefixes = {f'{run.run_id}:'}
+                request = mapping(run.run_request)
+                identifiers = {str(run.run_id), str(request.get('client_request_id') or '')}
+                from .website_models import WebsiteConnectionOperation
+                for field in ('operation_id', 'first_article_goal_operation_id'):
+                    operation_id = request.get(field)
+                    if not operation_id:
+                        continue
+                    try:
+                        operation = WebsiteConnectionOperation.objects.select_related('connection').filter(
+                            pk=operation_id, connection__organization=organization).first()
+                    except (ValueError, TypeError):
+                        operation = None
+                    if operation is None:
+                        continue
+                    children = {str(mapping(operation.receipt).get(key) or '') for key in (
+                        'child_run_id', 'setup_run_id', 'scan_run_id', 'first_article_run_id', 'first_article_publish_run_id')}
+                    children.add(str(mapping(operation.payload).get('run_id') or ''))
+                    if (identifiers - {''}) & children and request.get('website_connection_id') == str(operation.connection_id) and request.get('connection_generation') == operation.generation:
+                        prefixes.add(f'{operation.pk}:')
+                match = next((slot for slot in slots if any(slot.startswith(prefix) for prefix in prefixes) and slot not in completions), None)
                 if match:
                     day['pull_request_slot_completions'] = completions + [match]
             _save_daily(config, day)
@@ -306,20 +342,41 @@ def _execute_run(run, decision, *, now):
             payload['repin'] = {'to': 'latest'}
         if decision.action == 'rescan':
             payload['self_heal_rescan'] = True
-        return _call_content_factory_run_action(run_id=run.run_id, workflow=run.workflow,
-            action='resume', payload=payload, transport_errors_are_pending=True)
+        outcome = _call_content_factory_run_action(run_id=run.run_id, workflow=run.workflow,
+            action='resume', payload=payload, transport_errors_are_pending=True, preserve_run_clock=True)
+        ack = mapping(mapping(outcome).get('self_heal_resume'))
+        intent = 're_pin' if decision.action == 're_pin' else 'rescan' if decision.action == 'rescan' else 'resume'
+        if ack != {'version': 1, 'run_id': run.run_id, 'key': payload['self_heal_key'],
+                   'intent': intent, 'state': 'accepted'}:
+            # Older CF versions ignored these keys and could accidentally queue
+            # ordinary work. Only the exact durable task reservation acknowledges
+            # policy intent; uncertainty keeps this same attempt and charge held.
+            return {**mapping(outcome), 'status': 'action_pending', 'dispatch_state': 'pending'}
+        return outcome
     if decision.action == 'advance_rung':
         from .website_models import WebsiteConnectionOperation
         from .website_connections import authority_guard, scoped_run_contract
+        from . import website_goal as goals
         identifier = mapping(run.run_request).get('first_article_goal_operation_id') or mapping(run.run_request).get('operation_id')
-        with authority_guard(scoped_run_contract(run), action='read'):
-            operation = WebsiteConnectionOperation.objects.select_for_update().select_related('connection__organization').filter(
-                pk=identifier, action='prepare', connection__organization=run.organization).first() if identifier else None
-            if operation:
-                value = {**operation.receipt, '_organization': run.organization, '_operation': operation, 'run_request': operation.payload}
-                answer = _apply_operation(value, decision, now=now)
-                operation.save(update_fields=['receipt', 'payload', 'state', 'next_attempt_at', 'updated_at'])
-                return answer
+        # Match the org -> config -> website -> operation lock order used by
+        # binding and the owning goal controller, before any mutation.
+        with transaction.atomic():
+            _locked_config(run.organization)
+            with authority_guard(scoped_run_contract(run), action='read'):
+                operation = WebsiteConnectionOperation.objects.select_for_update(of=('self',)).select_related('connection__organization').filter(
+                    pk=identifier, action='prepare', connection__organization=run.organization).first() if identifier else None
+                if operation:
+                    if (operation.state not in {'pending', 'needs_attention', 'needs_user'}
+                            or operation.generation != operation.connection.generation
+                            or not goals.valid_goal(mapping(operation.receipt).get('goal'), goals.scope_for(operation.connection, operation.payload.get('company_id')))):
+                        return {'status': 'refused', 'detail': 'The owning website goal changed.'}
+                    value = {**operation.receipt, '_organization': run.organization, '_operation': operation, 'run_request': operation.payload}
+                    fresh = decide(value, now=now)
+                    if fresh.action != 'advance_rung' or fresh.at and fresh.at > now:
+                        return {'status': 'refused', 'detail': 'The website controller owns the next action.'}
+                    answer = _apply_operation(value, fresh, now=now)
+                    operation.save(update_fields=['receipt', 'payload', 'state', 'next_attempt_at', 'updated_at'])
+                    return answer
         # An orphan run cannot invent a goal or fresh repository setup consent.
         from .channel_switch import switch_to_copy_ready
         return switch_to_copy_ready(run=run, reason='strategy_goal_unavailable', now=now)
@@ -344,6 +401,9 @@ def apply(subject, decision, *, now=None):
     with transaction.atomic():
         config = _locked_config(organization)
         current = ContentFactoryRun.objects.select_for_update(of=('self',)).select_related('organization').get(pk=subject.pk)
+        if current.organization_id != organization.pk:
+            return {'status': 'refused', 'detail': 'The startup changed.'}
+        request = mapping(current.run_request)
         current.organization._state.fields_cache['content_config'] = config
         old = mapping(mapping(current.result).get('self_heal_v1'))
         pending = mapping(old.get('pending_action'))
@@ -386,7 +446,8 @@ def apply(subject, decision, *, now=None):
             receipt['history'] = (receipt['history'] + [{'at': now.isoformat(), 'action': decision.action,
                                                      'code': receipt['code'], 'attempt': decision.attempt}])[-10:]
         if decision.action in ACTIONS:
-            receipt['pending_action'] = {'state': 'reserved', 'action': decision.action, 'attempt': decision.attempt,
+            lease_claim = uuid4().hex
+            receipt['pending_action'] = {'state': 'reserved', 'claim': lease_claim, 'action': decision.action, 'attempt': decision.attempt,
                                          'cap': decision.cap, 'reason': decision.reason,
                                          'lease_until': (now + timedelta(minutes=2)).isoformat()}
         _write_run(current, receipt)
@@ -419,7 +480,7 @@ def apply(subject, decision, *, now=None):
             locked = ContentFactoryRun.objects.select_for_update().get(pk=current.pk)
             receipt = mapping(mapping(locked.result).get('self_heal_v1'))
             pending = mapping(receipt.get('pending_action'))
-            if pending.get('attempt') == decision.attempt:
+            if pending.get('attempt') == decision.attempt and pending.get('claim') == lease_claim:
                 receipt['pending_action'] = {**pending, 'state': 'uncertain' if uncertain else 'accepted'}
                 _write_run(locked, receipt)
     return receipt
@@ -501,33 +562,35 @@ def _apply_saved_operation(subject, decision, *, now):
     original = subject.get('_operation')
     if original is None:
         return {'status': 'refused', 'detail': 'Not available yet.'}
-    with authority_guard(contract_for(original.connection), action='read'):
-        current = WebsiteConnectionOperation.objects.select_for_update().select_related('connection__organization').get(pk=original.pk)
-        if (current.state in {'cancelled', 'denied', 'completed'} or current.generation != current.connection.generation
-                or current.updated_at != original.updated_at
-                or not goals.valid_goal(mapping(current.receipt).get('goal'), goals.scope_for(current.connection, current.payload.get('company_id')))):
-            return {'status': 'refused', 'detail': 'The saved website goal changed.'}
-        controller = subject.get('_controller') is True
-        if current.state == 'running' and not (controller and current.updated_at == getattr(original, '_claimed_at', None)):
-            return {'status': 'refused', 'detail': 'The website controller owns this attempt.'}
-        if controller:
-            # finish_goal holds the controller's current working observation;
-            # its existing lease CAS remains the only operation-state writer.
-            current.receipt, current.payload = original.receipt, original.payload
-            current.state, current.next_attempt_at = original.state, original.next_attempt_at
-        value = {**current.receipt, '_operation': current, '_organization': current.connection.organization,
-                 'run_request': current.payload}
-        fresh = decide(value, now=now)
-        if (fresh.action, fresh.attempt, fresh.cap) != (decision.action, decision.attempt, decision.cap):
-            return mapping(current.receipt.get('self_heal_v1'))
-        receipt = _apply_operation(value, decision, now=now)
-        if not controller:
-            current.save(update_fields=['receipt', 'payload', 'state', 'next_attempt_at', 'updated_at'])
-        original.receipt, original.payload = current.receipt, current.payload
-        original.state, original.next_attempt_at = current.state, current.next_attempt_at
-        if not controller:
-            original.updated_at = current.updated_at
-        return receipt
+    with transaction.atomic():
+        _locked_config(original.connection.organization)
+        with authority_guard(contract_for(original.connection), action='read'):
+            current = WebsiteConnectionOperation.objects.select_for_update().select_related('connection__organization').get(pk=original.pk)
+            if (current.state in {'cancelled', 'denied', 'completed'} or current.generation != current.connection.generation
+                    or current.updated_at != original.updated_at
+                    or not goals.valid_goal(mapping(current.receipt).get('goal'), goals.scope_for(current.connection, current.payload.get('company_id')))):
+                return {'status': 'refused', 'detail': 'The saved website goal changed.'}
+            controller = subject.get('_controller') is True
+            if current.state == 'running' and not (controller and current.updated_at == getattr(original, '_claimed_at', None)):
+                return {'status': 'refused', 'detail': 'The website controller owns this attempt.'}
+            if controller:
+                # finish_goal holds the controller's current working observation;
+                # its existing lease CAS remains the only operation-state writer.
+                current.receipt, current.payload = original.receipt, original.payload
+                current.state, current.next_attempt_at = original.state, original.next_attempt_at
+            value = {**current.receipt, '_operation': current, '_organization': current.connection.organization,
+                     'run_request': current.payload}
+            fresh = decide(value, now=now)
+            if (fresh.action, fresh.attempt, fresh.cap) != (decision.action, decision.attempt, decision.cap):
+                return mapping(current.receipt.get('self_heal_v1'))
+            receipt = _apply_operation(value, decision, now=now)
+            if not controller:
+                current.save(update_fields=['receipt', 'payload', 'state', 'next_attempt_at', 'updated_at'])
+            original.receipt, original.payload = current.receipt, current.payload
+            original.state, original.next_attempt_at = current.state, current.next_attempt_at
+            if not controller:
+                original.updated_at = current.updated_at
+            return receipt
 
 
 def _candidates(now, limit, organization_id=None):

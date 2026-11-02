@@ -1117,8 +1117,8 @@ def _redrive_fixed_runs(*, limit, now):
         return 0
     candidates = list(ContentFactoryRun.objects.filter(status="blocked", updated_at__lt=now - timedelta(minutes=10),
         workflow__in=DURABLY_READABLE_WORKFLOWS).filter(_legacy_delivery_rows("run_request")).filter(Q(result__sweep_redrive_attempted__isnull=True) | Q(result__sweep_redrive_attempted=False))[:limit])
-    from .failure_policy_engine import policy_mode
-    candidates = [run for run in candidates if policy_mode(run.organization) != 'policy']
+    from .failure_policy_engine import owns_recovery
+    candidates = [run for run in candidates if not owns_recovery(run, now=now)]
     if not candidates:
         return 0
     try:

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib
+from datetime import timedelta
+from uuid import uuid4
 
 from django.conf import settings
 from django.db import transaction
@@ -10,7 +12,7 @@ from django.utils import timezone
 from workflow_runs.models import ContentFactoryRun
 from . import registry_policy
 from .models import OrganizationContentConfig
-from .website_goal import mapping
+from .website_goal import mapping, stamp
 
 
 def _enabled(organization):
@@ -27,7 +29,12 @@ def _hosted(run):
         publish = getattr(importlib.import_module('content_factory.hosted_auto_register'), 'publish_via_hosted')
     except (ImportError, AttributeError):
         return None
-    return publish(run)
+    try:
+        return publish(run)
+    except ValueError:
+        # No current article-publish consent: retain a portable draft rather
+        # than turn setup consent into an article publication permission.
+        return None
 
 
 def switch_to_copy_ready(*, run, reason, now=None):
@@ -42,8 +49,12 @@ def switch_to_copy_ready(*, run, reason, now=None):
         old = mapping(mapping(current.result).get('channel_v1'))
         if old.get('version') == 1 and old.get('dispatch_state') == 'accepted':
             return old
+        if old.get('dispatch_state') == 'pending' and (stamp(old.get('lease_until')) or now) > now:
+            return old
         receipt = old if old.get('version') == 1 else {'version': 1, 'channel': 'copy_ready', 'reason': str(reason)[:100],
                    'waiting_to_publish': True, 'at': now.isoformat(), 'dispatch_state': 'pending'}
+        claim = uuid4().hex
+        receipt = {**receipt, 'claim': claim, 'lease_until': (now + timedelta(minutes=2)).isoformat(), 'dispatch_state': 'pending'}
         ContentFactoryRun.objects.filter(pk=current.pk).update(result={**mapping(current.result), 'channel_v1': receipt})
     # CF receives a delivery intent, never a rewritten portable authority tuple.
     # It retains saved body/spec and only replaces remaining delivery steps.
@@ -57,7 +68,7 @@ def switch_to_copy_ready(*, run, reason, now=None):
             from .vibe_marketing_views import _call_content_factory_run_action
             response = _call_content_factory_run_action(run_id=current.run_id, workflow=current.workflow, action='resume',
                 payload={'channel_switch': {'delivery_mode': 'content_only', 'key': f'{current.run_id}:copy-ready'}},
-                transport_errors_are_pending=True)
+                transport_errors_are_pending=True, preserve_run_clock=True)
             acknowledgement = mapping(mapping(response).get('channel_switch'))
             if (type(acknowledgement.get('version')) is int and acknowledgement['version'] == 1
                     and acknowledgement.get('run_id') == current.run_id
@@ -69,6 +80,9 @@ def switch_to_copy_ready(*, run, reason, now=None):
             receipt['dispatch_state'] = 'accepted'
     with transaction.atomic():
         locked = ContentFactoryRun.objects.select_for_update().get(pk=current.pk)
+        latest = mapping(mapping(locked.result).get('channel_v1'))
+        if latest.get('claim') != claim:
+            return latest
         ContentFactoryRun.objects.filter(pk=current.pk).update(result={**mapping(locked.result), 'channel_v1': receipt})
     return receipt
 

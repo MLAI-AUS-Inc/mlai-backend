@@ -145,6 +145,26 @@ class TeamTests(TransactionTestCase):
         teams.update_member(organization=self.org, user=self.owner, member_id=row['memberId'], remove=True)
         self.assertEqual(resolve_content_billing_user(self.member, self.org.domain).pk, self.member.pk)
 
+    def test_billing_summary_matches_live_spend_rights_without_other_account_email(self):
+        from content_factory.company_billing import billing_summary
+        self.org.billing_user = self.owner
+        self.org.save(update_fields=['billing_user'])
+        row = self.approve()
+        def balance(user):
+            return {'digital_service_balance_microroo': (20 if user.pk == self.owner.pk else 4) * 1_000_000}
+        with patch('roo.services.PointsService.get_balance', side_effect=balance), \
+                patch('content_factory.billing.get_content_factory_article_cost_points', return_value=12):
+            own = billing_summary(self.org, self.member)
+            self.assertEqual((own['balance'], own['companyBillingEnabled'], own['billingFounderIsYou']), (4, False, True))
+            self.assertFalse(own['otherFounderHasPoints'])
+            teams.update_member(organization=self.org, user=self.owner, member_id=row['memberId'], rights={'billing': True})
+            granted = billing_summary(self.org, self.member)
+            self.assertEqual((granted['balance'], granted['companyBillingEnabled'], granted['billingFounderIsYou']), (20, True, False))
+            self.assertEqual(granted['billingAccount'], 'Company points')
+            self.assertNotIn(self.owner.email, json.dumps(granted))
+            teams.update_member(organization=self.org, user=self.owner, member_id=row['memberId'], rights={'billing': False})
+            self.assertEqual(billing_summary(self.org, self.member)['balance'], 4)
+
     def test_T8_invite_is_hashed_fragment_revocable_and_five_uses(self):
         invitation = teams.invite_link(organization=self.org, user=self.owner, action='create')
         token = invitation['url'].split('#')[1]
@@ -531,6 +551,16 @@ class TeamTests(TransactionTestCase):
         self.assertFalse(type(run).objects.filter(pk=run.pk).exists())
         self.assertTrue(self.roster()['frozen'])
         self.assertIsNone(organization_owner_user_id(self.org))
+
+    def test_unicode_company_snapshot_and_member_names_round_trip(self):
+        self.fixture.company.name = 'Café founder’s studio'
+        self.fixture.company.save(update_fields=['name'])
+        self.member.first_name = 'Zoë'
+        self.member.save(update_fields=['first_name'])
+        self.approve()
+        self.assertEqual(self.roster()['company']['name'], 'Café founder’s studio')
+        payload = teams.team_payload(organization=self.org, user=self.owner)
+        self.assertEqual(payload['members'][0]['firstName'], 'Zoë')
 
 
 class DomainRulesTests(SimpleTestCase):

@@ -270,6 +270,24 @@ class StartupContractTests(TestCase):
         self.assertEqual(raw.GET["company_id"], "owned")
         self.assertEqual(provider, "slack")
 
+    @patch("founder_tools.my_startup.connectors.google_connect")
+    @patch("community_chat.authentication.authenticate_access_token")
+    def test_native_google_start_binds_selected_company_and_saved_sheet(self, authenticate, connect):
+        authenticate.return_value = session(22)
+        connect.return_value = HttpResponse(status=302, headers={'Location': 'https://accounts.google.com/o/oauth2/auth?state=opaque'})
+        company = str(uuid4())
+        path = f'/my-startup/create?company_id={company}&googleBaseline=refresh&step=websiteCheck'
+        request = self.factory.post(f'/api/v1/my-startup/connectors/google/connect/?company_id={company}',
+            {'next': ORIGIN+'/my-startup/create', 'return_runtime': 'tauri', 'return_path': path},
+            format='json', HTTP_ORIGIN=ORIGIN, HTTP_COOKIE='mlai_chat_access=valid')
+        response = MyStartupConnectorConnectView.as_view()(request, provider='google')
+        self.assertEqual(response.status_code, 200)
+        raw = connect.call_args.args[0]
+        self.assertEqual(raw.user.pk, 22)
+        self.assertEqual(raw.GET['next'], 'mlaichat:/'+path)
+        self.assertEqual(raw.GET['company_id'], company)
+        self.assertEqual(raw.GET['scope'], 'website_baseline')
+
     @patch("founder_tools.my_startup.handoff.company_for_handoff")
     def test_handoff_is_bound_to_account_and_redeemed_once(self, company_lookup):
         from django.core.cache import cache
