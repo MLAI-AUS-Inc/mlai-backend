@@ -41,6 +41,9 @@ class FirstArticleBillingTests(SimpleTestCase):
         self.connection.operations.select_for_update.return_value = self.connection.operations
         self.connection.operations.filter.return_value.order_by.return_value.first.return_value = self.op
         self.stack = ExitStack(); self.addCleanup(self.stack.close)
+        # Pure billing exercises the real stamp; membership resolution is a
+        # database collaborator covered by the persisted provider-chain suite.
+        self.stack.enter_context(patch("content_factory.p2_foundation.merge_policy_for", return_value=None))
         self.spend = self.stack.enter_context(patch("roo.services.PointsService.spend", return_value=(self.ledger, True)))
         self.stack.enter_context(patch("content_factory.billing.get_content_factory_article_cost_points", return_value=6))
         self.stack.enter_context(patch("content_factory.company_billing.billing_user_for_organization", return_value=self.payer))
@@ -184,7 +187,9 @@ class FirstArticleBillingTests(SimpleTestCase):
 
     def test_http_body_fields_do_not_activate_internal_reserved_billing(self):
         from . import vibe_marketing_views as views
-        request = SimpleNamespace(user=self.user, data={"expectedCostPoints":99,
+        # A confirmed ceiling above today's price is now valid. Use a genuinely
+        # insufficient quote so forged body fields still cannot bypass pricing.
+        request = SimpleNamespace(user=self.user, data={"expectedCostPoints":0,
             "goal_operation_id":"prepare", "first_article_goal_operation_id":"prepare"})
         with patch.object(views, "get_content_factory_article_cost_points", return_value=6), \
             patch.object(billing, "generation_key") as lookup:
