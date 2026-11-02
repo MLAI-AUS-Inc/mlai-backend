@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "producer": "actual guarded island task and run_research, real synthesis/proposals/durable events/canonical bytes and authenticated read/cancel; only config, research and synthesis provider transports substituted",
+  "producer": "actual guarded island task and run_research, real synthesis/proposals/durable events/canonical bytes and authenticated read/cancel; actual configured authorize_connection, only config, research and synthesis provider transports substituted",
   "run_id": "r3-actual-island-paid-worker",
   "original_backend_admission": {
     "original_ledger": {
@@ -91,6 +91,208 @@
       "slack_user_id": "mlai_user:1010"
     },
     "schema_version": 1
+  },
+  "admission_response": {
+    "job_id": "r3-actual-island-paid-worker",
+    "job_url": "/api/runs/r3-actual-island-paid-worker",
+    "run_id": "r3-actual-island-paid-worker",
+    "status": "queued",
+    "workflow": "island_refresh"
+  },
+  "callbacks": [],
+  "status_before_cancel": {
+    "acceptance_summary": {
+      "approval_recorded": false,
+      "browser_skipped": false,
+      "browser_verified": false,
+      "build_verified": false,
+      "content_packaged": false,
+      "evidence_summary": {
+        "accessibility_snapshot_path": null,
+        "article_component_manifest_path": null,
+        "article_html_path": null,
+        "article_json_path": null,
+        "article_markdown_path": null,
+        "article_meta_path": null,
+        "browser_report_path": null,
+        "build_log_path": null,
+        "claim_map_path": null,
+        "comparison_artifacts": [],
+        "content_package_path": null,
+        "content_package_slug": null,
+        "content_package_target_keyword": null,
+        "content_package_title": null,
+        "generated_inline_image_count": 0,
+        "grounding_report_path": null,
+        "hero_image_url": null,
+        "html_snapshot_path": null,
+        "image_errors": [],
+        "image_manifest_path": null,
+        "image_manifest_status": null,
+        "pr_url": null,
+        "preview_available": false,
+        "preview_evidence_path": null,
+        "preview_mode": null,
+        "preview_url": null,
+        "reference_screenshots": [],
+        "resource_manifest_path": null,
+        "resource_pdf_status": null,
+        "resource_pdf_url": null,
+        "review_summary_path": null,
+        "screenshots": [],
+        "style_review_report_path": null
+      },
+      "grounding_verified": false,
+      "pr_ready": false,
+      "publish_bundle_packaged": false,
+      "static_verified": false,
+      "style_review_verified": false,
+      "warnings": []
+    },
+    "approval_state": "not_required",
+    "artifact_root": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/cf-island-paired-dt5u4rht/r3-actual-island-paid-worker",
+    "auto_bootstrap_applied": false,
+    "bootstrap_status": "not_needed",
+    "bootstrap_strategy": "",
+    "capability_snapshot": {},
+    "current_step": "load_context",
+    "delivery_mode": null,
+    "draft_pr_number": null,
+    "draft_pr_url": null,
+    "error": "Island research is temporarily unavailable. Please try again later.",
+    "failure": {},
+    "fallback_reason": null,
+    "generation": 0,
+    "hook_bootstrap_suggestion": {},
+    "hook_config_path": "",
+    "materialized_target_paths": [],
+    "notified_progress_markers": [],
+    "publish_capability": null,
+    "publish_resolution": null,
+    "publish_target_kind": null,
+    "recovery": {},
+    "recovery_intents": {},
+    "resolution_source": null,
+    "resolved_delivery_mode": null,
+    "result": {
+      "error_code": "ISLAND_RESEARCH_FAILED",
+      "island_research": true,
+      "message": "We couldn\u2019t complete island research. Your brief is saved; please try again.",
+      "refundable": true,
+      "run_id": "r3-actual-island-paid-worker",
+      "status": "failed",
+      "step_durations": {
+        "phases": {
+          "context": 0.006
+        },
+        "run_wall_seconds": 0.021,
+        "schema_version": 1,
+        "steps": {
+          "load_context": {
+            "attempts": 1,
+            "phase": "context",
+            "seconds": 0.006,
+            "status": "failed"
+          }
+        },
+        "sum_seconds": 0.006
+      },
+      "suggested_islands": []
+    },
+    "resume_available": true,
+    "run_id": "r3-actual-island-paid-worker",
+    "run_request_path": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/cf-island-paired-dt5u4rht/r3-actual-island-paid-worker/RUN_REQUEST.json",
+    "started_at": "2026-11-02T21:56:36.844377+00:00",
+    "state_version": 5,
+    "status": "failed",
+    "step_order": [
+      "load_context",
+      "research_sources",
+      "synthesize",
+      "finalize"
+    ],
+    "step_states": {
+      "finalize": {
+        "artifacts": [],
+        "attempt_history": [],
+        "attempts": 0,
+        "budget_baseline": 0,
+        "completed_at": null,
+        "error": null,
+        "latest_attempt_path": null,
+        "message": null,
+        "name": "finalize",
+        "required": true,
+        "started_at": null,
+        "status": "pending"
+      },
+      "load_context": {
+        "artifacts": [],
+        "attempt_history": [
+          {
+            "artifacts": [],
+            "attempt": 1,
+            "completed_at": "2026-11-02T21:56:36.865635+00:00",
+            "error": "Island research is temporarily unavailable. Please try again later.",
+            "input_path": "steps/load_context/attempt-01/inputs.json",
+            "interrupted": false,
+            "message": "Island research is temporarily unavailable. Please try again later.",
+            "notes_path": "steps/load_context/attempt-01/NOTES.md",
+            "output_path": "steps/load_context/attempt-01/outputs.json",
+            "refunded": false,
+            "started_at": "2026-11-02T21:56:36.859642+00:00",
+            "status": "failed",
+            "status_path": "steps/load_context/attempt-01/STATUS.json"
+          }
+        ],
+        "attempts": 1,
+        "budget_baseline": 0,
+        "completed_at": "2026-11-02T21:56:36.865635+00:00",
+        "error": "Island research is temporarily unavailable. Please try again later.",
+        "latest_attempt_path": "steps/load_context/attempt-01",
+        "message": "Island research is temporarily unavailable. Please try again later.",
+        "name": "load_context",
+        "required": true,
+        "started_at": "2026-11-02T21:56:36.859642+00:00",
+        "status": "failed"
+      },
+      "research_sources": {
+        "artifacts": [],
+        "attempt_history": [],
+        "attempts": 0,
+        "budget_baseline": 0,
+        "completed_at": null,
+        "error": null,
+        "latest_attempt_path": null,
+        "message": null,
+        "name": "research_sources",
+        "required": true,
+        "started_at": null,
+        "status": "pending"
+      },
+      "synthesize": {
+        "artifacts": [],
+        "attempt_history": [],
+        "attempts": 0,
+        "budget_baseline": 0,
+        "completed_at": null,
+        "error": null,
+        "latest_attempt_path": null,
+        "message": null,
+        "name": "synthesize",
+        "required": true,
+        "started_at": null,
+        "status": "pending"
+      }
+    },
+    "updated_at": "2026-11-02T21:56:36.878737+00:00",
+    "verification_summary": {
+      "all_required_passed": false,
+      "blocked": false,
+      "checks": [],
+      "generated_at": "2026-11-02T21:56:36.844389+00:00"
+    },
+    "workflow": "island_refresh"
   },
   "cancel_request": {
     "backend_run_admission_v1": {
@@ -236,10 +438,10 @@
           "website_connection_id": null
         }
       },
-      "closed_at": "2026-11-02T21:04:25.581441+00:00",
+      "closed_at": "2026-11-02T21:56:36.907751+00:00",
       "event_cursor": 12,
       "kind": "topic_selection_v1",
-      "receipt_sha256": "57bfa835f4ff292fb26206d3ee3879ec3170776820f652184d4b83721c7c2ae1",
+      "receipt_sha256": "463b6009567a000b0b484be4f98494233b1c49e60a1e06958b61633505263e45",
       "run_id": "r3-actual-island-paid-worker",
       "schema_version": 1,
       "status": "closed_no_effects"
@@ -344,10 +546,10 @@
           "website_connection_id": null
         }
       },
-      "closed_at": "2026-11-02T21:04:25.581441+00:00",
+      "closed_at": "2026-11-02T21:56:36.907751+00:00",
       "event_cursor": 12,
       "kind": "topic_selection_v1",
-      "receipt_sha256": "57bfa835f4ff292fb26206d3ee3879ec3170776820f652184d4b83721c7c2ae1",
+      "receipt_sha256": "463b6009567a000b0b484be4f98494233b1c49e60a1e06958b61633505263e45",
       "run_id": "r3-actual-island-paid-worker",
       "schema_version": 1,
       "status": "closed_no_effects"
@@ -450,14 +652,14 @@
             "website_connection_id": null
           }
         },
-        "emitted_at": "2026-11-02T21:04:25.573613+00:00",
+        "emitted_at": "2026-11-02T21:56:36.900138+00:00",
         "event": "run_events_v2",
-        "event_id": "9e6ed2ef4dda573928b60015b2444a688b7cd3f231de852b41882760c2ccc97f",
+        "event_id": "e30ff17b4fdfaa7312384c6b5830ba32e730c85f560a825459731dfae8a50c66",
         "event_type": "run_events_v2",
         "events": [
           {
-            "at": "2026-11-02T21:04:25.520615+00:00",
-            "digest": "4ea925985a262780430961e541268564b2aa5be87abc9e50e0f310fe928df75b",
+            "at": "2026-11-02T21:56:36.847520+00:00",
+            "digest": "05d7a7d589383dd117404a6916b315adeb8b8c364efac0eed98e0b394f199e79",
             "generation": 0,
             "seq": 1,
             "state_version": 1,
@@ -466,8 +668,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.529099+00:00",
-            "digest": "6ae6bf229c07031b42f489643ca02e7d97a58eb3e2e6da7445199e35c0bda583",
+            "at": "2026-11-02T21:56:36.861728+00:00",
+            "digest": "38e8cc5e8dca838f55071fa02ea763f041d8ff165391f9d2feeb4eaa13ed2204",
             "generation": 0,
             "seq": 2,
             "state_version": 2,
@@ -476,9 +678,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.529099+00:00",
+            "at": "2026-11-02T21:56:36.861728+00:00",
             "attempt": 1,
-            "digest": "f4b3a9061c7769b9d80dca4e0f834743974e9917c6d2e3dd62d2f58fed187fcb",
+            "digest": "885adb8819a40d47f7a189a415541bb98b89a4d4569fba0ceabb9f5ea45eb0f6",
             "generation": 0,
             "seq": 3,
             "state_version": 2,
@@ -486,8 +688,8 @@
             "type": "step_started"
           },
           {
-            "at": "2026-11-02T21:04:25.536501+00:00",
-            "digest": "e0ffb90209b17a6dca656aa8470ec07f58c194e79c883f7934cec94a197fc1c9",
+            "at": "2026-11-02T21:56:36.868676+00:00",
+            "digest": "dc1f9f5ecc257d93a09add535f783f73c5787c436f3635a7e1761dc34b1cf36d",
             "generation": 0,
             "seq": 4,
             "state_version": 3,
@@ -496,9 +698,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.536501+00:00",
+            "at": "2026-11-02T21:56:36.868676+00:00",
             "attempt": 1,
-            "digest": "81751836113756221eb00c5c9b2ec1a72e22f7a6f031a86674823b0ed4b74bc3",
+            "digest": "c06ce133cda876c739c04f3e52d1f89aed4aaa26958912922fad8bf0f2e97f90",
             "generation": 0,
             "seq": 5,
             "state_version": 3,
@@ -507,8 +709,8 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.541776+00:00",
-            "digest": "cb0c46abfc50aad8e61b6006b7aac76970633c950b44aeb6b5fdb3a77985eb53",
+            "at": "2026-11-02T21:56:36.874057+00:00",
+            "digest": "ad2bda399af856e433c1a7bfafe45b298aaafa495a6b6d860d2dac80cda82970",
             "generation": 0,
             "seq": 6,
             "state_version": 4,
@@ -517,8 +719,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.547956+00:00",
-            "digest": "84c3f48e62f3d1ff50d3bfbf4de9747ebab5eab2d60a02dd2f04c0ae82efe7fe",
+            "at": "2026-11-02T21:56:36.880332+00:00",
+            "digest": "dea33cce80dde5b84a4639c4bf448f7a2640bcd32b2a9863e298a323d4c0a10c",
             "generation": 0,
             "seq": 7,
             "state_version": 5,
@@ -527,8 +729,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.573613+00:00",
-            "digest": "65aac4ffdcd8c2ed9b0c232b72b3e50438b90a32834048cac008ad98019d487b",
+            "at": "2026-11-02T21:56:36.900138+00:00",
+            "digest": "1779926583ff8c083b8d76abff785330e0fc0207f6baddf308b95c2f59a7244b",
             "generation": 0,
             "seq": 8,
             "state_version": 6,
@@ -537,9 +739,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.573613+00:00",
+            "at": "2026-11-02T21:56:36.900138+00:00",
             "attempt": 1,
-            "digest": "a4095e05e2ad393d192e8425444203395dbbe668da22c24c7bfb46dc6be4c920",
+            "digest": "79d520613be43f766bc508d0d3c8bf1716d0e85be9308aacd7b91c6d0dff2467",
             "generation": 0,
             "seq": 9,
             "state_version": 6,
@@ -548,9 +750,9 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.573613+00:00",
+            "at": "2026-11-02T21:56:36.900138+00:00",
             "attempt": 0,
-            "digest": "5303ea471e0449ea23599ef2811391501c5d132b3e68e148a3e4351d41de2231",
+            "digest": "c25d36a06aae5d9adc2c5fdeb59af28ae575515fb79e40ffc428e0aa6f45152e",
             "generation": 0,
             "seq": 10,
             "state_version": 6,
@@ -559,9 +761,9 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.573613+00:00",
+            "at": "2026-11-02T21:56:36.900138+00:00",
             "attempt": 0,
-            "digest": "93112cc4b177ff18524cf779035244d20bfec817ab824446694d57a2ac9146a3",
+            "digest": "a0c2ed3d5cf51f9d0f5cb599b1cc15d14473f6463f4757a8eccbe3d7d1be90d8",
             "generation": 0,
             "seq": 11,
             "state_version": 6,
@@ -570,9 +772,9 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.573613+00:00",
+            "at": "2026-11-02T21:56:36.900138+00:00",
             "attempt": 0,
-            "digest": "de6dedeb6597697be2aacd6050f53ba4fef15eee7568fc3fdf22e04d7ea09f99",
+            "digest": "4d31dabbad38d1f1f1c0ddcdf41e797a7ae3fc5f21733cf3325fa3e46b65b465",
             "generation": 0,
             "seq": 12,
             "state_version": 6,
@@ -637,14 +839,14 @@
             "website_connection_id": null
           }
         },
-        "emitted_at": "2026-11-02T21:04:25.547956+00:00",
+        "emitted_at": "2026-11-02T21:56:36.880332+00:00",
         "event": "run_events_v2",
-        "event_id": "eca1e54f7f6c231de942ec14e90c4b5633d080ba978eb1fcbad87e3ba2bb84ef",
+        "event_id": "848db7078b7a6705aaf733cab291efcbaf4900374bb0ec3eaf41e757d6c5673c",
         "event_type": "run_events_v2",
         "events": [
           {
-            "at": "2026-11-02T21:04:25.520615+00:00",
-            "digest": "4ea925985a262780430961e541268564b2aa5be87abc9e50e0f310fe928df75b",
+            "at": "2026-11-02T21:56:36.847520+00:00",
+            "digest": "05d7a7d589383dd117404a6916b315adeb8b8c364efac0eed98e0b394f199e79",
             "generation": 0,
             "seq": 1,
             "state_version": 1,
@@ -653,8 +855,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.529099+00:00",
-            "digest": "6ae6bf229c07031b42f489643ca02e7d97a58eb3e2e6da7445199e35c0bda583",
+            "at": "2026-11-02T21:56:36.861728+00:00",
+            "digest": "38e8cc5e8dca838f55071fa02ea763f041d8ff165391f9d2feeb4eaa13ed2204",
             "generation": 0,
             "seq": 2,
             "state_version": 2,
@@ -663,9 +865,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.529099+00:00",
+            "at": "2026-11-02T21:56:36.861728+00:00",
             "attempt": 1,
-            "digest": "f4b3a9061c7769b9d80dca4e0f834743974e9917c6d2e3dd62d2f58fed187fcb",
+            "digest": "885adb8819a40d47f7a189a415541bb98b89a4d4569fba0ceabb9f5ea45eb0f6",
             "generation": 0,
             "seq": 3,
             "state_version": 2,
@@ -673,8 +875,8 @@
             "type": "step_started"
           },
           {
-            "at": "2026-11-02T21:04:25.536501+00:00",
-            "digest": "e0ffb90209b17a6dca656aa8470ec07f58c194e79c883f7934cec94a197fc1c9",
+            "at": "2026-11-02T21:56:36.868676+00:00",
+            "digest": "dc1f9f5ecc257d93a09add535f783f73c5787c436f3635a7e1761dc34b1cf36d",
             "generation": 0,
             "seq": 4,
             "state_version": 3,
@@ -683,9 +885,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.536501+00:00",
+            "at": "2026-11-02T21:56:36.868676+00:00",
             "attempt": 1,
-            "digest": "81751836113756221eb00c5c9b2ec1a72e22f7a6f031a86674823b0ed4b74bc3",
+            "digest": "c06ce133cda876c739c04f3e52d1f89aed4aaa26958912922fad8bf0f2e97f90",
             "generation": 0,
             "seq": 5,
             "state_version": 3,
@@ -694,8 +896,8 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.541776+00:00",
-            "digest": "cb0c46abfc50aad8e61b6006b7aac76970633c950b44aeb6b5fdb3a77985eb53",
+            "at": "2026-11-02T21:56:36.874057+00:00",
+            "digest": "ad2bda399af856e433c1a7bfafe45b298aaafa495a6b6d860d2dac80cda82970",
             "generation": 0,
             "seq": 6,
             "state_version": 4,
@@ -704,8 +906,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.547956+00:00",
-            "digest": "84c3f48e62f3d1ff50d3bfbf4de9747ebab5eab2d60a02dd2f04c0ae82efe7fe",
+            "at": "2026-11-02T21:56:36.880332+00:00",
+            "digest": "dea33cce80dde5b84a4639c4bf448f7a2640bcd32b2a9863e298a323d4c0a10c",
             "generation": 0,
             "seq": 7,
             "state_version": 5,

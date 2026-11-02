@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "producer": "actual guarded island task and run_research, real synthesis/proposals/durable events/canonical bytes and authenticated read/cancel; only config, research and synthesis provider transports substituted",
+  "producer": "actual guarded island task and run_research, real synthesis/proposals/durable events/canonical bytes and authenticated read/cancel; actual configured authorize_connection, only config, research and synthesis provider transports substituted",
   "run_id": "r3-actual-island-paid-worker",
   "original_backend_admission": {
     "original_ledger": {
@@ -91,6 +91,372 @@
       "slack_user_id": "mlai_user:1010"
     },
     "schema_version": 1
+  },
+  "admission_response": {
+    "job_id": "r3-actual-island-paid-worker",
+    "job_url": "/api/runs/r3-actual-island-paid-worker",
+    "run_id": "r3-actual-island-paid-worker",
+    "status": "queued",
+    "workflow": "island_refresh"
+  },
+  "callbacks": [],
+  "status_before_cancel": {
+    "acceptance_summary": {
+      "approval_recorded": false,
+      "browser_skipped": false,
+      "browser_verified": false,
+      "build_verified": false,
+      "content_packaged": false,
+      "evidence_summary": {
+        "accessibility_snapshot_path": null,
+        "article_component_manifest_path": null,
+        "article_html_path": null,
+        "article_json_path": null,
+        "article_markdown_path": null,
+        "article_meta_path": null,
+        "browser_report_path": null,
+        "build_log_path": null,
+        "claim_map_path": null,
+        "comparison_artifacts": [],
+        "content_package_path": null,
+        "content_package_slug": null,
+        "content_package_target_keyword": null,
+        "content_package_title": null,
+        "generated_inline_image_count": 0,
+        "grounding_report_path": null,
+        "hero_image_url": null,
+        "html_snapshot_path": null,
+        "image_errors": [],
+        "image_manifest_path": null,
+        "image_manifest_status": null,
+        "pr_url": null,
+        "preview_available": false,
+        "preview_evidence_path": null,
+        "preview_mode": null,
+        "preview_url": null,
+        "reference_screenshots": [],
+        "resource_manifest_path": null,
+        "resource_pdf_status": null,
+        "resource_pdf_url": null,
+        "review_summary_path": null,
+        "screenshots": [],
+        "style_review_report_path": null
+      },
+      "grounding_verified": false,
+      "pr_ready": false,
+      "publish_bundle_packaged": false,
+      "static_verified": false,
+      "style_review_verified": false,
+      "warnings": []
+    },
+    "approval_state": "not_required",
+    "artifact_root": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/cf-island-paired-jh27fprz/r3-actual-island-paid-worker",
+    "auto_bootstrap_applied": false,
+    "bootstrap_status": "not_needed",
+    "bootstrap_strategy": "",
+    "capability_snapshot": {},
+    "current_step": "finalize",
+    "delivery_mode": null,
+    "draft_pr_number": null,
+    "draft_pr_url": null,
+    "error": null,
+    "failure": {},
+    "fallback_reason": null,
+    "generation": 0,
+    "hook_bootstrap_suggestion": {},
+    "hook_config_path": "",
+    "materialized_target_paths": [],
+    "notified_progress_markers": [],
+    "publish_capability": null,
+    "publish_resolution": null,
+    "publish_target_kind": null,
+    "recovery": {},
+    "recovery_intents": {},
+    "resolution_source": null,
+    "resolved_delivery_mode": null,
+    "result": {
+      "island_research": true,
+      "keyword_count": 3,
+      "market": {
+        "language_code": "en",
+        "location_code": 2036,
+        "name": "Australia"
+      },
+      "message": "Choose a researched island to add to your map.",
+      "refundable": false,
+      "researched_at": "2026-11-02T21:56:37.050821+00:00",
+      "run_id": "r3-actual-island-paid-worker",
+      "seeds": [
+        "balcony gardening"
+      ],
+      "source": "DataForSEO",
+      "status": "completed",
+      "step_durations": {
+        "phases": {
+          "context": 0.063,
+          "publish": 0.007
+        },
+        "run_wall_seconds": 0.125,
+        "schema_version": 1,
+        "steps": {
+          "finalize": {
+            "attempts": 1,
+            "phase": "publish",
+            "seconds": 0.007,
+            "status": "completed"
+          },
+          "load_context": {
+            "attempts": 1,
+            "phase": "context",
+            "seconds": 0.005,
+            "status": "completed"
+          },
+          "research_sources": {
+            "attempts": 1,
+            "phase": "context",
+            "seconds": 0.037,
+            "status": "completed"
+          },
+          "synthesize": {
+            "attempts": 1,
+            "phase": "context",
+            "seconds": 0.021,
+            "status": "completed"
+          }
+        },
+        "sum_seconds": 0.07
+      },
+      "suggested_islands": [
+        {
+          "centroid_embedding": [
+            1.0,
+            0.0
+          ],
+          "color_key": "green",
+          "description": "Growing food on balconies",
+          "direct_relevance": false,
+          "icon_key": "default",
+          "id": "a1a9ab0ac8dd7a2b7781",
+          "intent_preferred": false,
+          "keywords": [
+            {
+              "difficulty": 20,
+              "keyword": "balcony tomatoes",
+              "opportunity_index": 30.0,
+              "volume": 300
+            },
+            {
+              "difficulty": 20,
+              "keyword": "balcony vegetables",
+              "opportunity_index": 20.0,
+              "volume": 200
+            },
+            {
+              "difficulty": 20,
+              "keyword": "balcony herbs",
+              "opportunity_index": 10.0,
+              "volume": 100
+            }
+          ],
+          "limited_data": false,
+          "matched": false,
+          "members": [
+            {
+              "is_centroid": true,
+              "keyword_normalized": "balcony tomatoes",
+              "similarity_score": 1.0
+            },
+            {
+              "is_centroid": false,
+              "keyword_normalized": "balcony vegetables",
+              "similarity_score": 1.0
+            },
+            {
+              "is_centroid": false,
+              "keyword_normalized": "balcony herbs",
+              "similarity_score": 1.0
+            }
+          ],
+          "metrics": {
+            "ai_search_volume": 0,
+            "avg_difficulty": 20.0,
+            "keyword_count": 3,
+            "opportunity_score": 60.0,
+            "total_volume": 600
+          },
+          "name": "Balcony Food Gardening",
+          "origin": "cluster_birth",
+          "pillar_keyword": "balcony tomatoes",
+          "slug": null
+        }
+      ]
+    },
+    "resume_available": false,
+    "run_id": "r3-actual-island-paid-worker",
+    "run_request_path": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/cf-island-paired-jh27fprz/r3-actual-island-paid-worker/RUN_REQUEST.json",
+    "started_at": "2026-11-02T21:56:36.926002+00:00",
+    "state_version": 16,
+    "status": "completed",
+    "step_order": [
+      "load_context",
+      "research_sources",
+      "synthesize",
+      "finalize"
+    ],
+    "step_states": {
+      "finalize": {
+        "artifacts": [],
+        "attempt_history": [
+          {
+            "artifacts": [],
+            "attempt": 1,
+            "completed_at": "2026-11-02T21:56:37.051187+00:00",
+            "error": null,
+            "input_path": "steps/finalize/attempt-01/inputs.json",
+            "interrupted": false,
+            "message": "Choose a researched island to add to your map.",
+            "notes_path": "steps/finalize/attempt-01/NOTES.md",
+            "output_path": "steps/finalize/attempt-01/outputs.json",
+            "refunded": false,
+            "started_at": "2026-11-02T21:56:37.043724+00:00",
+            "status": "completed",
+            "status_path": "steps/finalize/attempt-01/STATUS.json"
+          }
+        ],
+        "attempts": 1,
+        "budget_baseline": 0,
+        "completed_at": "2026-11-02T21:56:37.051187+00:00",
+        "error": null,
+        "latest_attempt_path": "steps/finalize/attempt-01",
+        "message": "Choose a researched island to add to your map.",
+        "name": "finalize",
+        "required": true,
+        "started_at": "2026-11-02T21:56:37.043724+00:00",
+        "status": "completed"
+      },
+      "load_context": {
+        "artifacts": [],
+        "attempt_history": [
+          {
+            "artifacts": [],
+            "attempt": 1,
+            "completed_at": "2026-11-02T21:56:36.941829+00:00",
+            "error": null,
+            "input_path": "steps/load_context/attempt-01/inputs.json",
+            "interrupted": false,
+            "message": "Your research brief is ready",
+            "notes_path": "steps/load_context/attempt-01/NOTES.md",
+            "output_path": "steps/load_context/attempt-01/outputs.json",
+            "refunded": false,
+            "started_at": "2026-11-02T21:56:36.936891+00:00",
+            "status": "completed",
+            "status_path": "steps/load_context/attempt-01/STATUS.json"
+          }
+        ],
+        "attempts": 1,
+        "budget_baseline": 0,
+        "completed_at": "2026-11-02T21:56:36.941829+00:00",
+        "error": null,
+        "latest_attempt_path": "steps/load_context/attempt-01",
+        "message": "Your research brief is ready",
+        "name": "load_context",
+        "required": true,
+        "started_at": "2026-11-02T21:56:36.936891+00:00",
+        "status": "completed"
+      },
+      "research_sources": {
+        "artifacts": [
+          "steps/research_sources/attempt-01/artifacts/keywords.json"
+        ],
+        "attempt_history": [
+          {
+            "artifacts": [
+              {
+                "checksum": "18f317bc2ea9f3a91d8cfd3998719ebe9ab9734d3758b08959d05a12e4446646",
+                "created_at": "2026-11-02T21:56:36.982875+00:00",
+                "integrity_version": 1,
+                "media_type": "application/json",
+                "name": "keywords.json",
+                "relative_path": "steps/research_sources/attempt-01/artifacts/keywords.json",
+                "size": 481
+              }
+            ],
+            "attempt": 1,
+            "completed_at": "2026-11-02T21:56:36.991042+00:00",
+            "error": null,
+            "input_path": "steps/research_sources/attempt-01/inputs.json",
+            "interrupted": false,
+            "message": "Found 3 relevant measured keywords",
+            "notes_path": "steps/research_sources/attempt-01/NOTES.md",
+            "output_path": "steps/research_sources/attempt-01/outputs.json",
+            "refunded": false,
+            "started_at": "2026-11-02T21:56:36.953793+00:00",
+            "status": "completed",
+            "status_path": "steps/research_sources/attempt-01/STATUS.json"
+          }
+        ],
+        "attempts": 1,
+        "budget_baseline": 0,
+        "completed_at": "2026-11-02T21:56:36.991042+00:00",
+        "error": null,
+        "latest_attempt_path": "steps/research_sources/attempt-01",
+        "message": "Found 3 relevant measured keywords",
+        "name": "research_sources",
+        "required": true,
+        "started_at": "2026-11-02T21:56:36.953793+00:00",
+        "status": "completed"
+      },
+      "synthesize": {
+        "artifacts": [
+          "steps/synthesize/attempt-01/artifacts/islands.json"
+        ],
+        "attempt_history": [
+          {
+            "artifacts": [
+              {
+                "checksum": "ebb327c81f6edf1ee92ccd0b5a21e732a47040e718a7bb00fd216da934644592",
+                "created_at": "2026-11-02T21:56:37.017467+00:00",
+                "integrity_version": 1,
+                "media_type": "application/json",
+                "name": "islands.json",
+                "relative_path": "steps/synthesize/attempt-01/artifacts/islands.json",
+                "size": 1610
+              }
+            ],
+            "attempt": 1,
+            "completed_at": "2026-11-02T21:56:37.026723+00:00",
+            "error": null,
+            "input_path": "steps/synthesize/attempt-01/inputs.json",
+            "interrupted": false,
+            "message": "Ranked 1 relevant content islands",
+            "notes_path": "steps/synthesize/attempt-01/NOTES.md",
+            "output_path": "steps/synthesize/attempt-01/outputs.json",
+            "refunded": false,
+            "started_at": "2026-11-02T21:56:37.006154+00:00",
+            "status": "completed",
+            "status_path": "steps/synthesize/attempt-01/STATUS.json"
+          }
+        ],
+        "attempts": 1,
+        "budget_baseline": 0,
+        "completed_at": "2026-11-02T21:56:37.026723+00:00",
+        "error": null,
+        "latest_attempt_path": "steps/synthesize/attempt-01",
+        "message": "Ranked 1 relevant content islands",
+        "name": "synthesize",
+        "required": true,
+        "started_at": "2026-11-02T21:56:37.006154+00:00",
+        "status": "completed"
+      }
+    },
+    "updated_at": "2026-11-02T21:56:37.071266+00:00",
+    "verification_summary": {
+      "all_required_passed": false,
+      "blocked": false,
+      "checks": [],
+      "generated_at": "2026-11-02T21:56:36.926010+00:00"
+    },
+    "workflow": "island_refresh"
   },
   "cancel_request": {
     "backend_run_admission_v1": {
@@ -451,9 +817,9 @@
             "website_connection_id": null
           }
         },
-        "evidence_sha256": "32989ac2119bfb694fe0d3e529412054ee365132c5ef7e81c390fb7bca24de18",
+        "evidence_sha256": "c0be5e061ee8476b641524b5166e6c57d591b8b7c417978ef5cd169f5c9d936d",
         "kind": "island_proposals_v1",
-        "observed_at": "2026-11-02T21:04:25.690535+00:00",
+        "observed_at": "2026-11-02T21:56:37.016536+00:00",
         "payload": {
           "proposals_sha256": "13ae62cff45de927ce974e6fbbb8b104e2a5287d8e4e3218a96a6b51dc6e7b2e",
           "schema_version": 1,
@@ -578,14 +944,14 @@
             "website_connection_id": null
           }
         },
-        "emitted_at": "2026-11-02T21:04:25.784204+00:00",
+        "emitted_at": "2026-11-02T21:56:37.103938+00:00",
         "event": "run_events_v2",
-        "event_id": "ef717376e04fedb1ae521581357f05d751225a2be42c5add0b7afe58449ccfbb",
+        "event_id": "8226bbe8e395ba4683ea3c7d87b573d77960d8565ebd61abc4f3a6cf062986f9",
         "event_type": "run_events_v2",
         "events": [
           {
-            "at": "2026-11-02T21:04:25.602524+00:00",
-            "digest": "fc491edb25b55ebf840c0868e9cb48a4cdc3e9c243891712da948e5ecd744133",
+            "at": "2026-11-02T21:56:36.927374+00:00",
+            "digest": "5a640cb29b6a444feaf202d8c68913b5db270a9415f8be9bc147281d0bd0182e",
             "generation": 0,
             "seq": 1,
             "state_version": 1,
@@ -594,8 +960,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.612593+00:00",
-            "digest": "78288fad0f86ae1f8a6fb0cf707bcc819b390dc4a928935dad60090bffead57b",
+            "at": "2026-11-02T21:56:36.938853+00:00",
+            "digest": "7ea7667460524c51dc53a4a8734cb876fad9e7d3cb9b8d178880b8234bc891b0",
             "generation": 0,
             "seq": 2,
             "state_version": 2,
@@ -604,9 +970,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.612593+00:00",
+            "at": "2026-11-02T21:56:36.938853+00:00",
             "attempt": 1,
-            "digest": "52731f6604859ecd4a569f2814b84054bdf76289e980330a22bc7ca8e49c4eaa",
+            "digest": "182e3abd3effb07d11789b4bd52f8ae7711af46a65c32ea3008e19d3a48c004b",
             "generation": 0,
             "seq": 3,
             "state_version": 2,
@@ -614,8 +980,8 @@
             "type": "step_started"
           },
           {
-            "at": "2026-11-02T21:04:25.619710+00:00",
-            "digest": "6cfb8d6f87988c22c8d38731a3de9c52a2425a14002e662f04d64224cfdd75fe",
+            "at": "2026-11-02T21:56:36.944607+00:00",
+            "digest": "1425f714868773427c5cf56dde5e8cbb60a759c8f2f5169670b8aa999de4efc6",
             "generation": 0,
             "seq": 4,
             "state_version": 3,
@@ -624,9 +990,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.619710+00:00",
+            "at": "2026-11-02T21:56:36.944607+00:00",
             "attempt": 1,
-            "digest": "b40c83134e4e065961913939596502b89b2a7768506ce41a443e0b9a38dea18b",
+            "digest": "60d79cc9dc356ddbf7c5b59790007390a728aadea757c186254340d0a55c9f02",
             "generation": 0,
             "seq": 5,
             "state_version": 3,
@@ -635,8 +1001,8 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.625099+00:00",
-            "digest": "4612432e4f52a83faa000ce4b34f63233d0cf25778b7ebbe558c9895492e9ef6",
+            "at": "2026-11-02T21:56:36.949481+00:00",
+            "digest": "20ba7695d71935d36b7418e4cfbcd5e98e6b68faacaf546afad89fa8fe092199",
             "generation": 0,
             "seq": 6,
             "state_version": 4,
@@ -645,8 +1011,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.632609+00:00",
-            "digest": "0d2767d0f74476113b44eeda2cd0f50a44ed6c5a5f48933bc9b3cdd9c2bee08b",
+            "at": "2026-11-02T21:56:36.956214+00:00",
+            "digest": "d2d3d07bc2457d8f6ddceca4df7159a44234a599b14e1edc8316d2bbaa499882",
             "generation": 0,
             "seq": 7,
             "state_version": 5,
@@ -655,9 +1021,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.632609+00:00",
+            "at": "2026-11-02T21:56:36.956214+00:00",
             "attempt": 1,
-            "digest": "135b74ba3b2fc0b5edfe1c147d6503885040c4cadf579429b6c4d2162e44db8f",
+            "digest": "e89e31c383184519deb3f230f76edf2a0915dec7f4ba04726cd918acb668c026",
             "generation": 0,
             "seq": 8,
             "state_version": 5,
@@ -665,8 +1031,8 @@
             "type": "step_started"
           },
           {
-            "at": "2026-11-02T21:04:25.657893+00:00",
-            "digest": "1022cd402924a3c0b36b39feba84624b12d46d5db201dcfd8306fd881d0445c5",
+            "at": "2026-11-02T21:56:36.985693+00:00",
+            "digest": "7a603333bd0c153b91521970a9a51c8079f0e5710bd387a67c1b19417460e6f9",
             "generation": 0,
             "seq": 9,
             "state_version": 6,
@@ -675,8 +1041,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.662666+00:00",
-            "digest": "3b401a9bb2b06944b9a2ba6213437515bf8ccd0a96a684884aa692e15b76a857",
+            "at": "2026-11-02T21:56:36.989957+00:00",
+            "digest": "29883a41e2daf22ba56580fedd55abb8394ff96398f9d1315eaaa0e154ef14c2",
             "generation": 0,
             "kind": "json",
             "seq": 10,
@@ -685,8 +1051,8 @@
             "type": "artifact"
           },
           {
-            "at": "2026-11-02T21:04:25.668266+00:00",
-            "digest": "4a5b08aecc7d4339876ab11fe09711b59f81104c16b112961a34ce1b50347afc",
+            "at": "2026-11-02T21:56:36.994904+00:00",
+            "digest": "e0c844ebd817697c48568ee1e15329ac74b313602ea3f92e9954368d0148ee59",
             "generation": 0,
             "seq": 11,
             "state_version": 7,
@@ -695,9 +1061,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.668266+00:00",
+            "at": "2026-11-02T21:56:36.994904+00:00",
             "attempt": 1,
-            "digest": "87169a1d1228313654be43916e4d929ca445800bd5d703f158e420ae2816b40c",
+            "digest": "9cb62b4279329e9cb0efb8c169c685b84a2b3b210672cc3d0ee11df58a066b78",
             "generation": 0,
             "seq": 12,
             "state_version": 7,
@@ -706,8 +1072,8 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.674470+00:00",
-            "digest": "8950d3b4b7ed3d4c11ddfe0b4bf89d4815b73ab18e57280a702423a0a41aac66",
+            "at": "2026-11-02T21:56:37.000751+00:00",
+            "digest": "252117cb08b08d4ceceb620925d60eda8285d8d000ef704dfee00d7e220f70b6",
             "generation": 0,
             "seq": 13,
             "state_version": 8,
@@ -716,8 +1082,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.683744+00:00",
-            "digest": "2952c289df6231fda988dcc63cd93b0e7e8bc807a3496a8e39a242121cec3022",
+            "at": "2026-11-02T21:56:37.009494+00:00",
+            "digest": "d60c76d84c07ee809d1d3a4d697c0185cf8de581556888cef39678ece0dcf206",
             "generation": 0,
             "seq": 14,
             "state_version": 9,
@@ -726,9 +1092,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.683744+00:00",
+            "at": "2026-11-02T21:56:37.009494+00:00",
             "attempt": 1,
-            "digest": "3e80fbeb9db917c560238b8dcc65f5c9810dc2737bcb87d743b759dbc150ce47",
+            "digest": "102291d61927e03634ee7de555a6fa45e2e84b80d482aea209d995016a9e7138",
             "generation": 0,
             "seq": 15,
             "state_version": 9,
@@ -736,8 +1102,8 @@
             "type": "step_started"
           },
           {
-            "at": "2026-11-02T21:04:25.694927+00:00",
-            "digest": "91e50295a22fc20ad33ec1054d28d3fe778319ac1cd6e034d37dc76e3055e02e",
+            "at": "2026-11-02T21:56:37.020812+00:00",
+            "digest": "2ec5e312ebb5a0a6f895122fcfccd6b4c9e8878dd7a13836746d8ee36803246b",
             "generation": 0,
             "seq": 16,
             "state_version": 10,
@@ -746,8 +1112,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.700002+00:00",
-            "digest": "7fbe282eeb22abb72fc89070f5098bdd3c0ac4c951cde0b9e9d1738c3538b96d",
+            "at": "2026-11-02T21:56:37.025505+00:00",
+            "digest": "95730d0dbde5c37e1e49e0a5e8c7f4685ac4f42daec8be7871c40f7e97a8e7be",
             "generation": 0,
             "kind": "json",
             "seq": 17,
@@ -756,8 +1122,8 @@
             "type": "artifact"
           },
           {
-            "at": "2026-11-02T21:04:25.706532+00:00",
-            "digest": "23c518d4b9917bb8e63f94c00255b4188fd12d59deeacbf42ad42d05f0339a57",
+            "at": "2026-11-02T21:56:37.031383+00:00",
+            "digest": "9e6dc416e87d09ad6939c33cec8edae2dc3d4501aec8469050301fbb05172acb",
             "generation": 0,
             "seq": 18,
             "state_version": 11,
@@ -766,9 +1132,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.706532+00:00",
+            "at": "2026-11-02T21:56:37.031383+00:00",
             "attempt": 1,
-            "digest": "84977ae946adb993b1c67f8627012addefca2a031a0c5d4962334fb667d274bd",
+            "digest": "5a76c9c950fa63031069cffd53effed8c72ca8c99bfb3b1e3539c01f8a37d778",
             "generation": 0,
             "seq": 19,
             "state_version": 11,
@@ -777,8 +1143,8 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.713579+00:00",
-            "digest": "f964fca9012b8b2a828cf271f78fc7ab4e61370423ac94718e7e342e42ca9fad",
+            "at": "2026-11-02T21:56:37.037809+00:00",
+            "digest": "779b982166c99a6d5ed72d17e123f7b842d9a587bd6ee8532a65c0c1795e1f3a",
             "generation": 0,
             "seq": 20,
             "state_version": 12,
@@ -787,8 +1153,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.724247+00:00",
-            "digest": "1ef8b8c1097c1e03479feab1a84df624ba70b40ed0539c95b76aff84ea766515",
+            "at": "2026-11-02T21:56:37.047869+00:00",
+            "digest": "ffa6791f6da408d7ff5d2af0bc37296dfbd604cf1b1149e7ae0c5b5a29d35e88",
             "generation": 0,
             "seq": 21,
             "state_version": 13,
@@ -797,9 +1163,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.724247+00:00",
+            "at": "2026-11-02T21:56:37.047869+00:00",
             "attempt": 1,
-            "digest": "00e63940519b948a338f39de434f340da3c0756adef06a87c9f8d209bd02d830",
+            "digest": "41de7129638e278000ae681ac09f0f9dca488578d01226f7f5d971646c3547ec",
             "generation": 0,
             "seq": 22,
             "state_version": 13,
@@ -807,8 +1173,8 @@
             "type": "step_started"
           },
           {
-            "at": "2026-11-02T21:04:25.732919+00:00",
-            "digest": "8a231b91fb1297e24a469bdac9d51f977cae65002344908be5f9ea79052fcbaf",
+            "at": "2026-11-02T21:56:37.056549+00:00",
+            "digest": "3031173e3f21c83758d1937b470a56b97df04fdcf17eb4abfbc6845d66177920",
             "generation": 0,
             "seq": 23,
             "state_version": 14,
@@ -817,9 +1183,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.732919+00:00",
+            "at": "2026-11-02T21:56:37.056549+00:00",
             "attempt": 1,
-            "digest": "ac4717d3567ef49ba09606da0db0c4c2f083ff20594f0f4ef73f32265482a751",
+            "digest": "7a683cbe261c90986d6a54ab93c3207cdcac0c46a50cc533b6ef5a358f4b8f02",
             "generation": 0,
             "seq": 24,
             "state_version": 14,
@@ -828,8 +1194,8 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.740084+00:00",
-            "digest": "d703d6aeb7c965940eca8c408df6d5f27782c09e2ebcc9c112d8915c49264064",
+            "at": "2026-11-02T21:56:37.063716+00:00",
+            "digest": "dedad2aae9bdac31d2d354348b55c00540b617e8819914aca12db37554b47028",
             "generation": 0,
             "seq": 25,
             "state_version": 15,
@@ -838,8 +1204,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.752210+00:00",
-            "digest": "1cf8115b38feb98a5490a2bee78ffd847381cb406a7635f212aed2ca0ad8949e",
+            "at": "2026-11-02T21:56:37.074876+00:00",
+            "digest": "38e36bf2bf4c8d6ccae0da2e5f3d63cffe690c5f9a4200ec2ffacba2fa4888e2",
             "generation": 0,
             "seq": 26,
             "state_version": 16,
@@ -848,8 +1214,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.784204+00:00",
-            "digest": "f040d1024c0b61b652332f5d937e9b0b75e87d8550e29aea772753f389c65b81",
+            "at": "2026-11-02T21:56:37.103938+00:00",
+            "digest": "a04d95ff0aff63326e188086e9f71bbb2ddabaf6586588a3b40065bc9c314fb9",
             "generation": 0,
             "seq": 27,
             "state_version": 17,
@@ -914,14 +1280,14 @@
             "website_connection_id": null
           }
         },
-        "emitted_at": "2026-11-02T21:04:25.752210+00:00",
+        "emitted_at": "2026-11-02T21:56:37.074876+00:00",
         "event": "run_events_v2",
-        "event_id": "7ae7191274542407150ad450d7e114ba3a1791e859c1f742ad7f137254a468f8",
+        "event_id": "61c252a58c066c35280a15f5f7d9fcd403b6d24c139a493ba8160802917e70ca",
         "event_type": "run_events_v2",
         "events": [
           {
-            "at": "2026-11-02T21:04:25.602524+00:00",
-            "digest": "fc491edb25b55ebf840c0868e9cb48a4cdc3e9c243891712da948e5ecd744133",
+            "at": "2026-11-02T21:56:36.927374+00:00",
+            "digest": "5a640cb29b6a444feaf202d8c68913b5db270a9415f8be9bc147281d0bd0182e",
             "generation": 0,
             "seq": 1,
             "state_version": 1,
@@ -930,8 +1296,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.612593+00:00",
-            "digest": "78288fad0f86ae1f8a6fb0cf707bcc819b390dc4a928935dad60090bffead57b",
+            "at": "2026-11-02T21:56:36.938853+00:00",
+            "digest": "7ea7667460524c51dc53a4a8734cb876fad9e7d3cb9b8d178880b8234bc891b0",
             "generation": 0,
             "seq": 2,
             "state_version": 2,
@@ -940,9 +1306,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.612593+00:00",
+            "at": "2026-11-02T21:56:36.938853+00:00",
             "attempt": 1,
-            "digest": "52731f6604859ecd4a569f2814b84054bdf76289e980330a22bc7ca8e49c4eaa",
+            "digest": "182e3abd3effb07d11789b4bd52f8ae7711af46a65c32ea3008e19d3a48c004b",
             "generation": 0,
             "seq": 3,
             "state_version": 2,
@@ -950,8 +1316,8 @@
             "type": "step_started"
           },
           {
-            "at": "2026-11-02T21:04:25.619710+00:00",
-            "digest": "6cfb8d6f87988c22c8d38731a3de9c52a2425a14002e662f04d64224cfdd75fe",
+            "at": "2026-11-02T21:56:36.944607+00:00",
+            "digest": "1425f714868773427c5cf56dde5e8cbb60a759c8f2f5169670b8aa999de4efc6",
             "generation": 0,
             "seq": 4,
             "state_version": 3,
@@ -960,9 +1326,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.619710+00:00",
+            "at": "2026-11-02T21:56:36.944607+00:00",
             "attempt": 1,
-            "digest": "b40c83134e4e065961913939596502b89b2a7768506ce41a443e0b9a38dea18b",
+            "digest": "60d79cc9dc356ddbf7c5b59790007390a728aadea757c186254340d0a55c9f02",
             "generation": 0,
             "seq": 5,
             "state_version": 3,
@@ -971,8 +1337,8 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.625099+00:00",
-            "digest": "4612432e4f52a83faa000ce4b34f63233d0cf25778b7ebbe558c9895492e9ef6",
+            "at": "2026-11-02T21:56:36.949481+00:00",
+            "digest": "20ba7695d71935d36b7418e4cfbcd5e98e6b68faacaf546afad89fa8fe092199",
             "generation": 0,
             "seq": 6,
             "state_version": 4,
@@ -981,8 +1347,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.632609+00:00",
-            "digest": "0d2767d0f74476113b44eeda2cd0f50a44ed6c5a5f48933bc9b3cdd9c2bee08b",
+            "at": "2026-11-02T21:56:36.956214+00:00",
+            "digest": "d2d3d07bc2457d8f6ddceca4df7159a44234a599b14e1edc8316d2bbaa499882",
             "generation": 0,
             "seq": 7,
             "state_version": 5,
@@ -991,9 +1357,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.632609+00:00",
+            "at": "2026-11-02T21:56:36.956214+00:00",
             "attempt": 1,
-            "digest": "135b74ba3b2fc0b5edfe1c147d6503885040c4cadf579429b6c4d2162e44db8f",
+            "digest": "e89e31c383184519deb3f230f76edf2a0915dec7f4ba04726cd918acb668c026",
             "generation": 0,
             "seq": 8,
             "state_version": 5,
@@ -1001,8 +1367,8 @@
             "type": "step_started"
           },
           {
-            "at": "2026-11-02T21:04:25.657893+00:00",
-            "digest": "1022cd402924a3c0b36b39feba84624b12d46d5db201dcfd8306fd881d0445c5",
+            "at": "2026-11-02T21:56:36.985693+00:00",
+            "digest": "7a603333bd0c153b91521970a9a51c8079f0e5710bd387a67c1b19417460e6f9",
             "generation": 0,
             "seq": 9,
             "state_version": 6,
@@ -1011,8 +1377,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.662666+00:00",
-            "digest": "3b401a9bb2b06944b9a2ba6213437515bf8ccd0a96a684884aa692e15b76a857",
+            "at": "2026-11-02T21:56:36.989957+00:00",
+            "digest": "29883a41e2daf22ba56580fedd55abb8394ff96398f9d1315eaaa0e154ef14c2",
             "generation": 0,
             "kind": "json",
             "seq": 10,
@@ -1021,8 +1387,8 @@
             "type": "artifact"
           },
           {
-            "at": "2026-11-02T21:04:25.668266+00:00",
-            "digest": "4a5b08aecc7d4339876ab11fe09711b59f81104c16b112961a34ce1b50347afc",
+            "at": "2026-11-02T21:56:36.994904+00:00",
+            "digest": "e0c844ebd817697c48568ee1e15329ac74b313602ea3f92e9954368d0148ee59",
             "generation": 0,
             "seq": 11,
             "state_version": 7,
@@ -1031,9 +1397,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.668266+00:00",
+            "at": "2026-11-02T21:56:36.994904+00:00",
             "attempt": 1,
-            "digest": "87169a1d1228313654be43916e4d929ca445800bd5d703f158e420ae2816b40c",
+            "digest": "9cb62b4279329e9cb0efb8c169c685b84a2b3b210672cc3d0ee11df58a066b78",
             "generation": 0,
             "seq": 12,
             "state_version": 7,
@@ -1042,8 +1408,8 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.674470+00:00",
-            "digest": "8950d3b4b7ed3d4c11ddfe0b4bf89d4815b73ab18e57280a702423a0a41aac66",
+            "at": "2026-11-02T21:56:37.000751+00:00",
+            "digest": "252117cb08b08d4ceceb620925d60eda8285d8d000ef704dfee00d7e220f70b6",
             "generation": 0,
             "seq": 13,
             "state_version": 8,
@@ -1052,8 +1418,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.683744+00:00",
-            "digest": "2952c289df6231fda988dcc63cd93b0e7e8bc807a3496a8e39a242121cec3022",
+            "at": "2026-11-02T21:56:37.009494+00:00",
+            "digest": "d60c76d84c07ee809d1d3a4d697c0185cf8de581556888cef39678ece0dcf206",
             "generation": 0,
             "seq": 14,
             "state_version": 9,
@@ -1062,9 +1428,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.683744+00:00",
+            "at": "2026-11-02T21:56:37.009494+00:00",
             "attempt": 1,
-            "digest": "3e80fbeb9db917c560238b8dcc65f5c9810dc2737bcb87d743b759dbc150ce47",
+            "digest": "102291d61927e03634ee7de555a6fa45e2e84b80d482aea209d995016a9e7138",
             "generation": 0,
             "seq": 15,
             "state_version": 9,
@@ -1072,8 +1438,8 @@
             "type": "step_started"
           },
           {
-            "at": "2026-11-02T21:04:25.694927+00:00",
-            "digest": "91e50295a22fc20ad33ec1054d28d3fe778319ac1cd6e034d37dc76e3055e02e",
+            "at": "2026-11-02T21:56:37.020812+00:00",
+            "digest": "2ec5e312ebb5a0a6f895122fcfccd6b4c9e8878dd7a13836746d8ee36803246b",
             "generation": 0,
             "seq": 16,
             "state_version": 10,
@@ -1082,8 +1448,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.700002+00:00",
-            "digest": "7fbe282eeb22abb72fc89070f5098bdd3c0ac4c951cde0b9e9d1738c3538b96d",
+            "at": "2026-11-02T21:56:37.025505+00:00",
+            "digest": "95730d0dbde5c37e1e49e0a5e8c7f4685ac4f42daec8be7871c40f7e97a8e7be",
             "generation": 0,
             "kind": "json",
             "seq": 17,
@@ -1092,8 +1458,8 @@
             "type": "artifact"
           },
           {
-            "at": "2026-11-02T21:04:25.706532+00:00",
-            "digest": "23c518d4b9917bb8e63f94c00255b4188fd12d59deeacbf42ad42d05f0339a57",
+            "at": "2026-11-02T21:56:37.031383+00:00",
+            "digest": "9e6dc416e87d09ad6939c33cec8edae2dc3d4501aec8469050301fbb05172acb",
             "generation": 0,
             "seq": 18,
             "state_version": 11,
@@ -1102,9 +1468,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.706532+00:00",
+            "at": "2026-11-02T21:56:37.031383+00:00",
             "attempt": 1,
-            "digest": "84977ae946adb993b1c67f8627012addefca2a031a0c5d4962334fb667d274bd",
+            "digest": "5a76c9c950fa63031069cffd53effed8c72ca8c99bfb3b1e3539c01f8a37d778",
             "generation": 0,
             "seq": 19,
             "state_version": 11,
@@ -1113,8 +1479,8 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.713579+00:00",
-            "digest": "f964fca9012b8b2a828cf271f78fc7ab4e61370423ac94718e7e342e42ca9fad",
+            "at": "2026-11-02T21:56:37.037809+00:00",
+            "digest": "779b982166c99a6d5ed72d17e123f7b842d9a587bd6ee8532a65c0c1795e1f3a",
             "generation": 0,
             "seq": 20,
             "state_version": 12,
@@ -1123,8 +1489,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.724247+00:00",
-            "digest": "1ef8b8c1097c1e03479feab1a84df624ba70b40ed0539c95b76aff84ea766515",
+            "at": "2026-11-02T21:56:37.047869+00:00",
+            "digest": "ffa6791f6da408d7ff5d2af0bc37296dfbd604cf1b1149e7ae0c5b5a29d35e88",
             "generation": 0,
             "seq": 21,
             "state_version": 13,
@@ -1133,9 +1499,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.724247+00:00",
+            "at": "2026-11-02T21:56:37.047869+00:00",
             "attempt": 1,
-            "digest": "00e63940519b948a338f39de434f340da3c0756adef06a87c9f8d209bd02d830",
+            "digest": "41de7129638e278000ae681ac09f0f9dca488578d01226f7f5d971646c3547ec",
             "generation": 0,
             "seq": 22,
             "state_version": 13,
@@ -1143,8 +1509,8 @@
             "type": "step_started"
           },
           {
-            "at": "2026-11-02T21:04:25.732919+00:00",
-            "digest": "8a231b91fb1297e24a469bdac9d51f977cae65002344908be5f9ea79052fcbaf",
+            "at": "2026-11-02T21:56:37.056549+00:00",
+            "digest": "3031173e3f21c83758d1937b470a56b97df04fdcf17eb4abfbc6845d66177920",
             "generation": 0,
             "seq": 23,
             "state_version": 14,
@@ -1153,9 +1519,9 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.732919+00:00",
+            "at": "2026-11-02T21:56:37.056549+00:00",
             "attempt": 1,
-            "digest": "ac4717d3567ef49ba09606da0db0c4c2f083ff20594f0f4ef73f32265482a751",
+            "digest": "7a683cbe261c90986d6a54ab93c3207cdcac0c46a50cc533b6ef5a358f4b8f02",
             "generation": 0,
             "seq": 24,
             "state_version": 14,
@@ -1164,8 +1530,8 @@
             "type": "step_done"
           },
           {
-            "at": "2026-11-02T21:04:25.740084+00:00",
-            "digest": "d703d6aeb7c965940eca8c408df6d5f27782c09e2ebcc9c112d8915c49264064",
+            "at": "2026-11-02T21:56:37.063716+00:00",
+            "digest": "dedad2aae9bdac31d2d354348b55c00540b617e8819914aca12db37554b47028",
             "generation": 0,
             "seq": 25,
             "state_version": 15,
@@ -1174,8 +1540,8 @@
             "type": "run_state"
           },
           {
-            "at": "2026-11-02T21:04:25.752210+00:00",
-            "digest": "1cf8115b38feb98a5490a2bee78ffd847381cb406a7635f212aed2ca0ad8949e",
+            "at": "2026-11-02T21:56:37.074876+00:00",
+            "digest": "38e36bf2bf4c8d6ccae0da2e5f3d63cffe690c5f9a4200ec2ffacba2fa4888e2",
             "generation": 0,
             "seq": 26,
             "state_version": 16,

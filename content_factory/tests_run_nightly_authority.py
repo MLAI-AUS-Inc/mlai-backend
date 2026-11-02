@@ -20,10 +20,15 @@ from .tests_run_event_authority import FLAGS
     CONTENT_FACTORY_API_KEY="synthetic-nightly-key", ROO_API_KEY="synthetic-nightly-service-key",
     ARTICLES_RUN_CONTROL_MODEL_USD="5", ARTICLES_RUN_CONTROL_MODEL_TOKENS=100000)
 class NightlyAuthorityTests(TransactionTestCase):
-    def dispatch(self, suffix=""):
+    def dispatch(self, suffix="", admission=None):
         import requests
         from integrations.services.article_generation import http_requests
         from .services.island_refresh_scheduler import dispatch_island_refresh
+        if admission is not None:
+            from organizations.models import Organization
+            from .tests_run_terminal_settlement import ActualPairedTerminalSettlementTests
+            original = admission["run_request"]["backend_run_admission_v1"]
+            ActualPairedTerminalSettlementTests.sequence(self, Organization, int(original["organization_id"]))
         self.fixture = fixture = make_p2_org("actual-nightly" + suffix + ".fixture.test")
         physical_id = "r3-actual-nightly" + suffix + "-worker"
         config = fixture.config
@@ -50,6 +55,9 @@ class NightlyAuthorityTests(TransactionTestCase):
         self.assertEqual(owner_receipt(run)["identity"]["principal"], {"kind": "scheduler", "service": "island_refresh"})
         self.assertEqual(sent[0], run.run_request)
         self.assertFalse(Ledger.objects.exists())
+        if admission is not None:
+            self.assertEqual(run.run_request, admission["run_request"])
+            self.assertEqual(run.run_id, admission["run_id"])
         return run
 
     def test_actual_nightly_dispatch_keeps_version_and_budget_in_original_admission(self):
@@ -263,3 +271,51 @@ class NightlyAuthorityTests(TransactionTestCase):
         self.assertEqual(response.status_code, 409, response.data)
         self.assertEqual(calls, 0)
         self.assertEqual(ResearchAutomation.objects.values().get(pk=automation.pk), malformed)
+
+    def test_actual_cf_orphan_control_request_and_budget_receive_one_real_backend_ticket(self):
+        import requests
+        from django.db import connection
+        from rest_framework.test import APIClient
+        value = json.loads((Path(__file__).parent / "testdata/r3/nightly_actual_control_request.json").read_text())
+        run = self.dispatch(admission=value["original_backend_admission"])
+        self.assertEqual(value["body"]["backend_run_admission_v1"], wire_identity(owner_receipt(run)))
+        self.assertEqual(value["body"]["backend_run_execution_v1"], current_execution_ticket(run))
+        original = deepcopy(run.run_request)
+        def get(url, **kwargs):
+            self.assertFalse(connection.in_atomic_block)
+            self.assertFalse(kwargs["allow_redirects"])
+            self.assertEqual(kwargs["headers"]["X-API-KEY"], "synthetic-nightly-key")
+            if url.endswith("/execution-budget"):
+                data = value["execution_budget"]
+            else:
+                self.assertTrue(url.endswith("/events"), url)
+                self.assertEqual(kwargs["params"], {"after_seq": 0, "limit": 100})
+                data = value["history"]
+            response = requests.Response(); response.status_code = 200
+            response._content = json.dumps(data).encode(); response._content_consumed = True
+            return response
+        client = APIClient(); client.credentials(HTTP_X_API_KEY="synthetic-nightly-service-key")
+        url = "/api/content-factory/runs/" + run.run_id + "/execution-ticket"
+        with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False, ARTICLES_RUN_FACT_AUTHORITY_ENABLED=False,
+                ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=False, ARTICLES_RUN_CONTROL_MODEL_USD="0", ARTICLES_RUN_CONTROL_MODEL_TOKENS=0):
+            with patch("requests.get", side_effect=get) as remote:
+                response = client.post(url, value["body"], format="json")
+            self.assertEqual(response.status_code, 200, response.data)
+            self.assertEqual(remote.call_count, 2)
+            granted = deepcopy(response.data)
+            self.assertEqual(granted["backend_run_execution_v1"]["generation"], 1)
+            self.assertEqual(granted["backend_run_admission_v1"], value["body"]["backend_run_admission_v1"])
+            run.refresh_from_db()
+            before_replay = ContentFactoryRun.objects.values().get(pk=run.pk)
+            with patch("requests.get") as remote:
+                replay = client.post(url, value["body"], format="json")
+            self.assertEqual(replay.status_code, 200, replay.data)
+            self.assertEqual(replay.data, granted)
+            remote.assert_not_called()
+            self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before_replay)
+        run.refresh_from_db()
+        self.assertEqual(run.run_request, original)
+        self.assertFalse(Ledger.objects.exists())
+        if os.environ.get("R3_EXPORT_NIGHTLY_CONTROL_GRANT") == "1":
+            Path("/Users/samdonegan/Documents/Code/founder-journey-worktrees/recovery/R3_BE_ACTUAL_NIGHTLY_CONTROL_GRANTED.json").write_text(
+                json.dumps(granted, indent=2) + "\n")
