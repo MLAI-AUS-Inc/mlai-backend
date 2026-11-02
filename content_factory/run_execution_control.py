@@ -98,6 +98,9 @@ def require_current_principal(run):
     from django.contrib.auth import get_user_model
     from founder_tools import startup_team
     from integrations.services.article_generation import ArticleGenerationError, _validate_authenticated_content_factory_actor
+    from .run_ownership import user_stop_intent
+    if user_stop_intent(run):
+        raise ExecutionControlDenied("execution_stop_requested")
     principal = owner_receipt(run)["identity"]["principal"]
     if principal.get("kind") != "user":
         # Scheduler continuation needs a service-specific current permission
@@ -136,6 +139,9 @@ def append_execution_ticket(run, *, control_key, reason, scope=None, increment_g
     receipt = owner_receipt(run)
     if receipt is None or receipt["authority"].get("event_protocol") != 1:
         raise ExecutionControlDenied()
+    from .run_ownership import user_stop_intent
+    if user_stop_intent(run):
+        raise ExecutionControlDenied("execution_stop_requested")
     control = deepcopy((run.result or {}).get(CONTROL_KEY, {"schema_version": 1, "grants": {}}))
     if (not isinstance(control, dict) or type(control.get("schema_version")) is not int
             or control["schema_version"] != 1 or not isinstance(control.get("grants"), dict)):

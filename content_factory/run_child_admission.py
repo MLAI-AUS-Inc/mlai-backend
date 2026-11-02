@@ -50,6 +50,9 @@ def prepare_scan_child_dispatch(*, run, user, actor_id, payload):
             if (roster and roster.get("frozen") or startup_team._owner(run.organization) != user.pk):
                 raise RunOwnershipConflict("The current startup owner must approve its setup.")
             locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+            from .run_ownership import user_stop_intent
+            if user_stop_intent(locked):
+                raise RunOwnershipConflict("This scan was denied. Run a fresh scan before setup.")
             saved = owner_receipt(locked)
             if (saved != receipt or locked.run_id != run.run_id or locked.organization_id != connection.organization_id
                     or locked.status in {"cancelled", "denied", "failed", "blocked"}

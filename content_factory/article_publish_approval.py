@@ -123,6 +123,9 @@ def article_review_identity_matches_approved_run(run, expected_identity):
 
 def article_publish_approval_receipt_matches(run):
     """A later promote retry may use only the same run and hosted review."""
+    from .run_ownership import user_stop_intent
+    if user_stop_intent(run):
+        return False
     if str(getattr(run, "approval_state", "") or "").strip() != "approved":
         return False
     if _quality_status(run) not in ACCEPTED_QUALITY_STATUSES:

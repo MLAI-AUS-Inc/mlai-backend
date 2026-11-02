@@ -25,7 +25,9 @@ CONTROL_RESULT_KEY = "run_owner_control_v1"
 CHILDREN_RESULT_KEY = "run_owner_children_v1"
 ARTICLE_CHARGE_RESULT_KEY = "run_owner_article_charge_v1"
 ARTICLE_PUBLISH_APPROVAL_RESULT_KEY = "run_owner_article_publish_approval_v1"
+ARTICLE_PUBLISH_CONTROL_RESULT_KEY = "run_owner_article_publish_control_v1"
 VERIFIED_DELIVERY_RESULT_KEY = "run_owner_verified_delivery_v1"
+USER_STOP_RESULT_KEY = "run_owner_user_stop_v1"
 REVIEW_SOURCE_RESULT_KEY = "review_source_v1"
 WIRE_REQUEST_KEY = "backend_run_admission_v1"
 WIRE_EXECUTION_KEY = "backend_run_execution_v1"
@@ -33,8 +35,8 @@ BUDGET_KEY = "backend_run_budget_v1"
 R3_BACKEND_RESULT_KEYS = frozenset({OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, EVENT_RESULT_KEY,
                                   DISPATCH_RESULT_KEY, HOSTED_OBSERVATION_KEY,
                                   RECONCILIATION_RESULT_KEY, CONTROL_RESULT_KEY, CHILDREN_RESULT_KEY,
-                                  ARTICLE_CHARGE_RESULT_KEY, ARTICLE_PUBLISH_APPROVAL_RESULT_KEY,
-                                  VERIFIED_DELIVERY_RESULT_KEY, REVIEW_SOURCE_RESULT_KEY})
+                                  ARTICLE_CHARGE_RESULT_KEY, ARTICLE_PUBLISH_APPROVAL_RESULT_KEY, ARTICLE_PUBLISH_CONTROL_RESULT_KEY,
+                                  VERIFIED_DELIVERY_RESULT_KEY, USER_STOP_RESULT_KEY, REVIEW_SOURCE_RESULT_KEY})
 R3_BACKEND_REQUEST_KEYS = frozenset({WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY})
 SCOPE_FIELDS = (*CONNECTION_FIELDS, *OPERATION_FIELDS, "expected_source_sha", "source_run_id")
 SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation", "hosted_auto_register"})
@@ -111,6 +113,34 @@ def owns_backend_facts(run):
     """An admitted fact owner stays authoritative independently of rollout flags."""
     receipt = owner_receipt(run)
     return receipt is not None and receipt["authority"].get("backend_facts") is True
+
+
+def user_stop_intent(run):
+    """A current explicit user denial revokes consent without inventing CF state."""
+    receipt = owner_receipt(run)
+    result = getattr(run, "result", None)
+    if receipt is None or receipt["authority"].get("event_protocol") != 1 or not isinstance(result, dict):
+        return None
+    if USER_STOP_RESULT_KEY not in result:
+        return None
+    state = result[USER_STOP_RESULT_KEY]
+    if (not isinstance(state, dict) or type(state.get("schema_version")) is not int or state["schema_version"] != 1
+            or state.get("admission_digest") != evidence_digest(wire_identity(receipt))
+            or not isinstance(state.get("commands"), dict) or len(state["commands"]) > 1024):
+        return {"invalid": True}
+    try:
+        current = current_execution_ticket(run)
+        for command in state["commands"].values():
+            if (not isinstance(command, dict) or command.get("action") != "deny"
+                    or type(command.get("user_id")) is not str or not command["user_id"].isdigit()
+                    or not isinstance(command.get("requested_at"), str)):
+                return {"invalid": True}
+            if (command.get("execution_id") == current["execution_id"]
+                    and command.get("execution_sha256") == evidence_digest(current)):
+                return deepcopy(command)
+    except (ValueError, TypeError, KeyError):
+        return {"invalid": True}
+    return None
 
 
 def authorized_event_generation(run):
