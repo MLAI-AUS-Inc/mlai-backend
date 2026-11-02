@@ -13,6 +13,27 @@ class GitHubResponseError(ValueError):
         self.status_code = status_code
 
 
+def p2_setup_example_candidate_allowed(run):
+    """Accept prior-generation MLAI example removal only with both P2 gates.
+
+    CF's receipt proves byte ownership; existing-generation setup cleanup is
+    unchanged. This does not grant merge consent or bypass build verification.
+    """
+    result = run.result if isinstance(getattr(run, "result", None), dict) else {}
+    setup = result.get("article_system_setup") or {}
+    records = result.get("setup_example_cleanup") or setup.get("setup_example_cleanup") or []
+    if not isinstance(records, list):
+        return False
+    if not any(isinstance(item, dict) and item.get("basis") == "mlai_seed_receipt_prior_connection" for item in records):
+        return True
+    from django.conf import settings
+    from .p2_foundation import p2_applies
+    request = run.run_request if isinstance(getattr(run, "run_request", None), dict) else {}
+    stamp = request.get("self_heal_policy_v1") or {}
+    return bool(getattr(settings, "ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED", False)
+        and stamp.get("version") == 1 and stamp.get("cohort") == "p2" and p2_applies(run.organization))
+
+
 def _reviews_required(parameters):
     if not isinstance(parameters, dict):
         raise ValueError("Invalid GitHub review policy")

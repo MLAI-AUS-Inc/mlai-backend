@@ -69,6 +69,9 @@ def on_owner_setup_approve(*, organization, user, run, data):
         return None
     from . import founder_journey_cohort as cohort
     choice = MERGE_MANUAL if isinstance(data, dict) and data.get("merge") == MERGE_MANUAL else MERGE_AUTO
+    from .publish_merge_worker import record_owner_approval
+    if not record_owner_approval(run=run, organization=organization, user=user, choice=choice):
+        return {"merge": MERGE_MANUAL}
     now = timezone.now().isoformat()
     user_id = getattr(user, "pk", None)
     run_id = str(getattr(run, "run_id", "") or "")
