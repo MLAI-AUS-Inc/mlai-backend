@@ -539,3 +539,18 @@ class MergeWorkerTests(TransactionTestCase):
         run.refresh_from_db()
         self.assertEqual(run.result["owner_merge_approval_v1"]["kind"], "proxy")
         with self.providers():self.assertEqual(self.sweep()["merged"], 1)
+
+    def test_delivery_mode_requires_completed_cf_conversion_and_real_export_evidence(self):
+        run = self.run_fixture()
+        run.run_request["delivery_mode"] = "review_draft"
+        run.result["channel_v1"] = {"version": 1, "channel": "copy_ready", "dispatch_state": "pending"}
+        self.assertEqual(views._run_delivery_mode(run), "review_draft")
+        run.result["channel_v1"]["dispatch_state"] = "accepted"
+        run.result["channel_switch_cf_v1"] = {"version": 1, "run_id": run.run_id, "key": run.run_id + ":copy-ready", "delivery_mode": "content_only", "state": "applied"}
+        self.assertEqual(views._run_delivery_mode(run), "review_draft")
+        run.result["channel_switch_cf_v1"]["state"] = "completed"
+        self.assertEqual(views._run_delivery_mode(run), "review_draft")
+        run.result["content_package"] = {"article_markdown": "Exact saved article"}
+        self.assertEqual(views._run_delivery_mode(run), "content_only")
+        run.result["channel_switch_cf_v1"]["run_id"] = "foreign"
+        self.assertEqual(views._run_delivery_mode(run), "review_draft")
