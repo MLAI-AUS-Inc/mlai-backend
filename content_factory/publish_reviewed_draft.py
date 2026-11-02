@@ -77,10 +77,22 @@ def _destination(organization):
     return config, connection, None
 
 
+def _delivered_source(run):
+    if is_delivered_content_only(run):
+        return True
+    result = _mapping(run.result)
+    if not _mapping(result.get("channel_v1")).get("waiting_to_publish"):
+        return False
+    from .incident_guards import delivered_content
+    return delivered_content(run)
+
+
 def publish_offer(run):
     """Return the once-per-draft publish offer only for an eligible P2 startup."""
     if (not getattr(settings, 'ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED', False) or run.organization_id is None
-            or not p2_foundation.p2_applies(run.organization) or not is_delivered_content_only(run)):
+            or not p2_foundation.p2_applies(run.organization) or not _delivered_source(run)):
+        return None
+    if _mapping(run.result).get("publish_reviewed_v1"):
         return None
     receipt = _mapping(_mapping(run.result).get('publish_offer_v1'))
     if receipt.get('dismissed_at') or receipt.get('run_id'):
@@ -132,6 +144,9 @@ def _read_draft(context, source):
     review = remote_review(source)
     if isinstance(review, Response):
         raise PublishReviewedError('not_available', 'Your saved draft cannot be read just now.', 503)
+    if active_site(source.organization) is not None and getattr(settings, "HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW", False):
+        if (review.get("previewPending") or not review.get("revision") or review.get("previewedRevision") != review.get("revision")):
+            raise PublishReviewedError("preview_required", "Open the rendered preview of this version before publishing.")
     latest = _latest_review_ready_component_revision(source, context)
     export = article_export(review, run_id=source.run_id, latest_run_id=latest.run_id if latest else None,
                             allow_preview_pending=True, copy_formats=True)
@@ -140,12 +155,13 @@ def _read_draft(context, source):
     if claim_count(source, review) != 0:
         raise PublishReviewedError('claims_open', 'Check the highlighted passages before publishing this article.')
     body = export['markdown'].replace('\r\n', '\n').replace('\r', '\n').strip()
-    return body, export.get('revision')
+    previewed = review.get('previewedRevision') if not review.get('previewPending') else None
+    return body, export.get('revision'), previewed
 
 
-def _dispatch(source, run):
+def _dispatch(source, run, *, retry=False):
     try:
-        _send_dispatch(source, run)
+        _send_dispatch(source, run, retry=retry)
     except PublishReviewedError:
         raise
     except Exception:
@@ -153,7 +169,17 @@ def _dispatch(source, run):
         raise PublishReviewedError('not_available', 'Publishing is still being confirmed. Please try again shortly.', 503) from None
 
 
-def _send_dispatch(source, run):
+def _send_dispatch(source, run, *, retry=False):
+    if _mapping(run.run_request).get("hosted_site_id"):
+        from .hosted_auto_register import publish_via_hosted
+        receipt = publish_via_hosted(run, retry=retry)
+        if receipt is None:
+            raise PublishReviewedError("not_offered", "The hosted website is not active.")
+        with transaction.atomic():
+            current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+            ContentFactoryRun.objects.filter(pk=run.pk).update(result={**_mapping(current.result),
+                "publish_dispatch_v1": {"accepted_at": timezone.now().isoformat(), "hosted": True}})
+        return
     from integrations import http_client
     from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers
     from .website_connections import require_unlocked_remote_call
@@ -162,7 +188,7 @@ def _send_dispatch(source, run):
         raise PublishReviewedError('not_available', 'Publishing is not available just now.', 503)
     require_unlocked_remote_call()
     response = http_client.post(f"{config['base_url']}/api/runs/{source.run_id}/publish-reviewed-draft",
-                               json=run.run_request, headers=_content_factory_headers(), timeout=(3, 30))
+                               json={**run.run_request, **({'publish_retry': True} if retry else {})}, headers=_content_factory_headers(), timeout=(3, 30))
     if response.status_code not in {200, 202}:
         raise PublishReviewedError('not_available', 'Your article has not been published. Please try again shortly.', 503)
     value = response.json()
@@ -197,13 +223,19 @@ def start_publish(*, context, source_run, user):
     carry = _provider('content_factory.no_delivery_refunds', 'carry_charge')
     if carry is None:
         raise PublishReviewedError('not_available', 'Publishing is not available yet.', 503)
-    body, revision = _read_draft(context, source_run)  # Provider read before locks.
+    body, revision, previewed = _read_draft(context, source_run)  # Provider read before locks.
     destination = _destination(organization)
-    if destination is None or destination[1] is None:
+    if destination is None or (destination[1] is None and destination[2] is None):
         raise PublishReviewedError('not_offered', 'Connect your website before publishing this draft.')
     _, connection, site = destination
     from .website_connections import contract_for
-    binding = contract_for(connection)
+    binding = contract_for(connection) if site is None else {"hosted_site_id": str(site.pk)}
+    if site is None:
+        target = connection.targets.filter(target_key=destination[0].default_publish_target_id,
+            generation=connection.generation, source_sha=connection.verified_sha, verified_at__isnull=False).first()
+        if target is None:
+            raise PublishReviewedError('not_offered', 'The publishing target changed.')
+        binding['connection_target_id'] = str(target.pk)
     observed_at = source_run.updated_at
     now = timezone.now().isoformat()
     digest = hashlib.sha256(body.encode('utf-8')).hexdigest()
@@ -217,23 +249,29 @@ def start_publish(*, context, source_run, user):
             run = ContentFactoryRun.objects.get(run_id=receipt['run_id'], organization=organization)
             created = False
         else:
-            if locked.updated_at != observed_at or receipt.get('dismissed_at') or not is_delivered_content_only(locked):
+            if locked.updated_at != observed_at or receipt.get('dismissed_at') or not _delivered_source(locked):
                 raise PublishReviewedError('not_offered', 'Your draft changed. Open the latest draft before publishing.')
             prior = _mapping(locked.run_request).get('article_publish_approval_receipt')
             approval = {'version': 1, 'source': 'publish_reviewed', 'approved_by_user_id': user.pk,
                         'approved_at': now, 'approved_body_sha256': digest, 'claims_open': 0,
+                        'rendered_preview_revision': previewed,
                         'review_identity': {key: prior.get(key) for key in ('run_id', 'run_generation', 'preview_url',
                             'commit_sha', 'resume_generation', 'quality_inputs_sha256')} if isinstance(prior, dict) else None,
                         'prior_approval': prior}
             request = {**binding, 'run_id': run_id, 'new_run_id': run_id, 'source_run_id': locked.run_id,
                        'workflow': 'direct_generate', 'delivery_mode': 'review_draft', 'domain': locked.domain,
-                       'github_repo': connection.github_repo, 'expected_source_sha': connection.verified_sha,
+                       'github_repo': connection.github_repo if site is None else '', 'expected_source_sha': connection.verified_sha if site is None else '',
                        'approved_body': body, 'approved_body_sha256': digest, 'body_format': 'markdown',
                        'approval': {'by_user_id': user.pk, 'at': now}, 'merge_policy': 'backend_worker',
                        'self_heal_policy_v1': {'version': 1, 'cohort': 'p2', 'failure_policy': 'v2'},
                        'source_revision': revision}
+            if site is not None:
+                current_site = type(site).objects.select_for_update().get(pk=site.pk, organization=organization)
+                if current_site.state != 'active':
+                    raise PublishReviewedError('not_offered', 'Your hosted website is not active.')
+                request['delivery_mode'] = 'content_only'
             run = ContentFactoryRun.objects.create(run_id=run_id, organization=organization, domain=locked.domain,
-                github_repo=connection.github_repo, workflow='direct_generate', status='queued', run_request=request,
+                github_repo=connection.github_repo if site is None else '', workflow='direct_generate', status='queued', run_request=request,
                 result={'article_approval_v1': approval, 'publish_reviewed_v1': {'source_run_id': locked.run_id, 'approved_body_sha256': digest}})
             try:
                 carry(source_run=locked, new_run=run)
@@ -260,3 +298,55 @@ def dismiss_offer(*, source_run, user):
             raise PublishReviewedError('already_publishing', 'This article is already being published.')
         ContentFactoryRun.objects.filter(pk=run.pk).update(result={**_mapping(run.result),
             'publish_offer_v1': {'dismissed_at': previous.get('dismissed_at') or timezone.now().isoformat()}})
+
+
+def retry_publish(run):
+    """Retry only the retained approved body and destination; never read or generate a new draft."""
+    from django.contrib.auth import get_user_model
+    run.refresh_from_db()
+    if (not getattr(settings, 'ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED', False)
+            or run.organization_id is None or not p2_foundation.p2_applies(run.organization)):
+        raise PublishReviewedError('not_offered', 'Publishing this draft is not available yet.')
+    result, request = _mapping(run.result), _mapping(run.run_request)
+    approval = _mapping(result.get('article_approval_v1'))
+    body = request.get('approved_body')
+    digest = hashlib.sha256(body.encode('utf-8')).hexdigest() if isinstance(body, str) else None
+    user = get_user_model().objects.filter(pk=approval.get('approved_by_user_id'), is_active=True).first()
+    if user is None or not may_publish(user, run.organization):
+        raise PublishReviewedError('not_allowed', 'Publishing permission changed.', 403)
+    marker = _mapping(result.get('publish_reviewed_v1'))
+    source_id = request.get('source_run_id')
+    if (approval.get('source') != 'publish_reviewed' or type(approval.get('claims_open')) is not int or approval['claims_open'] != 0
+            or _mapping(request.get('approval')).get('by_user_id') != approval.get('approved_by_user_id')
+            or _mapping(request.get('approval')).get('at') != approval.get('approved_at')
+            or not source_id or marker.get('source_run_id') != source_id
+            or digest is None or digest != request.get('approved_body_sha256') or digest != approval.get('approved_body_sha256')
+            or digest != marker.get('approved_body_sha256') or request.get('domain') != run.organization.domain
+            or request.get('new_run_id') != run.run_id or request.get('run_id') != run.run_id):
+        raise PublishReviewedError('not_allowed', 'The saved publishing approval is not available.')
+    source = ContentFactoryRun.objects.filter(run_id=source_id, organization_id=run.organization_id).first()
+    if source is None:
+        raise PublishReviewedError('not_found', 'Not found.', 404)
+    destination = _destination(run.organization)
+    if destination is None:
+        raise PublishReviewedError('not_offered', 'Your publishing destination changed.')
+    config, connection, site = destination
+    if request.get('hosted_site_id'):
+        if getattr(settings, 'HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW', False) and approval.get('rendered_preview_revision') != request.get('source_revision'):
+            raise PublishReviewedError('preview_required', 'Open the rendered preview of this approved version before retrying.')
+        if site is None or str(site.pk) != request['hosted_site_id'] or site.domain != request.get('domain') or request.get('github_repo'):
+            raise PublishReviewedError('not_offered', 'Your hosted publishing destination changed.')
+    else:
+        if site is not None or connection is None:
+            raise PublishReviewedError('not_offered', 'Your publishing destination changed.')
+        from .website_connections import contract_for
+        current = contract_for(connection)
+        target = connection.targets.filter(target_key=config.default_publish_target_id, generation=connection.generation,
+            source_sha=connection.verified_sha, verified_at__isnull=False).first()
+        if target is None or request.get('connection_target_id') != str(target.pk):
+            raise PublishReviewedError('not_offered', 'The publishing target changed.')
+        if (any(request.get(key) != value for key, value in current.items())
+                or request.get('expected_source_sha') != connection.verified_sha or request.get('github_repo') != connection.github_repo):
+            raise PublishReviewedError('not_offered', 'Your website changed after this publishing approval.')
+    _dispatch(source, run, retry=True)
+    return {'status': 'queued', 'run_id': run.run_id, 'source_run_id': source.run_id}

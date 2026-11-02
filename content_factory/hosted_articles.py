@@ -90,6 +90,8 @@ def site_render_state(site: HostedArticleSite) -> dict:
     rendered = site.publications.filter(served).exclude(article={}).order_by("created_at")
     return {
         "domain": site.domain,
+        "siteId": str(site.pk),
+        "organizationId": site.organization_id,
         "basePath": site.base_path,
         "state": site.state,
         "profile": site.profile,
@@ -112,6 +114,13 @@ def _source_connection(site: HostedArticleSite):
     usable = [WebsiteConnection.State.CONNECTED, WebsiteConnection.State.PAUSED]
     config = OrganizationContentConfig.objects.select_related("website_connection").filter(organization=site.organization).first()
     selected = config.website_connection if config else None
+    auto = site.profile.get("auto") if isinstance(site.profile, dict) else None
+    if isinstance(auto, dict):
+        if (selected is None or selected.state != WebsiteConnection.State.CONNECTED
+                or str(selected.pk) != auto.get("connection_id") or selected.generation != auto.get("generation")
+                or selected.configuration_version != auto.get("configuration_version")):
+            raise HostedPublishError("hosted_source_not_connected", "The hosted website's authorized repository changed.")
+        return selected
     if selected is not None and selected.state in usable and selected.installation_id:
         return selected
     connections = list(WebsiteConnection.objects.filter(
@@ -170,13 +179,40 @@ def site_source(site: HostedArticleSite) -> dict:
     return {"githubRepo": connection.github_repo, "repositoryId": connection.repository_id, "branch": branch, "sha": sha}
 
 
-def request_publication(*, site: HostedArticleSite, run, user) -> HostedArticlePublication:
+def register_site(*, organization, profile, update_existing=True):
+    """Shared admin/automatic registration path; draft sites never imply publication consent."""
+    if not isinstance(profile, dict) or not isinstance(profile.get("build"), dict):
+        raise HostedPublishError("hosted_profile_invalid", "A hosted site needs a build contract.")
+    domain = normalized_domain(profile.get("domain"))
+    from .preview_domain_claim import public_host
+    if not domain or public_host(domain) != public_host(organization.domain):
+        raise HostedPublishError("hosted_site_mismatch", "The hosted profile belongs to another startup.")
+    base_path = profile.get("base_path")
+    if not isinstance(base_path, str) or not re.fullmatch(r"/(?:[A-Za-z0-9_-]+/)+", base_path):
+        raise HostedPublishError("hosted_profile_invalid", "Use a relative hosted directory path.")
+    with transaction.atomic():
+        site, created = HostedArticleSite.objects.get_or_create(domain=domain,
+            defaults={"organization": organization, "base_path": profile["base_path"], "profile": profile})
+        if site.organization_id != organization.pk:
+            raise HostedPublishError("hosted_site_mismatch", "This domain belongs to another startup.")
+        if not created and update_existing:
+            site.base_path, site.profile = profile["base_path"], profile
+            site.save(update_fields=["base_path", "profile", "updated_at"])
+    return site, created
+
+
+def request_publication(*, site: HostedArticleSite, run, user, allow_continuation=False) -> HostedArticlePublication:
     """Queue (or re-queue) one finished article for this site; the caller dispatches the render."""
     if site.state != HostedArticleSite.State.ACTIVE:
         raise HostedPublishError("hosted_site_not_active", "Hosted publishing is not switched on for this website.")
     if run.organization_id != site.organization_id:
         raise HostedPublishError("hosted_site_mismatch", "This article belongs to another website.", status=404)
-    if str(run.status) != "completed":
+    result = run.result if isinstance(run.result, dict) else {}
+    continuation = (allow_continuation and run.workflow == "direct_generate" and
+                    isinstance(result.get("article_approval_v1"), dict) and
+                    result["article_approval_v1"].get("source") == "publish_reviewed" and
+                    isinstance(result.get("publish_reviewed_v1"), dict))
+    if str(run.status) != "completed" and not continuation:
         raise HostedPublishError("article_not_ready", "Finish the article before publishing it.")
     with transaction.atomic():
         publication, created = HostedArticlePublication.objects.select_for_update().get_or_create(
@@ -279,6 +315,24 @@ def record_progress(*, domain: str, run_id: str, data: dict) -> HostedArticlePub
                 site.proxy_verified_at = now
                 site.save(update_fields=["proxy_verified_at", "updated_at"])
         publication.save(update_fields=sorted(fields))
+        # P2 approved-body continuations have no repository merge callback. The
+        # authenticated hosted progress record owns their real live outcome.
+        from workflow_runs.models import ContentFactoryRun
+        run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id, organization_id=site.organization_id).first()
+        result = run.result if run is not None and isinstance(run.result, dict) else {}
+        if (run is not None and isinstance(result.get("article_approval_v1"), dict)
+                and result["article_approval_v1"].get("source") == "publish_reviewed"):
+            if target == Status.LIVE:
+                url = f"https://{site.domain}{site.base_path}{publication.slug}/"
+                result = {**result, "deploy_v1": {"url": url, "provider": "mlai_hosted", "verified_at": now.isoformat()},
+                          "channel_v1": {"version": 1, "channel": "hosted", "waiting_to_publish": False, "at": now.isoformat()}}
+                ContentFactoryRun.objects.filter(pk=run.pk).update(status="completed", current_step="hosted_publish",
+                    result=result, updated_at=now)
+            elif target == Status.RENDERING:
+                ContentFactoryRun.objects.filter(pk=run.pk).update(status="running", current_step="hosted_publish", updated_at=now)
+            elif target == Status.FAILED:
+                result = {**result, "error_code": "HOSTED_PREVIEW_UNAVAILABLE"}
+                ContentFactoryRun.objects.filter(pk=run.pk).update(status="failed", current_step="hosted_publish", result=result, updated_at=now)
     return publication
 
 
