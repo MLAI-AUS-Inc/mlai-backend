@@ -1,4 +1,6 @@
 """Persisted, bounded orchestration of the existing website readiness journey."""
+from .website_contract import RunCommandConflict
+
 import logging
 import re
 from uuid import uuid4
@@ -864,7 +866,7 @@ def _resume_prepare_child(op, child, *, user, context):
     """Resume the saved run through existing guarded control and attempt fencing."""
     from .website_run_authority import event_owned
     if event_owned(child):
-        raise WebsiteAuthorityError("run_execution_owned", "Continue this execution from its saved run.", status=409)
+        raise RunCommandConflict("run_execution_owned", "Continue this execution from its saved run.", status=409)
     from .vibe_marketing_views import VibeMarketingRunControlView
     from .website_connections import scoped_run_contract
     request = SimpleNamespace(method="POST", user=user, META={}, query_params={}, headers={},

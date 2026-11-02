@@ -4,6 +4,8 @@ A preview branch is a different source from the selected default branch. Only
 an admitted review child with this saved proof may use that exact source; the
 connection's consent identity and all other workflow checks remain unchanged.
 """
+from .website_contract import RunCommandConflict
+
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
@@ -22,7 +24,7 @@ _verified_source = ContextVar("backend_verified_review_source", default=None)
 
 
 def _denied():
-    return WebsiteAuthorityError("review_source_changed", "Reload and verify this exact reviewed source before continuing.")
+    return RunCommandConflict("review_source_changed", "Reload and verify this exact reviewed source before continuing.")
 
 
 def _same(left, right):
@@ -55,7 +57,7 @@ def verify_review_ref(connection, source_ref, source_sha):
         response.raise_for_status()
         data = response.json()
     except Exception as exc:
-        raise WebsiteAuthorityError("review_source_unavailable", "The reviewed branch could not be verified. Retry when GitHub is available.", retryable=True) from exc
+        raise RunCommandConflict("review_source_unavailable", "The reviewed branch could not be verified. Retry when GitHub is available.", retryable=True) from exc
     if (not isinstance(data, dict) or data.get("name") != source_ref
             or not isinstance(data.get("commit"), dict) or data["commit"].get("sha") != source_sha):
         raise _denied()

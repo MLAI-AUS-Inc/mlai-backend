@@ -36,7 +36,8 @@ def remote_review(run, *, payload=None, child_operation=False):
                 from .run_revision_child_admission import accept_revision_child_response
                 child = admitted_run_for_key(owned_child.get("client_request_id")) if isinstance(owned_child, dict) else None
                 if child is None or child.run_request.get("parent_run_id") != run.run_id:
-                    raise views.WebsiteAuthorityError("review_source_changed", "The saved review child changed.")
+                    from .website_contract import RunCommandConflict
+                    raise RunCommandConflict("review_source_changed", "The saved review child changed.")
                 require_admission_identity(child, owned_child)
                 require_event_execution(child, owned_child)
                 if binding:

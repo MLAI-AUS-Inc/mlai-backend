@@ -202,6 +202,30 @@ class CurrentReviewTests(TransactionTestCase):
         for field in before.keys() - {"result"}:
             self.assertEqual(after[field], before[field], field)
         self.assertEqual(list(self.run.steps.order_by("pk").values()), original_steps)
+        # Exercise the actual R5 selected journey after consent, rather than
+        # manually filling the public approval field in a presentation fixture.
+        journey_url = f"/api/v1/my-startup/journey/?company_id={self.company.pk}&runId={self.run.run_id}"
+        with patch("community_chat.throttles.StartupScopedThrottle.allow_request", return_value=True):
+            journey = self.client.get(journey_url)
+        self.assertEqual(journey.status_code, 200, journey.data)
+        self.assertEqual(journey.data["article"]["approvalState"], "approved")
+        self.assertEqual(journey.data["article"]["status"], before["status"])
+        self.assertTrue(journey.data["capabilities"]["canCopyDraft"])
+        self.assertFalse(journey.data["capabilities"]["canPublish"])
+        self.assertEqual(journey.data["stage"], "review")
+        self.assertFalse(journey.data["state"] == "working")
+        with patch("content_factory.vibe_marketing_views.http_client.request",
+                return_value=response(self.fixture["article_review_response"])):
+            copied = self.client.post(f"/api/v1/vibe-marketing/runs/{self.run.run_id}/copied/?company_id={self.company.pk}",
+                {"revision": self.fixture["canonical_export"]["revision"]}, format="json")
+        self.assertEqual(copied.status_code, 200, copied.data)
+        with patch("community_chat.throttles.StartupScopedThrottle.allow_request", return_value=True):
+            done = self.client.get(journey_url)
+        self.assertEqual(done.status_code, 200, done.data)
+        self.assertEqual(done.data["stage"], "done")
+        self.assertTrue(done.data["capabilities"]["canCopyDraft"])
+        self.assertEqual(ContentFactoryRun.objects.count(), 1)
+        self.assertFalse(Ledger.objects.filter(kind="SPEND").exists())
 
     def test_actual_canonical_deny_records_intent_before_http_without_applying_acknowledgement_state(self):
         from .run_reconciliation import reconcile_authoritative_run

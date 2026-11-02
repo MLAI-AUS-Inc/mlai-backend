@@ -1,4 +1,6 @@
 """Website lifecycle authority shared by browser, service and scheduler paths."""
+from .website_contract import RunCommandConflict
+
 
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -405,11 +407,11 @@ def require_run_not_stopped(payload, *, lock=False):
         try:
             closed = terminal_execution_closed(run)
         except ValueError as exc:
-            raise WebsiteAuthorityError("run_execution_closed", "Review a new paid request before continuing this execution.") from exc
+            raise RunCommandConflict("run_execution_closed", "Review a new paid request before continuing this execution.") from exc
         if closed:
-            raise WebsiteAuthorityError("run_execution_closed", "Review a new paid request before continuing this execution.")
+            raise RunCommandConflict("run_execution_closed", "Review a new paid request before continuing this execution.")
         if user_stop_intent(run):
-            raise WebsiteAuthorityError("run_stop_requested", "This run was denied. Review a new run before changing the website.")
+            raise RunCommandConflict("run_stop_requested", "This run was denied. Review a new run before changing the website.")
 
 
 @contextmanager
