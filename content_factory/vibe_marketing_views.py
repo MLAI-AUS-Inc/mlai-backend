@@ -12578,6 +12578,13 @@ def _bootstrap_workflow_run_ref(serialized_run):
     return {key: serialized_run.get(key) for key in _BOOTSTRAP_WORKFLOW_RUN_FIELDS}
 
 
+def _article_improvements_payload(context, request=None):
+    """The optional checklist is a safe projection, never an admission decision."""
+    from .founder_improvements import summary
+    receipt = summary(context.organization, user=getattr(request, "user", None))
+    return {"articleImprovements": receipt} if receipt is not None else {}
+
+
 def _compute_bootstrap_payload(context, request=None, *, view="summary", config=None, latest_runs=None, defer_workflow_progress=False):
     compact = view == "summary"
     if config is None:
@@ -12707,6 +12714,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
             "articleVoice": article_voice_payload(getattr(config, "pillar_strategy", None)),
         },
         "startupProfile": _serialize_startup_profile(context.organization),
+        **_article_improvements_payload(context, request),
         "websiteBaseline": _serialize_baseline_snapshot(baseline_snapshot, config, compact=compact),
         "googleBaselineConnection": google_status,
         "checks": checks,
@@ -15964,9 +15972,16 @@ class VibeMarketingAuthorPhotoPreviewView(APIView):
 
         if not _company_id_from_request(request):
             return Response({"detail": "Choose a startup.", "field": "companyId"}, status=400)
-        _profile, _company, error = _resolve_profile_company_or_response(request)
+        _profile, company, error = _resolve_profile_company_or_response(request)
         if error:
             return error
+        uploaded = getattr(request, "FILES", {}).get("photo")
+        if uploaded is not None:
+            from content_factory.author_photos import upload_photo
+            try:
+                return Response({"photoUrl": upload_photo(uploaded, company_id=company.pk)}, status=200)
+            except AuthorPhotoError as exc:
+                return Response({"detail": str(exc), "code": exc.code}, status=exc.status)
         url = str(request.data.get("url") or "").strip()
         if len(url) > 2048 or not needs_copy(url):
             return Response({"detail": "Use a full https:// link to the photo.",
