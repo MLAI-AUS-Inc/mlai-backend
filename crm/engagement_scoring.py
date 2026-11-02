@@ -208,7 +208,9 @@ def score_engagement(
         for entry in sources.values()
     )
     summary = "All sources available." if not limited else "Limited source coverage: " + ", ".join(limited) + ". Missing evidence is not inactivity."
-    if sources["newsletter"].get("substack_automatic") is False:
+    if sources["newsletter"].get("substack_mode") == "browser_export":
+        summary += " Substack activity uses the scheduled browser export (" + sources["newsletter"].get("substack_status", "unknown") + ")."
+    elif sources["newsletter"].get("substack_automatic") is False:
         summary += " Substack uses dated import history; fresh subscriber activity is not connected."
     return {
         "stars": stars, "score": score, "version": VERSION,
@@ -221,6 +223,6 @@ def score_engagement(
             "strong_dates_180d": len(strong_dates), "strong_activity_30d": strong_30,
             "app_activity_available": sources["app"]["status"] in ("available", "partial"),
             "app_usage_frequency_available": False, "email_opens_scored": False,
-            "newsletter_live_substack_available": sources["newsletter"].get("substack_automatic") is True,
+            "newsletter_live_substack_available": sources["newsletter"].get("substack_export_available", sources["newsletter"].get("substack_automatic")) is True,
         },
     }

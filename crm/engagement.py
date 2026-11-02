@@ -12,7 +12,7 @@ from math import isfinite
 
 ENGAGEMENT_RATING_KEY = "engagement_rating"
 MARKETING_REVIEW_HOLD_KEY = "marketing_review_hold"
-RESERVED_ATTRIBUTE_KEYS = frozenset((ENGAGEMENT_RATING_KEY, MARKETING_REVIEW_HOLD_KEY, "engagement_import", "engagement_activity", "engagement_refresh", "engagement_legacy_attributes"))
+RESERVED_ATTRIBUTE_KEYS = frozenset((ENGAGEMENT_RATING_KEY, MARKETING_REVIEW_HOLD_KEY, "engagement_import", "engagement_activity", "engagement_refresh", "engagement_legacy_attributes", "engagement_newsletter"))
 
 
 def engagement_rating(attributes) -> dict | None:

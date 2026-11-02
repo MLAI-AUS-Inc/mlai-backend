@@ -215,11 +215,15 @@ The job reads:
   excluded. Exact active account email mappings are required.
 - Explicit `User.last_login` recency. This contributes at most five points;
   background refresh/device timestamps are not usage frequency.
-- Dated CRM email-click feedback and the imported Substack last-click history.
-  There is **no connected live per-subscriber Substack feed**. New Substack
-  reading/click activity cannot be observed until one is supplied. Historical
-  evidence ages normally. Undated aggregate counters cannot become invented
-  activity dates, and email opens always earn zero points.
+- Dated CRM email-click feedback and the scheduled Substack browser export.
+  `CRM_SUBSTACK_ACTIVITY_ENABLED=true` expects a daily authenticated export,
+  delivered by the local Codex task at 05:30 before the 06:00 rating sweep.
+  This uses the supported subscriber export, not an undocumented API or copied
+  session credentials. The Mac, Codex app and signed-in official Chrome
+  connection must be available. A stale expected export preserves prior ratings
+  and is visible in source coverage. Historical evidence ages normally.
+  Undated aggregate counters cannot become invented activity dates, and email
+  opens always earn zero points. See [the export runbook](crm-substack-refresh.md).
 
 Only rating/refresh metadata in `Contact.attributes` is changed. Consent,
 unsubscribe/delivery states, review holds, consent history, blasts, provider
@@ -231,6 +235,13 @@ attributes are retained under a protected key and remain effectively held.
 sender. The initial dated-history seed command is also rollback-first and
 requires exact input checksums. Namespace keys are protected from ordinary
 attribute editing.
+
+`crm_import_newsletter_activity PATH --expected-sha256 SHA --exported-at ISO
+--actor-email ADMIN` previews an export; `--apply` persists only dated click
+evidence for existing contacts. It never imports subscribers or preferences,
+infers opt-outs from missing rows, or changes a review hold. An older/equal
+export is idempotently skipped. Freshness is published only after commit and is
+durably recorded even when the export contains no new clicks.
 
 ```bash
 python manage.py crm_import_contacts PATH --consent granted|none [--consent-source TEXT] \
