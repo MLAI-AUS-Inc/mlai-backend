@@ -105,6 +105,11 @@ class WebsiteCheckTests(TransactionTestCase):
         self.assertEqual(first['key'], self.receipt()['key'])
 
     def test_nightly_respects_local_date_and_never_repeats_a_completed_day(self):
+        from zoneinfo import ZoneInfo
+        # This case covers daily identity after the nightly window opens. The
+        # adjacent test covers the before-02:00 boundary independently.
+        self.now = self.now.astimezone(ZoneInfo('Australia/Melbourne')).replace(
+            hour=12, minute=0, second=0, microsecond=0)
         self.deliver()
         self.config.default_timezone='Australia/Melbourne'; self.config.save(update_fields=['default_timezone'])
         WebsiteBaselineSnapshot.objects.create(organization=self.org, status='completed', collected_at=self.now)
