@@ -748,10 +748,13 @@ jobs:
           content_factory.tests.test_p2_authority_events \
           content_factory.tests.test_p2_authority_lineage \
           content_factory.tests.test_p2_authority_repin \
+          content_factory.tests.test_p2_hosted_registration \
+          content_factory.tests.test_p2_publish_reviewed \
           content_factory.tests_p2_merge_worker \
           content_factory.tests_p2_policy \
           content_factory.tests_p2_runs \
-          content_factory.tests_p2_staff --noinput --verbosity 2
+          content_factory.tests_p2_staff \
+          founder_tools.tests_startup_team --noinput --verbosity 2
 
     - name: Verify PostgreSQL search infrastructure
       run: |
