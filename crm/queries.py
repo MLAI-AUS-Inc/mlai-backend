@@ -20,6 +20,7 @@ from django.db.models import (
     Count,
     Exists,
     F,
+    IntegerField,
     Max,
     OuterRef,
     Q,
@@ -32,6 +33,7 @@ from django.db.models.functions import Coalesce, Lower, NullIf
 
 from core.models import AccountBan
 
+from .engagement import ENGAGEMENT_RATING_KEY, MARKETING_REVIEW_HOLD_KEY, RESERVED_ATTRIBUTE_KEYS
 from .luma_guests import APPROVED, WAITLIST
 from .models import (
     Blast,
@@ -53,7 +55,7 @@ INFERRED_CONSENT_DAYS = 730
 DEFAULT_SMS_PREFIXES = ("+614",)
 GUEST_STATUSES = ("going", "waitlist", "pending", "checked_in", "no_show", "all")
 EVENT_SCOPES = ("upcoming", "past")
-CONTACT_SORTS = ("recent", "name", "attended")
+CONTACT_SORTS = ("recent", "name", "attended", "engagement")
 SEARCH_FIELDS = ("email", "first_name", "last_name", "display_name", "company")
 MAX_SEARCH_TERMS = 5
 MAX_SEARCH_LENGTH = 200
@@ -117,10 +119,12 @@ def banned(prefix: str = "") -> Exists:
 
 
 def marketing_consent_q(now: datetime, prefix: str = "") -> Q:
-    """Granted, or attended an event in the last 24 months; withdrawal wins."""
+    """Existing consent policy, with withdrawals and import review holds winning."""
 
     inferred_since = now - timedelta(days=INFERRED_CONSENT_DAYS)
-    return ~Q(**{f"{prefix}marketing_consent": Contact.MarketingConsent.WITHDRAWN}) & (
+    hold = f"{prefix}attributes__{MARKETING_REVIEW_HOLD_KEY}"
+    reviewed = Q(**{f"{hold}__isnull": True}) | Q(**{hold: False})
+    return reviewed & ~Q(**{f"{prefix}marketing_consent": Contact.MarketingConsent.WITHDRAWN}) & (
         Q(**{f"{prefix}marketing_consent": Contact.MarketingConsent.GRANTED})
         | Q(**{f"{prefix}last_attended_at__gte": inferred_since})
     )
@@ -254,6 +258,23 @@ def contact_sort_name():
 
 
 def sort_contacts(queryset, sort: str):
+    if sort == "engagement":
+        # Numeric JSON values retain numeric ordering on PostgreSQL and SQLite.
+        # The importer validates typed snapshots; absent/invalid stars are null.
+        return queryset.annotate(
+            engagement_sort_stars=Case(
+                *[
+                    When(**{f"attributes__{ENGAGEMENT_RATING_KEY}__stars": stars}, then=Value(stars))
+                    for stars in range(1, 6)
+                ],
+                default=Value(None),
+                output_field=IntegerField(),
+            )
+        ).order_by(
+            F("engagement_sort_stars").desc(nulls_last=True),
+            F(f"attributes__{ENGAGEMENT_RATING_KEY}__score").desc(nulls_last=True),
+            "pk",
+        )
     if sort == "name":
         return queryset.annotate(sort_name=contact_sort_name()).order_by("sort_name", "pk")
     if sort == "attended":
@@ -367,6 +388,9 @@ def contacts_queryset(
     has_mobile: Optional[bool] = None,
     whatsapp: str = "",
     segment_q: Optional[Q] = None,
+    stars: Optional[int] = None,
+    min_stars: Optional[int] = None,
+    max_stars: Optional[int] = None,
     sort: str = "recent",
 ):
     """The contact list with every filter the API accepts; each one narrows it."""
@@ -387,7 +411,25 @@ def contacts_queryset(
         contacts = contacts.filter(has_mobile_q() if has_mobile else ~has_mobile_q())
     if whatsapp:
         contacts = contacts.filter(whatsapp_opt_in=whatsapp)
+    if stars is not None:
+        contacts = contacts.filter(engagement_stars_q("eq", stars))
+    if min_stars is not None:
+        contacts = contacts.filter(engagement_stars_q("gte", min_stars))
+    if max_stars is not None:
+        contacts = contacts.filter(engagement_stars_q("lte", max_stars))
     return sort_contacts(with_marketing_eligible(contacts, now), sort)
+
+
+def engagement_stars_q(op: str, value: int) -> Q:
+    """Match only typed ratings in 1–5; missing ratings never mean one star."""
+
+    if op not in ("eq", "gte", "lte") or type(value) is not int or not 1 <= value <= 5:
+        raise ValueError("Invalid engagement star filter.")
+    allowed = [
+        stars for stars in range(1, 6)
+        if stars == value or (op == "gte" and stars > value) or (op == "lte" and stars < value)
+    ]
+    return Q(**{f"attributes__{ENGAGEMENT_RATING_KEY}__stars__in": allowed})
 
 
 def contact_registrations(contact: Contact):
@@ -653,7 +695,10 @@ def attribute_key_counts() -> list[dict]:
     rows = Contact.objects.exclude(attributes={}).values_list("attributes", flat=True)
     for attributes in rows.iterator(chunk_size=2000):
         if isinstance(attributes, dict):
-            counts.update(key for key, value in attributes.items() if str(value or "").strip())
+            counts.update(
+                key for key, value in attributes.items()
+                if key not in RESERVED_ATTRIBUTE_KEYS and str(value or "").strip()
+            )
     return [{"key": key, "count": count} for key, count in _ranked(counts)]
 
 

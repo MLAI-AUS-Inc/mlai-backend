@@ -15,6 +15,12 @@ from rest_framework.exceptions import ErrorDetail
 from crm.blasts import QUICK_SEGMENTS as BLAST_QUICK_SEGMENTS, mask_address
 from crm.contact_import import MAX_TAGS, clean_tags
 from crm.emails import normalize_contact_email
+from crm.engagement import (
+    RESERVED_ATTRIBUTE_KEYS,
+    editable_attributes,
+    engagement_rating,
+    marketing_review_hold,
+)
 from crm.models import Blast, BlastDelivery, Channel, Contact, ContactImport, CrmAuditEvent
 from crm.phones import normalize_contact_phone
 from crm.queries import CONTACT_SORTS, EVENT_SCOPES, GUEST_STATUSES, INFERRED_CONSENT_DAYS
@@ -116,6 +122,10 @@ class ContactFieldsInput(StrictSerializer):
         return clean_tags(value)
 
     def validate_attributes(self, value):
+        if RESERVED_ATTRIBUTE_KEYS.intersection(value):
+            raise serializers.ValidationError(
+                "Engagement and review metadata are read-only.", code="reserved_attribute"
+            )
         if len(value) > MAX_ATTRIBUTE_KEYS:
             raise serializers.ValidationError("Too many attributes.", code="too_many_attributes")
         for key in value:
@@ -355,6 +365,19 @@ def contact_list_filters(params) -> dict:
     segment_id = params.get("segment_id") or ""
     if segment_id:
         segment_id = parse_uuid(segment_id, "segment_id")
+    stars = {}
+    for field in ("stars", "min_stars", "max_stars"):
+        value = params.get(field)
+        if value in (None, ""):
+            stars[field] = None
+        elif str(value) in ("1", "2", "3", "4", "5"):
+            stars[field] = int(value)
+        else:
+            raise CrmError("invalid_filter", field=field)
+    lower = stars["min_stars"] or 1
+    upper = stars["max_stars"] or 5
+    if lower > upper or (stars["stars"] is not None and not lower <= stars["stars"] <= upper):
+        raise CrmError("invalid_filter", field="stars")
     return {
         "text": params.get("q") or "",
         "tag": " ".join(str(params.get("tag") or "").split())[:64],
@@ -364,6 +387,7 @@ def contact_list_filters(params) -> dict:
         "whatsapp": whatsapp,
         "sort": sort,
         "segment_id": segment_id or None,
+        **stars,
     }
 
 
@@ -396,6 +420,7 @@ def _display_name(contact: Contact) -> str:
 
 
 def contact_row(contact: Contact) -> dict:
+    rating = engagement_rating(contact.attributes)
     return {
         "id": str(contact.pk),
         "email": contact.email,
@@ -415,12 +440,20 @@ def contact_row(contact: Contact) -> dict:
         "marketing_eligible": bool(getattr(contact, "marketing_eligible", False)),
         "sms_status": contact.sms_status,
         "whatsapp_opt_in": contact.whatsapp_opt_in,
+        "engagement_stars": rating["stars"] if rating else None,
+        "engagement_score": rating["score"] if rating else None,
+        "engagement_rating": rating,
+        "marketing_review_hold": marketing_review_hold(contact.attributes),
     }
 
 
 def contact_detail(contact: Contact, *, now, registrations, deliveries, replies, history) -> dict:
     inferred_until = None
-    if contact.marketing_consent == Contact.MarketingConsent.UNKNOWN and contact.last_attended_at:
+    if (
+        contact.marketing_consent == Contact.MarketingConsent.UNKNOWN
+        and contact.last_attended_at
+        and not marketing_review_hold(contact.attributes)
+    ):
         lapses_at = contact.last_attended_at + timedelta(days=INFERRED_CONSENT_DAYS)
         inferred_until = lapses_at if lapses_at > now else None
     return {
@@ -428,7 +461,7 @@ def contact_detail(contact: Contact, *, now, registrations, deliveries, replies,
         "phone": contact.phone,
         "city": contact.city,
         "linkedin_url": contact.linkedin_url,
-        "attributes": dict(contact.attributes or {}),
+        "attributes": editable_attributes(contact.attributes),
         "source": contact.source,
         "first_seen_at": iso(contact.first_seen_at),
         "user": {"display_name": contact.user.full_name} if contact.user_id and contact.user else None,

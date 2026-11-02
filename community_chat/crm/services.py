@@ -15,6 +15,7 @@ from django.db.models.functions import Lower
 from core.models import AccountBan
 from crm import sending_domains
 from crm.blasts import check_channel_rules
+from crm.engagement import RESERVED_ATTRIBUTE_KEYS
 from crm.luma_sync import users_by_email
 from crm.models import (
     Blast,
@@ -79,9 +80,17 @@ def _apply_fields(contact: Contact, data: dict, *, now: datetime) -> list[str]:
     if "tags" in data and list(contact.tags or []) != data["tags"]:
         contact.tags = data["tags"]
         changed.append("tags")
-    if "attributes" in data and dict(contact.attributes or {}) != data["attributes"]:
-        contact.attributes = data["attributes"]
-        changed.append("attributes")
+    if "attributes" in data:
+        if RESERVED_ATTRIBUTE_KEYS.intersection(data["attributes"]):
+            raise CrmError("reserved_attribute", field="attributes")
+        current = dict(contact.attributes or {})
+        attributes = {
+            **data["attributes"],
+            **{key: current[key] for key in RESERVED_ATTRIBUTE_KEYS if key in current},
+        }
+        if current != attributes:
+            contact.attributes = attributes
+            changed.append("attributes")
     return changed
 
 

@@ -29,6 +29,7 @@ from .queries import (
     PENDING,
     REACHABLE,
     banned,
+    engagement_stars_q,
     marketing_consent_q,
     registered_q,
 )
@@ -73,6 +74,11 @@ RULE_TYPES = {
     },
     "events_attended_count": {
         "label": "Number of events attended",
+        "keys": {"op", "value"},
+        "available": True,
+    },
+    "engagement_stars": {
+        "label": "Engagement stars",
         "keys": {"op", "value"},
         "available": True,
     },
@@ -181,6 +187,13 @@ def _last_attended_within_days(rule: dict, at: tuple) -> dict:
     return {"value": _integer(rule.get("value"), at + ("value",), 1, MAX_DAYS)}
 
 
+def _engagement_stars(rule: dict, at: tuple) -> dict:
+    return {
+        "op": _choice(COUNT_OPS)(rule.get("op"), at + ("op",)),
+        "value": _integer(rule.get("value"), at + ("value",), 1, 5),
+    }
+
+
 def _tag(rule: dict, at: tuple) -> dict:
     return {
         "op": _choice(TAG_OPS)(rule.get("op"), at + ("op",)),
@@ -234,6 +247,7 @@ def _blast_engagement(rule: dict, at: tuple) -> dict:
 _RULE_VALIDATORS = {
     "event_registration": _event_registration,
     "events_attended_count": _events_attended_count,
+    "engagement_stars": _engagement_stars,
     "last_attended_within_days": _last_attended_within_days,
     "tag": _tag,
     "field": _field,
@@ -409,6 +423,8 @@ def _rule_q(rule: dict, at: tuple, now: datetime) -> Q:
         return Q(Exists(registrations))
     if rule_type == "events_attended_count":
         return Q(**{f"events_attended_count__{_COUNT_LOOKUPS[rule['op']]}": rule["value"]})
+    if rule_type == "engagement_stars":
+        return engagement_stars_q(rule["op"], rule["value"])
     if rule_type == "last_attended_within_days":
         return Q(last_attended_at__gte=now - timedelta(days=rule["value"]))
     if rule_type == "tag":
