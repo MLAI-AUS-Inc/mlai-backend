@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # IF-P2-28: result keys the backend writes; a CF snapshot never drops or changes them.
 P2_BACKEND_RESULT_KEYS = frozenset({
     "self_heal_v1", "points_v1", "channel_v1", "re_pin_v1", "article_approval_v1", "owner_merge_approval_v1",
-    "merge_v1", "deploy_v1", "staff_actions_v1", "publish_offer_v1",
+    "merge_v1", "deploy_v1", "staff_actions_v1", "publish_offer_v1", "publish_reviewed_v1", "publish_dispatch_v1",
 })
 # IF-P2-26: run-request keys the backend owns; a snapshot never introduces or changes them.
 P2_BACKEND_REQUEST_KEYS = frozenset({"self_heal_policy_v1", "merge_policy"})

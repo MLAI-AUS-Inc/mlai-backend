@@ -329,6 +329,16 @@ def ops_alert_receipt(*, alert_id=None, alert_reason="our_team_item", state="pen
     return receipt
 
 
+def publish_reviewed_receipt(*, source_run_id="source-run", approved_body_sha256="a"*64):
+    """Backend-owned saved-body publish identity, protected alongside section10 receipts."""
+    return {"source_run_id": source_run_id, "approved_body_sha256": approved_body_sha256}
+
+
+def publish_dispatch_receipt(*, at=None, hosted=False):
+    """Backend-owned accepted publish dispatch, including the hosted destination kind."""
+    return {"accepted_at": _iso(at), "hosted": bool(hosted)}
+
+
 RECEIPT_BUILDERS = {
     "self_heal_v1": self_heal_receipt,
     "points_v1": points_receipt,
@@ -340,6 +350,8 @@ RECEIPT_BUILDERS = {
     "deploy_v1": deploy_receipt,
     "staff_actions_v1": staff_actions_receipt,
     "publish_offer_v1": publish_offer_receipt,
+    "publish_reviewed_v1": publish_reviewed_receipt,
+    "publish_dispatch_v1": publish_dispatch_receipt,
 }
 FRIDAY_4PM_MELBOURNE = datetime(2026, 10, 30, 5, 0, tzinfo=dt_timezone.utc)  # Fri 30 Oct 2026, 16:00 AEDT
 __all__ = [

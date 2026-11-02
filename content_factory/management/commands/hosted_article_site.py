@@ -20,7 +20,7 @@ from pathlib import Path
 from django.core.management.base import BaseCommand, CommandError
 
 from content_factory.hosted_article_models import HostedArticleSite
-from content_factory.hosted_articles import normalized_domain, site_render_state
+from content_factory.hosted_articles import normalized_domain, site_render_state, register_site, HostedPublishError
 from organizations.models import Organization
 
 REQUIRED_PROFILE_KEYS = {"domain", "base_path", "build"}
@@ -73,11 +73,8 @@ class Command(BaseCommand):
         organization = Organization.objects.filter(domain=domain).first()
         if organization is None:
             raise CommandError(f"No organization owns {domain}.")
-        site, created = HostedArticleSite.objects.get_or_create(
-            domain=domain, defaults={"organization": organization, "base_path": profile["base_path"], "profile": profile})
-        if not created:
-            if site.organization_id != organization.pk:
-                raise CommandError(f"{domain} is hosted for another organization.")
-            site.base_path, site.profile = profile["base_path"], profile
-            site.save(update_fields=["base_path", "profile", "updated_at"])
+        try:
+            site, created = register_site(organization=organization, profile=profile)
+        except HostedPublishError as exc:
+            raise CommandError(str(exc)) from exc
         self.stdout.write(f"{'Registered' if created else 'Updated'} {domain} ({site.state}).")
