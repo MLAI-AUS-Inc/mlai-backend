@@ -568,15 +568,34 @@ def check_approval_comments(run, payload):
     return None
 
 
+def persist_review_metadata(run, changes, *, preserve_other_batch=False):
+    """Merge explicit review metadata without replacing current execution facts."""
+    from .website_run_authority import event_owned
+    if not set(changes) <= {"article_review_approval", "component_feedback_latest_batch"}:
+        raise ValueError("Unsupported review metadata.")
+    with transaction.atomic():
+        fresh = views.ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        result = dict(fresh.result or {})
+        for key, value in changes.items():
+            current = result.get(key)
+            if (key == "component_feedback_latest_batch" and preserve_other_batch
+                    and isinstance(current, dict) and current.get("id") != value.get("id")):
+                continue
+            result[key] = value
+        fresh.result = result
+        fresh.save(update_fields=["result"] if event_owned(fresh) else ["result", "updated_at"])
+        run.result = result
+        run.updated_at = fresh.updated_at
+
+
 def record_review_approval(run, context, payload):
     """Record explicit waivers and accept the completed revision being approved."""
-    result = dict(run.result or {})
-    result["article_review_approval"] = {
+    approval = {
         "revision": payload.get("reviewedRevision"), "waivedComments": payload.get("waivedComments", []),
         "recordedAt": views.timezone.now().isoformat(),
     }
-    run.result = result
-    run.save(update_fields=["result", "updated_at"])
+    persist_review_metadata(run, {"article_review_approval": approval})
+    result = run.result
     if run.workflow != "article_revision" or not payload.get("acceptDisplayedRevision"):
         return
     source_id = (run.run_request or {}).get("source_run_id") or result.get("source_run_id")
@@ -587,8 +606,7 @@ def record_review_approval(run, context, payload):
     from .article_review_feedback import accept_addressed_feedback
     promoted, archived = accept_addressed_feedback(run, source, batch_id)
     for target in (source, run):
-        target.result = {**(target.result or {}), "component_feedback_latest_batch": {
+        persist_review_metadata(target, {"component_feedback_latest_batch": {
             "id": batch_id, "sourceRunId": source.run_id, "revisionRunId": run.run_id,
             "status": "accepted", "promotedLearningCount": promoted, "archivedLearningCount": archived,
-        }}
-        target.save(update_fields=["result", "updated_at"])
+        }})

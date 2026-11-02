@@ -19606,20 +19606,16 @@ class VibeMarketingRunCommentsAcceptRevisionView(VibeMarketingRunCommentsMixin, 
                 github_repo=source_run.github_repo or "",
             ))
         _persist_article_memory_from_run(organization=context.organization, run=run)
+        from .article_review_views import persist_review_metadata
         for target in [source_run, run]:
-            target_result = target.result or {}
-            latest_batch = target_result.get("component_feedback_latest_batch")
-            if not isinstance(latest_batch, dict) or latest_batch.get("id") == batch_id:
-                target_result["component_feedback_latest_batch"] = {
+            persist_review_metadata(target, {"component_feedback_latest_batch": {
                     "id": batch_id,
                     "sourceRunId": source_run.run_id,
                     "revisionRunId": run.run_id,
                     "status": "accepted",
                     "promotedLearningCount": promoted_count,
                     "archivedLearningCount": archived_count,
-                }
-            target.result = target_result
-            target.save(update_fields=["result", "updated_at"])
+                }}, preserve_other_batch=True)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
 
 
