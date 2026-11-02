@@ -38,6 +38,23 @@ def snapshot():
 
 
 class FinanceTests(SimpleTestCase):
+    def test_expense_receipts_are_cash_without_hour_credits(self):
+        rows = [invoice(), invoice('i2', 'EXPENSE', 'p2', amount=125)]
+        rows[0]['LineItems'] = [{'Description': 'Studio subscription November', 'LineAmount': 5000}]
+        rows[1]['LineItems'] = [{'Description': 'Software reimbursement', 'LineAmount': 125}]
+        get = Mock(side_effect=lambda path: {'Payments': [payment(path.rsplit('/', 1)[1],
+            'i2' if path.endswith('p2') else 'i1', 125 if path.endswith('p2') else 5000)]})
+        result = refresh_finance(snapshot(), 'UMARK', rows, get, CUTOFF,
+                                 credit_description_prefix='Studio subscription')
+        data = result['clients']['UMARK']
+        self.assertEqual(data['payments'][0]['amount_cents'], 512500)
+        self.assertEqual(data['payments'][0]['credit_amount_cents'], 500000)
+        self.assertFalse(data['invoices'][1]['credit_eligible'])
+        rows[0]['LineItems'].append({'Description': 'Mixed expense', 'LineAmount': 10})
+        result = refresh_finance(snapshot(), 'UMARK', rows, get, CUTOFF,
+                                 credit_description_prefix='Studio subscription')
+        self.assertEqual(result['clients']['UMARK']['payments'][0]['credit_amount_cents'], 0)
+
     def test_legacy_bank_receipt_is_verified_and_reversal_removes_credits(self):
         value = snapshot()
         data = value['clients']['UMARK']
@@ -104,6 +121,32 @@ class FinanceTests(SimpleTestCase):
 
 
 class PreparationTests(SimpleTestCase):
+    def test_latest_finance_keeps_work_dates_and_unknown_mail_visible(self):
+        self.manifest['hours_complete_through'] = '2026-10-11T00:00:00Z'
+        self.path.write_text(json.dumps(self.manifest))
+        self.request['mode'] = 'latest'
+        result = self.run_prepare(mail=Mock(return_value={'reviewed', 'new'}))
+        self.assertEqual(result['status'], 'partial')
+        data = result['snapshot']['clients']['UMARK']
+        self.assertEqual(data['source_freshness']['hours_complete_through'], '2026-10-11T00:00:00+00:00')
+        self.assertEqual(data['source_freshness']['unreviewed_invoice_count'], 1)
+        self.assertEqual(data['as_of'], NOW.isoformat())
+        self.assertEqual(json.loads(self.path.read_text()), self.manifest)
+
+    def test_latest_cannot_hide_finance_or_mail_failure_or_future_cutoff(self):
+        self.request['mode'] = 'latest'
+        cases = [dict(get=Mock(side_effect=RuntimeError('private')), mail=Mock(return_value={'reviewed'}), now=NOW),
+                 dict(get=Mock(return_value={'Invoices': []}), mail=Mock(side_effect=RuntimeError('private')), now=NOW)]
+        for args in cases:
+            result = prepare(self.scope, self.request, **args)
+            self.assertEqual(result['status'], 'waiting_data')
+            self.assertNotIn('snapshot', result)
+            self.assertNotIn('private', json.dumps(result))
+        self.request['cutoff'] = (NOW + timedelta(hours=1)).isoformat()
+        result = self.run_prepare()
+        self.assertEqual(result['status'], 'waiting_data')
+        self.assertNotIn('snapshot', result)
+
     def setUp(self):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
