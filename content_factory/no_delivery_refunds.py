@@ -55,12 +55,12 @@ def _failure(run):
 def _direct_delivery(run):
     result = _mapping(run.result)
     return (bool(result.get("draft_ready_v1")) or useful_delivery(run) or delivered_content(run)
-            or publication_state(run) == "article" or points_receipt(run).get("state") == "captured")
+            or publication_state(run) == "article")
 
 
 def _delivery(run):
     """A publish-only continuation cannot undo delivery on its proven original charge."""
-    if _direct_delivery(run):
+    if _direct_delivery(run) or points_receipt(run).get("state") == "captured":
         return True
     request = _mapping(getattr(run, "run_request", None))
     source_id = request.get("original_billing_source_run_id")
@@ -91,7 +91,7 @@ def _delivery(run):
             same = original is not None and original.pk == grant.pk
         if not same:
             return False
-        if _direct_delivery(source):
+        if _direct_delivery(source) or points_receipt(source).get("state") == "captured":
             return True
         source_id = saved.get("original_billing_source_run_id")
         if not source_id:
