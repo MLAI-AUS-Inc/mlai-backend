@@ -35,6 +35,11 @@ class ScanChildAdmissionTests(TestCase):
         self.native = patch("content_factory.website_connections.verify_repository_native_target", return_value=None)
         self.native.start()
         self.addCleanup(self.native.stop)
+        self.source_response = Mock(status_code=200)
+        self.source_response.json.return_value = {"sha": "a" * 40}
+        self.source_read = patch("integrations.services.github_connections.read_bound_repository", return_value=self.source_response)
+        self.source_read.start()
+        self.addCleanup(self.source_read.stop)
 
     def prepare(self, payload=None, **kwargs):
         return prepare_scan_child_dispatch(run=self.parent, user=kwargs.get("user", self.user),
@@ -127,6 +132,15 @@ class ScanChildAdmissionTests(TestCase):
         self.assertEqual(ContentFactoryRun.objects.count(), 1)
         self.assertEqual(WebsiteConnectionOperation.objects.count(), 0)
 
+    def test_source_changed_while_scan_waited_requires_fresh_scan_without_restamping_old_plan(self):
+        before = ContentFactoryRun.objects.values().get(pk=self.parent.pk)
+        self.source_response.json.return_value = {"sha": "b" * 40}
+        with self.assertRaises(WebsiteAuthorityError) as denied:
+            self.prepare()
+        self.assertEqual(denied.exception.code, "website_source_changed")
+        self.assertEqual(WebsiteConnectionOperation.objects.count(), 0)
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.parent.pk), before)
+
     def test_parent_response_id_cannot_be_used_as_child_and_unknown_ack_keeps_original_reservation(self):
         child = self.prepare()
         with patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("unknown", {})):
@@ -138,6 +152,7 @@ class ScanChildAdmissionTests(TestCase):
         self.assertEqual(child.run_id, owner_receipt(child)["identity"]["dispatch_key"])
         self.assertEqual(accept_scan_child_response(child, {"scaffold_job_id": "actual-setup-child"}).pk, child.pk)
 
+    @override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False)
     def test_legacy_parent_retains_original_protocol_and_no_automatic_enrollment(self):
         legacy = ContentFactoryRun.objects.create(run_id="legacy-scan", domain=self.org.domain, workflow="scan")
         body = {"retained": "legacy"}
