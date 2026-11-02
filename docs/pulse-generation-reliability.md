@@ -209,3 +209,21 @@ selection passed six tests, and the complete founder API suite passed 99 tests.
 Founder status responses now use the saved preflight run even without Gmail
 authorization, so one missing connector cannot hide other failed source checks.
 Active runs retain their pinned source selection; changing it requires a new run.
+
+### After Job identity adoption
+
+The current main graph adds the separately approved
+`workflow_runs/0008_contentfactoryrun_job_identity.py` to those unchanged 377
+files. Use the [378-file inventory](pulse-reliability-job-identity-test-migrations.json)
+with SHA-256 `6a24940b944af3e7b56ea2715661495672432238a9cd694cf4cb6eeaca0072f0`
+for fresh disposable tests. The [approval record](pulse-reliability-job-identity-test-approval.md)
+links the owner's existing approval of the four nullable identity/timestamp
+columns; this Pulse correction creates no migration.
+
+The combined local PostgreSQL selection passed 263 tests covering Pulse source
+barriers, receipts, connector scoping, CRM protections and Job identity races.
+Another 52 database-free regressions passed, including all 2,047 selected-source
+subsets. All 11,612 current canonical CI selectors collect; model checks find no
+drift. Hosted validation and production acceptance remain required before
+declaring the release complete. Preserve the CRM release's adoption/deployment
+order and require a fresh production migration plan before promotion.

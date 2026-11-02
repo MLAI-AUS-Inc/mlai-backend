@@ -28,6 +28,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [Job to Run cutover](run-job-cutover.md) — parity, copied identity, historical coverage and rollback
+
 - [19 October backend consolidation audit](articles-backend-rollup-audit-2026-10-19.md) — retained reliability fixes, deferred prototypes, exact component heads and release boundaries
 
 - [Interrupted article publication observation](articles-publication-observation.md) — bounded positive GitHub evidence, exact original intent and preserved settlement obligations
