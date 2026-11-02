@@ -76,6 +76,28 @@ class RefundTests(TestCase):
         self.assertEqual(spend.service_refunds.count(), 1)
         self.assertEqual(Ledger.objects.filter(kind="SPEND").count(), 1)
 
+    def test_failed_publish_continuation_cannot_refund_a_delivered_original_paid_draft(self):
+        source, spend = self.paid()
+        source.status = "completed"
+        source.result = {"draft_ready_v1": {"version": 1}}
+        source.save(update_fields=["status", "result"])
+        child = ContentFactoryRun.objects.create(run_id="publish-child", organization=self.org,
+            domain=self.org.domain, workflow="direct_generate", status="failed", result={"error_code": "RUN_BUDGET_EXHAUSTED"})
+        refunds.carry_charge(source_run=source, new_run=child)
+        self.assertEqual(refunds.apply_refund_decision(child, {})["state"], "captured")
+        self.assertFalse(spend.service_refunds.exists())
+
+    def test_unrelated_delivered_run_cannot_claim_another_original_charge_delivery(self):
+        source, spend = self.paid()
+        unrelated, _ = self.paid()
+        unrelated.result = {"draft_ready_v1": {"version": 1}}
+        unrelated.save(update_fields=["result"])
+        source.run_request["original_billing_source_run_id"] = unrelated.run_id
+        source.save(update_fields=["run_request"])
+        # The original direct debit remains valid, but its sender-provided delivery source is not.
+        self.assertEqual(refunds.apply_refund_decision(source, {})["state"], "refunded")
+        self.assertEqual(spend.service_refunds.count(), 1)
+
     def test_topic_research_uses_its_original_charge_and_preserves_job_billing(self):
         from integrations.services.article_generation import _ledger_reference_id
         from .models import ContentFactoryJob
