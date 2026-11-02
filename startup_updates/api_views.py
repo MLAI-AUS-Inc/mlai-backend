@@ -4644,7 +4644,7 @@ class StartupUpdateSourcePreflightView(APIView):
     permission_classes = [HasRooApiKey]
 
     def post(self, request, run_id):
-        from startup_updates.preflight import require_source_preflight, SourcesNotReady
+        from startup_updates.preflight import require_source_preflight, SourcesNotReady, apply_xero_cooldown
         from startup_updates.activity_scope import discover_resource_page
         from startup_updates.services import refresh_startup_update_run_source_context, build_startup_update_target_windows
         run = _get_run_or_404(run_id)
@@ -4712,9 +4712,9 @@ class StartupUpdateSourcePreflightView(APIView):
                 # Xero returns its failures in the warnings mapping.
                 warnings = {"linear": ["Source preparation is unavailable."]}
             if any(warnings.values()):
-                return failed_checks([
-                    {"provider": p, "status": "temporarily_unavailable", "message": "This source could not refresh. Check it before continuing."}
-                    if warnings.get(p) else c for c in checks for p in [c["provider"]]])
+                return failed_checks(apply_xero_cooldown([
+                    {**c, "status": "temporarily_unavailable", "message": "This source could not refresh. Check it before continuing."}
+                    if warnings.get(c["provider"]) else c for c in checks]))
         with transaction.atomic():
             locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
             from startup_updates.execution import validate_execution
@@ -4740,15 +4740,19 @@ class StartupUpdateSourcePreflightView(APIView):
                 end_date=windows["financial_end_date"], manual_document_ids=saved.get("manual_document_ids"),
                 manual_summary=saved.get("manual_summary", ""),
                 execution_token=request.headers.get("X-Pulse-Execution-Token"))
+            # A quota can be reached after the lightweight probe, including by
+            # another worker. Never open the barrier on partially refreshed data.
+            checks = apply_xero_cooldown(checks)
+            complete = all(check.get("status") == "ready" for check in checks)
             with transaction.atomic():
                 final = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
                 validate_execution(final, request.headers.get("X-Pulse-Execution-Token"))
                 if final.status == "cancelled":
                     return Response({"error": "run_cancelled"}, status=409)
-                final.run_request = {**(final.run_request or {}), "source_preflight_complete": True}
-                final.result = {**(final.result or {}), "source_preflight": {"checks": checks, "ready": True, "checked_at": checked_at.isoformat()}}
+                final.run_request = {**(final.run_request or {}), "source_preflight_complete": complete}
+                final.result = {**(final.result or {}), "source_preflight": {"checks": checks, "ready": complete, "checked_at": checked_at.isoformat()}}
                 final.save(update_fields=["run_request", "result", "updated_at"])
-        return Response({"ready": complete, "pending": not complete, "checks": checks})
+        return Response({"ready": complete, "pending": not complete and all(c.get("status") == "ready" for c in checks), "checks": checks})
 
 
 class StartupUpdateExecutionView(APIView):

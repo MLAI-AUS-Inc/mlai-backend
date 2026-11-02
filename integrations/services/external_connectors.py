@@ -6434,9 +6434,21 @@ def mark_sources_sync_requested(
     updated = []
     for connection in queryset:
         if connection.provider == ExternalServiceProvider.XERO:
+            prior_status, prior_error = connection.status, connection.last_error
             try:
                 updated.append(sync_xero_connection(connection))
             except (ConnectorOAuthError, requests.RequestException) as exc:
+                if getattr(getattr(exc, "response", None), "status_code", None) == 429:
+                    seconds = requests._retry_after_seconds(exc.response.headers.get("Retry-After"))
+                    # Quota is not a credential failure. Do not lose the last
+                    # successful sync/cursor or tell the user to reconnect.
+                    connection.status, connection.last_error = prior_status, prior_error
+                    connection.save(update_fields=["status", "last_error", "updated_at"])
+                    updated.append({"connectionId": connection.id, "connection_id": connection.id,
+                        "provider": connection.provider, "status": "error",
+                        "error": f"Xero API rate limit reached; retry after {seconds} seconds.",
+                        "retry_after_seconds": seconds})
+                    continue
                 logger.exception(
                     "Xero sync failed",
                     extra={"connection_id": connection.id, "user_id": user.id},

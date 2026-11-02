@@ -1,9 +1,11 @@
 """Check every explicitly selected provider before admitting expensive generation."""
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
-import requests
+from integrations import http_client as requests
 from django.db import close_old_connections, connections
+from django.utils import timezone
 from rest_framework.exceptions import APIException, ValidationError
 
 PROVIDERS = frozenset(
@@ -32,6 +34,31 @@ class SourcesNotReady(APIException):
 
 class ManualInputNotReady(ValueError):
     """Selected founder documents are missing or have not finished parsing."""
+
+
+def rate_limited_check(provider, retry_after_seconds):
+    """Expose a safe provider deadline without treating quota as revoked OAuth."""
+    seconds = max(int(retry_after_seconds), 1)
+    retry_at = timezone.now() + timedelta(seconds=seconds)
+    message = (
+        f"{provider.replace('_', ' ').title()} API rate limit reached. "
+        f"Pulse will check again after {retry_at:%d %b %Y, %H:%M:%S UTC}."
+    )
+    if provider == "xero":
+        message += " Reconnecting Xero does not reset this limit."
+    return {"provider": provider, "status": "temporarily_unavailable",
+        "reason": "rate_limited", "message": message,
+        "retry_after_seconds": seconds, "retry_at": retry_at.isoformat()}
+
+
+def apply_xero_cooldown(checks):
+    """Retain a quota hit during preparation/report refresh at the same barrier."""
+    return [
+        {**check, **rate_limited_check("xero", seconds)}
+        if check.get("provider") == "xero" and (seconds := requests.xero_cooldown_seconds(check.get("accountId")))
+        else check
+        for check in checks
+    ]
 
 
 def selected_sources(values, *, manual=False):
@@ -191,6 +218,12 @@ def check_sources(sources, probe):
                 getattr(exc, "response", None), "status_code", None
             ) or getattr(exc, "status_code", None)
             status = status or getattr(getattr(exc, "resp", None), "status", None)
+            if status == 429 or isinstance(exc, ec.ConnectorRateLimitError):
+                seconds = getattr(exc, "retry_after_seconds", None)
+                if seconds is None:
+                    headers = getattr(getattr(exc, "response", None), "headers", {})
+                    seconds = requests._retry_after_seconds(headers.get("Retry-After"))
+                return rate_limited_check(provider, seconds)
             if isinstance(exc, NotImplementedError):
                 code, message = (
                     "unsupported",

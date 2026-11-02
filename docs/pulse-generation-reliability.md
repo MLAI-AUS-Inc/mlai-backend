@@ -42,11 +42,26 @@ cannot fill gaps. Failed probes, discovery and preparation warnings remain in
 `result.source_preflight`, with `source_preflight_complete: false`.
 Downstream endpoints enforce this barrier independently of the worker.
 
-Transient-only preflight failures wait 15, 30 and 60 seconds before requiring user
-action. Revoked permissions and unsupported sources stop immediately. Clients
+Transient-only preflight failures without a provider retry deadline wait 15, 30
+and 60 seconds before requiring user action. HTTP 429 and connector quota errors
+instead retain `retry_after_seconds`, `retry_at` and `reason: rate_limited` in
+each affected source check. Valley checkpoints the longest provider wait and
+resumes preflight after it without consuming the short transient retry budget.
+No collection/model work starts during the wait. Revoked permissions and
+unsupported sources stop immediately, including when another source is limited. Clients
 show each failed source, keep saved progress visible after reload, and offer
 `POST /api/v1/community-chat/startups/runs/<id>/retry/` for safe recovery.
 The company must be explicitly owned. No selected source is silently omitted.
+
+Xero preflight uses the same bounded HTTP client and shared Redis app/tenant
+cooldown as accounting reads and writes. Reconnecting or changing users does not
+reset the same Xero tenant's quota; other tenants remain independent. Checks show
+the UTC retry time and explain that reconnecting cannot reset the limit. A quota
+hit during financial preparation or report refresh keeps the preflight barrier
+closed and preserves other source results. A sync quota does not invalidate a
+connected credential or advance its successful-sync cursor. Only quota metadata
+is shared, never tokens or financial evidence. See Xero's
+[rate-limit contract](https://developer.xero.com/documentation/best-practices/api-call-efficiencies/rate-limits/).
 
 ## Collection, execution and review
 
