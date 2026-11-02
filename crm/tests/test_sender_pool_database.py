@@ -261,12 +261,22 @@ from django.test import TransactionTestCase
                    CRM_RESEND_WEBHOOK_SECRET=SECRET)
 class SenderPoolConcurrencyTests(TransactionTestCase):
     def test_overlapping_campaigns_cannot_take_the_same_final_quota_slot(self):
+        self.compete_for_slot(separate_senders=False)
+
+    @override_settings(CRM_SENDER_POOL_DAILY_LIMIT=1)
+    def test_different_senders_cannot_take_the_same_provider_quota_slot(self):
+        self.compete_for_slot(separate_senders=True)
+
+    def compete_for_slot(self, *, separate_senders):
         now = timezone.now()
         admin = User.objects.create_user('operator@example.test', is_active=True, is_superuser=True)
         mailbox = SenderMailbox.objects.create(email=SENDERS[0], domain='mlai.au', route='resend',
             display_name='MLAI', reply_to=SENDERS[0], enabled=True, daily_limit=1)
         child_ids = []
         for i in range(2):
+            if i and separate_senders:
+                mailbox = SenderMailbox.objects.create(email=SENDERS[1], domain='mlai.au', route='resend',
+                    display_name='MLAI', reply_to=SENDERS[1], enabled=True, daily_limit=30)
             person = Contact.objects.create(email=f'concurrent{i}@example.test', source='manual',
                                             marketing_consent='granted')
             parent = Blast.objects.create(purpose='marketing', created_by=admin, channels=['email'],
