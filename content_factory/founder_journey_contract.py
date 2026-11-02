@@ -7,6 +7,7 @@ No worker-supplied error text or provider request enters this contract.
 from copy import deepcopy
 from functools import lru_cache
 import json
+import math
 from pathlib import Path
 import re
 
@@ -53,10 +54,12 @@ def _validate(value, rule, definitions, path="$", depth=0):
     # by this boundary's generator, with no optional runtime dependency.
     supported = {"$schema", "$id", "$defs", "$ref", "title", "version", "type", "const", "enum",
         "anyOf", "additionalProperties", "properties", "required", "minimum", "maximum", "minLength",
-        "maxLength", "pattern", "minItems", "maxItems", "items", "prefixItems"}
+        "maxLength", "pattern", "minItems", "maxItems", "items", "prefixItems", "x-wire-name", "x-wire-project"}
     def fail():
         raise FounderContractMismatch(f"Founder contract mismatch at {path}")
-    if depth > 40 or set(rule) - supported:
+    if rule is True:
+        return
+    if rule is False or not isinstance(rule, dict) or depth > 40 or set(rule) - supported:
         fail()
     if "$ref" in rule:
         reference = rule["$ref"]
@@ -78,15 +81,19 @@ def _validate(value, rule, definitions, path="$", depth=0):
     if "enum" in rule and not any(matches(candidate) for candidate in rule["enum"]):
         fail()
     if "type" in rule:
-        expected = {"object": dict, "array": list, "string": str, "integer": int, "boolean": bool, "null": type(None)}
-        if rule["type"] not in expected or type(value) is not expected[rule["type"]]:
+        expected = {"object": (dict,), "array": (list,), "string": (str,), "integer": (int,),
+            "number": (int, float), "boolean": (bool,), "null": (type(None),)}
+        if rule["type"] not in expected or type(value) not in expected[rule["type"]]:
             fail()
     if type(value) is dict:
         properties = rule.get("properties", {})
-        if not set(rule.get("required", ())) <= value.keys() or (rule.get("additionalProperties") is False and value.keys() - properties.keys()):
+        if any(type(key) is not str for key in value) or not set(rule.get("required", ())) <= value.keys() or (rule.get("additionalProperties") is False and value.keys() - properties.keys()):
             fail()
         for key in value.keys() & properties.keys():
             _validate(value[key], properties[key], definitions, f"{path}.{key}", depth + 1)
+        if isinstance(rule.get("additionalProperties"), dict):
+            for key in value.keys() - properties.keys():
+                _validate(value[key], rule["additionalProperties"], definitions, f"{path}.*", depth + 1)
     if type(value) is list:
         if not rule.get("minItems", 0) <= len(value) <= rule.get("maxItems", len(value)):
             fail()
@@ -98,8 +105,9 @@ def _validate(value, rule, definitions, path="$", depth=0):
     if type(value) is str:
         if not rule.get("minLength", 0) <= len(value) <= rule.get("maxLength", len(value)) or ("pattern" in rule and re.search(rule["pattern"], value) is None):
             fail()
-    if type(value) is int and not rule.get("minimum", value) <= value <= rule.get("maximum", value):
-        fail()
+    if type(value) in (int, float):
+        if not math.isfinite(value) or not rule.get("minimum", value) <= value <= rule.get("maximum", value):
+            fail()
 
 
 def validate_journey(payload):
@@ -203,8 +211,16 @@ def enrich_journey(payload, *, organization, company, config, user, run, connect
                     "Article step needs attention" if step.status == "failed" else "Preparing your article")})
         payload["article"] = {"runId": run.run_id, "status": run.status,
             "approvalState": effective_approval_state(run), "currentStep": run.current_step or None,
-            "deliveryMode": delivery, "resumeAvailable": bool(run.resume_available),
+            "deliveryMode": delivery, "resumeAvailable": _resume_available(run, user),
             "pollAfterMs": payload["pollAfterMs"], "progress": progress,
             "failure": deepcopy(failure), "capabilities": deepcopy(payload["capabilities"])}
     payload.setdefault("holdingReason", None)
     return payload
+
+
+def _resume_available(run, user):
+    from .website_run_authority import event_owned
+    if event_owned(run):
+        from .run_user_resume import can_request_user_resume
+        return can_request_user_resume(run, user=user)
+    return bool(run.resume_available)

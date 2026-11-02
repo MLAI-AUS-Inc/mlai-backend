@@ -120,6 +120,8 @@ class MyStartupViewMixin(StartupThrottleMixin):
         return [IsAuthenticated(), *super().get_permissions()]
 
     def finalize_response(self, request, response, *args, **kwargs):
+        from content_factory.founder_article_errors import decorate_article_error
+        response = decorate_article_error(self, request, response)
         company_id = (
             request.query_params.get("company_id")
             or request.query_params.get("companyId")

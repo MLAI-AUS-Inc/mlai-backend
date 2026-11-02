@@ -117,3 +117,44 @@ class FounderArticleContractTests(JourneyFixture, TestCase):
                 "source": "actual authenticated in-process HTTP over synthetic real PostgreSQL Run/Step; no CF event or live provider claim",
                 "request": {"companyId": str(self.company.pk), "runId": run.run_id},
                 "payload": value}, indent=2) + "\n")
+
+    def test_schema_map_values_numbers_and_boolean_schemas_fail_closed(self):
+        from .founder_journey_contract import _validate
+        rule = {"type": "object", "additionalProperties": {"enum": ["new_journey"]}}
+        _validate({"company-one": "new_journey"}, rule, {})
+        for value, schema in (({"company-one": "legacy"}, rule),
+                (float("nan"), {"type": "number"}), (2.5, {"type": "number", "maximum": 2}),
+                (["extra"], {"type": "array", "items": False}), (True, {"type": "integer"})):
+            with self.subTest(value=str(value)), self.assertRaises(FounderContractMismatch):
+                _validate(value, schema, {})
+
+    def test_actual_error_http_preserves_legacy_envelope_and_uses_only_server_copy(self):
+        from rest_framework.response import Response
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from community_chat.my_startup_journey_views import FirstArticleStartView
+        from .founder_article_errors import COMMAND_COPY
+        body = {"detail": "sk-synthetic-worker-secret must not become primary copy",
+            "failure": {"code": "UNKNOWN_WORKER_WORDS", "message": "raw worker text", "retryable": True}}
+        old = make_named_legacy_org("la_vie")
+        for owner, company, canonical in ((self.owner, self.company, True), (old.owner, old.company, False)):
+            request = APIRequestFactory().post("/api/v1/my-startup/first-article/start/",
+                {"company_id": str(company.pk)}, format="json")
+            force_authenticate(request, user=owner)
+            with patch.object(FirstArticleStartView, "post", side_effect=lambda *_args, **_kwargs:
+                    Response(deepcopy(body), status=503)), \
+                    patch("community_chat.throttles.StartupScopedThrottle.allow_request", return_value=True):
+                response = FirstArticleStartView.as_view()(request)
+            self.assertEqual(response.status_code, 503)
+            if canonical:
+                self.assertEqual(response.data["articleError"]["failure"]["code"], "UNREGISTERED_FAILURE_CODE")
+                self.assertNotIn("sk-synthetic", str(response.data["articleError"]))
+                self.assertEqual({key: value for key, value in response.data.items() if key != "articleError"}, body)
+                target = os.environ.get("FOUNDER_EXPORT_R5_ARTICLE_ERROR")
+                if target:
+                    Path(target).write_text(json.dumps({"source": "actual scoped HTTP finalizer; synthetic external failure",
+                        "status": response.status_code, "body": response.data}, indent=2) + "\n")
+            else:
+                self.assertEqual(response.data, body)
+        from .founder_article_errors import article_error_envelope
+        for code in COMMAND_COPY:
+            self.assertEqual(article_error_envelope({"code": code})["failure"]["code"], code)
