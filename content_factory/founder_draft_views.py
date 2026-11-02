@@ -60,6 +60,7 @@ TOOLS_FLAG = "ARTICLES_DRAFT_TOOLS_ENABLED"
 COPY_FLAG = "ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED"
 POSTED_KEY = cohort.POSTED_ARTICLES_KEY
 MAX_POSTED_RUNS = 50
+MAX_POSTED_OPERATIONS = 64
 MAX_URL_LENGTH = 2048
 MAX_REVISION_LENGTH = 200
 IMAGE_HOSTS = frozenset({"firebasestorage.googleapis.com", "storage.googleapis.com"})
@@ -259,8 +260,28 @@ def _record_time(record):
     return datetime.min.replace(tzinfo=dt_timezone.utc)
 
 
-def _store(organization, run_id, changes) -> dict:
-    """Merge ``changes`` into the run's record under the organisation lock, keeping the 50 most recently changed runs."""
+class DraftReceiptConflict(ValueError):
+    """A retained operation cannot be reused for a different posted link."""
+
+
+def _posted_operation(record, operation_id, url):
+    if not operation_id:
+        return None
+    operations = record.get("postedLinkOperations", {})
+    if not isinstance(operations, dict):
+        raise DraftReceiptConflict("The saved link requests cannot be verified.")
+    previous = operations.get(operation_id)
+    if previous is not None:
+        if not isinstance(previous, dict) or previous.get("url") != url:
+            raise DraftReceiptConflict("This request already records a different link.")
+        return dict(previous)
+    if len(operations) >= MAX_POSTED_OPERATIONS:
+        raise DraftReceiptConflict("This article has reached its saved link request limit.")
+    return None
+
+
+def _store(organization, run_id, changes, *, reuse_if=None, on_created=None, operation_id=None) -> dict:
+    """Atomically retain the first matching receipt and the 50 most recent runs."""
     from organizations.models import Organization
     from .models import OrganizationContentConfig
     run_id = str(run_id)
@@ -271,12 +292,24 @@ def _store(organization, run_id, changes) -> dict:
         config = OrganizationContentConfig.objects.select_for_update().get(organization_id=organization.pk)
         strategy = deepcopy(config.pillar_strategy) if isinstance(config.pillar_strategy, dict) else {}
         posted = _mapping(strategy.get(POSTED_KEY))
-        record = {**_mapping(posted.get(run_id)), **changes, "updatedAt": timezone.now().isoformat()}
+        previous = dict(_mapping(posted.get(run_id)))
+        retained = _posted_operation(previous, operation_id, changes.get("url"))
+        if retained is not None:
+            return retained
+        if reuse_if is not None and reuse_if(previous):
+            return previous
+        record = {**previous, **changes, "updatedAt": timezone.now().isoformat()}
+        if operation_id:
+            operations = deepcopy(previous.get("postedLinkOperations", {}))
+            operations[operation_id] = {key: record[key] for key in ("url", "check", "checkedAt", "postedAt", "updatedAt")}
+            record["postedLinkOperations"] = operations
         others = sorted(((key, value) for key, value in posted.items() if key != run_id and isinstance(value, dict)),
                         key=lambda item: _record_time(item[1]), reverse=True)
         strategy[POSTED_KEY] = {run_id: record, **dict(others[:MAX_POSTED_RUNS - 1])}
         config.pillar_strategy = strategy
         config.save(update_fields=["pillar_strategy", "updated_at"])
+        if on_created is not None:
+            on_created(record)
     return record
 
 
@@ -326,13 +359,16 @@ class FounderDraftCopiedView(_FounderDraftToolView):
         if export.get("revision") != revision:
             return _refusal(REVISION_CHANGED, "revision_changed", 409)
         at = timezone.now().isoformat()
-        record = _store(context.organization, run.run_id, {"copiedAt": at, "copiedRevision": revision})
-        logger.info("founder_draft_copied org=%s run=%s", context.organization.pk, run.run_id)
         from .founder_funnel import emit_event
         from .founder_funnel_events import after_commit
-        after_commit(lambda: emit_event('copied', user_id=request.user.pk, organization_id=context.organization.pk,
-                   run_id=run.run_id, at=at, signed_up_at=request.user.date_joined,
-                   source='article.copy_receipt'), using='default')
+        def record_event(record):
+            after_commit(lambda: emit_event('copied', user_id=request.user.pk, organization_id=context.organization.pk,
+                run_id=run.run_id, at=record["copiedAt"], signed_up_at=request.user.date_joined,
+                source='article.copy_receipt'), using='default')
+        record = _store(context.organization, run.run_id, {"copiedAt": at, "copiedRevision": revision},
+            reuse_if=lambda previous: _copied(previous) is not None and previous.get("copiedRevision") == revision,
+            on_created=record_event)
+        logger.info("founder_draft_copied org=%s run=%s", context.organization.pk, run.run_id)
         return Response({"copied": _copied(record)}, headers={"Cache-Control": "private, no-store"})
 
 
@@ -447,6 +483,16 @@ class FounderDraftPostedLinkView(_FounderDraftToolView):
         if cleaned is None:
             return _refusal(INVALID_URL, "invalid_url", 400)
         url, host = cleaned
+        operation_id = request.headers.get("Idempotency-Key")
+        if operation_id is not None and (not 1 <= len(operation_id) <= 200
+                or not re.fullmatch(r"[A-Za-z0-9:_-]+", operation_id)):
+            return _refusal("This link request identifier is invalid.", "operation_conflict", 400)
+        try:
+            retained = _posted_operation(posted_record(_config(context.organization), run.run_id), operation_id, url)
+        except DraftReceiptConflict as exc:
+            return _refusal(str(exc), "operation_conflict", 409)
+        if retained is not None:
+            return Response({"postedLink": _posted_link(retained)}, headers={"Cache-Control": "private, no-store"})
         now = timezone.now()
         if own_site_host(context.organization, host):
             export, error = current_export(context, run)
@@ -454,8 +500,12 @@ class FounderDraftPostedLinkView(_FounderDraftToolView):
         else:
             check = "skipped"
         checked_at = now.isoformat() if check in {"matched", "not_matched"} else None
-        record = _store(context.organization, run.run_id,
-                        {"url": url, "check": check, "checkedAt": checked_at, "postedAt": now.isoformat()})
+        try:
+            record = _store(context.organization, run.run_id,
+                {"url": url, "check": check, "checkedAt": checked_at, "postedAt": now.isoformat()},
+                operation_id=operation_id)
+        except DraftReceiptConflict as exc:
+            return _refusal(str(exc), "operation_conflict", 409)
         logger.info("founder_draft_posted org=%s run=%s check=%s", context.organization.pk, run.run_id, check)
         return Response({"postedLink": _posted_link(record)}, headers={"Cache-Control": "private, no-store"})
 
