@@ -103,10 +103,10 @@ def _withdraw(run):
             # remain held. Their error body can never become no-effect proof.
             raise DispatchSettlementPending("withdrawal_unconfirmed")
         raw = bytearray()
-        for chunk in response.iter_content(chunk_size=16_384):
-            raw.extend(chunk)
-            if len(raw) > MAX_WITHDRAWAL_BYTES or monotonic() > deadline:
+        for chunk in response.iter_content(chunk_size=1):
+            if len(raw) + len(chunk) > MAX_WITHDRAWAL_BYTES or monotonic() > deadline:
                 raise DispatchSettlementPending("withdrawal_response_unbounded")
+            raw.extend(chunk)
         try:
             payload = json.loads(raw)
         except (ValueError, UnicodeError, RecursionError) as exc:

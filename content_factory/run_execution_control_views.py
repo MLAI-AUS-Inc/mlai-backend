@@ -1,6 +1,7 @@
 """Service-only continuation tickets for existing admitted executions."""
 from urllib.parse import quote
 import json
+from time import monotonic
 
 import requests
 from django.db import transaction
@@ -37,16 +38,19 @@ def _budget(run_id):
     base, headers = _remote_base_url(), _remote_headers()
     if not base or not headers.get("X-API-KEY"):
         raise ExecutionControlDenied("execution_budget_unavailable", pending=True)
+    deadline = monotonic() + 15
     response = requests.get(f"{base}/api/runs/{quote(run_id, safe='')}/execution-budget",
         headers=headers, timeout=(3, 10), stream=True, allow_redirects=False)
     try:
         if response.status_code != 200:
             raise ExecutionControlDenied("execution_budget_unavailable", pending=True)
         raw = bytearray()
-        for chunk in response.iter_content(chunk_size=16_384):
-            raw.extend(chunk)
-            if len(raw) > 131_072:
+        for chunk in response.iter_content(chunk_size=1):
+            if len(raw) + len(chunk) > 131_072:
                 raise ExecutionControlDenied("execution_budget_unavailable")
+            if monotonic() > deadline:
+                raise ExecutionControlDenied("execution_budget_unavailable", pending=True)
+            raw.extend(chunk)
         return json.loads(raw)
     except ExecutionControlDenied:
         raise
