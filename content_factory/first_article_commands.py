@@ -101,7 +101,7 @@ def claim(context, user, header, data, prepare):
             _refuse()
         receipt = commands.get(digest)
         if receipt is not None:
-            if (not isinstance(receipt, dict) or receipt.get('schema_version') != 1
+            if (not isinstance(receipt, dict) or type(receipt.get('schema_version')) is not int or receipt['schema_version'] != 1
                     or receipt.get('user_id') != user.pk or receipt.get('company_id') != str(context.company.pk)
                     or receipt.get('body_sha256') != body_hash
                     or receipt.get('client_request_id') != f'first-article:{context.company.pk}:command:{digest[:32]}'):
