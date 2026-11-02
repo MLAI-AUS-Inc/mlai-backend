@@ -11,17 +11,22 @@ artifact dirs on content-factory), and throttle itself so the every-minute
 scheduler tick stays cheap.
 """
 from datetime import timedelta
+from io import StringIO
+import json
 from unittest.mock import patch
 
 import requests
 
 from django.test import TestCase, override_settings
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.utils import timezone
 
 from content_factory.reconciliation import (
     MISSING_REMOTE_FAILURE_ERROR,
     PLACEHOLDER_FAILURE_ERROR,
     _finalize_run_failure,
+    preview_discovery_reconciliation,
     run_content_factory_reconciliation_sweep,
 )
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
@@ -173,8 +178,7 @@ class ReconciliationSweepTests(TestCase):
         self.assertEqual(summary["checked"], 0)
 
     def test_workflows_outside_durable_read_are_skipped(self):
-        # content-factory's GET /api/runs cannot see these workflows' stores;
-        # a 404 would prove nothing, so the sweep must not touch them.
+        # Unreviewed workflow recovery contracts stay outside this sweep.
         _make_run("real-run-autofill", workflow="startup_autofill")
 
         with patch("content_factory.reconciliation.requests.get") as mock_get:
@@ -184,6 +188,100 @@ class ReconciliationSweepTests(TestCase):
         self.assertEqual(summary["checked"], 0)
         run = ContentFactoryRun.objects.get(run_id="real-run-autofill")
         self.assertEqual(run.status, ContentFactoryRunStatus.RUNNING)
+
+    def test_discovery_requires_an_aware_explicit_activation_boundary(self):
+        _make_run("discovery-disabled", workflow="auto_discovery")
+        for boundary in ("", None, "disabled", "invalid", "2026-11-02", "2026-11-02T10:00:00", "2026-99-99T00:00:00Z"):
+            with self.subTest(boundary=boundary), override_settings(CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE=boundary), \
+                    patch("content_factory.reconciliation.requests.get") as get:
+                self.assertEqual(run_content_factory_reconciliation_sweep()["checked"], 0)
+                get.assert_not_called()
+
+    def test_discovery_boundary_preserves_history_and_adopts_new_terminal_result(self):
+        since = timezone.now() - timedelta(hours=2)
+        historical = _make_run("discovery-history", workflow="auto_discovery")
+        eligible = _make_run("discovery-new", workflow="auto_discovery")
+        ContentFactoryRun.objects.filter(pk=eligible.pk).update(slack_user_id="U_DISCOVERY",
+            run_request={"domain": "example.com", "requested_topic_count": 2, "client_request_id": "original-dispatch"})
+        eligible.refresh_from_db()
+        identity = (eligible.domain, eligible.github_repo, eligible.slack_user_id, eligible.organization_id, eligible.run_request)
+        ContentFactoryRun.objects.filter(pk=historical.pk).update(created_at=since - timedelta(seconds=1))
+        ContentFactoryRun.objects.filter(pk=eligible.pk).update(created_at=since)
+        before = ContentFactoryRun.objects.filter(pk=historical.pk).values().get()
+        response = _FakeResponse(200, {"run_id": eligible.run_id, "workflow": "auto_discovery",
+                                       "status": "awaiting_confirmation", "step_states": {}})
+        with override_settings(CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE=since.isoformat()), \
+                patch("content_factory.reconciliation.requests.get", return_value=response) as get:
+            summary = run_content_factory_reconciliation_sweep()
+        self.assertEqual(summary["checked"], 1)
+        self.assertEqual(summary["adopted"], 1)
+        get.assert_called_once()
+        self.assertIn(eligible.run_id, get.call_args.args[0])
+        self.assertEqual(ContentFactoryRun.objects.filter(pk=historical.pk).values().get(), before)
+        eligible.refresh_from_db()
+        self.assertEqual(eligible.status, "awaiting_confirmation")
+        self.assertEqual((eligible.domain, eligible.github_repo, eligible.slack_user_id, eligible.organization_id, eligible.run_request), identity)
+
+    def test_discovery_adoption_rejects_foreign_identity_and_preserves_current_owner_stop(self):
+        from content_factory.reconciliation import _adopt_remote_payload
+        run = _make_run("discovery-scope", workflow="auto_discovery")
+        before = ContentFactoryRun.objects.filter(pk=run.pk).values().get()
+        for changes in ({"run_id": "foreign"}, {"workflow": "direct_generate"}, {"domain": "foreign.test"},
+                        {"run_request": {"domain": "foreign.test"}}, {"slack_user_id": "foreign"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                _adopt_remote_payload(run, {"status": "completed", **changes})
+        self.assertEqual(ContentFactoryRun.objects.filter(pk=run.pk).values().get(), before)
+        ContentFactoryRun.objects.filter(pk=run.pk).update(status="cancelled")
+        self.assertEqual(_adopt_remote_payload(run, {"status": "completed"}), "cancelled")
+        run.refresh_from_db()
+        self.assertEqual(run.status, "cancelled")
+
+    def test_discovery_worker_recovery_stays_with_cf_orphan_sweeper(self):
+        now = timezone.now()
+        run = _make_run("discovery-stale-heartbeat", workflow="auto_discovery")
+        response = _FakeResponse(200, {"run_id": run.run_id, "workflow": "auto_discovery", "status": "running",
+                                      "last_progress_at": (now - timedelta(hours=3)).isoformat()})
+        with override_settings(CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE=(now - timedelta(days=1)).isoformat()), \
+                patch("content_factory.reconciliation.requests.get", return_value=response), \
+                patch("content_factory.reconciliation.requests.post", side_effect=AssertionError("Unexpected worker control")):
+            summary = run_content_factory_reconciliation_sweep(now=now)
+        self.assertEqual(summary["remote_active"], 1)
+        self.assertEqual(summary["recovery_requested"], 0)
+        run.refresh_from_db()
+        self.assertEqual(run.status, "running")
+        self.assertNotIn("reconciliation_recovery", run.result)
+
+    def test_discovery_preview_is_bounded_and_never_runs_provider_or_mutating_sweep(self):
+        since = timezone.now() - timedelta(days=1)
+        for index in range(3):
+            _make_run(f"discovery-preview-{index}", workflow="auto_discovery")
+        _make_run("discovery-awaiting", workflow="auto_discovery", status="awaiting_confirmation")
+        _make_run("discovery-fresh", workflow="auto_discovery", age_minutes=1)
+        _make_run("other-workflow", workflow="direct_generate")
+        recent_probe = _make_run("discovery-recent-probe", workflow="auto_discovery")
+        ContentFactoryRun.objects.filter(pk=recent_probe.pk).update(reconciled_at=timezone.now())
+        history = _make_run("discovery-old", workflow="auto_discovery")
+        ContentFactoryRun.objects.filter(pk=history.pk).update(created_at=since - timedelta(seconds=1))
+        before = list(ContentFactoryRun.objects.order_by("pk").values())
+        with patch("content_factory.reconciliation.run_content_factory_reconciliation_sweep", side_effect=AssertionError("Mutation")), \
+                patch("requests.sessions.Session.request", side_effect=AssertionError("Network")):
+            result = preview_discovery_reconciliation(created_since=since.isoformat(), limit=2)
+            out = StringIO()
+            call_command("preview_discovery_reconciliation", "--created-since", since.isoformat(), "--limit", "2", stdout=out)
+        self.assertEqual(json.loads(out.getvalue()), result)
+        self.assertEqual(result["eligible"], 3)
+        self.assertEqual(result["selected"], 2)
+        self.assertEqual(result["selected_by_status"], {"running": 2})
+        self.assertEqual(result["remote_actions"], "not_probed")
+        self.assertEqual(list(ContentFactoryRun.objects.order_by("pk").values()), before)
+        self.assertNotIn("example.com", out.getvalue())
+        self.assertNotIn("discovery-preview-", out.getvalue())
+
+    def test_discovery_preview_rejects_unbounded_or_naive_scope(self):
+        for boundary, limit in (("2026-11-02", 10), ("bad", 10), ("2026-11-02T00:00:00Z", 0),
+                                ("2026-11-02T00:00:00Z", 101)):
+            with self.subTest(boundary=boundary, limit=limit), self.assertNumQueries(0), self.assertRaises(CommandError):
+                call_command("preview_discovery_reconciliation", "--created-since", boundary, "--limit", str(limit))
 
     def test_network_error_leaves_run_untouched_but_stamped(self):
         _make_run("real-run-4", workflow="direct_generate")
