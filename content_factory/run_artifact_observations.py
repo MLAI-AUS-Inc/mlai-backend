@@ -16,7 +16,7 @@ from .run_ownership import (
     WIRE_EXECUTION_KEY, WIRE_REQUEST_KEY, require_event_execution, require_event_identity,
 )
 
-KINDS = frozenset({"article_body_v1", "draft_ready_v1", "publish_pr_v1"})
+KINDS = frozenset({"article_body_v1", "draft_ready_v1", "publish_pr_v1", "article_preview_quality_v1"})
 MAX_BYTES = 4_000_000
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 
@@ -67,6 +67,12 @@ def _payload(kind, payload):
     if kind == "draft_ready_v1":
         return (set(payload) == {"version", "revision", "at"} and type(payload["version"]) is int
             and payload["version"] == 1 and _text(payload["revision"], 255) and _timestamp(payload["at"]))
+    if kind == "article_preview_quality_v1":
+        return (set(payload) == {"version", "revision", "article_sha256", "generation", "article_preview_quality", "live_preview"}
+            and type(payload["version"]) is int and payload["version"] == 1
+            and type(payload["generation"]) is int and 0 <= payload["generation"] < 2**53
+            and _hash(payload["revision"]) and _hash(payload["article_sha256"])
+            and isinstance(payload["article_preview_quality"], dict) and isinstance(payload["live_preview"], dict))
     required = {"kind", "number", "repository_id", "head_repository_id", "branch", "base", "head_sha", "pr_url"}
     optional = {"article_sha256", "review_quality_inputs_sha256"}
     return (required <= set(payload) <= required | optional and payload.get("kind") in {"article", "setup", "scaffold", "proxy"}
@@ -84,7 +90,7 @@ def validate_evidence(run, value):
                    "payload_sha256", "source_sha256", "observed_at", "evidence_sha256"}
     if (not isinstance(value, dict) or set(value) != required or type(value.get("schema_version")) is not int
             or value["schema_version"] != 1 or value.get("run_id") != run.run_id
-            or not isinstance(value.get("evidence"), list) or len(value["evidence"]) > 3):
+            or not isinstance(value.get("evidence"), list) or len(value["evidence"]) > len(KINDS)):
         raise ArtifactObservationInvalid("The evidence envelope is invalid.")
     try:
         require_event_identity(run, value)

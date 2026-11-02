@@ -400,8 +400,16 @@ def require_run_not_stopped(payload, *, lock=False):
         identifier = (op.payload or {}).get("run_id") if op else None
         if identifier:
             run = query.filter(run_id=identifier).first()
-    if run is not None and user_stop_intent(run):
-        raise WebsiteAuthorityError("run_stop_requested", "This run was denied. Review a new run before changing the website.")
+    if run is not None:
+        from .run_terminal_settlement import terminal_execution_closed
+        try:
+            closed = terminal_execution_closed(run)
+        except ValueError as exc:
+            raise WebsiteAuthorityError("run_execution_closed", "Review a new paid request before continuing this execution.") from exc
+        if closed:
+            raise WebsiteAuthorityError("run_execution_closed", "Review a new paid request before continuing this execution.")
+        if user_stop_intent(run):
+            raise WebsiteAuthorityError("run_stop_requested", "This run was denied. Review a new run before changing the website.")
 
 
 @contextmanager

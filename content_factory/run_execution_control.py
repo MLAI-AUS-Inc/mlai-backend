@@ -93,8 +93,19 @@ def _request_digest(request):
                             if key not in {WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY}})
 
 
+def require_unsettled_execution(run):
+    from .run_terminal_settlement import terminal_execution_closed
+    try:
+        closed = terminal_execution_closed(run)
+    except ValueError as exc:
+        raise ExecutionControlDenied("execution_obligation_unavailable") from exc
+    if closed:
+        raise ExecutionControlDenied("execution_obligation_closed")
+
+
 def require_current_principal(run):
     """Recheck the actual admitted requester and current startup write rights."""
+    require_unsettled_execution(run)
     from django.contrib.auth import get_user_model
     from founder_tools import startup_team
     from integrations.services.article_generation import ArticleGenerationError, _validate_authenticated_content_factory_actor
@@ -144,6 +155,12 @@ def append_execution_ticket(run, *, control_key, reason, scope=None, increment_g
             or type(reason) is not str or reason not in AUTOMATIC_REASONS | {"source_repin", "user_resume", "operation_resume", "connection_rebind", "user_revision"}
             or type(increment_generation) is not bool):
         raise ExecutionControlDenied()
+    from workflow_runs.models import ContentFactoryRun
+    fresh = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+    require_unsettled_execution(fresh)
+    if current_execution_ticket(fresh) != current_execution_ticket(run):
+        raise ExecutionControlDenied("execution_ticket_changed")
+    run.result = deepcopy(fresh.result)
     receipt = owner_receipt(run)
     if receipt is None or receipt["authority"].get("event_protocol") != 1:
         raise ExecutionControlDenied()

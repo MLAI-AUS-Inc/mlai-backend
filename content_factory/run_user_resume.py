@@ -16,6 +16,7 @@ def user_resume_payload(*, run, user, command_key, payload):
     receipt = owner_receipt(run)
     if receipt is None or receipt["authority"].get("event_protocol") != 1:
         return payload
+    from .article_publish_approval import effective_approval_state
     from founder_tools import startup_team
     from django.contrib.auth import get_user_model
     from .run_execution_control import (
@@ -27,7 +28,7 @@ def user_resume_payload(*, run, user, command_key, payload):
         if (user is None or not get_user_model().objects.filter(pk=user.pk, is_active=True).exists()
                 or roster and roster.get("frozen")
                 or locked.status not in {"queued", "running", "failed", "blocked"}
-                or locked.approval_state not in {"approved", "not_required"}):
+                or effective_approval_state(locked) not in {"approved", "not_required"}):
             raise ExecutionControlDenied("execution_requires_review")
         if not (startup_team._owner(locked.organization) == user.pk
                 or locked.workflow in startup_team.ARTICLE_WORKFLOWS and startup_team.enabled()

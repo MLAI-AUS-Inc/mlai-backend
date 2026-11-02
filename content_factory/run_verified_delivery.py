@@ -9,7 +9,7 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from .run_artifact_observations import ArtifactObservationInvalid, _digest, _hash, _timestamp, fetch_evidence
-from .run_ownership import (VERIFIED_DELIVERY_RESULT_KEY, WIRE_EXECUTION_KEY, WIRE_REQUEST_KEY,
+from .run_ownership import (CURRENT_REVIEW_RESULT_KEY, VERIFIED_DELIVERY_RESULT_KEY, WIRE_EXECUTION_KEY, WIRE_REQUEST_KEY,
     current_execution_ticket, owner_receipt, require_event_execution, require_event_identity, wire_identity)
 
 MAX_REVIEW_BYTES = 4_000_000
@@ -62,7 +62,7 @@ def verified_draft_ready(run):
         return False
 
 
-def _fetch_review(run):
+def _fetch_review(run, *, metadata=False):
     """Independent authenticated current canonical read, with bounded transport."""
     import requests
     from .vibe_marketing_views import _content_factory_headers, _content_factory_remote_config
@@ -72,8 +72,12 @@ def _fetch_review(run):
     if not config.get("enabled"):
         raise ArtifactObservationInvalid("The canonical article is unavailable.")
     deadline = monotonic() + 15
-    response = requests.get(config["base_url"].rstrip("/") + "/api/runs/" + quote(run.run_id, safe="") + "/article-review",
-        headers=_content_factory_headers(), timeout=(3, 10), stream=True, allow_redirects=False)
+    path = "/api/runs/" + quote(run.run_id, safe="") + ("?view=review_metadata" if metadata else "/article-review")
+    try:
+        response = requests.get(config["base_url"].rstrip("/") + path,
+            headers=_content_factory_headers(), timeout=(3, 10), stream=True, allow_redirects=False)
+    except requests.RequestException as exc:
+        raise ArtifactObservationInvalid("The canonical article read is pending.") from exc
     try:
         if response.status_code != 200:
             raise ArtifactObservationInvalid("The canonical article is unavailable.")
@@ -170,6 +174,24 @@ def _pull(run, record, website, body):
             raise ArtifactObservationInvalid("The publication lacks exact reviewed-body consent.")
 
 
+def _invalidate_current_review(run, ticket):
+    """A fresh authenticated omission revokes current approval-purpose cache only."""
+    from organizations.models import Organization
+    from workflow_runs.models import ContentFactoryRun
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=run.organization_id)
+        fresh = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if current_execution_ticket(fresh) != ticket:
+            raise ArtifactObservationInvalid("The current article review execution changed.")
+        if CURRENT_REVIEW_RESULT_KEY in fresh.result or "article_preview_quality" in fresh.result:
+            result = deepcopy(fresh.result)
+            result.pop(CURRENT_REVIEW_RESULT_KEY, None)
+            result.pop("article_preview_quality", None)
+            ContentFactoryRun.objects.filter(pk=fresh.pk).update(result=result)
+            fresh.result = result
+        run.result = deepcopy(fresh.result)
+
+
 def project_verified_delivery(run_id):
     """Fetch actual evidence and independent body/provider proof before SQL locks."""
     from organizations.models import Organization
@@ -191,7 +213,18 @@ def project_verified_delivery(run_id):
     # verified historical benefit is retained separately by the receipt reader.
     if any(record[WIRE_EXECUTION_KEY]["scope"] != current["scope"] for record in records.values()):
         raise ArtifactObservationInvalid("The retained delivery belongs to a previous source scope.")
+    quality = records.get("article_preview_quality_v1")
+    if quality is None:
+        _invalidate_current_review(run, current)
     body = _body(run, records)
+    quality_projection = canonical_metadata_digest = None
+    if quality is not None:
+        from .run_review_quality import review_projection
+        try:
+            quality_projection, canonical_metadata_digest = review_projection(run, quality, _fetch_review(run, metadata=True), body)
+        except (TypeError, ValueError, KeyError) as exc:
+            _invalidate_current_review(run, current)
+            raise ArtifactObservationInvalid("The current preview quality could not be independently verified.") from exc
     _pull(run, records.get("publish_pr_v1"), website, body)
     if not records:
         return {"status": "observation_only", "run_id": run.run_id, "verified": []}
@@ -237,6 +270,14 @@ def project_verified_delivery(run_id):
                 result[kind] = deepcopy(record["payload"])
         if body is not None:
             result["articleExport"] = body
+        if quality_projection is not None:
+            from .run_review_quality import metadata_digest
+            result.update(quality_projection)
+            result[CURRENT_REVIEW_RESULT_KEY] = {"schema_version": 1,
+                "admission_digest": _digest(wire_identity(owner_receipt(fresh))), "execution": deepcopy(current),
+                "revision": quality["payload"]["revision"], "article_sha256": quality["payload"]["article_sha256"],
+                "evidence_sha256": quality["evidence_sha256"], "canonical_metadata_sha256": canonical_metadata_digest,
+                "metadata_sha256": metadata_digest(result), "verified_at": timezone.now().isoformat()}
         result[VERIFIED_DELIVERY_RESULT_KEY] = state
         ContentFactoryRun.objects.filter(pk=fresh.pk).update(result=result)
         fresh.result = result

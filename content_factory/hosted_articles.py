@@ -250,6 +250,13 @@ def _require_publication_active(site, run):
     if not enabled() or site.state != HostedArticleSite.State.ACTIVE:
         raise HostedPublishError("hosted_site_not_active", "Hosted publishing is not switched on for this website.")
     from .run_ownership import user_stop_intent
+    from .run_terminal_settlement import terminal_execution_closed
+    try:
+        closed = terminal_execution_closed(run)
+    except ValueError as exc:
+        raise HostedPublishError("hosted_publish_not_allowed", "This publishing obligation is no longer available.", status=403) from exc
+    if closed:
+        raise HostedPublishError("hosted_publish_not_allowed", "This publishing obligation was settled.", status=403)
     if user_stop_intent(run) or run.status in {'cancelled', 'denied', 'stopped'}:
         raise HostedPublishError("hosted_publish_not_allowed", "This publishing request was stopped.", status=403)
 

@@ -56,14 +56,16 @@ class PublishChildAdmissionTests(TransactionTestCase):
         self.parent = reserve_admitted_run(organization=self.org, principal=user_principal(self.user.pk, f"mlai_user:{self.user.pk}"),
             workflow="article_generation", payload=request)
         bind_operation_run(operation, self.parent)
-        facts = _review_run().result
-        ContentFactoryRun.objects.filter(pk=self.parent.pk).update(status="completed", approval_state="approved",
-            result={**self.parent.result, **facts})
+        from .tests_run_event_authority import batch
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_current_review import project_test_review
+        self.assertEqual(receive_authoritative_run_events(batch(self.parent,
+            [{"status": "running"}, {"status": "completed"}])).status_code, 200)
         self.parent.refresh_from_db()
+        accepted, canonical = project_test_review(self.parent, _review_run().result)
         self.assertTrue(_record_article_publish_approval_receipt(self.parent, actor_id=f"mlai_user:{self.user.pk}",
-            expected_identity=article_review_identity(self.parent)))
-        self.review = {"revision": "canonical-approved-review", "approved": True, "previewPending": False,
-            "previewCommit": "a" * 40, "fields": []}
+            expected_identity=article_review_identity(self.parent), accepted_control=accepted, user=self.user))
+        self.review = {**canonical, "approved": True, "previewPending": False, "previewCommit": "a" * 40, "fields": []}
         # Only provider observations are replaced. Consent, source, destination,
         # role, canonical review/approval and admission are the real functions.
         for name, value in [("verify_repository_native_target", None), ("verify_repository_head", "a" * 40)]:
@@ -231,7 +233,7 @@ class LegacyPublishChildAdmissionTests(PublishChildAdmissionTests):
         request = {key: value for key, value in self.parent.run_request.items()
             if key not in {WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY}}
         request[RECEIPT_KEY] = receipt
-        ContentFactoryRun.objects.filter(pk=self.parent.pk).update(run_request=request, result=_review_run().result)
+        ContentFactoryRun.objects.filter(pk=self.parent.pk).update(run_request=request, result=_review_run().result, approval_state="approved")
         self.parent.refresh_from_db()
         self.descriptor = resigned({"schema_version": 1, "source_run_id": self.parent.run_id,
             "workflow": "direct_generate", "domain": self.org.domain, "github_repo": self.parent.github_repo,

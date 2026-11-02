@@ -72,6 +72,11 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                     run = ContentFactoryRun.objects.filter(run_id=run_id).first()
                     if run is None or not _run_belongs_to_context(run, context):
                         return Response({"detail": "Run not found."}, status=404)
+                    from .run_reconciliation import authoritative_run
+                    if original_portable_run(run) and run_action == "approve" and authoritative_run(run):
+                        # Owned approval records exact parent review consent;
+                        # publication still requires a separately admitted child.
+                        return invoke()
                     if original_portable_run(run) and run_action not in {"approve", "publish-pr", "promote-bundle", "merge-publish-pr", "retry-preview-quality"}:
                         if connection_contract(request.data):
                             raise WebsiteAuthorityError("website_connection_changed", "A portable draft cannot acquire repository authority.")
@@ -383,6 +388,8 @@ class WebsiteConnectionAuthorizeView(APIView):
                 from .website_connections import require_run_not_stopped
                 require_run_not_stopped(dict(request.query_params.items()))
             with authority_guard(dict(request.query_params.items()), action="read" if action == "ci_attestation" else action) as connection:
+                if action not in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation", "cancel_receipt"}:
+                    require_run_not_stopped(dict(request.query_params.items()), lock=True)
                 if action == "ci_attestation":
                     from .website_verification import ci_attestation_for
                     return Response(ci_attestation_for(connection, dict(request.query_params.items()), query=True))

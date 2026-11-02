@@ -5501,6 +5501,11 @@ def _github_token_for_repo_operation(*, domain: str, github_repo: str, permissio
 def _portable_article_preview_run(run):
     """Identify completed unbound copy that can use the private portable renderer."""
     from .portable_drafts import original_portable_run
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import verified_draft_ready
+        return bool(run.workflow in ARTICLE_WORKFLOWS and original_portable_run(run)
+            and not str(run.github_repo or "").strip() and verified_draft_ready(run))
     package = _content_package_from_run(run)
     return bool(
         run.workflow in ARTICLE_WORKFLOWS
@@ -11998,6 +12003,8 @@ def _serialize_run(
     run = terminal_setup_projection(_setup_pr_creation_failure_view(run))
     compact = mode in {"summary", "status"}
     original_request = _run_mapping(run.run_request)
+    from .article_publish_approval import effective_approval_state
+    approval_state = effective_approval_state(run)
     original_mode = str(original_request.get("delivery_mode") or original_request.get("deliveryMode") or "")
     original_confirmation = original_request.get("delivery_mode_confirmed", original_request.get("deliveryModeConfirmed",
         original_request.get("delivery_mode_explicit", original_request.get("deliveryModeExplicit"))))
@@ -12077,7 +12084,7 @@ def _serialize_run(
             "deliveryModeConfirmed": bool(original_mode) and (original_confirmation is True or str(original_confirmation).lower() in {"true", "1"}),
             "status": run.status,
             "currentStep": run.current_step,
-            "approvalState": run.approval_state,
+            "approvalState": approval_state,
             "sourceRunId": _run_source_run_id(run) or None,
             "resumeAvailable": run.resume_available,
             "restartAvailable": _article_restart_available(run),
@@ -12123,7 +12130,7 @@ def _serialize_run(
             "result": public_run_value(_strip_missing_setup_run_refs(_compact_result_for_run(run))),
             **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                        current_step=run.current_step, resume_available=run.resume_available,
-                                       approval_state=run.approval_state),
+                                       approval_state=approval_state),
             **entitlement_payload(run),
             **cancellation_payload(run.result),
         }
@@ -12156,7 +12163,7 @@ def _serialize_run(
         "deliveryModeConfirmed": bool(original_mode) and (original_confirmation is True or str(original_confirmation).lower() in {"true", "1"}),
         "status": run.status,
         "currentStep": run.current_step,
-        "approvalState": run.approval_state,
+        "approvalState": approval_state,
         "sourceRunId": _run_source_run_id(run) or None,
         "resumeAvailable": run.resume_available,
         "restartAvailable": _article_restart_available(run),
@@ -12206,7 +12213,7 @@ def _serialize_run(
         "result": public_run_value(_strip_missing_setup_run_refs(response_result)),
         **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                    current_step=run.current_step, resume_available=run.resume_available,
-                                   approval_state=run.approval_state),
+                                   approval_state=approval_state),
         **entitlement_payload(run),
         **cancellation_payload(run.result),
     }
@@ -15435,7 +15442,11 @@ def _call_content_factory_run_action(
                 except (RunOwnershipConflict, WebsiteAuthorityError):
                     return {"status": "blocked", "error": "A current publisher and reviewed source are required.",
                             "content_factory_status_code": 409, "retryable": False}
-        if (scoped_run and scoped_run.workflow in REPOSITORY_WORKFLOWS and not publication_dispatch
+        from .run_reconciliation import authoritative_run
+        from .portable_drafts import original_portable_run
+        parent_consent = action == "approve" and authoritative_run(scoped_run) and scoped_run.workflow in ARTICLE_WORKFLOWS
+        portable_consent = parent_consent and original_portable_run(scoped_run)
+        if (scoped_run and scoped_run.workflow in REPOSITORY_WORKFLOWS and not publication_dispatch and not portable_consent
                 and not portable_run_control_allowed(scoped_run, action, payload)):
             try:
                 saved = scoped_run_contract(scoped_run)
@@ -15445,7 +15456,7 @@ def _call_content_factory_run_action(
                         if preserve_run_clock else advance_workflow_attempt(scoped_run))
                     saved = scoped_run_contract(scoped_run)
                 from .website_connections import run_action_authority
-                operation = run_action_authority(scoped_run, action)
+                operation = "read" if parent_consent else run_action_authority(scoped_run, action)
                 with authority_guard(saved, action=operation):
                     # Control the original run under exactly its saved scope.
                     # A verified publishing target belongs to the child contract;
@@ -15791,6 +15802,36 @@ def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
             "available": False,
         }
 
+    if method in {"POST", "DELETE"}:
+        from workflow_runs.models import ContentFactoryRun
+        from .run_reconciliation import authoritative_run
+        from .run_ownership import (SCOPE_FIELDS, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY,
+            owner_receipt, wire_identity, current_execution_ticket)
+        current = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        if authoritative_run(current):
+            from .run_execution_control import current_execution_request, require_current_principal
+            try:
+                with transaction.atomic():
+                    Organization.objects.select_for_update().get(pk=current.organization_id)
+                    current = ContentFactoryRun.objects.select_for_update().get(pk=current.pk)
+                    if method == "POST":
+                        from .run_revision_child_admission import _require_original_request
+                        _require_original_request(current)
+                        require_current_principal(current)
+                    saved = current_execution_request(current)
+                    fields = (*SCOPE_FIELDS, "configuration_revision", "github_installation_id")
+                    payload = {key: value for key, value in dict(payload or {}).items()
+                        if key not in {*fields, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY,
+                            "github_token", "local_repo_path", "localRepoPath"}}
+                    payload.update({field: saved[field] for field in fields if field in saved})
+                    payload.update({WIRE_REQUEST_KEY: wire_identity(owner_receipt(current)),
+                        WIRE_EXECUTION_KEY: current_execution_ticket(current)})
+                    if method == "POST":
+                        payload["local_repo_path"] = ""
+            except ValueError as exc:
+                return {"available": False, "status": "blocked", "error": str(exc),
+                    "content_factory_status_code": 409, "retryable": False}
+
     url = f"{remote_config['base_url']}/api/runs/{run_id}/live-preview"
     try:
         logger.info("content_factory_live_preview_request run_id=%s method=%s url=%s", run_id, method, url)
@@ -15802,7 +15843,8 @@ def _call_content_factory_live_preview(*, run_id, method="GET", payload=None):
                 timeout=(3, _content_factory_live_preview_start_timeout_seconds()),
             )
         elif method == "DELETE":
-            response = http_client.delete(url, headers=_content_factory_headers(), timeout=(3, 15))
+            response = http_client.delete(url, headers=_content_factory_headers(), timeout=(3, 15),
+                **({"json": payload} if authoritative_run(current) else {}))
         else:
             response = http_client.get(url, headers=_content_factory_headers(), timeout=(3, 15))
     except http_client.RequestException as exc:
@@ -19898,6 +19940,14 @@ def _require_article_publish_approval_receipt(run, *, expected_identity):
     """Persist the strict retry gate before sending a new article approval."""
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        from .run_ownership import user_stop_intent
+        from .run_execution_control import require_unsettled_execution
+        if user_stop_intent(current):
+            return False
+        try:
+            require_unsettled_execution(current)
+        except ValueError:
+            return False
         if (
             not article_review_identity_is_complete(current)
             or article_review_identity(current) != expected_identity
@@ -19920,24 +19970,35 @@ def _require_article_publish_approval_receipt(run, *, expected_identity):
     return True
 
 
-def _record_article_publish_approval_receipt(run, *, actor_id, expected_identity):
+def _record_article_publish_approval_receipt(run, *, actor_id, expected_identity, accepted_control=None, user=None):
     if not article_review_identity_is_complete(run):
         return False
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
-        if not article_review_identity_matches_approved_run(current, expected_identity):
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(current):
+            from .run_owned_controls import require_accepted_approval
+            try:
+                require_accepted_approval(current, accepted_control, actor_id=actor_id, user=user,
+                    expected_identity=expected_identity)
+            except ValueError:
+                return False
+        elif not article_review_identity_matches_approved_run(current, expected_identity):
             return False
         receipt = make_article_publish_approval_receipt(current, actor_id=actor_id)
         if not receipt:
             return False
         run_request = dict(current.run_request or {})
-        from .run_ownership import (ARTICLE_PUBLISH_APPROVAL_RESULT_KEY, current_execution_ticket,
+        from .run_ownership import (CURRENT_REVIEW_RESULT_KEY, ARTICLE_PUBLISH_APPROVAL_RESULT_KEY, current_execution_ticket,
                                    owner_receipt, wire_identity)
         if owner_receipt(current) is not None:
             from .website_contract import evidence_digest
             state = {"schema_version": 1, "admission_digest": evidence_digest(wire_identity(owner_receipt(current))),
                 "execution": current_execution_ticket(current), ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY: True,
-                ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY: receipt}
+                ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY: receipt,
+                "review_revision": current.result["articleExport"]["revision"],
+                "article_sha256": current.result[CURRENT_REVIEW_RESULT_KEY]["article_sha256"],
+                "accepted_control_sha256": evidence_digest(accepted_control)}
             ContentFactoryRun.objects.filter(pk=current.pk).update(result={**current.result, ARTICLE_PUBLISH_APPROVAL_RESULT_KEY: state})
             run.result = {**current.result, ARTICLE_PUBLISH_APPROVAL_RESULT_KEY: state}
             return True
@@ -20027,6 +20088,12 @@ def _project_setup_pr_creation_failure(run, config, remote_data):
 
 def control_article_run(*, user, context, run, action, data, run_id=None, goal_operation_id=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
+    from .run_owned_controls import prepare_owned_control
+    owned_response = prepare_owned_control(run=run, user=user, action=action, context=context)
+    if owned_response is not None:
+        return owned_response
+    from .run_reconciliation import authoritative_run
+    owned_parent_consent = authoritative_run(run) and action == "approve" and run.workflow in ARTICLE_WORKFLOWS and not _is_publish_child_run(run)
     if goal_operation_id is not None:
         from .website_article_recovery import authorize_resume
         try:
@@ -20058,7 +20125,7 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
         on_owner_setup_approve(organization=context.organization, user=command.user, run=run, data=command.data)
         return Response(_serialize_run(run, context=context), status=202)
     gated_actions = {"restart", "resume", "revise", "regenerate-image", "regenerate-images", "retry-preview-quality", "promote-bundle", "publish-pr", "approve", "merge-publish-pr"}
-    if action in gated_actions and run.workflow in ARTICLE_WORKFLOWS | {"article_publish", "publish_article"}:
+    if not owned_parent_consent and action in gated_actions and run.workflow in ARTICLE_WORKFLOWS | {"article_publish", "publish_article"}:
         blocked = _setup_blocked_response_for_generation(context, _get_config(context.organization), run=run,
             publishing=action in {"promote-bundle", "publish-pr", "approve", "merge-publish-pr"})
         if blocked is not None:
@@ -20099,13 +20166,16 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
     payload.setdefault("request_source", CONTENT_FACTORY_REQUEST_SOURCE)
     payload.setdefault("slack_user_id", founder_actor_id_for_user(command.user))
     auto_merge_requested = bool(
-        action in {"promote-bundle", "publish-pr", "approve"}
+        not owned_parent_consent and action in {"promote-bundle", "publish-pr", "approve"}
         and run.workflow in ARTICLE_WORKFLOWS
         and _payload_requests_auto_merge(payload)
     )
+    if owned_parent_consent:
+        payload.pop("auto_merge", None)
+        payload.pop("autoMerge", None)
     if auto_merge_requested:
         payload["auto_merge"] = True
-    if action in {"promote-bundle", "publish-pr", "approve", "merge-publish-pr"} and run.workflow in ARTICLE_WORKFLOWS:
+    if not owned_parent_consent and action in {"promote-bundle", "publish-pr", "approve", "merge-publish-pr"} and run.workflow in ARTICLE_WORKFLOWS:
         from .incident_guards import publish_child_binding
         from .run_ownership import owner_receipt, admission_enabled
         if action not in {"promote-bundle", "publish-pr"} or not (owner_receipt(run) is not None or admission_enabled()):
@@ -20495,6 +20565,13 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
         if setup_approve_rejected(remote_data):
             restore_setup_owner_approval(context.organization, owner_approval_snapshot)
             logger.info("founder_setup_owner_click_reverted org=%s run=%s", context.organization.pk, run.run_id)
+
+    from .run_owned_controls import owned_control_response
+    owned_response = owned_control_response(run=run, remote_run=remote_run, user=command.user, context=context,
+        action=action, payload=payload, remote_data=remote_data, expected_identity=approval_review_identity,
+        approval_required=approval_requires_receipt, admitted_publish_child=admitted_publish_child)
+    if owned_response is not None:
+        return owned_response
 
     with _remote_response_write_guard(remote_data, workflow="article_generation",
             **({"binding": scoped_run_contract(admitted_publish_child)} if admitted_publish_child is not None else {})):
