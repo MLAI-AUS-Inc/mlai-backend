@@ -1088,6 +1088,9 @@
         },
         "capabilities": {
           "$ref": "#/$defs/FounderCapabilities"
+        },
+        "controls": {
+          "$ref": "#/$defs/FounderArticleControls"
         }
       },
       "required": [
@@ -2998,7 +3001,7 @@
             "properties": {
               "candidateId": {
                 "type": "string",
-                "maxLength": 200,
+                "maxLength": 255,
                 "minLength": 1
               },
               "failure": {
@@ -3272,7 +3275,7 @@
             },
             "candidateId": {
               "type": "string",
-              "maxLength": 200,
+              "maxLength": 255,
               "minLength": 1
             }
           },
@@ -3354,7 +3357,7 @@
             },
             "candidateId": {
               "type": "string",
-              "maxLength": 200,
+              "maxLength": 255,
               "minLength": 1
             }
           },
@@ -3576,11 +3579,12 @@
         "audienceId": {
           "type": "string",
           "maxLength": 200,
-          "x-wire-name": "audience_id"
+          "x-wire-name": "audience_id",
+          "minLength": 1
         },
         "audienceVersion": {
           "type": "integer",
-          "minimum": 0,
+          "minimum": 1,
           "x-wire-name": "audience_version"
         },
         "conversionIntent": {
@@ -3606,7 +3610,7 @@
           "anyOf": [
             {
               "type": "integer",
-              "minimum": 0
+              "minimum": 1
             },
             {
               "type": "null"
@@ -3629,26 +3633,31 @@
         "country": {
           "type": "string",
           "maxLength": 100,
-          "x-wire-name": "country"
+          "x-wire-name": "country",
+          "pattern": "^[A-Z]{2}$"
         },
         "readerTask": {
           "type": "string",
           "maxLength": 10000,
-          "x-wire-name": "reader_task"
+          "x-wire-name": "reader_task",
+          "minLength": 1
         },
         "distinctContribution": {
           "type": "string",
           "maxLength": 20000,
-          "x-wire-name": "distinct_contribution"
+          "x-wire-name": "distinct_contribution",
+          "minLength": 1
         },
         "acceptanceCriteria": {
           "type": "array",
           "maxItems": 100,
           "items": {
             "type": "string",
-            "maxLength": 4000
+            "maxLength": 4000,
+            "minLength": 1
           },
-          "x-wire-name": "acceptance_criteria"
+          "x-wire-name": "acceptance_criteria",
+          "minItems": 1
         }
       },
       "required": [
@@ -3663,7 +3672,165 @@
         "distinctContribution",
         "acceptanceCriteria"
       ],
-      "x-wire-project": false
+      "x-wire-project": false,
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "audienceId": {
+              "type": "string",
+              "maxLength": 200,
+              "x-wire-name": "audience_id",
+              "minLength": 1,
+              "pattern": "^(?!OUTSIDE$).+"
+            },
+            "audienceVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "x-wire-name": "audience_version"
+            },
+            "conversionIntent": {
+              "const": "offer",
+              "x-wire-name": "conversion_intent"
+            },
+            "offerId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "x-wire-name": "offer_id"
+            },
+            "offerVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "x-wire-name": "offer_version"
+            },
+            "noOfferReason": {
+              "type": "null",
+              "x-wire-name": "no_offer_reason"
+            },
+            "country": {
+              "type": "string",
+              "maxLength": 100,
+              "x-wire-name": "country",
+              "pattern": "^[A-Z]{2}$"
+            },
+            "readerTask": {
+              "type": "string",
+              "maxLength": 10000,
+              "x-wire-name": "reader_task",
+              "minLength": 1
+            },
+            "distinctContribution": {
+              "type": "string",
+              "maxLength": 20000,
+              "x-wire-name": "distinct_contribution",
+              "minLength": 1
+            },
+            "acceptanceCriteria": {
+              "type": "array",
+              "maxItems": 100,
+              "items": {
+                "type": "string",
+                "maxLength": 4000,
+                "minLength": 1
+              },
+              "x-wire-name": "acceptance_criteria",
+              "minItems": 1
+            }
+          },
+          "required": [
+            "audienceId",
+            "audienceVersion",
+            "conversionIntent",
+            "offerId",
+            "offerVersion",
+            "noOfferReason",
+            "country",
+            "readerTask",
+            "distinctContribution",
+            "acceptanceCriteria"
+          ],
+          "x-wire-project": false
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "audienceId": {
+              "type": "string",
+              "maxLength": 200,
+              "x-wire-name": "audience_id",
+              "minLength": 1
+            },
+            "audienceVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "x-wire-name": "audience_version"
+            },
+            "conversionIntent": {
+              "const": "none",
+              "x-wire-name": "conversion_intent"
+            },
+            "offerId": {
+              "type": "null",
+              "x-wire-name": "offer_id"
+            },
+            "offerVersion": {
+              "type": "null",
+              "x-wire-name": "offer_version"
+            },
+            "noOfferReason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000,
+              "x-wire-name": "no_offer_reason"
+            },
+            "country": {
+              "type": "string",
+              "maxLength": 100,
+              "x-wire-name": "country",
+              "pattern": "^[A-Z]{2}$"
+            },
+            "readerTask": {
+              "type": "string",
+              "maxLength": 10000,
+              "x-wire-name": "reader_task",
+              "minLength": 1
+            },
+            "distinctContribution": {
+              "type": "string",
+              "maxLength": 20000,
+              "x-wire-name": "distinct_contribution",
+              "minLength": 1
+            },
+            "acceptanceCriteria": {
+              "type": "array",
+              "maxItems": 100,
+              "items": {
+                "type": "string",
+                "maxLength": 4000,
+                "minLength": 1
+              },
+              "x-wire-name": "acceptance_criteria",
+              "minItems": 1
+            }
+          },
+          "required": [
+            "audienceId",
+            "audienceVersion",
+            "conversionIntent",
+            "offerId",
+            "offerVersion",
+            "noOfferReason",
+            "country",
+            "readerTask",
+            "distinctContribution",
+            "acceptanceCriteria"
+          ],
+          "x-wire-project": false
+        }
+      ]
     },
     "FounderArticleCreateRequest": {
       "type": "object",
@@ -3825,6 +3992,589 @@
         "companyId",
         "runId",
         "kind"
+      ]
+    },
+    "FounderCompanyBilling": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "balance": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "setupPoints": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "articlePoints": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "signedInAccount": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "billingAccount": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "companyBillingEnabled": {
+          "type": "boolean"
+        },
+        "billingFounderIsYou": {
+          "type": "boolean"
+        },
+        "canPrepare": {
+          "type": "boolean"
+        },
+        "canGenerate": {
+          "type": "boolean"
+        },
+        "otherFounderHasPoints": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "balance",
+        "setupPoints",
+        "articlePoints",
+        "signedInAccount",
+        "billingAccount",
+        "companyBillingEnabled",
+        "billingFounderIsYou",
+        "canPrepare",
+        "canGenerate",
+        "otherFounderHasPoints"
+      ],
+      "x-wire-project": true
+    },
+    "FounderCompanyBillingResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "companyBilling": {
+          "$ref": "#/$defs/FounderCompanyBilling"
+        }
+      },
+      "required": [
+        "companyBilling"
+      ],
+      "x-wire-project": true
+    },
+    "FounderEditorialAudience": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "approved",
+            "retired"
+          ]
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "approvedBy": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "approved_by"
+        },
+        "approvedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "approved_at"
+        },
+        "readerTask": {
+          "type": "string",
+          "maxLength": 10000,
+          "x-wire-name": "reader_task"
+        },
+        "constraints": {
+          "type": "array",
+          "maxItems": 300,
+          "items": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "exclusions": {
+          "type": "array",
+          "maxItems": 300,
+          "items": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "allowNoOffer": {
+          "type": "boolean",
+          "x-wire-name": "allow_no_offer"
+        },
+        "catalogSchemaVersion": {
+          "const": 2,
+          "x-wire-name": "catalog_schema_version"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "painPoints": {
+          "type": "array",
+          "maxItems": 300,
+          "items": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "x-wire-name": "pain_points"
+        },
+        "desiredOutcomes": {
+          "type": "array",
+          "maxItems": 300,
+          "items": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "x-wire-name": "desired_outcomes"
+        },
+        "knowledgeLevel": {
+          "enum": [
+            "beginner",
+            "intermediate",
+            "specialist",
+            "unspecified"
+          ],
+          "x-wire-name": "knowledge_level"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "version",
+        "approvedBy",
+        "approvedAt",
+        "readerTask",
+        "constraints",
+        "exclusions",
+        "allowNoOffer"
+      ],
+      "x-wire-project": true
+    },
+    "FounderEditorialOffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "approved",
+            "retired"
+          ]
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "approvedBy": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "approved_by"
+        },
+        "approvedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "approved_at"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 100000
+        },
+        "buttonText": {
+          "type": "string",
+          "maxLength": 2000,
+          "x-wire-name": "button_text"
+        },
+        "buttonHref": {
+          "type": "string",
+          "maxLength": 4096,
+          "x-wire-name": "button_href"
+        },
+        "audience": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "useWhen": {
+          "type": "string",
+          "maxLength": 10000,
+          "x-wire-name": "use_when"
+        },
+        "ctaComponent": {
+          "type": "string",
+          "maxLength": 500,
+          "x-wire-name": "cta_component"
+        },
+        "imageUrl": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "image_url"
+        },
+        "secondaryButtonText": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2000
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "secondary_button_text"
+        },
+        "secondaryButtonHref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "secondary_button_href"
+        },
+        "audienceIds": {
+          "type": "array",
+          "maxItems": 300,
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "x-wire-name": "audience_ids"
+        },
+        "countries": {
+          "type": "array",
+          "maxItems": 300,
+          "items": {
+            "type": "string",
+            "maxLength": 100
+          }
+        },
+        "catalogSchemaVersion": {
+          "const": 2,
+          "x-wire-name": "catalog_schema_version"
+        },
+        "actionType": {
+          "enum": [
+            "book_demo",
+            "start_trial",
+            "sign_up",
+            "contact",
+            "buy",
+            "download",
+            "attend",
+            "apply",
+            "custom"
+          ],
+          "x-wire-name": "action_type"
+        },
+        "actionDescription": {
+          "type": "string",
+          "maxLength": 10000,
+          "x-wire-name": "action_description"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "version",
+        "approvedBy",
+        "approvedAt",
+        "title",
+        "body",
+        "buttonText",
+        "buttonHref",
+        "audience",
+        "useWhen",
+        "ctaComponent",
+        "imageUrl",
+        "secondaryButtonText",
+        "secondaryButtonHref",
+        "audienceIds",
+        "countries"
+      ],
+      "x-wire-project": true
+    },
+    "FounderEditorialReviewEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "audience",
+            "offer"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "contentSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "x-wire-name": "content_sha256"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "version",
+        "contentSha256"
+      ],
+      "x-wire-project": true
+    },
+    "FounderOfferPageCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "pending",
+            "checked",
+            "skipped",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pageUrl": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "page_url"
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "sentence": {
+                "type": "string",
+                "maxLength": 10000
+              },
+              "message": {
+                "type": "string",
+                "maxLength": 10000
+              }
+            },
+            "required": [
+              "sentence",
+              "message"
+            ],
+            "x-wire-project": true
+          }
+        }
+      },
+      "required": [
+        "status",
+        "reason",
+        "pageUrl",
+        "findings"
+      ],
+      "x-wire-project": true
+    },
+    "FounderEditorialCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "audienceOptions": {
+          "type": "array",
+          "maxItems": 300,
+          "items": {
+            "$ref": "#/$defs/FounderEditorialAudience"
+          },
+          "x-wire-name": "audience_options"
+        },
+        "ctaOptions": {
+          "type": "array",
+          "maxItems": 300,
+          "items": {
+            "$ref": "#/$defs/FounderEditorialOffer"
+          },
+          "x-wire-name": "cta_options"
+        },
+        "editorialCatalogVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "x-wire-name": "editorial_catalog_version"
+        },
+        "reviewEntries": {
+          "type": "array",
+          "maxItems": 600,
+          "items": {
+            "$ref": "#/$defs/FounderEditorialReviewEntry"
+          },
+          "x-wire-name": "review_entries"
+        }
+      },
+      "required": [
+        "audienceOptions",
+        "ctaOptions",
+        "editorialCatalogVersion",
+        "reviewEntries"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticleControls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "canCancel": {
+          "type": "boolean"
+        },
+        "canDeny": {
+          "type": "boolean"
+        },
+        "cancelCopy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderCopy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "denyCopy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderCopy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancelOutcome": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "enum": [
+                    "no_charge",
+                    "refund",
+                    "kept"
+                  ]
+                },
+                "points": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "freeArticle": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "state",
+                "points",
+                "freeArticle"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "canCancel",
+        "canDeny",
+        "cancelCopy",
+        "denyCopy",
+        "cancelOutcome"
       ]
     }
   }
