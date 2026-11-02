@@ -175,15 +175,36 @@ class RevisionChildAdmissionTests(TransactionTestCase):
         self.assertEqual(ContentFactoryRun.objects.count(), 2)
         self.assertEqual(list(Ledger.objects.order_by("pk").values()), self.money_before)
 
-    def test_new_admission_enabled_does_not_silently_enroll_legacy_lineage(self):
+    def test_new_child_from_unmarked_parent_has_own_admission_without_parent_rewrite(self):
+        from .tests_run_legacy_source import resigned
         legacy = ContentFactoryRun.objects.create(run_id="old-source", organization=self.org,
-            domain=self.org.domain, workflow="article_generation")
+            domain=self.org.domain, workflow="article_generation", run_request={"domain": self.org.domain,
+                "delivery_mode": "content_only", "delivery_mode_confirmed": True}, result={"retained_original": True})
         before = ContentFactoryRun.objects.values().get(pk=legacy.pk)
-        body = {"source_run_id": legacy.run_id, "feedback_batch_id": "new-legacy-child", "comments": []}
-        unchanged = deepcopy(body)
-        self.assertIsNone(prepare_component_revision_child(run=legacy, user=self.user, payload=body))
-        self.assertEqual(body, unchanged)
+        descriptor = resigned({"schema_version": 1, "source_run_id": legacy.run_id, "workflow": "direct_generate",
+            "domain": legacy.domain, "github_repo": "", "request_sha256": "a" * 64, "content_sha256": "b" * 64})
+        def body():
+            return {"source_run_id": legacy.run_id, "feedback_batch_id": "new-legacy-child", "comments": [],
+                "requested_run_id": "new-independent-legacy-child"}
+        first, second = body(), body()
+        with patch("content_factory.run_legacy_source.fetch_legacy_source", return_value=descriptor):
+            child = prepare_component_revision_child(run=legacy, user=self.user, payload=first)
+            with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False, ARTICLES_RUN_CONTROL_MODEL_USD="9.00"):
+                again = prepare_component_revision_child(run=legacy, user=self.user, payload=second)
+        self.assertEqual(child.pk, again.pk)
+        self.assertEqual(first, second)
+        self.assertEqual(child.run_request["legacy_source_v1"], descriptor)
+        self.assertEqual(first["child_dispatch_v1"]["legacy_source_v1"], descriptor)
+        self.assertNotIn(WIRE_REQUEST_KEY, first)
+        self.assertNotIn(WIRE_EXECUTION_KEY, first)
+        self.assertIsNotNone(owner_receipt(child))
+        self.assertEqual(child.run_request[BUDGET_KEY]["max_model_usd"], "5.00")
         self.assertEqual(ContentFactoryRun.objects.values().get(pk=legacy.pk), before)
+        changed = resigned({**descriptor, "content_sha256": "c" * 64})
+        with patch("content_factory.run_legacy_source.fetch_legacy_source", return_value=changed):
+            with self.assertRaises(RunOwnershipConflict):
+                prepare_component_revision_child(run=legacy, user=self.user, payload=body())
+        self.assertEqual(ContentFactoryRun.objects.count(), 3)
 
 
 @override_settings(**FLAGS)
@@ -357,6 +378,33 @@ class ReviewedSourceChildTests(SetupFeedbackTicketTests):
         with authority_guard(scoped_run_contract(child), action="preview"):
             pass
 
+    def test_ordinary_article_revision_uses_real_revision_and_original_source_without_fabricated_ref(self):
+        from .run_revision_child_admission import prepare_review_update_child
+        original = {**contract_for(self.connection), "domain": self.org.domain,
+            "github_repo": self.connection.github_repo, "expected_source_sha": "a" * 40,
+            "client_request_id": "ordinary-article-source"}
+        with authority_guard(original, action="read"), owner_operation_scope(original):
+            operation = reserve_workflow_operation(self.connection, workflow="article_generation", payload=original)
+        parent = reserve_admitted_run(organization=self.org,
+            principal=user_principal(self.user.pk, f"mlai_user:{self.user.pk}"), workflow="article_generation", payload=original)
+        bind_operation_run(operation, parent)
+        body = {"action": "applyUpdate", "operationId": "ordinary-review-update", "expectedRevision": "ordinary-revision",
+            "source_run_id": parent.run_id, "commentIds": [], "comments": [],
+            "restoredSentences": ["Restore this approved sentence"], "textEdits": []}
+        def head(connection, expected):
+            self.assertFalse(transaction.get_connection().in_atomic_block)
+            self.assertEqual(expected, "a" * 40)
+            return expected
+        with patch("content_factory.website_connections.verify_repository_head", side_effect=head) as provider:
+            child = prepare_review_update_child(run=parent, user=self.user, payload=body,
+                snapshot={"revision": "ordinary-revision", "fields": [], "previewCommit": "d" * 40})
+        provider.assert_called_once()
+        self.assertEqual(child.workflow, "article_revision")
+        self.assertEqual(child.run_request["expected_source_sha"], "a" * 40)
+        self.assertNotIn("reviewed_source_ref", child.run_request)
+        self.assertNotIn("reviewed_revision", child.run_request)
+        self.assertEqual(body["requested_run_id"], reviewed_update_child_id(parent.run_id, "ordinary-review-update", setup=False))
+
     def test_actual_apply_update_reserves_before_post_and_preserves_callback_first_lifecycle(self):
         from types import SimpleNamespace
         from unittest.mock import Mock
@@ -410,3 +458,49 @@ class ReviewedSourceChildTests(SetupFeedbackTicketTests):
             with self.assertRaises(WebsiteAuthorityError):
                 with authority_guard(scoped_run_contract(child), action="preview"):
                     self.fail("revocation race reached an effect")
+
+
+@override_settings(**FLAGS)
+class LegacyReviewedSourceChildTests(ReviewedSourceChildTests):
+    def setUp(self):
+        super().setUp()
+        from .tests_run_legacy_source import resigned
+        request = {key: value for key, value in self.parent.run_request.items()
+            if key not in {WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY}}
+        ContentFactoryRun.objects.filter(pk=self.parent.pk).update(run_request=request, result={"retained_original": True})
+        self.parent.refresh_from_db()
+        self.descriptor = resigned({"schema_version": 1, "source_run_id": self.parent.run_id,
+            "workflow": "article_system_setup", "domain": self.parent.domain, "github_repo": self.parent.github_repo,
+            "request_sha256": "a" * 64, "content_sha256": "b" * 64})
+        descriptor_patch = patch("content_factory.run_legacy_source.fetch_legacy_source", return_value=self.descriptor)
+        descriptor_patch.start()
+        self.addCleanup(descriptor_patch.stop)
+
+    def test_exact_preview_commit_passes_without_changing_selected_default_source(self):
+        from .website_connections import scoped_run_contract, observed_source_sha
+        from .website_models import WebsiteConnectionOperation
+        before = ContentFactoryRun.objects.values().get(pk=self.parent.pk)
+        child, body = self.create_child()
+        self.assertIsNone(owner_receipt(self.parent))
+        self.assertIsNotNone(owner_receipt(child))
+        self.assertNotIn(WIRE_REQUEST_KEY, body)
+        self.assertNotIn(WIRE_EXECUTION_KEY, body)
+        self.assertEqual(body["child_dispatch_v1"]["legacy_source_v1"], self.descriptor)
+        operation = WebsiteConnectionOperation.objects.get(pk=child.run_request["operation_id"])
+        proof = operation.payload["review_source_v1"]["proofs"][current_execution_ticket(child)["execution_id"]]
+        self.assertIsNone(proof["parent_admission_digest"])
+        self.assertEqual(proof["legacy_source_digest"], self.descriptor["descriptor_sha256"])
+        with patch("content_factory.website_connections.verify_repository_head") as default_head:
+            with authority_guard(scoped_run_contract(child), action="preview"):
+                pass
+        default_head.assert_not_called()
+        self.assertEqual(observed_source_sha(self.connection), "a" * 40)
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.parent.pk), before)
+
+    def test_one_generation_per_exact_batch_preserves_request_charge_and_clocks(self):
+        # The old same-run feedback route stays legacy. It creates no new child
+        # and cannot retroactively turn a historical execution into an admission.
+        before = ContentFactoryRun.objects.values().get(pk=self.parent.pk)
+        body = self.payload()
+        self.assertIsNone(prepare_setup_revision_ticket(run=self.parent, user=self.user, payload=body))
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.parent.pk), before)

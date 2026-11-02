@@ -66,16 +66,23 @@ class VerifiedReviewSource:
     """Short-lived backend provider result; never accepted from an HTTP body."""
     connection_identity: tuple
     parent_run_id: str
-    parent_admission_digest: str
+    parent_admission_digest: str | None
     reviewed_revision: str
     reviewed_source_ref: str
     expected_source_sha: str
+    legacy_source_digest: str | None = None
 
 
-def verify_review_snapshot(parent, snapshot, *, expected_revision):
+def verify_review_snapshot(parent, snapshot, *, expected_revision, legacy_source=None):
     """Bind a trusted current worker snapshot to a fresh independent GitHub read."""
     from .website_connections import authority_guard, scoped_run_contract
-    if (owner_receipt(parent) is None or not isinstance(snapshot, dict)
+    receipt = owner_receipt(parent)
+    if receipt is None:
+        from .run_legacy_source import validate_legacy_source
+        legacy_source = validate_legacy_source(parent, legacy_source)
+    elif legacy_source is not None:
+        raise _denied()
+    if (not isinstance(snapshot, dict)
             or type(expected_revision) is not str or snapshot.get("revision") != expected_revision
             or not _valid_ref(snapshot.get("sourceRef")) or type(snapshot.get("baseCommit")) is not str
             or not SHA_PATTERN.fullmatch(snapshot["baseCommit"])):
@@ -83,12 +90,18 @@ def verify_review_snapshot(parent, snapshot, *, expected_revision):
     with authority_guard(scoped_run_contract(parent), action="read") as connection:
         identity = _connection_identity(connection)
     verify_review_ref(connection, snapshot["sourceRef"], snapshot["baseCommit"])
-    return VerifiedReviewSource(identity, parent.run_id, evidence_digest(wire_identity(owner_receipt(parent))),
-        expected_revision, snapshot["sourceRef"], snapshot["baseCommit"])
+    return VerifiedReviewSource(identity, parent.run_id, evidence_digest(wire_identity(receipt)) if receipt else None,
+        expected_revision, snapshot["sourceRef"], snapshot["baseCommit"],
+        legacy_source["descriptor_sha256"] if legacy_source else None)
 
 
 def _proof(run, parent, connection, ticket, *, revision, source_ref, source_sha):
     scope = ticket["scope"]
+    parent_receipt = owner_receipt(parent)
+    legacy_digest = None
+    if parent_receipt is None:
+        from .run_legacy_source import validate_legacy_source
+        legacy_digest = validate_legacy_source(parent, run.run_request.get("legacy_source_v1"))["descriptor_sha256"]
     return {"schema_version": 1, "organization_id": str(run.organization_id),
         "website_connection_id": str(connection.pk), "connection_generation": connection.generation,
         "repository_id": connection.repository_id, "github_repo": connection.github_repo,
@@ -96,7 +109,8 @@ def _proof(run, parent, connection, ticket, *, revision, source_ref, source_sha)
         "configuration_revision": connection.configuration_version,
         "operation_id": scope["operation_id"], "operation_attempt": scope["operation_attempt"],
         "deletion_epoch": scope["deletion_epoch"], "parent_run_id": parent.run_id,
-        "parent_admission_digest": evidence_digest(wire_identity(owner_receipt(parent))),
+        "parent_admission_digest": evidence_digest(wire_identity(parent_receipt)) if parent_receipt else None,
+        "legacy_source_digest": legacy_digest,
         "child_run_id": run.run_id, "child_admission_digest": evidence_digest(wire_identity(owner_receipt(run))),
         "request_digest": ticket["request_digest"], "execution_id": ticket["execution_id"],
         "generation": ticket["generation"], "ticket_digest": evidence_digest(ticket),
@@ -142,7 +156,8 @@ def seal_review_source(*, parent, child, connection, verified):
     ticket = current_execution_ticket(child)
     if (verified.connection_identity != _connection_identity(connection)
             or verified.parent_run_id != parent.run_id
-            or verified.parent_admission_digest != evidence_digest(wire_identity(owner_receipt(parent)))
+            or verified.parent_admission_digest != (evidence_digest(wire_identity(owner_receipt(parent))) if owner_receipt(parent) else None)
+            or verified.legacy_source_digest != (request.get("legacy_source_v1") or {}).get("descriptor_sha256")
             or owner_receipt(child) is None or owner_receipt(child)["authority"].get("event_protocol") != 1
             or child.workflow not in {"article_revision", "article_system_setup"}
             or child.organization_id != parent.organization_id or child.organization_id != connection.organization_id
@@ -162,7 +177,7 @@ def seal_review_source(*, parent, child, connection, verified):
         source_ref=verified.reviewed_source_ref, source_sha=verified.expected_source_sha))
 
 
-def _candidate(payload, connection, *, lock=False):
+def _candidate(payload, connection, *, lock=False, require_principal=True):
     from workflow_runs.models import ContentFactoryRun
     request_ref = payload.get("reviewed_source_ref")
     if request_ref is None:
@@ -178,13 +193,17 @@ def _candidate(payload, connection, *, lock=False):
         raise _denied()
     try:
         require_admission_identity(run, payload)
+        if evidence_digest({key: value for key, value in (run.run_request or {}).items()
+                if key not in {WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY}}) != owner_receipt(run)["identity"]["request_digest"]:
+            raise _denied()
         require_event_execution(run, payload, current=True)
-        from .run_execution_control import require_current_principal
-        require_current_principal(run)
+        if require_principal:
+            from .run_execution_control import require_current_principal
+            require_current_principal(run)
         ticket = current_execution_ticket(run)
         operation = _operation_for(run, connection, ticket, lock=lock)
         parent = query.filter(run_id=run.run_request.get("parent_run_id"), organization_id=run.organization_id).first()
-        if parent is None or owner_receipt(parent) is None:
+        if parent is None:
             raise _denied()
         proof = (operation.payload.get(REVIEW_SOURCE_KEY) or {}).get("proofs", {}).get(ticket["execution_id"])
         wanted = _proof(run, parent, connection, ticket, revision=run.run_request.get("reviewed_revision"),
@@ -245,3 +264,29 @@ def append_review_source_ticket(run, previous, ticket):
         "execution_id": ticket["execution_id"], "generation": ticket["generation"],
         "request_digest": ticket["request_digest"], "ticket_digest": evidence_digest(ticket)}
     _append(operation, ticket, proof)
+
+
+_publication_source = ContextVar("backend_verified_publication_source", default=None)
+
+
+@contextmanager
+def publication_source_scope(run, evidence):
+    """Retain a backend-verified new-publication source across destination locks."""
+    token = _publication_source.set((run.pk, deepcopy(evidence)))
+    try:
+        yield
+    finally:
+        _publication_source.reset(token)
+
+
+def publication_binding_source(run, connection):
+    """Require the fresh approved source proof; raw payload fields grant nothing."""
+    from .article_publish_approval import article_publish_approval_receipt_matches
+    current = _publication_source.get()
+    if (current is None or current[0] != run.pk or not article_publish_approval_receipt_matches(run)
+            or run.organization_id != connection.organization_id or run.github_repo != connection.github_repo
+            or not current[1].get("reviewed_source_ref")
+            or current[1].get("source_run_id") != run.run_id
+            or owner_receipt(run) is not None and current[1].get("source_ticket_digest") != evidence_digest(current_execution_ticket(run))):
+        raise _denied()
+    return deepcopy(current[1])

@@ -9204,6 +9204,11 @@ def _publish_auto_merge_enabled(*runs):
     from .website_first_article import goal_auto_merge
     goal_permission=goal_auto_merge(runs)
     if goal_permission is not None:return goal_permission
+    from .run_ownership import owner_receipt
+    owned = [run for run in runs if run is not None and owner_receipt(run) is not None]
+    if owned:
+        from .run_revision_child_admission import publish_auto_merge_control
+        return publish_auto_merge_control(owned[0])
     for run in runs:
         if not run:
             continue
@@ -9214,10 +9219,14 @@ def _publish_auto_merge_enabled(*runs):
 
 
 @guarded_local_run_write
-def _record_publish_auto_merge_flag(run):
+def _record_publish_auto_merge_flag(run, *, user=None):
     """Persist the auto-merge opt-in on run_request (durable) and result (serialized)."""
     if not run:
         return run
+    from .run_ownership import owner_receipt
+    if owner_receipt(run) is not None:
+        from .run_revision_child_admission import record_publish_auto_merge_control
+        return record_publish_auto_merge_control(run=run, user=user, enabled=True)
     update_fields = []
     run_request = dict(run.run_request or {})
     if not _truthy_flag(run_request.get("publish_auto_merge")):
@@ -9468,6 +9477,17 @@ def _sync_publish_child_from_control_response(
     remote_data,
     mark_source_approved=False,
 ):
+    if payload.get("child_dispatch_v1"):
+        from .run_ownership import admitted_run_for_key
+        from .run_revision_child_admission import accept_revision_child_response, record_publish_handoff
+        child = admitted_run_for_key(payload["child_dispatch_v1"]["client_request_id"])
+        pending = bool(remote_data.get("child_dispatch_pending_resolution") or remote_data.get("content_factory_transport_error"))
+        if not pending:
+            accept_revision_child_response(child, remote_data)
+        for source in (run,) if run.pk == remote_run.pk else (run, remote_run):
+            record_publish_handoff(run=source, child=child, pending=pending)
+        child.refresh_from_db()
+        return child
     child_run_id = str(
         remote_data.get("run_id")
         or remote_data.get("runId")
@@ -15372,7 +15392,18 @@ def _call_content_factory_run_action(
         if action == "approve" and workflow in SCAN_WORKFLOWS | {"scan"} and scoped_run is None and admission_enabled():
             return {"status": "needs_user", "error": "Run a fresh website scan before approving this setup.",
                     "content_factory_status_code": 409, "retryable": False}
-        if (scoped_run and scoped_run.workflow in REPOSITORY_WORKFLOWS
+        publication_dispatch = action in {"promote-bundle", "publish-pr"} and payload.get("child_dispatch_v1") is not None
+        if action in {"promote-bundle", "publish-pr"} and scoped_run and not publication_dispatch:
+            from .run_ownership import owner_receipt, admission_enabled, RunOwnershipConflict
+            if owner_receipt(scoped_run) is not None or admission_enabled():
+                from .run_revision_child_admission import prepare_publish_child
+                try:
+                    admitted_child = prepare_publish_child(run=scoped_run, user=control_user, payload=payload, action=action)
+                    publication_dispatch = admitted_child is not None
+                except (RunOwnershipConflict, WebsiteAuthorityError):
+                    return {"status": "blocked", "error": "A current publisher and reviewed source are required.",
+                            "content_factory_status_code": 409, "retryable": False}
+        if (scoped_run and scoped_run.workflow in REPOSITORY_WORKFLOWS and not publication_dispatch
                 and not portable_run_control_allowed(scoped_run, action, payload)):
             try:
                 saved = scoped_run_contract(scoped_run)
@@ -15404,6 +15435,14 @@ def _call_content_factory_run_action(
                 except (RunOwnershipConflict, WebsiteAuthorityError):
                     return {"status": "blocked", "error": "The scan approval or current website permission changed.",
                             "content_factory_status_code": 409, "retryable": False}
+        if publication_dispatch and scoped_run:
+            from .run_revision_child_admission import checked_publish_child
+            from .run_ownership import RunOwnershipConflict
+            try:
+                admitted_child = checked_publish_child(run=scoped_run, user=control_user, payload=payload)
+            except (RunOwnershipConflict, WebsiteAuthorityError):
+                return {"status": "blocked", "error": "The approved source or current publishing permission changed.",
+                        "content_factory_status_code": 409, "retryable": False}
         if action == "resume" and scoped_run:
             from .run_ownership import owner_receipt, RunOwnershipConflict
             if (owner_receipt(scoped_run) or {}).get("authority", {}).get("event_protocol") == 1:
@@ -15478,8 +15517,12 @@ def _call_content_factory_run_action(
             return {"status": "action_pending", "action": action, "child_run_id": holding.json()["run_id"],
                     "child_dispatch_pending_resolution": True, "retryable": True}
         if admitted_child is not None:
-            from .run_child_admission import accept_scan_child_response
-            accept_scan_child_response(admitted_child, data, status_code=response.status_code)
+            if publication_dispatch:
+                from .run_revision_child_admission import accept_revision_child_response
+                accept_revision_child_response(admitted_child, data)
+            else:
+                from .run_child_admission import accept_scan_child_response
+                accept_scan_child_response(admitted_child, data, status_code=response.status_code)
         return data
 
     try:
@@ -15521,6 +15564,13 @@ def _call_content_factory_component_revision(*, organization, run_id, payload, u
             retryable=True,
         )
 
+    from .run_revision_child_admission import require_revision_requester
+    from .run_ownership import RunOwnershipConflict
+    try:
+        if original:
+            require_revision_requester(original, user)
+    except RunOwnershipConflict:
+        return Response({"detail": "The current startup reviewer permission changed."}, status=409)
     editorial_error = _refresh_article_editorial_payload(organization=organization, payload=payload)
     if editorial_error is not None:
         return editorial_error  # No POST; retain any submitted batch for explicit retry.
@@ -15551,7 +15601,10 @@ def _call_content_factory_component_revision(*, organization, run_id, payload, u
     if response.status_code in (200, 202):
         data = response.json() if response.content else {}
         if child is not None:
-            accept_revision_child_response(child, data)
+            try:
+                accept_revision_child_response(child, data)
+            except RunOwnershipConflict:
+                return Response({"detail": "The revision response identified a different saved execution."}, status=409)
         return data
 
     try:
@@ -15629,6 +15682,13 @@ def _request_editorial_learnings_fold(*, organization, github_repo=""):
 def _call_content_factory_article_system_revision(*, run_id, payload, user=None):
     require_unlocked_remote_call()
     original = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    from .run_revision_child_admission import require_revision_requester
+    from .run_ownership import RunOwnershipConflict
+    try:
+        if original:
+            require_revision_requester(original, user, setup=True)
+    except RunOwnershipConflict:
+        return {"error": "The current startup owner permission changed.", "content_factory_status_code": 409, "retryable": False}
     if original and connection_contract(scoped_run_contract(original)):
         with authority_guard(scoped_run_contract(original), action="setup"):
             payload.update(connection_contract(scoped_run_contract(original)))
@@ -19390,7 +19450,8 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                     "error": remote_data.data.get("detail"), "policyBlocked": True,
                 }
                 from .run_revision_child_admission import persist_revision_metadata
-                persist_revision_metadata(source_run, result, keys={"component_feedback_latest_batch"})
+                persist_revision_metadata(source_run, result, keys={"component_feedback_latest_batch"},
+                    admitted_child=bool(remote_payload.get("child_dispatch_v1")))
                 return remote_data
             new_run_id = str(remote_data.get("run_id") or remote_data.get("runId") or "").strip()
             if remote_data.get("error") and not new_run_id:
@@ -19404,7 +19465,8 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                     "retryable": retryable,
                 }
                 from .run_revision_child_admission import persist_revision_metadata
-                persist_revision_metadata(source_run, result, keys={"component_feedback_latest_batch"})
+                persist_revision_metadata(source_run, result, keys={"component_feedback_latest_batch"},
+                    admitted_child=bool(remote_payload.get("child_dispatch_v1")))
                 if retryable:
                     return Response(_serialize_run(source_run, context=context), status=status.HTTP_202_ACCEPTED)
                 return Response(
@@ -19459,7 +19521,8 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
                 "retry": retry_existing_batch,
             }
             result["component_feedback_revision_run_id"] = revision_run.run_id
-            persist_revision_metadata(source_run, result, keys={"component_feedback_latest_batch", "component_feedback_revision_run_id"})
+            persist_revision_metadata(source_run, result, keys={"component_feedback_latest_batch", "component_feedback_revision_run_id"},
+                admitted_child=bool(remote_payload.get("child_dispatch_v1")))
             return Response(_serialize_run(revision_run, context=context), status=status.HTTP_202_ACCEPTED)
 
 
@@ -19935,6 +19998,13 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(),status=exc.status)
     command = ContentCommand(user=user, data=data)
+    if action in {"promote-bundle", "publish-pr"}:
+        from .run_revision_child_admission import require_revision_requester
+        from .run_ownership import RunOwnershipConflict
+        try:
+            require_revision_requester(run, user, publish=True)
+        except RunOwnershipConflict:
+            return Response({"detail": "The current startup publishing permission changed."}, status=403)
     run_id = run_id or run.run_id
     from .p2_foundation import run_merge_policy, BACKEND_WORKER
     owned_kind = _run_mapping(_run_mapping(getattr(run, "result", None)).get("publish_pr_v1")).get("kind") if action == "approve" else None
@@ -20001,10 +20071,12 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
         payload["auto_merge"] = True
     if action in {"promote-bundle", "publish-pr", "approve", "merge-publish-pr"} and run.workflow in ARTICLE_WORKFLOWS:
         from .incident_guards import publish_child_binding
-        try:
-            payload.update(publish_child_binding(_get_config(context.organization), run, payload, {}))
-        except WebsiteAuthorityError as exc:
-            return Response(exc.as_dict(), status=exc.status)
+        from .run_ownership import owner_receipt, admission_enabled
+        if action not in {"promote-bundle", "publish-pr"} or not (owner_receipt(run) is not None or admission_enabled()):
+            try:
+                payload.update(publish_child_binding(_get_config(context.organization), run, payload, {}))
+            except WebsiteAuthorityError as exc:
+                return Response(exc.as_dict(), status=exc.status)
 
     if action == "cancel":
         from .island_research_cancel import is_island_research_run, cancel_island_research
@@ -20249,6 +20321,7 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
         return Response(_serialize_run(merged_run or run, context=context), status=status.HTTP_200_OK)
 
     remote_run = run
+    admitted_publish_child = None
     if action in {"promote-bundle", "publish-pr"}:
         publish_child_source = _publish_source_run_for_child(run, context)
         if publish_child_source is not None:
@@ -20277,8 +20350,8 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             existing_publish_run = _refresh_publish_child_remote_state(existing_publish_run, context=context)
             if not _publish_child_run_recoverable(existing_publish_run):
                 if auto_merge_requested:
-                    _record_publish_auto_merge_flag(existing_publish_run)
-                    _record_publish_auto_merge_flag(run)
+                    _record_publish_auto_merge_flag(existing_publish_run, user=command.user)
+                    _record_publish_auto_merge_flag(run, user=command.user)
                 return Response(_serialize_run(existing_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
         known_child_run_id = _publish_child_run_id_for_run(remote_run)
         if not known_child_run_id and not publishing_superseding_revision:
@@ -20289,8 +20362,8 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
                 recovered_publish_run = _refresh_publish_child_remote_state(recovered_publish_run, context=context)
                 if not _publish_child_run_recoverable(recovered_publish_run):
                     if auto_merge_requested:
-                        _record_publish_auto_merge_flag(recovered_publish_run)
-                        _record_publish_auto_merge_flag(run)
+                        _record_publish_auto_merge_flag(recovered_publish_run, user=command.user)
+                        _record_publish_auto_merge_flag(run, user=command.user)
                     return Response(_serialize_run(recovered_publish_run, context=context), status=status.HTTP_202_ACCEPTED)
         pending_runs = [
             candidate
@@ -20301,7 +20374,19 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             for candidate in pending_runs:
                 _annotate_publish_handoff_staleness(candidate)
             return Response(_serialize_run(run, context=context), status=status.HTTP_202_ACCEPTED)
-        _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action, auto_merge=auto_merge_requested)
+        from .run_revision_child_admission import prepare_publish_child, record_publish_handoff
+        from .run_ownership import RunOwnershipConflict
+        try:
+            admitted_publish_child = prepare_publish_child(run=remote_run, user=command.user, payload=payload, action=action)
+        except WebsiteAuthorityError as exc:
+            return Response(exc.as_dict(), status=exc.status)
+        except RunOwnershipConflict:
+            return Response({"detail": "Review the current article and publishing destination before retrying."}, status=409)
+        if admitted_publish_child is not None:
+            for source in (run,) if run.pk == remote_run.pk else (run, remote_run):
+                record_publish_handoff(run=source, child=admitted_publish_child, pending=True)
+        else:
+            _mark_publish_handoff_pending(run=run, remote_run=remote_run, action=action, auto_merge=auto_merge_requested)
     from . import first_article_entitlement as first_article
     revision_grant = first_article.lineage_entitlement(run) if action == "revise" else None
     if revision_grant is not None:
@@ -20363,6 +20448,7 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             (3, 20) if action in {"promote-bundle", "publish-pr"} else (3, 15)
         ),
         transport_errors_are_pending=action in {"promote-bundle", "publish-pr"},
+        **({"control_user": command.user} if action in {"promote-bundle", "publish-pr"} else {}),
         **({"control_user": command.user, "control_command_key": next((command.data.get(key) for key in
             ("_backend_control_command_key", "idempotency_key", "idempotencyKey", "clientRequestId")
             if command.data.get(key)), None)} if action == "resume" else {}),
@@ -20374,7 +20460,8 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             restore_setup_owner_approval(context.organization, owner_approval_snapshot)
             logger.info("founder_setup_owner_click_reverted org=%s run=%s", context.organization.pk, run.run_id)
 
-    with _remote_response_write_guard(remote_data, workflow="article_generation"):
+    with _remote_response_write_guard(remote_data, workflow="article_generation",
+            **({"binding": scoped_run_contract(admitted_publish_child)} if admitted_publish_child is not None else {})):
         run.refresh_from_db()
         if remote_run.pk != run.pk:
             remote_run.refresh_from_db()

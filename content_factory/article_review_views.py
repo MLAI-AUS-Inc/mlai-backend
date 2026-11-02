@@ -215,6 +215,13 @@ def _revision_authorization(request, context, run, payload):
 
 
 
+def _keeps_review_source_clock(run, entry):
+    from .run_ownership import admission_enabled, owner_receipt
+    return (owner_receipt(run) is not None
+        or isinstance(entry.get("dispatchContract"), dict) and "child_dispatch_v1" in entry["dispatchContract"]
+        or admission_enabled() and (run.workflow in {"article_system_setup", "scaffold_articles"} or bool(entry.get("remoteComments"))))
+
+
 def _record_update_result(run, operation, entry, feedback=None):
     """Merge one dispatch outcome into fresh metadata without erasing callbacks."""
     with transaction.atomic():
@@ -244,8 +251,7 @@ def _record_update_result(run, operation, entry, feedback=None):
                     feedback["status"] = "running"
             result["component_feedback_latest_batch"] = feedback
         fresh.result = result
-        from .run_ownership import owner_receipt
-        if owner_receipt(fresh) is not None:
+        if _keeps_review_source_clock(fresh, {**previous, **entry}):
             views.ContentFactoryRun.objects.filter(pk=fresh.pk).update(result=result)
         else:
             fresh.save(update_fields=["result", "updated_at"])
@@ -275,8 +281,7 @@ def _revert_update_submission(run, operation, request_hash):
             else:
                 result.pop("component_feedback_latest_batch", None)
         fresh.result = result
-        from .run_ownership import owner_receipt
-        if owner_receipt(fresh) is not None:
+        if _keeps_review_source_clock(fresh, entry):
             views.ContentFactoryRun.objects.filter(pk=fresh.pk).update(result=result)
         else:
             fresh.save(update_fields=["result", "updated_at"])
@@ -289,19 +294,19 @@ def _review_dispatch_contract(run, payload, *, user=None):
     """Reserve fresh review work under the source's original website consent."""
     original = views.scoped_run_contract(run)
     from .run_ownership import owner_receipt, RunOwnershipConflict, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY
-    if owner_receipt(run) is not None:
-        from .run_revision_child_admission import prepare_review_update_child
-        try:
-            prepare_review_update_child(run=run, user=user, payload=payload, snapshot=lambda: remote_review(run))
-            from .website_contract import CONNECTION_FIELDS
-            from .website_operations import OPERATION_FIELDS
+    from .run_revision_child_admission import prepare_review_update_child
+    try:
+        child = prepare_review_update_child(run=run, user=user, payload=payload, snapshot=lambda: remote_review(run))
+        from .website_contract import CONNECTION_FIELDS
+        from .website_operations import OPERATION_FIELDS
+        if child is not None or owner_receipt(run) is not None:
             return {key: deepcopy(payload[key]) for key in (*CONNECTION_FIELDS, *OPERATION_FIELDS,
-                WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY, "child_dispatch_v1", "expected_source_sha",
-                "reviewed_source_ref", "reviewed_revision", "requested_run_id", "branch", "app_root", "configuration_revision") if key in payload}
-        except views.WebsiteAuthorityError as exc:
-            return Response(exc.as_dict(), status=exc.status)
-        except RunOwnershipConflict:
-            return Response({"detail": "The saved review update or current startup permission changed."}, status=409)
+            WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY, "child_dispatch_v1", "expected_source_sha",
+            "reviewed_source_ref", "reviewed_revision", "requested_run_id", "branch", "app_root", "configuration_revision") if key in payload}
+    except views.WebsiteAuthorityError as exc:
+        return Response(exc.as_dict(), status=exc.status)
+    except RunOwnershipConflict:
+        return Response({"detail": "The saved review update or current startup permission changed."}, status=409)
     try:
         binding = views.connection_contract(original)
         if not binding and original.get("delivery_mode") == "content_only":
@@ -354,6 +359,12 @@ def apply_article_review_update(*, user, context, run, data):
     error = _revision_authorization(command, context, run, payload)
     if error is not None:
         return error
+    from .run_revision_child_admission import require_revision_requester, checked_review_child
+    from .run_ownership import RunOwnershipConflict
+    try:
+        require_revision_requester(run, command.user, setup=run.workflow == "article_system_setup")
+    except RunOwnershipConflict:
+        return Response({"detail": "The current startup reviewer permission changed."}, status=409)
     comments, claimed, error = _claim_comments(run, payload)
     if error is not None:
         return error
@@ -403,6 +414,11 @@ def apply_article_review_update(*, user, context, run, data):
             if error is not None:
                 return error
     remote_payload.update(contract)
+    if remote_payload.get("child_dispatch_v1"):
+        try:
+            checked_review_child(run=run, user=command.user, payload=remote_payload)
+        except RunOwnershipConflict:
+            return Response({"detail": "The saved review command or current requester changed."}, status=409)
     child_operation = bool(contract.get("operation_id")) and (
         contract.get("operation_id") != views.scoped_run_contract(run).get("operation_id"))
     if claimed and run.workflow != "article_system_setup":

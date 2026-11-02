@@ -138,7 +138,10 @@ def publish_child_binding(config, source_run, payload, remote_data, *, reviewed_
         raise WebsiteAuthorityError("website_repository_changed", "This saved draft belongs to an older website repository. Start a newly reviewed publishing draft.")
     original_request = getattr(source_run, "run_request", None) or {}
     if original_request.get("expected_source_sha") and original_request["expected_source_sha"] != connection.verified_sha:
-        raise WebsiteAuthorityError("website_source_changed", "The verified website source changed since this draft. Review a new publishing revision.")
+        # A newly admitted publication may consume a separately reviewed ref.
+        # Its source remains pinned; only the fresh destination uses default.
+        from .run_review_source import publication_binding_source
+        publication_binding_source(source_run, connection)
     target = connection.targets.filter(generation=connection.generation,
         target_key=getattr(config, "default_publish_target_id", None), source_sha=connection.verified_sha,
         verified_at__isnull=False).first()

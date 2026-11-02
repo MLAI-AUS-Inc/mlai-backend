@@ -84,6 +84,13 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                     expected = connection_contract(request.data)
                     if expected and any(connection_contract(payload).get(key) != value for key, value in expected.items()):
                         raise WebsiteAuthorityError("website_connection_changed", "This run belongs to a previous website connection.")
+                    from .run_ownership import owner_receipt, admission_enabled
+                    if run_action in {"promote-bundle", "publish-pr"} and (owner_receipt(run) is not None or admission_enabled()):
+                        # This is a new child execution. The canonical controller
+                        # checks actual publisher, retained review source and fresh
+                        # destination before any placeholder or provider request.
+                        with owner_operation_scope(payload):
+                            return invoke()
                 else:
                     requested_repo = str(request.data.get("github_repo") or request.data.get("githubRepo") or config.github_repo or "").strip()
                     from .vibe_marketing_views import _github_repo_company_conflict_response
