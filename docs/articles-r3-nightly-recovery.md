@@ -29,5 +29,9 @@ The existing authenticated execution-ticket controller owns original-budget
 and complete retained-journal checks, durable claims, current-ticket CAS and
 same-key replay. Worker grant preflight must occur outside a CF Run lock, since
 that backend controller reads CF budget/history before issuing its ticket.
-Actual paired worker recovery is a separate acceptance gate. These changes do
-not enable any runtime flag or enroll historical rows.
+The frozen actual worker and PostgreSQL fixtures exercise the original HTTP
+admission, real orphan control body/budget/history, real backend grant and
+lost-ack replay, then the same retained guarded worker through completed global
+event cursor 28. Replaying the full journal changes no backend row. The original
+expansion intent is reused and no repository authorization or TOPIC benefit is
+introduced. These changes do not enable flags or enroll historical rows.

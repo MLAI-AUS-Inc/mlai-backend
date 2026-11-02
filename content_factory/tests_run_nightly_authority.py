@@ -319,3 +319,42 @@ class NightlyAuthorityTests(TransactionTestCase):
         if os.environ.get("R3_EXPORT_NIGHTLY_CONTROL_GRANT") == "1":
             Path("/Users/samdonegan/Documents/Code/founder-journey-worktrees/recovery/R3_BE_ACTUAL_NIGHTLY_CONTROL_GRANTED.json").write_text(
                 json.dumps(granted, indent=2) + "\n")
+        completed = json.loads((Path(__file__).parent / "testdata/r3/nightly_actual_completed_worker.json").read_text())
+        self.assertEqual(completed["resume"]["backend_grant"], granted)
+        self.assertEqual(completed["run_request"]["backend_run_admission_v1"], original["backend_run_admission_v1"])
+        self.assertEqual(completed["run_request"]["backend_run_execution_v1"], granted["backend_run_execution_v1"])
+        self.assertIs(completed["run_request"]["include_expansion"], True)
+        self.assertEqual((completed["expansion_calls"], completed["repository_authorization_calls"]), (1, 0))
+        # Pagination removes only the already committed prefix. Every retained
+        # event/ticket/digest is unchanged from the actual authenticated CF GET.
+        page = deepcopy(completed["history"])
+        page["batches"] = [{**batch, "events": [event for event in batch["events"] if event["seq"] > 4]}
+            for batch in page["batches"] if any(event["seq"] > 4 for event in batch["events"])]
+        def final_history(url, **kwargs):
+            self.assertTrue(url.endswith("/events"), url)
+            self.assertEqual(kwargs["params"], {"after_seq": 4, "limit": 100})
+            self.assertFalse(connection.in_atomic_block)
+            reply = requests.Response(); reply.status_code = 200
+            reply._content = json.dumps(page).encode(); reply._content_consumed = True
+            return reply
+        from .run_reconciliation import reconcile_authoritative_run
+        from .run_ownership import EVENT_RESULT_KEY, RECONCILIATION_RESULT_KEY, TOPIC_DELIVERY_RESULT_KEY
+        from .run_event_authority import receive_authoritative_run_events
+        with patch("requests.get", side_effect=final_history) as remote:
+            outcome = reconcile_authoritative_run(run.run_id, refresh=True)
+        self.assertEqual(outcome["outcome"], "history_received", outcome)
+        self.assertEqual(remote.call_count, 1)
+        run.refresh_from_db()
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(current_execution_ticket(run), granted["backend_run_execution_v1"])
+        self.assertEqual(run.result[RECONCILIATION_RESULT_KEY]["cursor"], 28)
+        self.assertEqual(len(run.result[EVENT_RESULT_KEY]["events"]), 28)
+        self.assertNotIn(TOPIC_DELIVERY_RESULT_KEY, run.result)
+        before_replay = ContentFactoryRun.objects.values().get(pk=run.pk)
+        for batch in completed["history"]["batches"]:
+            replay = receive_authoritative_run_events(batch)
+            self.assertEqual(replay.status_code, 200, replay.data)
+            self.assertEqual(replay.data["accepted"], 0)
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before_replay)
+        self.assertEqual(run.run_request, original)
+        self.assertFalse(Ledger.objects.exists())
