@@ -184,3 +184,10 @@ For the rebased disposable runner, add
 `--migration-inventory docs/pulse-reliability-release-test-migrations.json`
 and pass the new approved digest. Deployment retains the production migration
 plan gate and must stop if a new, unapproved pending plan is found.
+
+The final PostgreSQL Pulse, source-cache, existing collection, member-perk and
+Home regression selection passed 366 tests. The legacy service admission
+selection passed six tests, and the complete founder API suite passed 99 tests.
+Founder status responses now use the saved preflight run even without Gmail
+authorization, so one missing connector cannot hide other failed source checks.
+Active runs retain their pinned source selection; changing it requires a new run.

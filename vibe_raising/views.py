@@ -1925,7 +1925,11 @@ def _build_status_payload(*, user, company, domain):
     )
 
     error = None
-    if latest_run_requires_gmail and not google_scope_status["hasGmailScope"]:
+    if (
+        latest_run_requires_gmail
+        and not google_scope_status["hasGmailScope"]
+        and not (latest_run and (latest_run.run_request or {}).get("source_preflight_version"))
+    ):
         state = "needs_google_auth"
     elif open_run is not None:
         state = "processing"
@@ -2049,7 +2053,11 @@ def _build_email_draft_payload(
     )
 
     error = None
-    if latest_run_requires_gmail and not google_scope_status["hasGmailScope"]:
+    if (
+        latest_run_requires_gmail
+        and not google_scope_status["hasGmailScope"]
+        and not (latest_run and (latest_run.run_request or {}).get("source_preflight_version"))
+    ):
         state = "auth_required"
     elif latest_run is not None and latest_run.status == ContentFactoryRunStatus.QUEUED:
         state = "queued"
