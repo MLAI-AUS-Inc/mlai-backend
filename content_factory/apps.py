@@ -8,3 +8,4 @@ class ContentFactoryConfig(AppConfig):
 
     def ready(self):
         from . import checks  # noqa: F401
+        from . import job_mirror  # noqa: F401  (Job -> run dual-write receivers)

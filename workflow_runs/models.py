@@ -30,6 +30,29 @@ class ContentFactoryApprovalState(models.TextChoices):
     APPROVAL_REQUIRED = "approval_required", "Approval Required"
     APPROVED = "approved", "Approved"
     DENIED = "denied", "Denied"
+
+
+# The backend's delivery phase: ContentFactoryJob.STATUS_CHOICES, unchanged.
+# Kept here (not imported) so workflow_runs never imports content_factory;
+# tests/test_run_job_fold.py pins the two lists equal.
+CONTENT_FACTORY_DELIVERY_PHASE_CHOICES = [
+    ("queued", "Queued"),
+    ("researching", "Researching"),
+    ("awaiting_confirmation", "Awaiting Confirmation"),
+    ("awaiting_delivery_mode", "Awaiting Delivery Mode"),
+    ("awaiting_approval", "Awaiting Approval"),
+    ("generating", "Generating"),
+    ("blocked", "Blocked"),
+    ("pr_opened", "PR Opened"),
+    ("needs_review", "Needs Review"),
+    ("confirmed", "Confirmed"),
+    ("cancelled", "Cancelled"),
+    ("completed", "Completed"),
+    ("error", "Error"),
+    ("auth_required", "Auth Required"),
+]
+
+
 class ContentFactoryRun(models.Model):
     """
     Canonical durable run state for Content Factory harness workflows.
@@ -82,6 +105,49 @@ class ContentFactoryRun(models.Model):
     # so a stuck-looking run is checked at most once per probe interval even
     # though the scheduler ticks every minute.
     reconciled_at = models.DateTimeField(blank=True, null=True)
+
+    # Backend-owned facts folded in from ContentFactoryJob (robustness Phase 3,
+    # R7 job/run merge). Written only by content_factory.job_mirror and the
+    # backfill_run_job_fields command; ContentFactoryJob stays authoritative
+    # until run-only writes. CF snapshots never write these columns, and
+    # `status` above stays owned by CF snapshots and events. Defaulted columns
+    # keep their database default too, so a row inserted without them (an
+    # older binary, or a migration test's historical model) still succeeds.
+    delivery_phase = models.CharField(
+        max_length=30, blank=True, default="", db_default="", choices=CONTENT_FACTORY_DELIVERY_PHASE_CHOICES,
+    )
+    # The Job's request_meta. Kept apart from run_request, which CF snapshots merge.
+    job_meta = models.JSONField(default=dict, db_default={}, blank=True)
+    client_request_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    billing_source_run_id = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    billing_amount = models.IntegerField(default=0, db_default=0)
+    billing_status = models.CharField(max_length=20, blank=True, default="", db_default="")
+    billing_ledger = models.ForeignKey(
+        "roo.Ledger",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="content_factory_runs",
+    )
+    selected_keyword = models.CharField(max_length=255, blank=True, null=True)
+    selection_reason = models.TextField(blank=True, null=True)
+    selection_data = models.JSONField(default=dict, db_default={}, blank=True)
+    slack_channel_id = models.CharField(max_length=100, blank=True, default="", db_default="")
+    slack_root_message_ts = models.CharField(max_length=50, blank=True, default="", db_default="")
+    slack_thread_ts = models.CharField(max_length=50, blank=True, default="", db_default="")
+    progress_message_ts = models.CharField(max_length=50, blank=True, default="", db_default="")
+    posted_progress_ids = models.JSONField(default=list, db_default=[], blank=True)
+    last_progress_milestone_index = models.IntegerField(default=0, db_default=0)
+    last_progress_milestone_key = models.CharField(max_length=100, blank=True, default="", db_default="")
+    last_progress_updated_at = models.DateTimeField(blank=True, null=True)
+    still_working_pinged_at = models.DateTimeField(blank=True, null=True)
+    article_url = models.URLField(blank=True, null=True)
+    pr_url = models.URLField(blank=True, null=True)
+    # The Job's error_message. Kept apart from `error`, which snapshots own.
+    job_error_message = models.TextField(blank=True, null=True)
+    # The mirrored Job's job_id, only when it differs from run_id (dispatch tokens).
+    legacy_job_id = models.CharField(max_length=100, blank=True, default="", db_default="", db_index=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -97,6 +163,10 @@ class ContentFactoryRun(models.Model):
             # matching row for the domain on each bootstrap call.
             models.Index(fields=["domain", "workflow", "-updated_at"], name="cf_run_domain_wf_updated_idx"),
             models.Index(fields=["organization", "workflow", "-updated_at"], name="cf_run_org_wf_updated_idx"),
+            # Slack thread routing (content_views thread resolvers). Built
+            # concurrently by migration 0007.
+            models.Index(fields=["slack_channel_id", "slack_thread_ts"], name="cf_run_slack_thread_idx"),
+            models.Index(fields=["slack_channel_id", "slack_root_message_ts"], name="cf_run_slack_root_idx"),
         ]
 
     def save(self, *args, **kwargs):

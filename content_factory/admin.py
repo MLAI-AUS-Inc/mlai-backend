@@ -411,6 +411,7 @@ class WrittenArticleAdmin(admin.ModelAdmin):
     list_select_related = ('organization', 'job')
     ordering = ('-created_at',)
     readonly_fields = ('created_at',)
+    raw_id_fields = ('run',)
 
     def organization_domain(self, obj):
         return obj.organization.domain

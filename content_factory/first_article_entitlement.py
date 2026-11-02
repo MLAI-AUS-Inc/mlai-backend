@@ -449,9 +449,14 @@ def _established(organization, config, *, count_website: bool) -> bool:
         return True
     if any(not entitled_request(request) for request in runs.filter(status="completed").values_list("run_request", flat=True)[:50]):
         return True
-    paid_jobs = ContentFactoryJob.objects.filter(domain__iexact=organization.domain, billing_status__in=["charged", "reused"])
-    return any(_mapping(meta).get("roo_points_action") not in TOPIC_ACTIONS
-        for meta in paid_jobs.values_list("request_meta", flat=True)[:50])
+    from .job_view import job_runs, read_job_flag
+
+    def paid_article(rows, meta_field):
+        paid_jobs = rows.filter(domain__iexact=organization.domain, billing_status__in=["charged", "reused"])
+        return any(_mapping(meta).get("roo_points_action") not in TOPIC_ACTIONS
+            for meta in paid_jobs.values_list(meta_field, flat=True)[:50])
+    return read_job_flag("established_paid_job", from_job=lambda: paid_article(ContentFactoryJob.objects, "request_meta"),
+        from_run=lambda: paid_article(job_runs(), "job_meta"))
 
 
 def _topic_batch_free(organization, user, rows: _Rows, *, now, established: bool) -> bool:

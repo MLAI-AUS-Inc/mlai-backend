@@ -79,8 +79,12 @@ def _same_company_charge(ledger, *, organization_id, domain, key):
             _ledger_id(saved.get('roo_points_ledger_id')) == ledger.pk
             and normalize_content_factory_domain(saved.get('domain')) == domain)
     # Older authenticated/Roo starts materialize their billing on the job.
-    return ContentFactoryJob.objects.filter(domain__iexact=domain, client_request_id=key,
-        billing_ledger_id=ledger.pk).exists()
+    from .job_view import job_runs, read_job_flag
+    return read_job_flag("same_company_charge",
+        from_job=lambda: ContentFactoryJob.objects.filter(domain__iexact=domain, client_request_id=key,
+            billing_ledger_id=ledger.pk).exists(),
+        from_run=lambda: job_runs().filter(domain__iexact=domain, client_request_id=key,
+            billing_ledger_id=ledger.pk).exists())
 
 
 def original_article_spend_for_run(run):
