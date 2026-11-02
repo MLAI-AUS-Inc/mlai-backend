@@ -15,6 +15,26 @@ from . import founder_journey as journey
 
 
 class FounderArticleContractTests(JourneyFixture, TestCase):
+    def test_actual_first_article_http_cards_keep_nullable_topic_and_original_schema(self):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from community_chat.my_startup_journey_views import FirstArticleCardView
+        cases = []
+        for name, description in (("suggested", self.one_liner), ("custom_required", "")):
+            self.describe(description)
+            request = APIRequestFactory().get("/api/v1/my-startup/first-article/", {"company_id": str(self.company.pk)})
+            force_authenticate(request, user=self.owner)
+            from contextlib import nullcontext
+            empty_topics = patch("content_factory.content_first_article.topics_for", return_value=[]) if name == "custom_required" else nullcontext()
+            with patch("community_chat.throttles.StartupScopedThrottle.allow_request", return_value=True), empty_topics:
+                response = FirstArticleCardView.as_view()(request)
+            self.assertEqual(response.status_code, 200, response.data)
+            self.assertEqual(response.data["version"], 1)
+            self.assertEqual(response.data["topic"] is None, name == "custom_required")
+            cases.append({"name": name, "companyId": str(self.company.pk), "payload": response.data})
+        target = os.environ.get("FOUNDER_EXPORT_R5_FIRST_CARD")
+        if target:
+            Path(target).write_text(json.dumps({"source": "actual authenticated HTTP card; synthetic local organization, nullable case uses empty topic source, no worker/model effects", "cases": cases}, indent=2) + "\n")
+
     def test_portable_first_article_never_requires_repository_capability(self):
         self.describe(self.one_liner, target_audience="Australian physiotherapy clinics")
         value = self.journey()
