@@ -33,6 +33,12 @@ class RunFactGuardTests(TransactionTestCase):
 
     def job(self, run=None, **fields):
         run = run or self.run
+        ledger = fields.pop("billing_ledger", fields.pop("billing_ledger_id", None))
+        if ledger is not None:
+            # Retention defenses also cover externally corrupted references.
+            # Seed that corruption explicitly; never ask the fact writer to
+            # approve an arbitrary Ledger as an original financial obligation.
+            ContentFactoryRun.objects.filter(pk=run.pk).update(billing_ledger_id=getattr(ledger, "pk", ledger))
         return create_job_facts(job_id=run.run_id, domain=run.domain, slack_user_id="U_SYNTHETIC",
             status="queued", request_meta={"synthetic": True}, **fields)
 
@@ -177,9 +183,11 @@ class RunFactGuardTests(TransactionTestCase):
         with transaction.atomic():
             record_article_charge(job, ledger=spend, cost_points=12, billing_user=user, requester=user,
                 article_request_key="sealed-guard", confirmed_keyword="Approved synthetic topic", custom_title=None)
-        job.billing_ledger = self.ledger()
+        refund, _ = PointsService.refund(user=user, delta=12, source="CONTENT_FACTORY",
+            description="Synthetic exact original refund", created_by_slack_id="system",
+            original_spend_key=spend.idempotency_key, idempotency_key="sealed-guard-refund")
+        job.billing_ledger = refund
         save_job_facts(job, update_fields=["billing_ledger"])
-        refund = self.ledger(refund_of=spend)
         before = self.snapshot()
         for row in (spend, refund):
             with self.subTest(kind=row.kind), self.assertRaises(RunFactHistoryProtected):
