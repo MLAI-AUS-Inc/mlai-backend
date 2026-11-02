@@ -202,10 +202,10 @@ def _claims(run, identity):
 
 
 def _copy_article_approval(run):
-    from .article_publish_approval import article_publish_approval_receipt_matches, article_review_identity
+    from .article_publish_approval import article_publish_approval_receipt, article_publish_approval_receipt_matches, article_review_identity
     if not article_publish_approval_receipt_matches(run):
         return None
-    source = _mapping(run.run_request).get("article_publish_approval_receipt") or {}
+    source = article_publish_approval_receipt(run)
     identity = article_review_identity(run)
     claims = _claims(run, identity)
     # Copy the P1 receipt fields verbatim; never reconstruct a consent from

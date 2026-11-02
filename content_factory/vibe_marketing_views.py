@@ -19698,10 +19698,14 @@ def _article_publish_retry_authorized(run):
     Runs approved before durable local receipts existed can retry an already
     recorded child. They cannot initiate a new child from a fresh draft.
     """
-    run_request = _run_mapping(run.run_request)
+    from .article_publish_approval import article_publish_approval_state
+    run_request = article_publish_approval_state(run)
     if ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY in run_request:
         return article_publish_approval_receipt_matches(run)
     if ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY in run_request:
+        return False
+    from .run_ownership import owner_receipt
+    if owner_receipt(run) is not None:
         return False
     return bool(
         run.approval_state == ContentFactoryApprovalState.APPROVED
@@ -19719,6 +19723,15 @@ def _require_article_publish_approval_receipt(run, *, expected_identity):
         ):
             return False
         run_request = dict(current.run_request or {})
+        from .run_ownership import (ARTICLE_PUBLISH_APPROVAL_RESULT_KEY, current_execution_ticket,
+                                   owner_receipt, wire_identity)
+        if owner_receipt(current) is not None:
+            from .website_contract import evidence_digest
+            state = {"schema_version": 1, "admission_digest": evidence_digest(wire_identity(owner_receipt(current))),
+                "execution": current_execution_ticket(current), ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY: True}
+            ContentFactoryRun.objects.filter(pk=current.pk).update(result={**current.result, ARTICLE_PUBLISH_APPROVAL_RESULT_KEY: state})
+            run.result = {**current.result, ARTICLE_PUBLISH_APPROVAL_RESULT_KEY: state}
+            return True
         run_request[ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY] = True
         current.run_request = run_request
         current.save(update_fields=["run_request", "updated_at"])
@@ -19737,6 +19750,16 @@ def _record_article_publish_approval_receipt(run, *, actor_id, expected_identity
         if not receipt:
             return False
         run_request = dict(current.run_request or {})
+        from .run_ownership import (ARTICLE_PUBLISH_APPROVAL_RESULT_KEY, current_execution_ticket,
+                                   owner_receipt, wire_identity)
+        if owner_receipt(current) is not None:
+            from .website_contract import evidence_digest
+            state = {"schema_version": 1, "admission_digest": evidence_digest(wire_identity(owner_receipt(current))),
+                "execution": current_execution_ticket(current), ARTICLE_PUBLISH_APPROVAL_RECEIPT_REQUIRED_KEY: True,
+                ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY: receipt}
+            ContentFactoryRun.objects.filter(pk=current.pk).update(result={**current.result, ARTICLE_PUBLISH_APPROVAL_RESULT_KEY: state})
+            run.result = {**current.result, ARTICLE_PUBLISH_APPROVAL_RESULT_KEY: state}
+            return True
         run_request[ARTICLE_PUBLISH_APPROVAL_RECEIPT_KEY] = receipt
         current.run_request = run_request
         current.save(update_fields=["run_request", "updated_at"])
