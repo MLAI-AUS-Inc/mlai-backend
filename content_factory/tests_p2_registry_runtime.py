@@ -103,8 +103,9 @@ class SweepRunnerTests(SimpleTestCase):
             result = self_heal_sweeps.run_self_heal_sweeps(now=now, sweeps=sweeps)
         self.assertEqual(json.loads(json.dumps(result)), {"date": {"next_at": str(now), "processed": 2}})
 
-    def test_today_every_sweep_is_missing(self):
-        result = self_heal_sweeps.scheduled_self_heal_sweeps()
+    def test_missing_packages_are_reported_without_importing_them(self):
+        with patch.object(self_heal_sweeps, "_module_available", return_value=False):
+            result = self_heal_sweeps.scheduled_self_heal_sweeps()
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["errors"], 0)
         self.assertEqual(set(result["sweeps"]), {name for name, _, _ in self_heal_sweeps.SWEEPS})
@@ -189,7 +190,8 @@ class LazyRouteTests(TestCase):
                 # Cached: still served after the fake module is gone.
                 self.assertEqual(self.client.get(path).status_code, 200)
                 route.lazy_reset()
-                self.assertEqual(self.client.get(path).status_code, 404)
+                with missing_provider(module):
+                    self.assertEqual(self.client.get(path).status_code, 404)
 
     def test_a_missing_class_in_a_present_module_is_404(self):
         view = lazy_view("content_factory.p2_fake_views", "Missing")
