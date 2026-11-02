@@ -296,8 +296,17 @@ class PostApprovalCallbackReplayTests(SimpleTestCase):
             action='workflow',payload={'attempt':1,'run_id':self.child.run_id})
         self.website.operations.filter.return_value.first.return_value=self.operation
         self.processed=Mock(return_value=True)
-        context=patch.object(self.callbacks.ContentFactoryRun.objects,'filter',
-            side_effect=lambda **kw:SimpleNamespace(first=lambda:self.source if kw['run_id']==self.source.run_id else self.child))
+        def saved_run(**filters):
+            if set(filters) == {"result__run_owner_v1__identity__dispatch_key"}:
+                # Both retained source and child are genuinely unmarked.
+                return SimpleNamespace(first=lambda: None)
+            if "run_id" in filters and set(filters) <= {"run_id", "workflow", "organization_id"}:
+                rows = {self.source.run_id: self.source, self.child.run_id: self.child}
+                row = rows.get(filters["run_id"])
+                return SimpleNamespace(first=lambda: row if row is not None and all(
+                    getattr(row, key, None) == value for key, value in filters.items()) else None)
+            raise AssertionError(f"Unexpected canonical lookup: {filters}")
+        context=patch.object(self.callbacks.ContentFactoryRun.objects,'filter', side_effect=saved_run)
         context.start();self.addCleanup(context.stop)
         context=patch.object(self.callbacks.ContentFactoryCallbackEvent.objects,'filter')
         context.start().return_value.exists=self.processed

@@ -17,6 +17,7 @@ class RetiredRunWriterTests(TransactionTestCase):
     def setUp(self):
         fixture = make_p2_org()
         self.org, self.user, self.config = fixture.organization, fixture.owner, fixture.config
+        self.company = fixture.company
         self.actor = f"mlai_user:{self.user.pk}"
         raw = {"domain": self.org.domain, "client_request_id": "retired-original", "topic": "Retained original",
             "delivery_mode": "content_only", "delivery_mode_confirmed": True}
@@ -60,6 +61,104 @@ class RetiredRunWriterTests(TransactionTestCase):
         old_status.assert_not_called()
         self.assertEqual(observed["status"], before[0]["status"])
         self.assertEqual(self.snapshot(), before)
+
+    def test_direct_poll_repair_helpers_cannot_replace_owned_execution_state(self):
+        from .tests_run_event_authority import batch
+        from .run_event_authority import receive_authoritative_run_events
+        self.assertEqual(receive_authoritative_run_events(batch(self.run,
+            [{"status": "running"}, {"status": "blocked"}])).status_code, 200)
+        self.run.refresh_from_db()
+        before = self.snapshot()
+        with patch.object(views, "_article_run_has_completed_local_artifacts", return_value=True) as artifacts:
+            views._heal_stale_status_poll_timeout(self.run)
+        artifacts.assert_not_called()
+        self.assertEqual(self.snapshot(), before)
+        raw = {"domain": self.org.domain, "client_request_id": "retired-autofill"}
+        autofill = bind_admitted_run(reserve_admitted_run(organization=self.org,
+            principal=user_principal(self.user.pk, self.actor), workflow="startup_autofill", payload=raw),
+            "retired-autofill-worker")
+        before = self.snapshot(autofill)
+        views._block_startup_autofill_on_status_poll_unavailable(autofill, {"error": "Status timed out"})
+        self.assertEqual(self.snapshot(autofill), before)
+
+    def test_dispatch_ack_after_revoke_retains_owned_execution_and_queues_only_cleanup_intent(self):
+        from .website_models import WebsiteConnection, WebsiteConnectionOperation
+        from .website_connections import contract_for
+        website = WebsiteConnection.objects.create(organization=self.org, authorized_by=self.user,
+            github_repo="synthetic/retired-ack", repository_id=42, installation_id="1001", branch="main", verified_sha="a" * 40)
+        operation = WebsiteConnectionOperation.objects.create(connection=website, generation=website.generation,
+            action="workflow", idempotency_key="retired-late-operation", payload={"attempt": 1, "deletion_epoch": 0})
+        raw = {**contract_for(website), "operation_id": str(operation.pk), "operation_attempt": 1, "deletion_epoch": 0, "domain": self.org.domain, "github_repo": website.github_repo,
+            "client_request_id": "retired-late-ack"}
+        run = bind_admitted_run(reserve_admitted_run(organization=self.org,
+            principal=user_principal(self.user.pk, self.actor), workflow="article_generation", payload=raw), "retired-late-worker")
+        before = self.snapshot(run)
+        WebsiteConnection.objects.filter(pk=website.pk).update(state="revoked", generation=2)
+        retained = views._create_local_run(workflow=run.workflow, domain=run.domain, github_repo=run.github_repo,
+            actor_id=self.actor, payload=run.run_request, remote_data={"run_id": run.run_id, "status": "queued"})
+        self.assertEqual(retained.pk, run.pk)
+        self.assertEqual(self.snapshot(run), before)
+        from .website_operations import bind_operation_run
+        bind_operation_run(operation, run)
+        self.assertEqual(self.snapshot(run), before)
+        cleanup = WebsiteConnectionOperation.objects.get(idempotency_key=f"{website.pk}:late-dispatch:{operation.pk}")
+        from .website_cancellation_retirement import bindings_for
+        self.assertEqual(cleanup.payload["cancel_run_bindings"], bindings_for([run]))
+        self.assertTrue(WebsiteConnectionOperation.objects.filter(connection=website, action="disconnect",
+            payload__cancel_run_ids__contains=[run.run_id]).exists())
+
+    def test_actual_scan_and_setup_post_metadata_preserve_racing_typed_journal_and_clocks(self):
+        from .website_models import WebsiteConnection
+        from .website_connections import contract_for
+        from .run_ownership import admitted_run_for_key, EVENT_RESULT_KEY
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_event_authority import batch
+        from .run_provider_facts import save_provider_result
+        from roo.services import PointsService
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        PointsService.credit_purchased_topup(user=self.user, delta=100, description="Synthetic scan gate",
+            idempotency_key="retired-post-funding")
+        website = WebsiteConnection.objects.create(organization=self.org, authorized_by=self.user,
+            github_repo="synthetic/metadata", repository_id=42, installation_id="1001", branch="main", verified_sha="a" * 40)
+        self.config.website_connection, self.config.github_repo = website, website.github_repo
+        self.config.save(update_fields=["website_connection", "github_repo"])
+        provider = Mock(status_code=200)
+        provider.json.return_value = {"id": 42, "full_name": website.github_repo, "default_branch": "main", "sha": "a" * 40}
+        for index, endpoint in enumerate((views.VibeMarketingScanView, views.VibeMarketingArticleSystemSetupView)):
+            seen = []
+
+            def post(url, **kwargs):
+                run = admitted_run_for_key(kwargs["json"]["client_request_id"])
+                run = bind_admitted_run(run, f"retired-post-worker-{index}")
+                self.assertEqual(receive_authoritative_run_events(batch(run, [{"status": "running"}])).status_code, 200)
+                seen.append(ContentFactoryRun.objects.values().get(pk=run.pk))
+                response = Mock(status_code=202, content=b"{}")
+                response.json.return_value = {"run_id": run.run_id, "status": "queued"}
+                return response
+
+            def merge(run, proposed, **kwargs):
+                self.assertEqual(receive_authoritative_run_events(batch(run,
+                    [{"status": "running"}, {"status": "awaiting_approval"}])).status_code, 200)
+                return save_provider_result(run, proposed, **kwargs)
+
+            request = APIRequestFactory().post(f"/start?company_id={self.company.pk}", {
+                **contract_for(website), "company_id": str(self.company.pk), "github_repo": website.github_repo,
+                "articleSurfaceMode": "none", "articleSurfaceUrl": "/blog", "scanPurpose": "setup",
+                "clientRequestId": f"retired-post-original-{index}"}, format="json")
+            force_authenticate(request, user=self.user)
+            with patch("integrations.services.github_connections.read_bound_repository", return_value=provider), \
+                    patch.object(views, "analytics_config_for_content_factory", return_value={}), \
+                    patch.object(views.http_client, "post", side_effect=post), \
+                    patch("content_factory.run_provider_facts.save_provider_result", side_effect=merge):
+                response = endpoint.as_view()(request)
+            self.assertEqual(response.status_code, 202, response.data)
+            self.assertEqual(len(seen), 1)
+            after = ContentFactoryRun.objects.values().get(pk=seen[0]["id"])
+            self.assertEqual(after["status"], "awaiting_approval")
+            for key in ("created_at", "updated_at", "last_event_emitted_at", "reconciled_at", "run_request"):
+                self.assertEqual(after[key], seen[0][key], key)
+            self.assertEqual(len(after["result"][EVENT_RESULT_KEY]["events"]), 2)
+            self.assertEqual(after["result"][EVENT_RESULT_KEY]["projection"]["status"], "awaiting_approval")
 
     def test_actual_cancel_deny_and_approve_transport_echo_current_ticket_without_trusting_browser_scope(self):
         response = Mock(status_code=202, content=b"{}")

@@ -78,6 +78,20 @@ class OwnedRefundBoundaryTests(TestCase):
         self.assertFalse(spend.service_refunds.exists())
         self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before)
 
+    def test_owned_terminal_credit_intent_keeps_execution_clocks_and_original_request(self):
+        from types import SimpleNamespace
+        from integrations.services.article_generation import _record_terminal_article_refund
+        run, _, _ = self.obligation()
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        _record_terminal_article_refund(SimpleNamespace(job_id=run.run_id, domain=run.domain),
+            status="pending", error_code="RUN_BUDGET_EXHAUSTED")
+        after = ContentFactoryRun.objects.values().get(pk=run.pk)
+        for field in before.keys() - {"result"}:
+            self.assertEqual(after[field], before[field], field)
+        for key, value in before["result"].items():
+            self.assertEqual(after["result"][key], value)
+        self.assertEqual(after["result"]["article_terminal_refund"]["status"], "pending")
+
     def test_unmarked_original_article_keeps_actual_legacy_refund_behavior(self):
         run, spend, request = self.obligation(owned=False)
         refund = self.refund(request)

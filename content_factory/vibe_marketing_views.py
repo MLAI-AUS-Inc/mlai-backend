@@ -13408,6 +13408,9 @@ def _article_run_has_completed_local_artifacts(run):
 
 
 def _heal_stale_status_poll_timeout(run):
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        return run
     if not run or run.workflow not in ARTICLE_WORKFLOWS:
         return run
     if run.status != ContentFactoryRunStatus.BLOCKED:
@@ -13442,6 +13445,9 @@ def _heal_stale_status_poll_timeout(run):
 
 
 def _block_startup_autofill_on_status_poll_unavailable(run, remote_data):
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        return run
     if not run or run.workflow != "startup_autofill":
         return run
     payload = _blocked_worker_payload(
@@ -14123,18 +14129,21 @@ def _create_local_run(*, workflow, domain, github_repo="", actor_id="", payload=
                 "current_step": "website_connection_changed", "error": str(exc),
                 "result": {"error_code": exc.code, "remote_dispatch_accepted": bool(remote_id)},
             })
-            if not created and run.status not in {ContentFactoryRunStatus.COMPLETED, ContentFactoryRunStatus.CANCELLED}:
+            from .run_reconciliation import authoritative_run
+            if not created and not authoritative_run(run) and run.status not in {ContentFactoryRunStatus.COMPLETED, ContentFactoryRunStatus.CANCELLED}:
                 run.status = ContentFactoryRunStatus.CANCELLED
                 run.resume_available = False
                 run.error = str(exc)
                 run.save(update_fields=["status", "resume_available", "error", "updated_at"])
             if remote_id and website:
+                from .website_cancellation_retirement import bindings_for
                 WebsiteConnectionOperation.objects.get_or_create(
                     idempotency_key=f"{website.pk}:late-dispatch:{remote_id}", defaults={
                         "connection": website, "generation": website.generation,
                         "action": "disconnect", "state": "pending",
                         "payload": {"cancel_run_ids": [remote_id], "stop_preview_run_ids": [remote_id],
-                            "previous_generation": binding["connection_generation"]},
+                            "previous_generation": binding["connection_generation"],
+                            **({"cancel_run_bindings": bindings_for([run])} if authoritative_run(run) else {})},
                         "receipt": {"authority_revoked": True, "remote_cleanup_pending": True, "repository_modified": False},
                     })
             return run
@@ -17684,18 +17693,20 @@ class VibeMarketingScanView(APIView):
             payload=payload,
         )
         with owner_write_guard():
-            result = run.result or {}
+            result = copy.deepcopy(run.result or {})
+            baseline = copy.deepcopy(result)
             result["scan_purpose"] = scan_purpose
             result["article_surface_mode"] = article_surface_mode
             if article_surface_hint:
                 result["article_surface_hint"] = article_surface_hint
-            run.result = result
-            run.save(update_fields=["result", "updated_at"])
+            from .run_provider_facts import save_provider_result
+            save_provider_result(run, result, baseline=baseline, legacy_fields=["result", "updated_at"])
             if superseded_scan_run_ids:
-                result = run.result or {}
+                result = copy.deepcopy(run.result or {})
+                baseline = copy.deepcopy(result)
                 result["superseded_scan_run_ids"] = superseded_scan_run_ids
-                run.result = result
-                run.save(update_fields=["result", "updated_at"])
+                from .run_provider_facts import save_provider_result
+                save_provider_result(run, result, baseline=baseline, legacy_fields=["result", "updated_at"])
             if scan_purpose == "setup" and article_surface_hint:
                 route_path = str(article_surface_hint.get("route_path") or article_surface_url or "").strip()
                 source_scan_run_id = str(
@@ -17708,10 +17719,11 @@ class VibeMarketingScanView(APIView):
                     source_scan_run_id=source_scan_run_id,
                     article_surface_hint=article_surface_hint,
                 )
-                result = run.result or {}
+                result = copy.deepcopy(run.result or {})
+                baseline = copy.deepcopy(result)
                 result["pending_article_system_setup"] = pending
-                run.result = result
-                run.save(update_fields=["result", "updated_at"])
+                from .run_provider_facts import save_provider_result
+                save_provider_result(run, result, baseline=baseline, legacy_fields=["result", "updated_at"])
             return Response({"run_id": run.run_id, "runId": run.run_id, "status": run.status}, status=status.HTTP_202_ACCEPTED)
 
 
@@ -17803,18 +17815,20 @@ class VibeMarketingArticleSystemSetupView(APIView):
                     "setupStatus": run.status, "setup_status": run.status, "status": run.status}
                 config.article_system = {**dict(config.article_system or {}), "pending_article_system_setup": pending}
                 config.save(update_fields=["article_system", "updated_at"])
-                result = run.result or {}
+                result = copy.deepcopy(run.result or {})
+                baseline = copy.deepcopy(result)
                 result["scan_purpose"] = "setup"
                 result["article_surface_mode"] = article_surface_mode
                 result["article_surface_hint"] = article_surface_hint
                 result["pending_article_system_setup"] = pending
-                run.result = result
-                run.save(update_fields=["result", "updated_at"])
+                from .run_provider_facts import save_provider_result
+                save_provider_result(run, result, baseline=baseline, legacy_fields=["result", "updated_at"])
                 if not getattr(request, "_website_prepare_dispatch", False):
                     from .website_prepare import attach_selected_setup_run
                     attach_selected_setup_run(config, run, company_id=context.company.pk)
                 return Response(_run_start_payload(run), status=status.HTTP_503_SERVICE_UNAVAILABLE)
-            result = run.result or {}
+            result = copy.deepcopy(run.result or {})
+            baseline = copy.deepcopy(result)
             result["scan_purpose"] = "setup"
             result["article_surface_mode"] = article_surface_mode
             result["article_surface_hint"] = article_surface_hint
@@ -17837,8 +17851,8 @@ class VibeMarketingArticleSystemSetupView(APIView):
             setup_payload.setdefault("status", run.status)
             setup_payload["requested_action"] = None
             result["article_system_setup"] = setup_payload
-            run.result = result
-            run.save(update_fields=["result", "updated_at"])
+            from .run_provider_facts import save_provider_result
+            save_provider_result(run, result, baseline=baseline, legacy_fields=["result", "updated_at"])
             if not getattr(request, "_website_prepare_dispatch", False):
                 from .website_prepare import attach_selected_setup_run
                 attach_selected_setup_run(config, run, company_id=context.company.pk)

@@ -1537,7 +1537,8 @@ def _record_terminal_article_refund(job, *, status, error_code, ledger=None, pai
             receipt['refund_ledger_id'] = str(ledger.pk)
         current.result = {**result, 'article_terminal_refund': receipt,
             'reconciliation_refund_pending': status in {'pending', 'stop_required', 'needs_reconciliation', 'deferred_to_goal'}}
-        current.save(update_fields=['result', 'updated_at'])
+        from content_factory.run_reconciliation import authoritative_run
+        current.save(update_fields=['result'] if authoritative_run(current) else ['result', 'updated_at'])
 
 
 def maybe_auto_refund_terminal_failure(

@@ -309,7 +309,8 @@ def bind_operation_run(operation, run):
                 "receipt": {"status": "late_dispatch_cancel_requested", "remote_cleanup_pending": True, "repository_modified": None}})
             # A completed callback may have won before we acquired consent
             # locks. Read its current history under lock before cancelling.
-            if current.status in {"completed", "denied", "cancelled"}:
+            from .run_reconciliation import authoritative_run
+            if authoritative_run(current) or current.status in {"completed", "denied", "cancelled"}:
                 run.status, run.resume_available, run.error, run.result = current.status, current.resume_available, current.error, current.result
             else:
                 current.status, current.resume_available, current.error = "cancelled", False, "Website authority changed during dispatch."
