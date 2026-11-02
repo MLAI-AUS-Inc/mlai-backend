@@ -9043,6 +9043,16 @@ def _hide_kept_draft_sibling(sibling, *, now):
 def _run_delivery_mode(run):
     run_request = _run_mapping(run.run_request)
     result = _run_mapping(run.result)
+    channel = _run_mapping(result.get("channel_v1"))
+    converted = _run_mapping(result.get("channel_switch_cf_v1"))
+    package = _run_mapping(result.get("content_package") or result.get("delivery_package"))
+    if (channel.get("version") == 1 and channel.get("channel") == "copy_ready"
+            and channel.get("dispatch_state") == "accepted"
+            and converted.get("version") == 1 and converted.get("run_id") == run.run_id
+            and converted.get("key") == run.run_id + ":copy-ready"
+            and converted.get("state") == "completed" and converted.get("delivery_mode") == "content_only"
+            and (package.get("article_markdown") or package.get("article_html") or result.get("delivery_package_path"))):
+        return "content_only"
     return str(
         run_request.get("resolved_delivery_mode")
         or run_request.get("delivery_mode")
