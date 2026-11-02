@@ -133,6 +133,10 @@ class ExecutionTicketTests(TestCase):
         before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
         self.assertFalse(self.run.resume_available)
         self.assertTrue(can_request_user_resume(self.run, user=self.user))
+        from .founder_journey import project_founder_journey
+        payload = project_founder_journey(self.org, user=self.user, company=self.fixture.company, run_id=self.run.run_id)
+        self.assertTrue(payload["article"]["resumeAvailable"])
+        self.assertEqual(payload["article"]["status"], "failed")
         self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), before)
         from django.utils import timezone
         from datetime import timedelta

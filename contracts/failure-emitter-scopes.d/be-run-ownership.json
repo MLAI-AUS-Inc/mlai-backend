@@ -145,6 +145,18 @@
       "allowed_codes_ref": "contracts/failure-codes.json#/codes",
       "source": "Local goal coordination reports its saved child owner and an inspect-only next action. This does not alter execution lifecycle, create a retry, or classify a producer failure.",
       "test": "content_factory.tests_run_goal_authority"
+    },
+    {
+      "path": "content_factory/founder_article_errors.py",
+      "function": "article_error_envelope",
+      "field": "code",
+      "expression": "code",
+      "site_sha256": "f25b91a45c459d0502b719b0c911557f6700e0d3f7f065ac319258f67a3ca0ce",
+      "adapter": "nonfailure_category",
+      "owner": "backend.founder_article_contract",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Additive scoped article error presentation selects only canonical registry membership or the closed server COMMAND_COPY catalogue, otherwise UNREGISTERED_FAILURE_CODE. Local command conflicts are not CF failure classifications; the original response and validated producer failure envelope stay unchanged. Remote detail text never supplies founder copy.",
+      "test": "content_factory.tests_founder_article_contract"
     }
   ]
 }

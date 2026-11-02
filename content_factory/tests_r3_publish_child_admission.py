@@ -103,6 +103,22 @@ class PublishChildAdmissionTests(TransactionTestCase):
                 "parent_request": self.parent.run_request, "approved_review": self.review,
                 "dispatch": first, "child_request": child.run_request}, indent=2, sort_keys=True) + "\n")
 
+    def test_prepared_owned_publication_child_is_recovered_from_protected_source_dispatch_without_http(self):
+        from . import vibe_marketing_views as views
+        from .run_revision_child_admission import record_publish_handoff
+        child = prepare_publish_child(run=self.parent, user=self.user, payload={}, action="publish-pr")
+        record_publish_handoff(run=self.parent, child=child, pending=False)
+        self.parent.refresh_from_db(); child.refresh_from_db()
+        before = {run.pk: ContentFactoryRun.objects.values().get(pk=run.pk) for run in (self.parent, child)}
+        with patch.object(views, "_call_content_factory_run_status") as remote, patch.object(views.http_client, "post") as post:
+            resolved = views._admitted_publish_child_for_source(self.parent, child.run_id)
+            recovered = views._recover_publish_child_for_run(self.parent, request=None, context=self.fixture)
+        self.assertEqual(resolved.pk, child.pk)
+        self.assertEqual(recovered.pk, child.pk)
+        remote.assert_not_called(); post.assert_not_called()
+        for run in (self.parent, child):
+            self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before[run.pk])
+
     def test_changed_review_body_or_destination_cannot_reuse_admission(self):
         prepare_publish_child(run=self.parent, user=self.user, payload={}, action="publish-pr")
         with self.assertRaises(RunOwnershipConflict):
@@ -225,6 +241,8 @@ class PublishChildAdmissionTests(TransactionTestCase):
 
 @override_settings(**FLAGS, ARTICLES_PUBLISHING_INPUTS_V3_ENABLED=False)
 class LegacyPublishChildAdmissionTests(PublishChildAdmissionTests):
+    test_prepared_owned_publication_child_is_recovered_from_protected_source_dispatch_without_http = None
+
     def setUp(self):
         super().setUp()
         from .article_publish_approval import article_publish_approval_receipt, RECEIPT_KEY

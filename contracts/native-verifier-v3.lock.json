@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source_repository": "drsamdonegan/content-factory",
-  "source_revision": "64c8a7712c156ff0fd950c9fbb828f894c1cf055",
+  "source_revision": "24e89c83d3ecb52e9d6cec0774b03ead5e7a016a",
   "artifacts": {
     "contracts/native-verifier-v3.json": {
       "source_path": "contracts/native-verifier-v3.json",
@@ -9,7 +9,7 @@
     },
     "content_factory/testdata/sealed-verification-v3/static.json": {
       "source_path": "backend/tests/fixtures/native_evidence_v3_static.json",
-      "sha256": "460a5c2c4e36769d3e6ca87f83ac7b11c12a0e0a7b8e17844fa48444ff20f7ae"
+      "sha256": "8469427cae634db265db5d0467ef47caa64e4f3b8e8d5ab323e873f4702a3138"
     },
     "content_factory/testdata/sealed-verification-v3/proposal.json": {
       "source_path": "backend/tests/fixtures/native_candidate_v3_static.json",

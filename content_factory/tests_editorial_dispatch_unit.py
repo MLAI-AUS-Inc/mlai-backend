@@ -7,6 +7,7 @@ database and network guards. ORM/HTTP/billing seams are controlled fixtures,
 so these tests do not prove persistence, SQL races or real billing.
 """
 import ast
+import copy
 from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone as dt_timezone
@@ -152,7 +153,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         model_seam.start(); self.addCleanup(model_seam.stop)
         from content_factory.article_request_identity import ContentFactoryDispatchOutbox
         self.enterContext(patch.object(ContentFactoryDispatchOutbox.objects, "filter", return_value=SimpleNamespace(first=lambda: None)))
-        self.ns = {"__name__": "content_factory.vibe_marketing_views", "__package__": "content_factory",
+        self.ns = {"__name__": "content_factory.vibe_marketing_views", "__package__": "content_factory", "copy": copy,
             "transaction": SimpleNamespace(atomic=nullcontext),
             "Organization": SimpleNamespace(objects=SimpleNamespace(select_for_update=lambda: SimpleNamespace(get=lambda **kw: self.org))),
             "ContentFactoryRun": SimpleNamespace(objects=SimpleNamespace(select_for_update=lambda: SimpleNamespace(get=lambda **kw: self.run))),
