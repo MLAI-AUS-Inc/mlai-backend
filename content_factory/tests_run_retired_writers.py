@@ -171,6 +171,24 @@ class RetiredRunWriterTests(TransactionTestCase):
         self.assertEqual(calls, [])
         self.assertEqual(self.snapshot(), before)
 
+    def test_owned_deferred_refund_and_confirmed_absence_helpers_preserve_pending_evidence(self):
+        raw = {"domain": self.org.domain, "client_request_id": "retired-pending-refund",
+            "topic": "Retained original", "pending_billing_refund": {"charged_user_id": self.user.pk,
+                "actor_id": self.actor, "article_request": {"client_request_id": "retired-pending-refund"}}}
+        run = bind_admitted_run(reserve_admitted_run(organization=self.org,
+            principal=user_principal(self.user.pk, self.actor), workflow="article_generation", payload=raw),
+            "retired-pending-worker")
+        from .tests_run_event_authority import batch
+        from .run_event_authority import receive_authoritative_run_events
+        self.assertEqual(receive_authoritative_run_events(batch(run, [{"status": "running"}, {"status": "failed"}])).status_code, 200)
+        run.refresh_from_db()
+        before = self.snapshot(run)
+        with patch.object(views, "_refund_roo_points_for_article_start") as refund:
+            views._process_pending_dispatch_refund(run)
+            views._fail_unconfirmed_dispatch_run(run, outcome="not_received")
+        refund.assert_not_called()
+        self.assertEqual(self.snapshot(run), before)
+
     def test_old_valley_telemetry_refuses_owned_before_mutating_history_or_clocks(self):
         from .service_views import ContentFactoryRunValleyJobView
         from rest_framework.test import APIRequestFactory

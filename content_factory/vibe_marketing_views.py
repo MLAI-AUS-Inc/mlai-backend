@@ -14727,6 +14727,11 @@ def _process_pending_dispatch_refund(run) -> None:
             current = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).first()
             if current is None or current.status not in {"failed", "cancelled"}:
                 return
+            from .run_reconciliation import authoritative_run
+            if authoritative_run(current):
+                # Only exact dispatch closure settlement may credit an owned
+                # original. Keep its pending evidence and immutable request.
+                return
             run_request = dict(current.run_request or {})
             stash = run_request.get("pending_billing_refund")
             result = dict(current.result or {})
@@ -14781,6 +14786,9 @@ def _fail_unconfirmed_dispatch_run(run, *, outcome, lookup_payload=None):
     """Fail only a confirmed no-work dispatch and release its withheld refund."""
     from content_factory.dispatch_outbox import dispatch_failure_details
     from content_factory.section_issues import _safe_text
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        return run
     run_request = dict(run.run_request) if isinstance(run.run_request, dict) else {}
     lookup_payload = lookup_payload or {}
     code, detail = dispatch_failure_details(outcome, lookup_payload)
