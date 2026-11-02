@@ -82,14 +82,18 @@ class BrowserSession:
         except Exception:raise SmokeFailure('request') from None
 
 
-def check(credentials,expected_sha,request):
-    if (not re.fullmatch(r'[0-9a-f]{40}',expected_sha or '')
-        or not re.fullmatch(r'[^@\s]+@staging\.mlai\.au',credentials.get('email') or '')
-        or not credentials.get('password')
+def validate_credentials(credentials):
+    if (not re.fullmatch(r'[^@\s]+@staging\.mlai\.au',credentials.get('email') or '')
+        or not isinstance(credentials.get('password'),str) or not credentials.get('password')
         or not re.fullmatch(r'[0-9a-f]{64}',credentials.get('public_key') or '')):
         raise SmokeFailure('credentials')
     try:uuid.UUID(credentials['installation_id'])
     except (KeyError,ValueError,TypeError):raise SmokeFailure('credentials') from None
+
+
+def check(credentials,expected_sha,request):
+    validate_credentials(credentials)
+    if not re.fullmatch(r'[0-9a-f]{40}',expected_sha or ''):raise SmokeFailure('credentials')
     request('/community-chat/auth/password/',{
         'email':credentials['email'],'password':credentials['password'],'client_id':'mlai-chat-web',
         'device':{'public_key':credentials['public_key'],'installation_id':credentials['installation_id'],'platform':'web','name':'Staging readiness'}})
@@ -107,9 +111,12 @@ def check(credentials,expected_sha,request):
 
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--sha',required=True);parser.add_argument('--report',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--sha',required=True);parser.add_argument('--report',action='store_true');parser.add_argument('--validate',action='store_true');args=parser.parse_args()
     try:
-        print(json.dumps(check(read_credentials(),args.sha,BrowserSession().request)));return 0
+        credentials=read_credentials()
+        if args.validate:
+            validate_credentials(credentials);print(json.dumps({'ok':True,'check':'configuration'}));return 0
+        print(json.dumps(check(credentials,args.sha,BrowserSession().request)));return 0
     except Exception as error:
         print(json.dumps({'ok':False,'check':'signed-in','category':failure_category(error)}));return 0 if args.report else 1
 

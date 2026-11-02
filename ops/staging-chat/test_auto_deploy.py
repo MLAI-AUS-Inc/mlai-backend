@@ -35,6 +35,7 @@ class AutoDeployTests(unittest.TestCase):
         self.c.running=lambda values:None
         self.c.health=lambda:None
         self.c.smoke=lambda:None
+        self.c.preflight=lambda:None
         self.c.cleanup=lambda:None
         self.c.build=self.build
         self.c.activate=self.activate
@@ -272,7 +273,7 @@ class ReadinessTests(AutoDeployTests):
         calls=[]
         def smoke():
             calls.append(1)
-            if len(calls)==2:raise module.Failure('signed-in-check')
+            if len(calls)==1:raise module.Failure('signed-in-check')
         self.c.smoke=smoke
         self.assertEqual(self.c.tick(),'failed')
         self.assertEqual(self.c.load()['active_sha'],'0'*40)
@@ -356,7 +357,7 @@ class ReadinessTests(AutoDeployTests):
         self.assertTrue(all(s['readiness']!='ready' for s in candidate_checks))
 
     def test_invalid_probe_credentials_block_before_build_or_activation(self):
-        self.c.smoke=lambda:(_ for _ in ()).throw(module.Failure('signed-in-check'))
+        self.c.preflight=lambda:(_ for _ in ()).throw(module.Failure('signed-in-check'))
         self.assertEqual(self.c.tick(),'failed')
         self.assertEqual(self.built,[])
         self.assertEqual(self.activations,[])
@@ -374,3 +375,10 @@ class ReadinessTests(AutoDeployTests):
         self.assertEqual(self.c.tick(),'paused')
         self.assertEqual(self.c.status()['readiness'],'needs-attention')
         self.assertTrue(self.c.status()['recovery_pending'])
+
+    def test_preflight_checks_configuration_without_probing_broken_current_pages(self):
+        calls=[]
+        self.c.preflight=lambda:calls.append('configuration')
+        self.c.smoke=lambda:calls.append('candidate')
+        self.assertEqual(self.c.tick(),'deployed')
+        self.assertEqual(calls,['configuration','candidate'])

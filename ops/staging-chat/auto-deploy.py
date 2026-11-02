@@ -76,7 +76,10 @@ class Controller:
             receipt.update(component=COMPONENT,observed_at=self.clock(),paused=self.paused.exists(),recovery_pending=self.journal.exists())
             self.write_json(Path(self.cfg['status_dir'])/(COMPONENT+'.json'),receipt)
 
-    def smoke(self):
+    def preflight(self):
+        self.smoke(validate_only=True)
+
+    def smoke(self,validate_only=False):
         path=Path('/etc/mlai-staging-smoke/smoke.py')
         if path.is_symlink() or path.stat().st_uid!=0 or path.stat().st_mode & 0o022 or hashlib.sha256(path.read_bytes()).hexdigest()!=self.cfg.get('smoke_hash'):
             raise Failure('installed-smoke')
@@ -88,7 +91,7 @@ class Controller:
             lines=dict(line.split('=',1) for line in backend.read_text().splitlines() if '=' in line and not line.startswith('#'))
             sha=lines['STAGING_API_SOURCE_SHA']
         if not SHA.fullmatch(sha):raise Failure('smoke-release')
-        result=json.loads(self.run(['python3',str(path),'--report','--sha',sha],timeout=150))
+        result=json.loads(self.run(['python3',str(path)]+(['--validate'] if validate_only else [])+['--report','--sha',sha],timeout=150))
         if result.get('ok') is not True:
             category=result.get('category')
             if category not in {'configuration','account','release','core-pages','browser-access'}:category='service'
@@ -303,7 +306,7 @@ class Controller:
                 source=self.checkout(sha);self.compatible(source)
                 self.running(self.values(self.env))
                 state.update(outcome='checking',readiness='checking',last_checked_at=self.clock(),last_smoke_attempt=self.clock());self.save(state)
-                self.smoke()  # Preflight the current account/probe before touching a candidate.
+                self.preflight()  # Validate private probe configuration without blocking a fix for old broken pages.
                 release=self.releases/sha;release.mkdir(mode=0o700,exist_ok=True)
                 candidate=release/'candidate.env'
                 self.build(sha,source,candidate)
