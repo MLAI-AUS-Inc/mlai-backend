@@ -46,15 +46,19 @@ class SourceOperationControlTests(TransactionTestCase):
         self.sequence = 0
         self.make_run()
 
-    def make_run(self, workflow="article_system_setup"):
+    def make_run(self, workflow="article_system_setup", *, suffix=""):
+        if suffix:
+            self.operation = WebsiteConnectionOperation.objects.create(connection=self.website, generation=1,
+                action="workflow", state="running", idempotency_key="synthetic-source-control-operation" + suffix,
+                payload={"run_id": "source-control-worker" + suffix, "attempt": 1, "deletion_epoch": 0})
         payload = {"domain": self.org.domain, "github_repo": self.website.github_repo,
-            "client_request_id": "source-control-original", "expected_source_sha": "a" * 40,
+            "client_request_id": "source-control-original" + suffix, "expected_source_sha": "a" * 40,
             "github_installation_id": "45", "configuration_revision": 1,
             "approved_body_sha256": "b" * 64, "article_text": "Keep this approved body",
             **contract_for(self.website), "operation_id": str(self.operation.pk), "operation_attempt": 1, "deletion_epoch": 0}
         run = reserve_admitted_run(organization=self.org, principal=user_principal(self.user.pk, f"mlai_user:{self.user.pk}"),
             workflow=workflow, payload=payload)
-        self.run = bind_admitted_run(run, "source-control-worker")
+        self.run = bind_admitted_run(run, "source-control-worker" + suffix)
         self.original = ContentFactoryRun.objects.values().get(pk=self.run.pk)
 
     def response(self, value):
@@ -183,8 +187,7 @@ class SourceOperationControlTests(TransactionTestCase):
         self.assertEqual(self.run.result["points_v1"], {"state": "released"})
 
     def test_non_sdk_article_retains_the_two_repin_limit(self):
-        ContentFactoryRun.objects.filter(pk=self.run.pk).delete()
-        self.make_run("article_generation")
+        self.make_run("article_generation", suffix="-article")
         get, native, head = self.guards()
         with get, native, head:
             self.assertEqual(self.apply()["max_repins"], 2)

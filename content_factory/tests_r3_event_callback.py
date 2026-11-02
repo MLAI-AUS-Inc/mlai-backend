@@ -103,9 +103,15 @@ class AdmittedEventCallbackTests(TestCase):
 
     def test_unknown_admission_cannot_create_or_adopt_a_run(self):
         payload = self.envelope()
-        self.run.delete()
+        from .website_contract import evidence_digest
+        payload[WIRE_REQUEST_KEY]["dispatch_key"] = "unknown-original-admission"
+        ticket = payload[WIRE_EXECUTION_KEY]
+        ticket["admission_digest"] = evidence_digest(payload[WIRE_REQUEST_KEY])
+        ticket["execution_id"] = "admit:" + ticket["admission_digest"]
+        payload["events"][0]["digest"] = event_digest(payload["run_id"], payload[WIRE_REQUEST_KEY], ticket, payload["events"][0])
+        before = list(ContentFactoryRun.objects.values())
         self.assertEqual(self.receive(payload).status_code, 409)
-        self.assertEqual(ContentFactoryRun.objects.count(), 0)
+        self.assertEqual(list(ContentFactoryRun.objects.values()), before)
 
     def test_exact_private_transport_hold_is_released_for_callback_first_event_only(self):
         ContentFactoryRun.objects.filter(pk=self.run.pk).update(status="blocked", current_step="dispatch_pending_resolution",
