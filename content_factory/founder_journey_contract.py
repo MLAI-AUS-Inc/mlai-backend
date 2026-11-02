@@ -183,6 +183,10 @@ def enrich_journey(payload, *, organization, company, config, user, run, connect
         "copy": deepcopy(current_copy) if key == stage else _copy(*STEP_COPY[key])} for key in STEPS]
     offer = _mapping(payload.get("publishOffer"))
     quality_ready = bool(run is not None and article_review_identity_is_complete(run))
+    from .website_run_authority import event_owned
+    if run is not None and event_owned(run):
+        from .run_review_quality import verified_review_quality
+        quality_ready = verified_review_quality(run)
     payload.update(contractVersion=2, capabilities={
         "canWriteArticle": bool(writable and _mapping(payload.get("next")).get("kind") in {"write_first_article", "write_article"}),
         "canCopyDraft": bool(readable and ready),
