@@ -1205,6 +1205,2598 @@
         "contractVersion",
         "failure"
       ]
+    },
+    "FirstArticleTopic": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 1000,
+          "minLength": 1
+        },
+        "source": {
+          "enum": [
+            "research",
+            "description"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "source"
+      ],
+      "x-wire-project": true
+    },
+    "FirstArticleEntitlement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "status": {
+          "enum": [
+            "available",
+            "in_progress",
+            "used",
+            "unavailable"
+          ]
+        },
+        "free": {
+          "type": "boolean"
+        },
+        "attemptsUsed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "attemptsAllowed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "topicBatchFree": {
+          "type": "boolean"
+        },
+        "runId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8192
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "enum": [
+                "account",
+                "attempts",
+                "daily_cap",
+                "disabled",
+                "established"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deliveryMode": {
+          "const": "content_only"
+        }
+      },
+      "required": [
+        "version",
+        "status",
+        "free",
+        "attemptsUsed",
+        "attemptsAllowed",
+        "topicBatchFree",
+        "runId",
+        "limit"
+      ],
+      "x-wire-project": true
+    },
+    "FirstArticleCard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "topic": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FirstArticleTopic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "alternatives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FirstArticleTopic"
+          },
+          "maxItems": 20
+        },
+        "audience": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "name": {
+                  "type": "string",
+                  "maxLength": 1000,
+                  "minLength": 1
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "status": {
+                  "enum": [
+                    "approved",
+                    "draft",
+                    "inferred"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "description",
+                "status"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "callToAction": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "maxLength": 500,
+                  "minLength": 1
+                },
+                "url": {
+                  "type": "string",
+                  "maxLength": 2048,
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "label",
+                "url"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 1000,
+          "minLength": 1
+        },
+        "free": {
+          "type": "boolean"
+        },
+        "pricePoints": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "balancePoints": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "maxLength": 1000
+            },
+            "oneLiner": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "logoUrl": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "authorName": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 1000
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "oneLiner",
+            "logoUrl",
+            "authorName"
+          ]
+        },
+        "firstArticle": {
+          "$ref": "#/$defs/FirstArticleEntitlement"
+        },
+        "access": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "canStart": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "canStart"
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "available",
+        "topic",
+        "alternatives",
+        "audience",
+        "callToAction",
+        "label",
+        "free",
+        "pricePoints",
+        "balancePoints",
+        "profile",
+        "firstArticle",
+        "access"
+      ],
+      "x-wire-project": true
+    },
+    "FirstArticleStartRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "topicId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "customTopic": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "audience": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "description"
+          ]
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "oneLiner": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "oneLiner"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expectedCostPoints": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "topicId",
+        "customTopic",
+        "audience",
+        "profile",
+        "expectedCostPoints"
+      ]
+    },
+    "FirstArticleSwitchTopicRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "topicId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "customTopic": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "runId",
+        "topicId",
+        "customTopic"
+      ]
+    },
+    "FirstArticleStartResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "status": {
+          "anyOf": [
+            {
+              "enum": [
+                "approval_required",
+                "awaiting_approval",
+                "awaiting_confirmation",
+                "awaiting_delivery_mode",
+                "blocked",
+                "cancelled",
+                "completed",
+                "denied",
+                "failed",
+                "queued",
+                "running"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redirect": {
+          "type": "string",
+          "maxLength": 2048,
+          "minLength": 1,
+          "pattern": "^/my-startup/"
+        }
+      },
+      "required": [
+        "runId",
+        "status",
+        "redirect"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticleExportMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "slug": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "canonicalUrl": {
+          "type": "string",
+          "maxLength": 4096,
+          "x-wire-name": "canonical_url"
+        }
+      },
+      "required": [],
+      "x-wire-project": true
+    },
+    "FounderArticleExport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "unavailable"
+          ]
+        },
+        "runId": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "format": {
+          "const": "markdown"
+        },
+        "markdown": {
+          "type": "string",
+          "maxLength": 2000000
+        },
+        "metadata": {
+          "$ref": "#/$defs/FounderArticleExportMetadata"
+        },
+        "media": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "url": {
+                "type": "string",
+                "maxLength": 4096,
+                "minLength": 1
+              },
+              "alt": {
+                "type": "string",
+                "maxLength": 10000
+              },
+              "caption": {
+                "type": "string",
+                "maxLength": 10000
+              }
+            },
+            "required": [
+              "url"
+            ]
+          }
+        },
+        "reasonCode": {
+          "enum": [
+            "revision_superseded",
+            "preview_pending",
+            "revision_mismatch",
+            "canonical_snapshot_unavailable"
+          ]
+        },
+        "html": {
+          "type": "string",
+          "maxLength": 4000000
+        },
+        "metaTitle": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "previewPending": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "version",
+        "status",
+        "runId",
+        "revision",
+        "format",
+        "markdown",
+        "metadata",
+        "media"
+      ],
+      "x-wire-project": true
+    },
+    "FounderCopyReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        }
+      },
+      "required": [
+        "at",
+        "revision"
+      ],
+      "x-wire-project": true
+    },
+    "FounderPostedLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "maxLength": 2048,
+          "minLength": 1
+        },
+        "check": {
+          "enum": [
+            "pending",
+            "matched",
+            "not_matched",
+            "skipped"
+          ]
+        },
+        "checkedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "url",
+        "check",
+        "checkedAt"
+      ],
+      "x-wire-project": true
+    },
+    "FounderDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "copyWhilePreviewPending": {
+          "type": "boolean"
+        },
+        "tools": {
+          "type": "boolean"
+        },
+        "postedLink": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderPostedLink"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "copied": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderCopyReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "platform": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blogUrl": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "copyWhilePreviewPending",
+        "tools",
+        "postedLink",
+        "copied",
+        "platform",
+        "blogUrl"
+      ],
+      "x-wire-project": true
+    },
+    "FounderReviewFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fieldId": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "claim",
+            "style"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 8192
+        }
+      },
+      "required": [
+        "fieldId",
+        "kind",
+        "message"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticleImageAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "altText": {
+          "type": "string",
+          "maxLength": 10000,
+          "x-wire-name": "alt_text"
+        },
+        "caption": {
+          "type": "string",
+          "maxLength": 10000
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticleReviewField": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1
+        },
+        "componentId": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "text",
+            "image"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 2000000
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "protected": {
+          "type": "boolean"
+        },
+        "canUndo": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "comment",
+              "editText",
+              "regenerateImage"
+            ]
+          },
+          "maxItems": 16
+        },
+        "asset": {
+          "$ref": "#/$defs/FounderArticleImageAsset"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "label",
+        "value",
+        "required",
+        "protected",
+        "capabilities"
+      ],
+      "x-wire-project": true
+    },
+    "FounderCommentAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "type": "number",
+          "minimum": -100000000,
+          "maximum": 100000000
+        },
+        "y": {
+          "type": "number",
+          "minimum": -100000000,
+          "maximum": 100000000
+        },
+        "createdFrom": {
+          "type": "string",
+          "maxLength": 120
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "x-wire-project": true
+    },
+    "FounderCommentRect": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "left": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "top": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "right": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bottom": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "width": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "height": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "x-wire-project": true
+    },
+    "FounderCommentClick": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "x": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "y": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pageX": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pageY": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "x-wire-project": true
+    },
+    "FounderCommentViewport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "width": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "height": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scrollX": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scrollY": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "devicePixelRatio": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": -100000000,
+              "maximum": 100000000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "x-wire-project": true
+    },
+    "FounderCommentContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reviewOutcome": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 120
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "summary": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 1200
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "status",
+                "summary"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "domPath": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "textHash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "textExcerpt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 10000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderCommentRect"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "click": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderCommentClick"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "viewport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderCommentViewport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pageUrl": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previewMode": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 120
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "x-wire-project": true
+    },
+    "FounderArticleComment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "componentId": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1,
+          "x-wire-name": "component_id"
+        },
+        "componentType": {
+          "type": "string",
+          "maxLength": 120,
+          "x-wire-name": "component_type"
+        },
+        "componentLabel": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "component_label"
+        },
+        "sourceSectionId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 255
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "source_section_id"
+        },
+        "selector": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "anchor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderCommentAnchor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderCommentContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 10000,
+          "minLength": 1
+        },
+        "requestedAction": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 120
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "submitted",
+            "applied",
+            "superseded",
+            "resolved"
+          ]
+        },
+        "batchId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "batch_id"
+        },
+        "createdAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "created_at"
+        },
+        "updatedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "updated_at"
+        },
+        "outcome": {
+          "type": "string",
+          "maxLength": 120
+        }
+      },
+      "required": [
+        "id",
+        "componentId",
+        "componentType",
+        "body",
+        "status"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticleFeedbackBatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "sourceRunId": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1,
+          "x-wire-name": "source_run_id"
+        },
+        "revisionRunId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "revision_run_id"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "queued",
+            "submitted",
+            "running",
+            "completed",
+            "accepted",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "promotedLearningCount": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "promoted_learning_count"
+        }
+      },
+      "required": [
+        "id",
+        "sourceRunId",
+        "status"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticleFeedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "comments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FounderArticleComment"
+          },
+          "maxItems": 1000
+        },
+        "latestBatch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderArticleFeedbackBatch"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "latest_batch"
+        }
+      },
+      "required": [
+        "comments"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticleImageCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fieldId": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "ready",
+            "failed",
+            "superseded"
+          ]
+        },
+        "reasonCode": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "asset": {
+          "$ref": "#/$defs/FounderArticleImageAsset"
+        }
+      },
+      "required": [
+        "fieldId",
+        "status"
+      ],
+      "x-wire-project": true
+    },
+    "FounderReviewFindingsIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1,
+          "x-wire-name": "run_id"
+        },
+        "runGeneration": {
+          "type": "integer",
+          "minimum": 0,
+          "x-wire-name": "run_generation"
+        },
+        "previewUrl": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1,
+          "x-wire-name": "preview_url"
+        },
+        "commitSha": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{40}$",
+          "x-wire-name": "commit_sha"
+        },
+        "resumeGeneration": {
+          "type": "integer",
+          "minimum": 0,
+          "x-wire-name": "resume_generation"
+        },
+        "qualityInputsSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$",
+          "x-wire-name": "quality_inputs_sha256"
+        },
+        "revision": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        }
+      },
+      "required": [
+        "runId",
+        "runGeneration",
+        "previewUrl",
+        "commitSha",
+        "resumeGeneration",
+        "qualityInputsSha256",
+        "revision"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticleReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "articleId": {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FounderArticleReviewField"
+          },
+          "maxItems": 2000
+        },
+        "componentFeedback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderArticleFeedback"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previewPending": {
+          "type": "boolean"
+        },
+        "articleExport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderArticleExport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "editorialNotes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "source": {
+                "type": "string",
+                "maxLength": 120
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 20000,
+                "minLength": 1
+              }
+            },
+            "required": [
+              "source",
+              "text"
+            ],
+            "x-wire-project": true
+          },
+          "maxItems": 200
+        },
+        "revisionRunId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latestRunId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100,
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "imageRegenerationCostPoints": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidates": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/FounderArticleImageCandidate"
+          }
+        },
+        "reviewFindings": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FounderReviewFinding"
+              },
+              "maxItems": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reviewFindingsIdentity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderReviewFindingsIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "commentOutcomes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "commentId": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "status": {
+                "enum": [
+                  "addressed",
+                  "unaddressed"
+                ]
+              },
+              "summary": {
+                "type": "string",
+                "maxLength": 1200
+              }
+            },
+            "required": [
+              "commentId",
+              "status",
+              "summary"
+            ],
+            "x-wire-project": true
+          },
+          "maxItems": 200
+        },
+        "previewCommit": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "previewedRevision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reviewKind": {
+          "enum": [
+            "article",
+            "setup"
+          ]
+        },
+        "pendingUpdate": {
+          "type": "boolean"
+        },
+        "hasProtectedEdits": {
+          "type": "boolean"
+        },
+        "approved": {
+          "type": "boolean"
+        },
+        "founderDraft": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FounderDraft"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "articleId",
+        "revision",
+        "fields"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticleReviewEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contractVersion": {
+          "const": 2
+        },
+        "companyId": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "runId": {
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "access": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "canEdit": {
+              "type": "boolean"
+            },
+            "canApprove": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "canEdit",
+            "canApprove"
+          ]
+        },
+        "candidateFailures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "candidateId": {
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
+              },
+              "failure": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"
+                  },
+                  "copy": {
+                    "$ref": "#/$defs/FounderCopy"
+                  }
+                },
+                "required": [
+                  "code",
+                  "copy"
+                ]
+              }
+            },
+            "required": [
+              "candidateId",
+              "failure"
+            ]
+          },
+          "maxItems": 100
+        },
+        "review": {
+          "$ref": "#/$defs/FounderArticleReview"
+        },
+        "pollAfterMs": {
+          "type": "integer",
+          "minimum": 2000,
+          "maximum": 60000
+        }
+      },
+      "required": [
+        "contractVersion",
+        "companyId",
+        "runId",
+        "access",
+        "candidateFailures",
+        "review",
+        "pollAfterMs"
+      ],
+      "x-wire-project": false
+    },
+    "FounderArticleTextEdit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fieldId": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1
+        },
+        "componentId": {
+          "type": "string",
+          "maxLength": 255,
+          "minLength": 1
+        },
+        "originalValue": {
+          "type": "string",
+          "maxLength": 100000
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 100000
+        }
+      },
+      "required": [
+        "fieldId",
+        "originalValue",
+        "value"
+      ]
+    },
+    "FounderArticleApplyUpdateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "const": "applyUpdate"
+        },
+        "operationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,100}$"
+        },
+        "expectedRevision": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        },
+        "textEdits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FounderArticleTextEdit"
+          },
+          "maxItems": 300
+        },
+        "commentIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "maxItems": 100
+        },
+        "restoredSentences": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4000,
+            "minLength": 1
+          },
+          "maxItems": 50
+        }
+      },
+      "required": [
+        "action",
+        "operationId",
+        "expectedRevision",
+        "textEdits",
+        "commentIds"
+      ]
+    },
+    "FounderArticleMutationRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FounderArticleApplyUpdateRequest"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "editText"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{8,100}$"
+            },
+            "expectedRevision": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "fieldId": {
+              "type": "string",
+              "maxLength": 255,
+              "minLength": 1
+            },
+            "value": {
+              "type": "string",
+              "maxLength": 100000
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "expectedRevision",
+            "fieldId",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "editTextBatch"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{8,100}$"
+            },
+            "expectedRevision": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "edits": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "fieldId": {
+                    "type": "string",
+                    "maxLength": 255,
+                    "minLength": 1
+                  },
+                  "value": {
+                    "type": "string",
+                    "maxLength": 100000
+                  }
+                },
+                "required": [
+                  "fieldId",
+                  "value"
+                ]
+              },
+              "maxItems": 20
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "expectedRevision",
+            "edits"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "regenerateImage"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{8,100}$"
+            },
+            "expectedRevision": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "fieldId": {
+              "type": "string",
+              "maxLength": 255,
+              "minLength": 1
+            },
+            "instruction": {
+              "type": "string",
+              "maxLength": 4000
+            },
+            "expectedCostPoints": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "expectedRevision",
+            "fieldId",
+            "instruction",
+            "expectedCostPoints"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "chooseImage"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{8,100}$"
+            },
+            "expectedRevision": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "fieldId": {
+              "type": "string",
+              "maxLength": 255,
+              "minLength": 1
+            },
+            "candidateId": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "expectedRevision",
+            "fieldId",
+            "candidateId"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "refresh"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{8,100}$"
+            },
+            "expectedRevision": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "expectedRevision"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "undo"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{8,100}$"
+            },
+            "expectedRevision": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "fieldId": {
+              "type": "string",
+              "maxLength": 255,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "expectedRevision",
+            "fieldId"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "discardImage"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{8,100}$"
+            },
+            "expectedRevision": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "candidateId": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "expectedRevision",
+            "candidateId"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "const": "allowAI"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{8,100}$"
+            },
+            "expectedRevision": {
+              "type": "string",
+              "maxLength": 200,
+              "minLength": 1
+            },
+            "fieldId": {
+              "type": "string",
+              "maxLength": 255,
+              "minLength": 1
+            }
+          },
+          "required": [
+            "action",
+            "operationId",
+            "expectedRevision",
+            "fieldId"
+          ]
+        }
+      ]
+    },
+    "FounderArticleCopyRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "revision": {
+          "type": "string",
+          "maxLength": 200,
+          "minLength": 1
+        }
+      },
+      "required": [
+        "revision"
+      ]
+    },
+    "FounderArticleCopyResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "copied": {
+          "$ref": "#/$defs/FounderCopyReceipt"
+        }
+      },
+      "required": [
+        "copied"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticlePostedLinkRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "maxLength": 2048,
+          "minLength": 1
+        }
+      },
+      "required": [
+        "url"
+      ]
+    },
+    "FounderArticlePostedLinkResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "postedLink": {
+          "$ref": "#/$defs/FounderPostedLink"
+        }
+      },
+      "required": [
+        "postedLink"
+      ],
+      "x-wire-project": true
+    },
+    "FounderArticleCommentRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "componentId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "componentType": {
+          "enum": [
+            "text",
+            "image"
+          ]
+        },
+        "componentLabel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 10000
+        },
+        "expectedRevision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "operationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,100}$"
+        }
+      },
+      "required": [
+        "componentId",
+        "componentType",
+        "componentLabel",
+        "body",
+        "expectedRevision",
+        "operationId"
+      ]
+    },
+    "FounderArticleCommentResponse": {
+      "$ref": "#/$defs/FounderArticleComment"
+    },
+    "FounderArticleControlRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,100}$"
+        },
+        "expectedRevision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "operationId",
+        "expectedRevision"
+      ]
+    },
+    "FounderArticlePublishRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "publish",
+            "dismiss"
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ]
+    },
+    "FounderArticlePublishResponse": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "publishing"
+            },
+            "runId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"
+            },
+            "alreadyStarted": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "status",
+            "runId",
+            "alreadyStarted"
+          ],
+          "x-wire-project": true
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "dismissed"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "x-wire-project": true
+        }
+      ]
+    },
+    "FounderArticleEditorialBrief": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "audienceId": {
+          "type": "string",
+          "maxLength": 200,
+          "x-wire-name": "audience_id"
+        },
+        "audienceVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "x-wire-name": "audience_version"
+        },
+        "conversionIntent": {
+          "enum": [
+            "offer",
+            "none"
+          ],
+          "x-wire-name": "conversion_intent"
+        },
+        "offerId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "offer_id"
+        },
+        "offerVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "offer_version"
+        },
+        "noOfferReason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4000
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-wire-name": "no_offer_reason"
+        },
+        "country": {
+          "type": "string",
+          "maxLength": 100,
+          "x-wire-name": "country"
+        },
+        "readerTask": {
+          "type": "string",
+          "maxLength": 10000,
+          "x-wire-name": "reader_task"
+        },
+        "distinctContribution": {
+          "type": "string",
+          "maxLength": 20000,
+          "x-wire-name": "distinct_contribution"
+        },
+        "acceptanceCriteria": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "x-wire-name": "acceptance_criteria"
+        }
+      },
+      "required": [
+        "audienceId",
+        "audienceVersion",
+        "conversionIntent",
+        "offerId",
+        "offerVersion",
+        "noOfferReason",
+        "country",
+        "readerTask",
+        "distinctContribution",
+        "acceptanceCriteria"
+      ],
+      "x-wire-project": false
+    },
+    "FounderArticleCreateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "companyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "clientRequestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,128}$",
+          "x-wire-name": "client_request_id"
+        },
+        "authorId": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "editorialBrief": {
+          "$ref": "#/$defs/FounderArticleEditorialBrief"
+        },
+        "expectedCostPoints": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "costConfirmed": {
+          "const": true
+        },
+        "topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 10000
+        },
+        "targetKeyword": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "customTitle": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "selectedTitle": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "topicCandidateId": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "context": {
+          "type": "string",
+          "maxLength": 100000
+        },
+        "sourceRunId": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "deliveryMode": {
+          "enum": [
+            "review_draft",
+            "publish_code",
+            "content_only"
+          ]
+        },
+        "deliveryModeExplicit": {
+          "const": true
+        },
+        "deliveryModeConfirmed": {
+          "const": true
+        },
+        "websiteConnectionId": {
+          "type": "string",
+          "maxLength": 100,
+          "x-wire-name": "website_connection_id"
+        },
+        "connectionGeneration": {
+          "type": "integer",
+          "minimum": 0,
+          "x-wire-name": "connection_generation"
+        },
+        "configurationRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "x-wire-name": "configuration_revision"
+        }
+      },
+      "required": [
+        "companyId",
+        "clientRequestId",
+        "authorId",
+        "editorialBrief",
+        "expectedCostPoints",
+        "costConfirmed",
+        "topic",
+        "targetKeyword",
+        "deliveryMode",
+        "deliveryModeExplicit",
+        "deliveryModeConfirmed"
+      ],
+      "x-wire-project": false
+    },
+    "FounderArticleCreateResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$",
+          "x-wire-name": "run_id"
+        },
+        "status": {
+          "enum": [
+            "approval_required",
+            "awaiting_approval",
+            "awaiting_confirmation",
+            "awaiting_delivery_mode",
+            "blocked",
+            "cancelled",
+            "completed",
+            "denied",
+            "failed",
+            "queued",
+            "running"
+          ]
+        }
+      },
+      "required": [
+        "runId",
+        "status"
+      ],
+      "x-wire-project": true
     }
   }
 }
