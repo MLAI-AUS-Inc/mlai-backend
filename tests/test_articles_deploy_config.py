@@ -19,6 +19,7 @@ JOURNEY_VALUES = {
     "MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT": "2026-11-07T09:00:00+11:00",
     "MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS": "123, pawshare.com.au",
     "COMMUNITY_CHAT_INVITE_RESOLVE_RATE": "30/minute",
+    "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE": "2026-11-07T09:00:00+11:00",
 }
 
 
@@ -35,6 +36,7 @@ class ArticlesDeployConfigTests(unittest.TestCase):
                   "ARTICLES_WORKSHOP_WINDOWS": WINDOWS,
                   **JOURNEY_VALUES})
         validate({"MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT": "2026-11-07T22:00Z",
+                  "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE": "disabled",
                   "MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS": "none",
                   "COMMUNITY_CHAT_INVITE_RESOLVE_RATE": "10/m"})
         validate({**{key: "false" for key in FLAG_KEYS},
@@ -58,6 +60,10 @@ class ArticlesDeployConfigTests(unittest.TestCase):
                            ("AUTH_THROTTLE_IP_CODE_REQUESTS_PER_HOUR", "1_000"),
                            ("ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE", "2026-02-30"),
                            ("ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE", "20261030"),
+                           ("CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE", "2026-11-02"),
+                           ("CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE", "2026-11-02T10:00:00"),
+                           ("CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE", "2026-99-99T10:00:00Z"),
+                           ("CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE", "sensitive"),
                            ("ARTICLES_WORKSHOP_WINDOWS", "sensitive"),
                            ("ARTICLES_WORKSHOP_WINDOWS", '{"start": "2026-11-07T22:00:00Z"}'),
                            # A naive time is read as UTC by the scheduler.
@@ -130,6 +136,9 @@ class ArticlesDeployConfigTests(unittest.TestCase):
             self.assertIn("MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=true\n", text)
             for key, value in JOURNEY_VALUES.items():
                 self.assertIn(f"{key}={value}\n", text)
+            key = "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE"
+            self.assertEqual(upsert(key, "disabled").returncode, 0)
+            self.assertIn(f"{key}=disabled\n", env_file.read_text())
 
     def test_every_setting_is_read_by_the_backend(self):
         # A misspelt name would install a value nothing reads.
