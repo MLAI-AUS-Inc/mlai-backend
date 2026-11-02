@@ -197,3 +197,28 @@ class XeroPreflightScopeTests(TestCase):
                 self.assertEqual(run.result["source_preflight"]["checks"][0], checks[0])
                 self.assertEqual(run.result["source_preflight"]["checks"][1]["reason"], "rate_limited")
                 self.assertEqual(request.call_count, 1)
+
+                # The real worker snapshot API must retain the deadline across
+                # reloads, while the backend's failed checks remain authoritative.
+                from content_factory.service_views import ContentFactoryRunView
+                deadline = (timezone.now() + timedelta(seconds=27384)).isoformat()
+                payload = {"run_id": run.run_id, "workflow": run.workflow, "domain": run.domain,
+                    "status": "running", "current_step": "source_preflight", "step_order": ["source_preflight"],
+                    "run_request": {"input_sources": ["xero"]},
+                    "result": {"preflight_retry_at": deadline, "source_preflight": {"ready": True}}}
+                with override_settings(MLAI_API_KEY="synthetic"):
+                    synced = ContentFactoryRunView.as_view()(APIRequestFactory().put(
+                        "/", payload, format="json", HTTP_X_API_KEY="synthetic"), run_id=run.run_id)
+                self.assertEqual(synced.status_code, 200, synced.data)
+                run.refresh_from_db()
+                self.assertEqual(run.result["preflight_retry_at"], deadline)
+                self.assertFalse(run.result["source_preflight"]["ready"])
+                self.assertEqual(run.run_request["input_sources"], ["gmail", "xero"])
+                run.status = "cancelled"
+                run.save(update_fields=["status"])
+                with override_settings(MLAI_API_KEY="synthetic"):
+                    cancelled = ContentFactoryRunView.as_view()(APIRequestFactory().put(
+                        "/", payload, format="json", HTTP_X_API_KEY="synthetic"), run_id=run.run_id)
+                self.assertEqual(cancelled.status_code, 409)
+                run.refresh_from_db()
+                self.assertEqual(run.status, "cancelled")

@@ -7,6 +7,8 @@ pin the new contract: company_id scopes status/sync/previews/disconnect and
 the OAuth connect start, with ownership enforced.
 """
 
+from unittest.mock import patch
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
@@ -114,7 +116,8 @@ class ConnectorCompanyScopingTests(TestCase):
         synced_ids = {run["connectionId"] for run in response.data["syncRuns"]}
         self.assertEqual(synced_ids, {connection_b.id})
 
-    def test_gmail_disconnect_targets_requested_company_mailbox(self):
+    @patch("startup_updates.data_deletion._revoke_google_refresh_token", return_value={"requested": True, "succeeded": True})
+    def test_gmail_disconnect_targets_requested_company_mailbox(self, revoke):
         connection_a = GoogleConnection.objects.create(
             user=self.user,
             organization=self.org_a,
@@ -135,6 +138,7 @@ class ConnectorCompanyScopingTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["googleAccount"], "b@example.com")
+        revoke.assert_called_once_with("token-b")
 
         remaining = GoogleConnection.objects.filter(user=self.user)
         self.assertEqual(list(remaining.values_list("id", flat=True)), [connection_a.id])
