@@ -122,6 +122,99 @@ class TopicProducerTests(TransactionTestCase):
     def test_actual_paid_brief_http_admits_original_research_before_one_worker_post(self):
         self.admit_paid_brief()
 
+    def restore_free_http_pair(self, outcome):
+        """Rebuild real grant/admission; compare the unchanged HTTP/CF wire tuple.
+
+        The exported HTTP key is opaque input here. We never restamp worker
+        identity or copy private owner receipts to make a fixture fit.
+        """
+        from django.contrib.auth import get_user_model
+        from organizations.models import Organization
+        from .tests_run_terminal_settlement import ActualPairedTerminalSettlementTests
+        from .first_article_entitlement import grant_topic_batch, entitled_authorization
+        from .run_ownership import WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY, reserve_admitted_run, bind_admitted_run, user_principal
+        from .run_backend_facts import create_job_facts
+        value = json.loads((Path(__file__).parent / "testdata/r3" /
+            ("topic_actual_free_first_http_" + outcome + ".json")).read_text())
+        original = value["original_backend_admission"]
+        request, ledger = original["run_request"], original["original_ledger"]
+        identity = request[WIRE_REQUEST_KEY]
+        for model, target in ((Organization, int(identity["organization_id"])),
+                (get_user_model(), int(identity["principal"]["user_id"])), (Ledger, ledger["id"])):
+            ActualPairedTerminalSettlementTests.sequence(self, model, target)
+        fixture = make_p2_org(identity["domain"])
+        grant = grant_topic_batch(organization=fixture.organization, user=fixture.owner,
+            client_request_id=identity["dispatch_key"], requested_topic_count=request["requested_topic_count"])
+        stamp = entitled_authorization(domain=fixture.organization.domain, action="topic_discovery", ledger=grant)
+        self.assertTrue(all(request[key] == item for key, item in stamp.items()))
+        raw = {key: item for key, item in request.items() if key not in {WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY}}
+        run = reserve_admitted_run(organization=fixture.organization,
+            principal=user_principal(fixture.owner.pk, identity["principal"]["actor_id"]), workflow="auto_discovery", payload=raw)
+        run = bind_admitted_run(run, value["run_id"])
+        self.assertEqual(run.run_request, request)
+        self.assertEqual({"id": grant.pk, "kind": grant.kind, "user_id": grant.user_id, "source": grant.source,
+            "idempotency_key": grant.idempotency_key, "delta_microroo": grant.delta_microroo}, ledger)
+        create_job_facts(job_id=run.run_id, domain=run.domain, slack_user_id=run.slack_user_id,
+            status="queued", client_request_id=identity["dispatch_key"], request_meta=deepcopy(run.run_request),
+            billing_status="entitled", billing_ledger_id=grant.pk, billing_amount=0)
+        self.assertTrue(value["dispatch_replay"]["idempotent"])
+        self.assertEqual(value["dispatch_replay"]["run_id"], value["admission_response"]["run_id"])
+        self.assertEqual(value["callbacks"], [])
+        from .run_event_authority import receive_authoritative_run_events
+        for batch in value["history_before_cancel"]["batches"]:
+            reply = receive_authoritative_run_events(batch)
+            self.assertEqual(reply.status_code, 200, reply.data)
+        run.refresh_from_db()
+        return value, run, grant
+
+    def test_actual_free_first_http_worker_choices_survive_cancel_without_callback_or_grant_release(self):
+        from .run_topic_delivery import project_verified_topics, has_verified_topic_delivery
+        from .run_event_authority import receive_authoritative_run_events
+        from .run_terminal_settlement import settle_authoritative_terminal
+        from .run_dispatch_settlement import _free_obligation_state
+        from .models import ContentFactoryJob
+        value, run, grant = self.restore_free_http_pair("delivery")
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        with patch("requests.get", side_effect=[self.response(value["delivery_evidence"]),
+                self.response(value["canonical_topic_response"])]) as get:
+            self.assertEqual(project_verified_topics(run.run_id)["verified"], ["topic_selection_v1"])
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(ContentFactoryJob.objects.get(job_id=run.run_id).selection_data,
+            value["canonical_topic_response"]["topic_selection_v1"]["selection"])
+        for batch in value["history"]["batches"]:
+            reply = receive_authoritative_run_events(batch)
+            self.assertEqual(reply.status_code, 200, reply.data)
+        run.refresh_from_db()
+        self.assertTrue(has_verified_topic_delivery(run))
+        with patch("requests.post") as close:
+            self.assertEqual(settle_authoritative_terminal(run.run_id)["state"], "kept")
+        close.assert_not_called()
+        run.refresh_from_db()
+        self.assertEqual(run.run_request, before["run_request"])
+        self.assertEqual(run.created_at, before["created_at"])
+        self.assertEqual(_free_obligation_state(run), "reserved")
+        self.assertFalse(Ledger.objects.filter(kind__in=["SPEND", "REFUND"]).exists())
+
+    def test_actual_free_first_http_worker_empty_failure_releases_only_unchanged_original_grant(self):
+        from .run_terminal_settlement import settle_authoritative_terminal, terminal_execution_closed
+        from .run_dispatch_settlement import _free_obligation_state
+        value, run, grant = self.restore_free_http_pair("settlement")
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        with patch("requests.post", return_value=self.response(value["cancel_response"])) as close, \
+                patch("requests.get", return_value=self.response(value["history"])):
+            result = settle_authoritative_terminal(run.run_id)
+            self.assertEqual(result["state"], "released", result)
+            self.assertEqual(settle_authoritative_terminal(run.run_id), result)
+        self.assertEqual(close.call_count, 1)
+        self.assertEqual(close.call_args.kwargs["json"], value["cancel_request"])
+        self.assertEqual(value["cancel_replay"]["terminal_topic_settlement_v1"], value["cancel_response"]["terminal_topic_settlement_v1"])
+        run.refresh_from_db()
+        self.assertTrue(terminal_execution_closed(run))
+        self.assertEqual(_free_obligation_state(run), "released")
+        self.assertEqual(run.run_request, before["run_request"])
+        self.assertEqual(run.created_at, before["created_at"])
+        self.assertFalse(Ledger.objects.filter(kind__in=["SPEND", "REFUND"]).exists())
+
     def response(self, value):
         import requests
         response = requests.Response(); response.status_code = 200
