@@ -58,7 +58,8 @@ class DispatchSettlementTests(TransactionTestCase):
         missing = reconcile.requests.Response()
         missing.status_code = 404
         missing._content = json.dumps({"detail": "client_request_id not found"}).encode()
-        with patch.object(reconcile.requests, "request", return_value=missing) as get:
+        with patch.object(reconcile.requests, "request", return_value=missing) as get, \
+                patch.object(settle.requests, "post", return_value=self.remote({}, status=409)):
             result = reconcile.reconcile_authoritative_run(run.run_id, now=self.now, refresh=True)
         self.assertEqual(result["outcome"], "dispatch_no_effect_proven")
         self.assertEqual(get.call_args.kwargs["params"], {"client_request_id": owner_receipt(run)["identity"]["dispatch_key"]})
@@ -90,7 +91,8 @@ class DispatchSettlementTests(TransactionTestCase):
         child.refresh_from_db()
         create_job_facts(job_id=child.run_id, domain=child.domain, slack_user_id=child.slack_user_id,
             status="queued", client_request_id=child.run_request["client_request_id"],
-            request_meta=deepcopy(child.run_request), billing_status="reused", billing_ledger_id=spend.pk, billing_amount=12)
+            request_meta=deepcopy(child.run_request), billing_status="reused" if spend.kind == "SPEND" else "entitled",
+            billing_ledger_id=spend.pk, billing_amount=12 if spend.kind == "SPEND" else 0)
         return child
 
     def free(self, *, topic=False):
@@ -333,3 +335,44 @@ class DispatchSettlementTests(TransactionTestCase):
         self.assertTrue(rows.topics_released)
         self.assertIsNone(rows.topics_retry)
         self.assertFalse(Ledger.objects.filter(kind__in=["SPEND", "REFUND"]).exists())
+
+    def test_free_sibling_requires_exact_durable_closures_then_releases_original_without_status_fabrication(self):
+        from .first_article_entitlement import entitlement_payload
+        run, grant = self.free()
+        child = self.child(run, grant)
+        self.candidate(run)
+        self.candidate(child)
+        before = {row.pk: ContentFactoryRun.objects.values().get(pk=row.pk) for row in (run, child)}
+        with patch.object(settle.requests, "post", return_value=self.remote(self.closed(run))):
+            self.assertEqual(settle.settle_authoritative_dispatch(run.run_id, now=self.now)["state"], "pending")
+        run.refresh_from_db()
+        self.assertEqual(entitlement_payload(run)["entitlementStatus"], "reserved")
+        with patch.object(settle.requests, "post", return_value=self.remote(self.closed(child))):
+            result = settle.settle_authoritative_dispatch(child.run_id, now=self.now)
+        self.assertEqual(result["state"], "released")
+        self.assertEqual(entitlement_payload(run)["entitlementStatus"], "released")
+        for row in (run, child):
+            after = ContentFactoryRun.objects.values().get(pk=row.pk)
+            for name in ("status", "current_step", "run_request", "created_at", "updated_at"):
+                self.assertEqual(before[row.pk][name], after[name], name)
+        self.assertFalse(Ledger.objects.filter(kind__in=["SPEND", "REFUND"]).exists())
+
+    def test_real_scheduled_reconciliation_handoff_refunds_only_after_authenticated_atomic_withdrawal(self):
+        run, _, spend = self.paid()
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        missing = reconcile.requests.Response()
+        missing.status_code = 404
+        missing._content = json.dumps({"detail": "client_request_id not found"}).encode()
+        with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False, ARTICLES_RUN_FACT_AUTHORITY_ENABLED=False,
+                               ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=False), \
+                patch.object(reconcile.requests, "request", return_value=missing) as get, \
+                patch.object(settle.requests, "post", return_value=self.remote(self.closed(run))) as post:
+            result = reconcile.run_authoritative_reconciliation_sweep(now=self.now)
+        self.assertEqual(result["dispatch_no_effect_proven"], 1)
+        self.assertEqual((get.call_count, post.call_count), (1, 1))
+        run.refresh_from_db()
+        self.assertEqual(run.result[RECONCILIATION_RESULT_KEY]["dispatch_settlement"]["state"], "refunded")
+        self.assertEqual(spend.service_refunds.count(), 1)
+        self.assertEqual(Ledger.objects.filter(kind="SPEND").count(), 1)
+        for name in ("run_request", "status", "created_at", "updated_at", "reconciled_at"):
+            self.assertEqual(getattr(run, name), before[name], name)

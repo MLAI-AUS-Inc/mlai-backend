@@ -401,6 +401,9 @@ def _release_blocked(organization_id, attempt, *, run=None, client_request_id=""
         same = (run is not None and other.pk == getattr(run, "pk", None)) or (client_request_id
             and str(_mapping(other.run_request).get("client_request_id") or "").strip() == client_request_id)
         if not same and str(other.status or "") not in STOPPED_STATUSES:
+            from .run_dispatch_settlement import dispatch_closed_without_effects
+            if dispatch_closed_without_effects(other):
+                continue
             return True
     return False
 

@@ -1,8 +1,10 @@
 """Pull immutable history for explicitly admitted authoritative executions.
 
 This owner is independent of new-admission switches. It neither reads a
-mutable status snapshot nor starts, approves, cancels or settles work. A
+mutable status snapshot nor starts, approves or cancels work. A
 short database claim fences every response; network I/O happens outside it.
+An absent-dispatch candidate hands off to the separate durable-withdrawal
+consumer; only the existing original-charge controller may settle it.
 """
 from copy import deepcopy
 from datetime import timedelta, timezone as datetime_timezone
@@ -346,9 +348,14 @@ def no_effect_dispatch_proof(run):
 
 def _process_claim(claim, base_url, headers, now):
     if claim["pending_dispatch"]:
-        return _apply_lookup(claim, *_lookup(claim), now)
-    payload = _fetch_page(base_url, headers, claim)
-    return _apply_page(claim, payload, now) if payload is not None else _apply_lookup(claim, *_lookup(claim), now)
+        outcome = _apply_lookup(claim, *_lookup(claim), now)
+    else:
+        payload = _fetch_page(base_url, headers, claim)
+        outcome = _apply_page(claim, payload, now) if payload is not None else _apply_lookup(claim, *_lookup(claim), now)
+    if outcome == "dispatch_no_effect_proven":
+        from .run_dispatch_settlement import settle_authoritative_dispatch
+        settle_authoritative_dispatch(claim["run_id"], now=now)
+    return outcome
 
 
 def _read_state(pk, *, outcome, now):

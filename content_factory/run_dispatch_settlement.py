@@ -164,6 +164,8 @@ def _claim(run, now):
         meta = _meta(run)
         if _closed(run) is not None:
             return run, None
+        if _spend(run) is None and _free_obligation_state(run) not in {"reserved", "released"}:
+            raise DispatchSettlementPending("withdrawal_original_obligation_unverified")
         candidate = no_effect_dispatch_proof(run)
         if candidate is None or not _pending(run):
             raise DispatchSettlementPending("withdrawal_candidate_missing")
@@ -229,12 +231,22 @@ def _family_query(ledger_id):
         | Q(result__run_owner_article_charge_v1__ledger_id=ledger_id))
 
 
+def _free_original(run):
+    from .no_delivery_refunds import _original_free_run
+    source = _original_free_run(run)
+    if (source is None or source.organization_id != run.organization_id or source.domain != run.domain
+            or str((source.run_request or {}).get("roo_points_ledger_id")) != str((run.run_request or {}).get("roo_points_ledger_id"))):
+        raise DispatchSettlementPending("withdrawal_entitlement_lineage_invalid")
+    return source
+
+
 def _free_obligation_state(run):
     from .first_article_entitlement import _reference, _rows, entitled_request, entitlement_payload
     saved = run.run_request or {}
     if not entitled_request(saved):
         return None
     if saved.get("roo_points_action") == "content_island_topic_generation":
+        saved = _free_original(run).run_request
         rows = _rows(run.organization_id)
         if (rows.topics is not None and str(rows.topics.pk) == str(saved.get("roo_points_ledger_id"))
                 and rows.topics.reference_id == _reference(saved.get("client_request_id"))):
@@ -279,7 +291,7 @@ def original_dispatch_refund_authority(run, *, closed_receipt, original_spend):
         if (actual is not None or not entitled_request(saved)
                 or _free_obligation_state(fresh) not in {"reserved", "released"}):
             raise DispatchSettlementPending("withdrawal_authority_entitlement_invalid")
-        key, ledger_id, user_id = saved.get("client_request_id"), saved.get("roo_points_ledger_id"), None
+        key, ledger_id, user_id = _free_original(fresh).run_request.get("client_request_id"), saved.get("roo_points_ledger_id"), None
     family = list(ContentFactoryRun.objects.select_for_update().filter(_family_query(ledger_id))
                   .order_by("pk")[:MAX_CHARGE_FAMILY + 1])
     if len(family) > MAX_CHARGE_FAMILY or not any(other.pk == fresh.pk for other in family):
@@ -319,6 +331,23 @@ def refund_authority_matches(*, user, article_request, resolved_domain):
         return (_original_request_intact(run) and retained is not None and retained["receipt_sha256"] == scope["closure_sha256"]
             and current_execution_ticket(run)["execution_id"] == scope["execution_id"]
             and evidence_digest(wire_identity(owner_receipt(run))) == scope["admission_digest"])
+    except (DispatchSettlementPending, RunOwnershipConflict, ValueError, TypeError, KeyError):
+        return False
+
+
+def dispatch_closed_without_effects(run):
+    """Whether retained exact closure can replace a provisional active label.
+
+    This read never authorizes a financial effect or supplies a lifecycle
+    status. Legacy and reservation-only executions cannot opt into it.
+    """
+    from .article_publication_evidence import publication_state
+    from .no_delivery_refunds import _direct_delivery, points_receipt
+    try:
+        return (_original_request_intact(run) and _closed(run) is not None
+            and not (run.result or {}).get(EVENT_RESULT_KEY, {}).get("events")
+            and not _direct_delivery(run) and points_receipt(run).get("state") not in {"captured", "kept"}
+            and publication_state(run) == "none")
     except (DispatchSettlementPending, RunOwnershipConflict, ValueError, TypeError, KeyError):
         return False
 
@@ -428,7 +457,7 @@ def _settle(run, now):
                 controller = (refund_content_factory_topic_generation_for_user
                     if saved.get("roo_points_action") == "content_island_topic_generation"
                     else refund_content_factory_request_for_user)
-                controller(user=None, actor_id="system", article_request=saved,
+                controller(user=None, actor_id="system", article_request=deepcopy(_free_original(run).run_request),
                     resolved_domain=run.domain, reason="Exact original dispatch durably withdrawn before enqueue")
             if _free_obligation_state(run) != "released":
                 raise DispatchSettlementPending("withdrawal_release_unconfirmed")
