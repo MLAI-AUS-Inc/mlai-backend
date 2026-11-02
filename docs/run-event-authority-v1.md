@@ -114,7 +114,7 @@ Allowed types and additional fields:
 |---|---|---|---|
 | `run_state` | `status` | `step` | Canonical `contracts/run-statuses.json` worker execution status; no approval, money or delivery proof. |
 | `step_started` | `step`, `attempt` | | Attempt is a positive integer; step is a safe identifier. |
-| `step_done` | `step`, `attempt`, `status` | | Status is completed/skipped/failed/blocked/cancelled. |
+| `step_done` | `step`, `attempt`, `status` | | Status is completed/skipped/failed/blocked/cancelled; an unattempted step retains attempt 0. |
 | `failure` | `failure` | `step` | Membership-only causal object below; no raw error text or worker policy. |
 | `artifact` | `step`, `kind` | `artifact_id`, `content_sha256` | Safe identifiers and optional content digest only; never path, URL or content. |
 | `cost` | at least one of `calls`, `tokens`, `input_tokens`, `output_tokens`, `usd` | `step`, `model` | Per-step cumulative observation; does not debit, reserve, refund or replace the accounting ledger. |
@@ -129,7 +129,9 @@ retry and safe copy by membership. Unknown valid codes map to its registered
 Their original unknown identifier is not rendered. No incoming class, retry,
 action, message or findings are accepted. Failure alone never sets Run status.
 
-Safe identifiers match `[A-Za-z0-9_.:-]{1,120}`. Counts are nonnegative integers
+Safe identifiers match `[A-Za-z0-9_][A-Za-z0-9_.:-]{0,119}`. Step-start attempts
+are positive database integers no greater than 2147483647; terminal step facts
+may retain the worker's actual zero for a genuinely unattempted step. Counts are nonnegative integers
 smaller than 2^53. `usd` is a finite nonnegative decimal **string**, at most 40
 characters. SHA256 fields are exactly 64 lowercase hexadecimal characters.
 Fields not listed for a type are rejected; nested worker dictionaries are not
