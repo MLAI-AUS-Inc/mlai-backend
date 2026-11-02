@@ -2,8 +2,8 @@
   "schema_version": 1,
   "complete_for_reviewed_scope": true,
   "review_scope": "Bounded AST inventory of ContentFactoryRun/Step/Attempt lifecycle writes in content_factory and integrations, including original172 witnesses and expanded parameter/tuple aliases. Whole enclosing function AST hashes bind the manual source/caller decisions. Separate critical policy/control/observation contexts are pinned. This does not claim arbitrary dynamic SQL or all future alias coverage. No historical enrollment.",
-  "reviewed_source_parent": "7481c56f8209c88e0143926b1f1d7947722f4690",
-  "reviewed_at": "2026-11-02T22:06:25.975512+00:00",
+  "reviewed_source_parent": "81db0a4f5be88d70e1e7fd65e02e69eda5551037",
+  "reviewed_at": "2026-11-02T22:38:40.126282+00:00",
   "sites": [
     {
       "identity": "content_factory/article_editorial.py:upsert_written_article:0697dd48837225608a5041a22aced805bd473e6b52238f50664c6372a7011eca:1",
@@ -5874,6 +5874,53 @@
       ]
     },
     {
+      "path": "content_factory/founder_article_controls.py",
+      "function": "article_controls",
+      "function_sha256": "97172735502f40bf2b21f2987fa60cad03276a55256ae1ff44efe6773c164fb5",
+      "reason": "Pure current active owner/rights/article scope and stop/settlement/publication checks offer only commands; conditional original-obligation copy cannot promise a refund or mutate money.",
+      "test_refs": [
+        "content_factory.tests_founder_article_controls"
+      ]
+    },
+    {
+      "path": "content_factory/founder_article_controls.py",
+      "function": "_stopped_or_settling",
+      "function_sha256": "5b662895c85768568e2da653429f1e4f6d74e2df298406273b6715d820cc4f34",
+      "reason": "Malformed private settlement state, stop intent, actual closed obligations and publication evidence hold further command offers without repairing state.",
+      "test_refs": [
+        "content_factory.tests_founder_article_controls"
+      ]
+    },
+    {
+      "path": "content_factory/founder_journey_contract.py",
+      "function": "enrich_journey",
+      "function_sha256": "45d8d951ed599f313f2743e7793116de2c754e3d525df654456c9bbf446c9fec",
+      "reason": "Canonical current article DTO calls the read-only rights, verified review/resume and stop-control projections; no local lifecycle or monetary effects.",
+      "test_refs": [
+        "content_factory.tests_founder_article_contract",
+        "content_factory.tests_founder_article_controls"
+      ]
+    },
+    {
+      "path": "content_factory/founder_article_preferences.py",
+      "function": "review_preferences",
+      "function_sha256": "f8c7f662c6ec32dabb17a0a75cbb725a3e175c14433d75767338da28842ffb7b",
+      "reason": "Current active settings owner, cohort/flag/roster and verified earned history control only future voice preferences; no summary cache, draft mutation or provider call.",
+      "test_refs": [
+        "content_factory.tests_founder_article_preferences"
+      ]
+    },
+    {
+      "path": "content_factory/founder_article_review_contract.py",
+      "function": "scoped_review_response",
+      "function_sha256": "9453a7607d9582e127142bc0bb3e3fadfcfea91ab2054c62aa4c026828a6a5d9",
+      "reason": "Actual resolved parent scope and deep-copied original success remain exact; current access and voice preferences are additive local reads and safe candidate copy, never command authority.",
+      "test_refs": [
+        "content_factory.tests_founder_article_review_contract",
+        "content_factory.tests_founder_article_preferences"
+      ]
+    },
+    {
       "path": "content_factory/run_nightly_authority.py",
       "function": "require_nightly_principal",
       "function_sha256": "a0fd60af6caf92d5585eec011268f09cfa8d28f26800c894ad412a824569ce27",
@@ -5942,7 +5989,7 @@
     {
       "path": "content_factory/vibe_marketing_views.py",
       "function": "VibeMarketingRunView.get",
-      "function_sha256": "520dfc7818bc033312cb67fb9d7632803696fba10c3bbacd8c5c4284986b8de8",
+      "function_sha256": "ea55583837128fed732509ed6a9125be6b8e5162ab347dfd9bcdab50e5d258a3",
       "reason": "Scoped visible new-cohort route descriptor returns before revision/status/provider/metadata/refund work; only actual article workflows route to the article journey.",
       "test_refs": [
         "content_factory.tests_founder_article_contract"

@@ -175,7 +175,8 @@ class CurrentReviewTests(TransactionTestCase):
         before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
         original_steps = list(self.run.steps.order_by("pk").values())
         url = f"/api/v1/vibe-marketing/runs/{self.run.run_id}/approve/?company_id={self.company.pk}"
-        data = {"reviewedRevision": self.fixture["canonical_export"]["revision"], "auto_merge": True}
+        data = {"operationId": "founder-parent-consent-wire", "reviewedRevision": self.fixture["canonical_export"]["revision"],
+            "waivedComments": [], "acceptDisplayedRevision": True}
         with self.reads(), \
                 patch("content_factory.vibe_marketing_views.http_client.request",
                     return_value=response(self.fixture["article_review_response"])), \
@@ -183,8 +184,10 @@ class CurrentReviewTests(TransactionTestCase):
                     return_value=response(self.fixture["approval_response"])) as post:
             accepted = self.client.post(url, data, format="json")
             replay = self.client.post(url, data, format="json")
+            ignored_auto_merge = self.client.post(url, {**data, "auto_merge": True}, format="json")
         self.assertEqual(accepted.status_code, 202, accepted.data)
         self.assertEqual(replay.status_code, 202, replay.data)
+        self.assertEqual(ignored_auto_merge.status_code, 202, ignored_auto_merge.data)
         self.assertEqual(post.call_count, 1)
         self.assertTrue(post.call_args.args[0].endswith("/approve"))
         sent = post.call_args.kwargs["json"]
@@ -193,6 +196,14 @@ class CurrentReviewTests(TransactionTestCase):
         self.assertNotIn("auto_merge", sent)
         self.run.refresh_from_db()
         self.assertTrue(article_publish_approval_receipt_matches(self.run))
+        from .article_publish_approval import article_publish_approval_state
+        self.assertEqual(article_publish_approval_state(self.run)['review_revision'], data['reviewedRevision'])
+        import os
+        target = os.environ.get('FOUNDER_EXPORT_R5_PARENT_APPROVAL')
+        if target:
+            Path(target).write_text(json.dumps({'source': 'Actual authenticated PostgreSQL generic parent approval with client wire; retained actual CF worker history/evidence/metadata/body/ack, no live model/provider or publication enqueue',
+                'companyId': str(self.company.pk), 'runId': self.run.run_id, 'request': data,
+                'response': accepted.data, 'protectedConsent': article_publish_approval_state(self.run)}, indent=2) + '\n')
         self.assertEqual(accepted.data["approvalState"], "approved")
         self.assertEqual(accepted.data["status"], before["status"])
         self.assertTrue(is_delivered_content_only(self.run))

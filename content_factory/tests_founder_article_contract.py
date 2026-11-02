@@ -41,7 +41,8 @@ class FounderArticleContractTests(JourneyFixture, TestCase):
                     response = self.route_response(run.run_id)
                     self.assertEqual(response.status_code, 200, response.data)
                     self.assertEqual(response.data, {'contractVersion': 2, 'companyId': str(self.company.pk),
-                        'runId': run.run_id, 'kind': 'article' if run.workflow in ARTICLE_WORKFLOWS else 'advanced'})
+                        'requestedRunId': run.run_id, 'runId': run.run_id,
+                        'kind': 'article' if run.workflow in ARTICLE_WORKFLOWS else 'advanced'})
         self.assertFalse(any(row['sql'].lstrip().upper().startswith(('INSERT ', 'UPDATE ', 'DELETE ')) for row in queries))
         self.assertEqual(list(ContentFactoryRun.objects.order_by('pk').values()), before)
         self.assertEqual(OrganizationContentConfig.objects.values().get(organization=self.org), config)

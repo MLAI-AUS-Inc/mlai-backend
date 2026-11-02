@@ -64,6 +64,28 @@ class FirstArticleCommandTests(CardFixture, TransactionTestCase):
         self.assertFalse(Ledger.objects.filter(kind__in=['SPEND', 'REFUND']).exists())
         self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before)
 
+    def test_actual_admitted_dispatch_alias_route_echoes_requested_selector_and_bound_worker_without_effects(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        first = self.post()
+        self.assertEqual(first.status_code, 201, first.data)
+        run = ContentFactoryRun.objects.get(run_id=first.data['runId'])
+        logical_key = run.run_request['client_request_id']
+        self.assertNotEqual(logical_key, run.run_id)
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        outbox = list(ContentFactoryDispatchOutbox.objects.values())
+        with patch.object(views, '_call_content_factory_run_status', side_effect=AssertionError('Alias read cannot poll')):
+            with CaptureQueriesContext(connection) as queries:
+                value = self.client.get(f'/api/v1/vibe-marketing/runs/{logical_key}/',
+                    {'company_id': str(self.company.pk), 'view': 'route'})
+        self.assertEqual(value.status_code, 200, value.data)
+        self.assertEqual(value.data, {'contractVersion': 2, 'companyId': str(self.company.pk),
+            'requestedRunId': logical_key, 'runId': run.run_id, 'kind': 'article'})
+        self.assertFalse(any(row['sql'].lstrip().upper().startswith(('INSERT ', 'UPDATE ', 'DELETE ')) for row in queries))
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before)
+        self.assertEqual(list(ContentFactoryDispatchOutbox.objects.values()), outbox)
+        self.assertEqual(len(self.posted), 1)
+
     def test_paid_completed_retry_and_lost_ack_keep_one_actual_spend_and_original_key(self):
         from integrations.services import article_generation as generation
         self.balance = 100

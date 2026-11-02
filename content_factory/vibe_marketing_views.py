@@ -18859,7 +18859,8 @@ class VibeMarketingRunView(APIView):
             if not is_new_journey(context.organization) or is_hidden_run(run):
                 return Response({'detail': 'Run not found.'}, status=status.HTTP_404_NOT_FOUND)
             return Response({'contractVersion': 2, 'companyId': str(context.company.pk),
-                'runId': run.run_id, 'kind': 'article' if run.workflow in ARTICLE_WORKFLOWS else 'advanced'})
+                'requestedRunId': run_id, 'runId': run.run_id,
+                'kind': 'article' if run.workflow in ARTICLE_WORKFLOWS else 'advanced'})
         if run.workflow in ARTICLE_WORKFLOWS and not _is_publish_child_run(run):
             latest_revision = _latest_review_ready_component_revision(run, context)
             if latest_revision is not None:
