@@ -9,6 +9,7 @@ from community_chat.onboarding_models import CommunityMemberConsent, CommunityMe
 from core.models import AccountBan
 
 from .emails import normalize_contact_email
+from .engagement import marketing_review_hold
 from .models import Contact, ContactConsentEvent, CrmAuditEvent
 
 SOURCE = "community_onboarding:"
@@ -30,9 +31,14 @@ def current_consent(profile):
     return evidence if evidence and evidence.granted else None
 
 
-def contact_is_opted_in(contact):
-    """Recheck the live source, address, CRM suppression and account ban before sending."""
-    if (not contact.user_id or contact.email_status != Contact.EmailStatus.ACTIVE
+def contact_is_opted_in(contact, *, include_review_hold=True):
+    """Check current permission; only send checks include the separate review hold.
+
+    Source reconciliation passes ``include_review_hold=False`` so a hold cannot
+    be mistaken for a person's withdrawal. Genuine source withdrawals still win.
+    """
+    if ((include_review_hold and marketing_review_hold(contact.attributes))
+            or not contact.user_id or contact.email_status != Contact.EmailStatus.ACTIVE
             or contact.marketing_consent != Contact.MarketingConsent.GRANTED):
         return False
     profile = CommunityMemberProfile.objects.select_related("user").filter(user_id=contact.user_id).first()
@@ -96,7 +102,7 @@ def sync_community_optins(*, actor=None, dry_run=False):
             marketing_consent_source__startswith=SOURCE, marketing_consent=Contact.MarketingConsent.GRANTED,
             email_status=Contact.EmailStatus.ACTIVE,
         ).select_related("user"):
-            if not contact_is_opted_in(contact):
+            if not contact_is_opted_in(contact, include_review_hold=False):
                 record_email_opt_out(contact.email, "unsubscribed", source="community_onboarding:withdrawal", now=now)
                 counts["withdrawn"] += 1
         if dry_run:
