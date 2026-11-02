@@ -162,6 +162,38 @@ class StartupUpdateApiTestCase(TestCase):
 
 class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
     @patch("startup_updates.api_views.notify_valley_run_created")
+    def test_service_admission_keeps_failed_gmail_and_checks_every_selected_source(self, notify):
+        self.google_connection.scope = "https://www.googleapis.com/auth/calendar.readonly"
+        self.google_connection.save(update_fields=["scope"])
+        UserStartupBinding.objects.create(user=self.user, organization=self.organization,
+            google_connection=self.google_connection, is_default_for_gmail=True)
+        with self.captureOnCommitCallbacks(execute=True), self._with_key():
+            response = self.client.post(reverse("startup_updates_run"), {
+                "user_id": self.user.pk, "domain": self.organization.domain,
+                "input_sources": ["gmail", "slack"], "target_month": "2026-03-01",
+            }, format="json", **self.headers)
+        self.assertEqual(response.status_code, 201, response.data)
+        run = ContentFactoryRun.objects.get(run_id=response.data["run"]["run_id"])
+        self.assertEqual(run.run_request["input_sources"], ["gmail", "slack"])
+        self.assertEqual(run.run_request["source_preflight_version"], 1)
+        self.assertFalse(run.run_request.get("source_preflight_complete", False))
+        def probe(provider, **kwargs):
+            if provider == "gmail":
+                raise PermissionError("synthetic permission missing")
+            raise TimeoutError("synthetic provider outage")
+        with self._with_key(), patch("startup_updates.preflight.probe_source", side_effect=probe), patch(
+            "vibe_raising.views._sync_selected_connector_sources_for_draft",
+        ) as collect:
+            checked = self.client.post(reverse("startup_updates_source_preflight", args=[run.run_id]),
+                {}, format="json", **self.headers)
+        self.assertEqual(checked.status_code, 200, checked.data)
+        self.assertFalse(checked.data["ready"])
+        self.assertEqual([row["provider"] for row in checked.data["checks"]], ["gmail", "slack"])
+        self.assertEqual([row["status"] for row in checked.data["checks"]], ["needs_reconnect", "temporarily_unavailable"])
+        collect.assert_not_called()
+        notify.assert_called_once_with(run.run_id)
+
+    @patch("startup_updates.api_views.notify_valley_run_created")
     def test_profile_upsert_and_run_creation(self, mock_notify):
         with self._with_key():
             response = self.client.post(

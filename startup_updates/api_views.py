@@ -1097,28 +1097,11 @@ class StartupUpdateRunView(APIView):
         google_connection = binding.google_connection or google_connection_for_org(
             binding.user, binding.organization
         )
-        input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
-            input_sources,
-            google_connection,
-        )
-        if gmail_required_for_sources(input_sources) and (
-            google_connection is None or not has_gmail_read_scope(google_connection)
-        ):
-            return Response(
-                {
-                    "error": "The bound user does not have a usable Gmail connection.",
-                    "code": GMAIL_INSUFFICIENT_SCOPE_CODE if google_connection else "gmail_connection_required",
-                    "sourceUnavailable": bool(google_connection),
-                    "source_unavailable": bool(google_connection),
-                    "source": "gmail",
-                    "retryable": False,
-                    "warning": GMAIL_RECONNECT_WARNING if google_connection else "Connect Gmail before selecting Gmail.",
-                    **gmail_scope_status_payload(google_connection),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if google_connection is not None and binding.google_connection_id != google_connection.id:
+        # Preserve the complete selection. The durable preflight reports every
+        # failed permission/read together; admission must not silently remove
+        # Gmail or stop after inspecting only that source.
+        gmail_scope_warnings = {}
+        if "gmail" in input_sources and google_connection is not None and binding.google_connection_id != google_connection.id:
             binding.google_connection = google_connection
             binding.save(update_fields=["google_connection", "updated_at"])
 
