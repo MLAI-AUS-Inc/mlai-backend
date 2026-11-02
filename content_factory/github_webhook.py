@@ -152,6 +152,8 @@ def process_github_event(event_type, payload) -> dict:
     if event_wakes_enabled() and any(payload.get(key) is not None and not isinstance(payload[key], dict) for key in ("installation", "repository", "pull_request", "check_run", "check_suite", "deployment", "deployment_status")):
         return {"event": event_type, "ignored": True, "reason": "malformed_event"}
     wakes = wake_from_event(event_type, payload) if event_wakes_enabled() else 0
+    from .website_wakeups import wake_installation_work
+    p2_wakes = wake_installation_work(event_type, payload)
     if event_type == "installation" and payload.get("action") == "new_permissions_accepted":
         from django.db.models import F
         from .website_models import WebsiteConnection
@@ -164,12 +166,14 @@ def process_github_event(event_type, payload) -> dict:
         connections = WebsiteConnection.objects.filter(installation_id=identifier, state="connected",
             operations__action="prepare", operations__state="needs_user", operations__generation=F("generation"))
         count = wakes if event_wakes_enabled() else sum(advance_prepares_for_connection(key) for key in connections.values_list("id", flat=True).distinct())
-        return {"event": event_type, "action": "new_permissions_accepted", "prepares_woken": count}
+        return {"event": event_type, "action": "new_permissions_accepted", "prepares_woken": count,
+            **({"p2_work_woken": p2_wakes} if p2_wakes else {})}
     if event_type == "ping":
         return {"event": "ping"}
     if event_type in {"installation", "installation_repositories", "repository"}:
         from .website_reconciliation import handle_website_github_event
-        return {**handle_website_github_event(event_type, payload), **({"prepares_woken": wakes} if event_wakes_enabled() else {})}
+        return {**handle_website_github_event(event_type, payload), **({"prepares_woken": wakes} if event_wakes_enabled() else {}),
+            **({"p2_work_woken": p2_wakes} if p2_wakes else {})}
     if event_type == "pull_request":
         return {**handle_pull_request(payload), **({"prepares_woken": wakes} if event_wakes_enabled() else {})}
     if event_type == "push":

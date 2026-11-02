@@ -7046,6 +7046,9 @@ def _setup_pr_changes_outcome(*, run, context, config, pull, pr_number, checks, 
 
 
 def _attempt_setup_publish_merge(*, run, context, automatic=False):
+    from .p2_foundation import run_merge_policy, BACKEND_WORKER
+    if run_merge_policy(run) == BACKEND_WORKER:
+        return {"outcome": "waiting", "detail": "Waiting for the publication worker.", "run": run, "checks": {}}
     outcome = _attempt_setup_publish_merge_authorized(run=run, context=context, automatic=automatic)
     if outcome.get("outcome") == "merged":
         outcome["run"] = _maybe_verify_merged_setup_for_blocked_articles(run=outcome["run"], context=context)
@@ -7573,6 +7576,9 @@ def _check_and_merge_publish_pr(*, run, context):
     {"outcome": "merged" | "already_merged" | "pending" | "no_repo" | "no_pr"
     | "error", "detail": str, "checks": dict}.
     """
+    from .p2_foundation import run_merge_policy, BACKEND_WORKER
+    if run_merge_policy(run) == BACKEND_WORKER:
+        return {"outcome": "pending", "detail": "Waiting for the publication worker.", "checks": {"state": "pending"}}
     config = _get_config(context.organization)
     blocked = _setup_blocked_response_for_generation(context, config, run=run, publishing=True)
     if blocked is not None:
@@ -8845,9 +8851,10 @@ DJANGO_OWNED_ARTICLE_RESULT_PREFIXES = (
 
 def _merge_django_owned_article_result(local_result, remote_result):
     from content_factory.article_publication_evidence import SETTLEMENT_RESULT_KEYS
+    from .p2_foundation import P2_BACKEND_RESULT_KEYS
     local = _run_mapping(local_result)
     # A status poll of a failed run must not erase, or invent, its refund work.
-    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merge_sha", "merged_at", *SETTLEMENT_RESULT_KEYS}
+    backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merge_sha", "merged_at", *SETTLEMENT_RESULT_KEYS, *P2_BACKEND_RESULT_KEYS}
     merged = {key: value for key, value in _run_mapping(remote_result).items()
         if key not in backend_merge_keys or key in local}
     remote_quality = _run_mapping(merged.get("article_preview_quality"))
@@ -9629,6 +9636,9 @@ def _maybe_auto_merge_publish_child(*, child, viewed_run, context):
     Throttled via the cache so concurrent tabs and fast polls don't hammer the
     GitHub API. A blocked state (failed checks, closed PR, or timeout) halts
     automatic attempts until the manual merge action clears it."""
+    from .p2_foundation import run_merge_policy, BACKEND_WORKER
+    if child is not None and run_merge_policy(child) == BACKEND_WORKER:
+        return None
     if not child or child.workflow not in ARTICLE_WORKFLOWS:
         return None
     child_result = _run_mapping(child.result)
@@ -11912,6 +11922,8 @@ def _serialize_run(
     from content_factory.run_state import reliability_presentation
     from content_factory.run_queue_position import queue_position_payload
     result = _run_mapping(run.result)
+    from .publish_merge_worker import run_fields
+    p2_fields = run_fields(run, organization=getattr(context, "organization", None) or getattr(run, "organization", None))
     section_issues = public_section_issues(_nested_run_result_value(result, "section_issues", "sectionIssues"))
     raw_quality = _nested_run_result_value(result, "article_preview_quality", "articlePreviewQuality")
     needs_hosted_issues = _run_mapping(raw_quality).get("status") == "blocking_findings"
@@ -11971,6 +11983,7 @@ def _serialize_run(
     if compact:
         return {
             "runId": run.run_id,
+            **p2_fields,
             **billing_receipt,
             **connection_contract(run.run_request or {}),
             "editorialSnapshot": editorial_snapshot,
@@ -12049,6 +12062,7 @@ def _serialize_run(
     ) if run.workflow in ARTICLE_WORKFLOWS else result
     return {
         "runId": run.run_id,
+        **p2_fields,
         **billing_receipt,
             **connection_contract(run.run_request or {}),
             "editorialSnapshot": editorial_snapshot,
@@ -14706,6 +14720,9 @@ def _resolve_dispatch_token_run(run):
 
 
 def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, billing_refund_context=None):
+    from .p2_foundation import stamp_run_request
+    stamp_run_request(payload, organization=context.organization,
+        requester_user_id=getattr(getattr(getattr(context, "profile", None), "user", None), "pk", None))
     if payload.get("delivery_mode") == "content_only":
         # Portable editorial work has no repository authority, even when the
         # company retains a disconnected repository in its settings.
@@ -16528,7 +16545,17 @@ def _domain_claimed_response(request, exc):
     domain_claim_disputed alert is kept. The body never names the owner.
     """
     queue_domain_claim_alert(organization=exc.organization, claimant_user_id=request.user.id)
-    return exc.response()
+    response = exc.response()
+    if str(getattr(request, "path", "")).startswith("/api/v1/my-startup/"):
+        try:
+            from founder_tools.startup_team import issue_join_reference
+        except (ImportError, AttributeError):
+            issue_join_reference = None
+        if issue_join_reference is not None:
+            reference = issue_join_reference(user=request.user, organization=exc.organization)
+            if reference:
+                response.data = {**response.data, "joinReference": reference}
+    return response
 
 
 class VibeMarketingAutofillView(APIView):
@@ -17937,6 +17964,12 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
     command = ContentCommand(user=user, data=data)
     config = _get_config(context.organization)
     from .portable_drafts import copy_ready_request, has_connected_website, keeps_copy_ready_start, requests_content_only
+    try:
+        from .channel_switch import article_start_delivery_mode
+    except (ImportError, AttributeError):
+        article_start_delivery_mode = None
+    if article_start_delivery_mode is not None and article_start_delivery_mode(organization=context.organization, request=dict(command.data)) == "content_only":
+        command = ContentCommand(user=command.user, data=copy_ready_request(command.data))
     if requests_content_only(command.data) and has_connected_website(config):
         # P1.8 (IF-P1-10): a new-journey article started before the website
         # verifies (or before the owner chose "Publish automatically") stays
@@ -19564,6 +19597,21 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             return Response(exc.as_dict(),status=exc.status)
     command = ContentCommand(user=user, data=data)
     run_id = run_id or run.run_id
+    from .p2_foundation import run_merge_policy, BACKEND_WORKER
+    owned_kind = _run_mapping(_run_mapping(run.result).get("publish_pr_v1")).get("kind")
+    if action == "approve" and owned_kind in {"proxy", "scaffold"} and run_merge_policy(run) == BACKEND_WORKER:
+        # A completed proxy/scaffold has no article approval pipeline. This
+        # owner click records consent; the sweep owns its only merge path.
+        from founder_tools.services import user_may_use_organization
+        if not user_may_use_organization(command.user, context.organization):
+            return Response({"detail": "Only your startup's owner can add this to your website.", "reason": "owner_required"}, status=403)
+        from .publish_merge_worker import record_owner_approval
+        choice = "manual" if command.data.get("merge") == "manual" else "auto"
+        if not record_owner_approval(run=run, organization=context.organization, user=command.user, choice=choice):
+            return Response({"detail": "The website setup changed. Review its current preview.", "reason": "publish_receipt_changed"}, status=409)
+        from .website_setup_owner_approval import on_owner_setup_approve
+        on_owner_setup_approve(organization=context.organization, user=command.user, run=run, data=command.data)
+        return Response(_serialize_run(run, context=context), status=202)
     gated_actions = {"restart", "resume", "revise", "regenerate-image", "regenerate-images", "retry-preview-quality", "promote-bundle", "publish-pr", "approve", "merge-publish-pr"}
     if action in gated_actions and run.workflow in ARTICLE_WORKFLOWS | {"article_publish", "publish_article"}:
         blocked = _setup_blocked_response_for_generation(context, _get_config(context.organization), run=run,
