@@ -203,6 +203,7 @@ def enrich_journey(payload, *, organization, company, config, user, run, connect
     }, deliveryMode=delivery, steps=steps, failure=failure)
     payload["article"] = None
     if run is not None:
+        from .founder_article_controls import article_controls
         progress = []
         for index, step in enumerate(run.steps.all().order_by("display_order", "pk")[:100]):
             identifier = step.step_key if re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", step.step_key) else f"step-{index + 1}"
@@ -213,6 +214,7 @@ def enrich_journey(payload, *, organization, company, config, user, run, connect
             "approvalState": effective_approval_state(run), "currentStep": run.current_step or None,
             "deliveryMode": delivery, "resumeAvailable": _resume_available(run, user),
             "pollAfterMs": payload["pollAfterMs"], "progress": progress,
+            "controls": article_controls(organization=organization, company=company, user=user, run=run),
             "failure": deepcopy(failure), "capabilities": deepcopy(payload["capabilities"])}
     payload.setdefault("holdingReason", None)
     return payload
