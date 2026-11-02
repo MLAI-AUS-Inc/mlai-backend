@@ -33,6 +33,7 @@ EVERY_RULE = [
     {"type": "chat_member", "value": True},
     {"type": "source", "values": ["import"]},
     {"type": "reachable", "channel": "sms"},
+    {"type": "engagement_stars", "op": "gte", "value": 4},
 ]
 
 

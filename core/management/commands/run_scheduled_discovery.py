@@ -22,6 +22,7 @@ from crm.blasts import run_blast_dispatch_scheduler
 from crm.listmonk_sync import run_listmonk_sync_scheduler
 from crm.luma_sync import run_luma_guest_sync_scheduler
 from crm.warmup import run_warmup_scheduler
+from crm.engagement_refresh import run_engagement_refresh_scheduler
 from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
     run_daily_discovery_scheduler,
@@ -167,6 +168,8 @@ class Command(BaseCommand):
             # unsubscribes. Runs whenever listmonk is configured, throttled to
             # CRM_LISTMONK_SYNC_INTERVAL_SECONDS (about five minutes).
             ("crm_listmonk_sync", run_listmonk_sync_scheduler),
+            # Activity-only daily ratings. No consent or messaging side effects.
+            ("crm_engagement_refresh", run_engagement_refresh_scheduler),
             # Releases expired, undispatched MLAI Coding reservations and
             # resolves calls whose provider usage could not be confirmed.
             # Authenticated request paths only reconcile their own account;

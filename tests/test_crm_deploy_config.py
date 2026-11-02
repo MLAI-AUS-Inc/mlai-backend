@@ -41,6 +41,13 @@ class CrmDeployConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_single("LISTMONK_API_TOKEN", "x" * 40)
 
+    def test_daily_refresh_hour_is_a_strict_local_hour(self):
+        for hour in ("0", "6", "23"):
+            validate_single("CRM_ENGAGEMENT_REFRESH_HOUR", hour)
+        for hour in ("24", "-1", "1.5", "06", "secret"):
+            with self.subTest(hour=hour), self.assertRaises(ValueError):
+                validate_single("CRM_ENGAGEMENT_REFRESH_HOUR", hour)
+
     def test_host_upsert_accepts_crm_settings_and_keeps_the_rest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

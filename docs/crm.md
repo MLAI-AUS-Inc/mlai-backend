@@ -152,6 +152,97 @@ This approval does not cover production migrations.
 
 ## CSV import
 
+### Reviewed engagement snapshots
+
+`crm_import_engagement` imports the reviewed merged contact CSV into the existing
+contact store. It uses existing JSON attributes; no migration is required.
+
+```bash
+python manage.py crm_import_engagement /private/path/merged.csv \
+  --expected-sha256 <reviewed-file-sha256> --actor-email <MLAI-admin-email> \
+  --permission-evidence /private/path/luma-marketing-evidence.json
+# Review the rollback-only counts, then repeat with --apply to persist.
+```
+
+The complete file is validated before writes. Duplicate addresses, invalid
+ratings and a checksum mismatch abort the operation. The default preview rolls
+back all writes, including its import/audit records. Application is atomic and
+reimporting the same snapshot leaves contact data unchanged. An older snapshot
+cannot replace a newer rating. Banned addresses are skipped.
+
+The import stores typed `engagement_rating` metadata (stars, score, rule version,
+as-of date, reason and source coverage) and namespaced source evidence. It fills
+only blank display names. It does not modify existing consent, email/SMS/WhatsApp
+status, opt-out timestamps, provider IDs or consent-event history. It does not
+create blasts/deliveries or call a mail provider. Positive or partner-scoped form
+answers remain evidence for review, never an automatic marketing consent grant.
+
+New contacts, existing contacts with unknown permission, and contacts with a
+declined MLAI/event-update preference receive a monotonic
+`marketing_review_hold`. Existing holds are never cleared by an import. This is
+a review flag, not a formal unsubscribe or consent withdrawal. Marketing
+audience selection, send-time loading/campaign start and warm-up admission honor
+the hold. Source-consent synchronization still processes genuine withdrawals
+without turning the review flag itself into an unsubscribe.
+
+Admin contact list/detail responses expose `engagement_rating` (or null),
+`engagement_stars`, `engagement_score` and `marketing_review_hold`. Filters accept
+`stars`, `min_stars`, `max_stars` (1–5); `sort=engagement` ranks stars then score,
+with unrated contacts last. Segments support an `engagement_stars` rule. Ordinary
+attribute edits cannot replace reserved ratings or remove a review hold.
+
+The 2 November 2026 import is a provisional snapshot. Daily refresh (below)
+uses dated source evidence without turning unknown coverage into inactivity.
+One star can reflect limited observed evidence.
+
+### Daily engagement refresh
+
+`CRM_ENGAGEMENT_REFRESH_ENABLED=true` enables the activity-only scheduler runner.
+`CRM_ENGAGEMENT_REFRESH_HOUR=6` starts each day's sweep after 06:00 in
+Australia/Melbourne, including daylight saving. Thirty-five-second passes
+resume on subsequent ticks, with a shared Redis lock, per-contact day/version
+receipts and a durable completed-day audit record. Repeated ticks are cheap.
+Transient expected-source failures preserve the previous rating and retry after
+15 minutes. A permanently unavailable source is explicitly partial coverage.
+
+The job reads:
+
+- Luma's existing successfully ingested registrations and actual check-ins.
+  Dated imported history outside the calendar key remains available; only a
+  complete newer sync can replace that event's historical evidence.
+- Public Slack human-message metadata from the bridge, dated by source Slack
+  timestamp. Bots, reactions, system notices, private/DM and test activity are
+  excluded. Exact active account email mappings are required.
+- Explicit `User.last_login` recency. This contributes at most five points;
+  background refresh/device timestamps are not usage frequency.
+- Dated CRM email-click feedback and the scheduled Substack browser export.
+  `CRM_SUBSTACK_ACTIVITY_ENABLED=true` expects a daily authenticated export,
+  delivered by the local Codex task at 05:30 before the 06:00 rating sweep.
+  This uses the supported subscriber export, not an undocumented API or copied
+  session credentials. The Mac, Codex app and signed-in official Chrome
+  connection must be available. A stale expected export preserves prior ratings
+  and is visible in source coverage. Historical evidence ages normally.
+  Undated aggregate counters cannot become invented activity dates, and email
+  opens always earn zero points. See [the export runbook](crm-substack-refresh.md).
+
+Only rating/refresh metadata in `Contact.attributes` is changed. Consent,
+unsubscribe/delivery states, review holds, consent history, blasts, provider
+audiences and sending configuration are not modified. Malformed legacy
+attributes are retained under a protected key and remain effectively held.
+
+`crm_refresh_engagement --actor-email <admin>` is rollback-only by default;
+`--apply` executes a bounded pass. It never invokes source synchronization or a
+sender. The initial dated-history seed command is also rollback-first and
+requires exact input checksums. Namespace keys are protected from ordinary
+attribute editing.
+
+`crm_import_newsletter_activity PATH --expected-sha256 SHA --exported-at ISO
+--actor-email ADMIN` previews an export; `--apply` persists only dated click
+evidence for existing contacts. It never imports subscribers or preferences,
+infers opt-outs from missing rows, or changes a review hold. An older/equal
+export is idempotently skipped. Freshness is published only after commit and is
+durably recorded even when the export contains no new clicks.
+
 ```bash
 python manage.py crm_import_contacts PATH --consent granted|none [--consent-source TEXT] \
   [--tag TAG ...] [--map HEADER=FIELD ...] [--actor-email EMAIL] [--dry-run]

@@ -26,6 +26,7 @@ from django.utils import timezone
 
 from . import listmonk, merge_tags
 from .emails import normalize_contact_email
+from .engagement import marketing_review_hold
 from .listmonk import ListmonkError
 from .models import Blast, BlastDelivery, Channel, Contact, SenderMailbox
 from .queries import banned
@@ -274,6 +275,8 @@ def _drop_reason(blast, contact, is_banned: bool) -> Optional[str]:
         and contact.marketing_consent == Contact.MarketingConsent.WITHDRAWN
     ):
         return "consent_withdrawn"
+    if blast.purpose == Blast.Purpose.MARKETING and marketing_review_hold(contact.attributes):
+        return "marketing_review_hold"
     return None
 
 
@@ -455,6 +458,16 @@ def start_campaign(blast_id, campaign_id: int, *, now) -> str:
             return str(email_stats(blast).get("listmonk_status") or listmonk.RUNNING)
         if email_block(blast):
             return "held"
+        if blast.purpose == Blast.Purpose.MARKETING:
+            # Loading a list can span ticks. Recheck under contact locks so an
+            # import's hold cannot race the final provider start call.
+            contacts = Contact.objects.select_for_update().filter(
+                blast_deliveries__blast=blast,
+                blast_deliveries__channel=Channel.EMAIL,
+                blast_deliveries__status=Status.SUBMITTING,
+            ).order_by("pk")
+            if any(marketing_review_hold(contact.attributes) for contact in contacts):
+                return "held"
         try:
             listmonk.set_campaign_status(campaign_id, listmonk.RUNNING)
             status = listmonk.RUNNING

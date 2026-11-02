@@ -423,6 +423,9 @@ class InputTests(SimpleTestCase):
                 "whatsapp": "",
                 "sort": "recent",
                 "segment_id": None,
+                "stars": None,
+                "min_stars": None,
+                "max_stars": None,
             },
         )
         for params in (
@@ -477,6 +480,7 @@ class WireShapeTests(SimpleTestCase):
                 "tags", "phone_e164", "events_registered_count", "events_attended_count",
                 "last_event_at", "last_attended_at", "email_status", "marketing_consent",
                 "marketing_eligible", "sms_status", "whatsapp_opt_in",
+                "engagement_stars", "engagement_score", "engagement_rating", "marketing_review_hold",
             },
         )
         self.assertTrue(row["marketing_eligible"])
