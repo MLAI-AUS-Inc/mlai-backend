@@ -1,7 +1,7 @@
 """Database-free research spend/outbox, delivery and original-price refund fences."""
 from contextlib import contextmanager
 from types import SimpleNamespace as Obj
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
 
@@ -10,8 +10,23 @@ from content_factory.website_contract import WebsiteAuthorityError
 from integrations.services import article_generation as billing
 
 
+def _empty_canonical_runs(test):
+    """Model absent admitted rows, keeping actual boundary predicates active."""
+    from workflow_runs.models import ContentFactoryRun
+    rows = MagicMock(name="unadmitted_research_runs")
+    rows.filter.return_value = rows.order_by.return_value = rows.select_for_update.return_value = rows
+    rows.__getitem__.return_value = rows
+    rows.first.return_value = None
+    rows.iterator.return_value = iter(())
+    rows.__iter__.return_value = iter(())
+    canonical = patch.object(ContentFactoryRun, "objects", rows)
+    canonical.start()
+    test.addCleanup(canonical.stop)
+
+
 class ResearchDispatchTests(SimpleTestCase):
     def setUp(self):
+        _empty_canonical_runs(self)
         self.user = Obj(pk=7, id=7)
         self.company = Obj(pk="company-1")
         self.org = Obj(pk=9, id=9, domain="synthetic.example.test")
@@ -157,6 +172,9 @@ class ResearchDispatchTests(SimpleTestCase):
 
 
 class OriginalResearchRefundTests(SimpleTestCase):
+    def setUp(self):
+        _empty_canonical_runs(self)
+
     def test_paid_to_free_and_free_to_paid_price_changes_use_original_charge(self):
         from roo.models import Ledger
         from roo.services import PointsService
