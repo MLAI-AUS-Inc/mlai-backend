@@ -84,6 +84,10 @@ class Command(BaseCommand):
                         "version": "source-events-v1", "as_of": "2026-11-02",
                         "events": evidence[contact.email],
                         "source_sha256": {"registrations": options["registration_sha256"], "slack": options["slack_sha256"]},
+                        "coverage": {
+                            "luma": {"status": "partial", "exported_events": 103, "unavailable_listings": 14, "as_of": "2026-11-02"},
+                            "slack": {"status": "partial", "public_only": True, "history_from": "2026-08-04", "as_of": "2026-11-02"},
+                        },
                     }
                     attributes = dict(contact.attributes or {})
                     previous = attributes.get("engagement_activity")
