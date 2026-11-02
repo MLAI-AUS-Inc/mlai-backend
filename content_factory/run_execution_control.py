@@ -130,7 +130,7 @@ def append_execution_ticket(run, *, control_key, reason, scope=None, increment_g
     Same-key retry returns its exact ticket without advancing any generation.
     """
     if (not transaction.get_connection().in_atomic_block or type(control_key) is not str or not _KEY.fullmatch(control_key)
-            or type(reason) is not str or reason not in AUTOMATIC_REASONS | {"source_repin", "user_resume", "operation_resume", "connection_rebind"}
+            or type(reason) is not str or reason not in AUTOMATIC_REASONS | {"source_repin", "user_resume", "operation_resume", "connection_rebind", "user_revision"}
             or type(increment_generation) is not bool):
         raise ExecutionControlDenied()
     receipt = owner_receipt(run)

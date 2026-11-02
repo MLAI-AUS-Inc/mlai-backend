@@ -60,6 +60,23 @@ class ExecutionTicketTests(TestCase):
                 self.assertEqual(after[key], value, key)
         self.assertEqual(list(Ledger.objects.values()), before_ledgers)
 
+    def test_internal_user_revision_is_one_retained_command_without_automatic_endpoint_admission(self):
+        from .run_execution_control import AUTOMATIC_REASONS
+        self.assertNotIn("user_revision", AUTOMATIC_REASONS)
+        tickets = []
+        for _ in range(2):
+            with transaction.atomic():
+                run = ContentFactoryRun.objects.select_for_update().get(pk=self.run.pk)
+                require_current_principal(run)
+                tickets.append(append_execution_ticket(run, control_key="d" * 64, reason="user_revision"))
+        self.assertEqual(tickets[0], tickets[1])
+        self.assertEqual(tickets[0]["generation"], 1)
+        self.run.refresh_from_db()
+        after = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        for key, value in self.original.items():
+            if key != "result":
+                self.assertEqual(after[key], value, key)
+
     def test_pair_commit_before_receipt_replay_can_echo_the_issued_ticket(self):
         first = self.append()
         second = self.append(expected_execution_id=first["execution_id"])
