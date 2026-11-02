@@ -101,6 +101,12 @@ def wire_identity(receipt):
     return {**deepcopy(receipt["identity"]), "event_protocol": receipt["authority"]["event_protocol"]}
 
 
+def owns_backend_facts(run):
+    """An admitted fact owner stays authoritative independently of rollout flags."""
+    receipt = owner_receipt(run)
+    return receipt is not None and receipt["authority"].get("backend_facts") is True
+
+
 def authorized_event_generation(run):
     """The backend-authorized generation; worker observations cannot raise it."""
     return current_execution_ticket(run)["generation"]

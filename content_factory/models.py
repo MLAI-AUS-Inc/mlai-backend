@@ -485,6 +485,21 @@ class ContentFactoryJob(models.Model):
         db_table = 'content_factory_job'
         ordering = ['-created_at']
 
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        """Capture loaded metadata for an explicit concurrency-safe fact patch."""
+        instance = super().from_db(db, field_names, values)
+        from .run_backend_facts import capture_fact_baseline
+        capture_fact_baseline(instance)
+        return instance
+
+    def refresh_from_db(self, using=None, fields=None, from_queryset=None):
+        """Refresh the pure metadata baseline together with a refreshed value."""
+        super().refresh_from_db(using=using, fields=fields, from_queryset=from_queryset)
+        if fields is None or "request_meta" in fields:
+            from .run_backend_facts import capture_fact_baseline
+            capture_fact_baseline(self)
+
     def __str__(self):
         return f"{self.job_id} ({self.status}) - {self.domain}"
 
