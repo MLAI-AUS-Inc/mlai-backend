@@ -606,6 +606,52 @@ class BackfillTest(TestCase):
         self.assertEqual(report.create_statuses, {"completed": 1})
         self.assertFalse(ContentFactoryRun.objects.filter(run_id="legacy-live-job").exists())
 
+    def test_create_never_revives_blocked_awaiting_or_unrecognized_history(self):
+        phases = (
+            "blocked", "auth_required", "blocked_verification", "precondition_failed",
+            "preview_failed", "needs_user", "fallback_ready", "setup_pr_create_failed",
+            "queued", "running", "researching", "generating", "processing", "in_progress",
+            "awaiting_confirmation", "awaiting_delivery_mode", "awaiting_approval", "approval_required",
+            "", "unknown", "setup_pr_created", "pr_created", "merged", "merged_verifying",
+        )
+        with override_settings(ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED=False):
+            jobs = [_job(f"legacy-ineligible-{index}", status=phase, request_meta={}, client_request_id=None)
+                    for index, phase in enumerate(phases)]
+        before = list(ContentFactoryJob.objects.filter(pk__in=[job.pk for job in jobs]).values())
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                report = backfill_run_job_fields(apply=apply, create=True)
+                self.assertEqual(report.counts["create_skipped_live"], len(phases))
+                self.assertEqual(report.create_statuses, {"completed": 1})
+                self.assertFalse(ContentFactoryRun.objects.filter(run_id__in=[job.job_id for job in jobs]).exists())
+                self.assertEqual(list(ContentFactoryJob.objects.filter(pk__in=[job.pk for job in jobs]).values()), before)
+
+    def test_create_preserves_explicit_finished_job_phases(self):
+        phases = {"completed": "completed", "pr_opened": "completed", "needs_review": "completed",
+                  "confirmed": "completed", "cancelled": "cancelled", "error": "failed",
+                  "failed": "failed", "denied": "denied", " COMPLETED ": "completed"}
+        with override_settings(ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED=False):
+            jobs = [_job(f"legacy-finished-{index}", status=phase, request_meta={}, client_request_id=None)
+                    for index, phase in enumerate(phases)]
+        report = backfill_run_job_fields(apply=True, create=True)
+        self.assertEqual(report.counts["runs_created"], len(jobs) + 1)
+        for job, expected in zip(jobs, phases.values()):
+            with self.subTest(phase=job.status):
+                run = ContentFactoryRun.objects.get(run_id=job.job_id)
+                self.assertEqual(run.status, expected)
+                self.assertEqual(run.delivery_phase, job.status)
+                self.assertEqual(job_field_mismatches(job, job_view(run)), [])
+
+    def test_blocked_existing_run_still_receives_job_facts_without_lifecycle_change(self):
+        with override_settings(ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED=False):
+            run = _run("blocked-existing", status="blocked")
+            job = _job(run.run_id, status="auth_required")
+        before = (run.status, run.updated_at)
+        backfill_run_job_fields(apply=True)
+        run.refresh_from_db()
+        self.assertEqual((run.status, run.updated_at), before)
+        self.assertEqual(job_field_mismatches(job, job_view(run)), [])
+
     def test_undo_restores_the_previous_state(self):
         before = list(ContentFactoryRun.objects.order_by("pk").values())
         backfill_run_job_fields(apply=True, create=True)
