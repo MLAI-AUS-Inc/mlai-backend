@@ -167,3 +167,20 @@ measurement remain release gates. Authentication revocation, provider downtime
 and an empty reporting period cannot be guaranteed away; the contract is an
 actionable source result and durable progress, with no fabricated or silently
 incomplete update.
+
+## Release validation against current main
+
+On 2 November 2026, the user approved the exact 377-file set in
+`pulse-reliability-release-test-migrations.json` for fresh disposable local and
+GitHub CI test databases. Its SHA-256 is
+`2a5810e4f9574febe4bc0c6fdf3666ee50fc1d78afe999b462e187672306e22f`.
+The prior 374-file inventory remains unchanged. Three existing migrations from
+main were added; this change creates no migrations and grants no production
+migration permission. The rebased PostgreSQL Pulse/member-perk suite passed
+199 tests, with database teardown completed. Another 57 provider, worker and
+ticket-policy checks passed without database access.
+
+For the rebased disposable runner, add
+`--migration-inventory docs/pulse-reliability-release-test-migrations.json`
+and pass the new approved digest. Deployment retains the production migration
+plan gate and must stop if a new, unapproved pending plan is found.

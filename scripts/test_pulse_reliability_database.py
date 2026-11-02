@@ -35,6 +35,7 @@ REGRESSIONS = [
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--migration-inventory", type=Path, default=INVENTORY)
     parser.add_argument("--approved-inventory-sha256", required=True)
     parser.add_argument("--postgres-port", type=int)
     parser.add_argument(
@@ -45,7 +46,7 @@ def main():
     parser.add_argument("--include-regressions", action="store_true")
     parser.add_argument("--test-label", action="append", dest="test_labels")
     args = parser.parse_args()
-    raw = INVENTORY.read_bytes()
+    raw = args.migration_inventory.read_bytes()
     if hashlib.sha256(raw).hexdigest() != args.approved_inventory_sha256:
         raise SystemExit("Migration approval inventory changed.")
     inventory = json.loads(raw)
