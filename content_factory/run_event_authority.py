@@ -386,7 +386,7 @@ def receive_authoritative_run_events(payload):
     from django.utils import timezone
     from rest_framework.response import Response
     from workflow_runs.models import ContentFactoryRun
-    from .run_ownership import (EVENT_RESULT_KEY, RunOwnershipConflict, current_execution_ticket,
+    from .run_ownership import (DISPATCH_RESULT_KEY, EVENT_RESULT_KEY, RunOwnershipConflict, current_execution_ticket,
                                 require_event_execution, require_event_identity)
     try:
         batch = validate_authoritative_envelope(payload)
@@ -403,9 +403,12 @@ def receive_authoritative_run_events(payload):
             result = deepcopy(run.result)
             before = result.get(EVENT_RESULT_KEY)
             previous_projection = before.get("projection", {}) if isinstance(before, dict) else {}
+            dispatch = result.get(DISPATCH_RESULT_KEY, {})
+            transport_hold = (run.status == "blocked" and run.current_step == "dispatch_pending_resolution"
+                and isinstance(dispatch, dict) and dispatch.get("state") == "pending_resolution")
             # A backend stop which differs from the last event projection is
             # authoritative until a new backend-issued execution ticket exists.
-            local_stop = (run.status in TERMINAL and run.status not in HARD_TERMINAL
+            local_stop = (run.status in TERMINAL and run.status not in HARD_TERMINAL and not transport_hold
                 and (not previous_projection or previous_projection.get("execution_id") == current["execution_id"])
                 and previous_projection.get("status") != run.status)
             ledger, accepted, duplicates = fold_authoritative_events(before, batch,
