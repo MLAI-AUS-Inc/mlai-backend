@@ -22,7 +22,7 @@ WIRE_EXECUTION_KEY = "backend_run_execution_v1"
 R3_BACKEND_RESULT_KEYS = frozenset({OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, EVENT_RESULT_KEY, DISPATCH_RESULT_KEY})
 R3_BACKEND_REQUEST_KEYS = frozenset({WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY})
 SCOPE_FIELDS = (*CONNECTION_FIELDS, *OPERATION_FIELDS, "expected_source_sha", "source_run_id")
-SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation"})
+SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation", "hosted_auto_register"})
 WORKER_WORKFLOW_ALIASES = {
     "article_generation": frozenset({"direct_generate", "confirmed_topic"}),
     "scaffold_articles": frozenset({"article_system_setup"}),
@@ -285,6 +285,61 @@ def reserve_admitted_run(*, organization, principal, workflow, payload, reserved
         ticket = current_execution_ticket(run)
     payload[WIRE_REQUEST_KEY] = wire
     payload[WIRE_EXECUTION_KEY] = ticket
+    return run
+
+
+def seal_new_run_admission(run, *, created, principal):
+    """Seal only a caller's newly created named Run before its first dispatch.
+
+    ``created`` must be the trusted ORM creation result, never request data.
+    The caller owns the creation transaction and must finish any original
+    charge carry before this call. Existing legacy rows are never enrolled.
+    """
+    if not admission_enabled():
+        return run
+    if created is not True or not transaction.get_connection().in_atomic_block:
+        raise RunOwnershipConflict("New named admission requires its actual creation transaction.")
+    from workflow_runs.models import ContentFactoryRun
+    from .models import ContentFactoryJob
+    from organizations.models import Organization
+    Organization.objects.select_for_update().get(pk=run.organization_id)
+    locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+    result = locked.result if isinstance(locked.result, dict) else {}
+    request = deepcopy(locked.run_request) if isinstance(locked.run_request, dict) else {}
+    progress_fields = ("progress_message_ts", "slack_channel_id", "slack_thread_ts", "slack_root_message_ts",
+                       "posted_progress_ids", "last_progress_milestone_key", "last_progress_milestone_index",
+                       "last_progress_updated_at", "still_working_pinged_at")
+    if (owner_receipt(locked) is not None or locked.status != "queued"
+            or locked.current_step not in {"", "queued"} or locked.last_event_emitted_at is not None
+            or locked.reconciled_at is not None or locked.artifact_root or locked.resume_available
+            or locked.acceptance_summary or locked.verification_summary
+            or any(getattr(locked, field) for field in progress_fields)
+            or any(key in result for key in ("generation", "state_version", "run_events_v1", "delivery_v1", EVENT_RESULT_KEY))
+            or any(key in request for key in R3_BACKEND_REQUEST_KEYS)
+            or locked.steps.exists() or ContentFactoryJob.objects.filter(job_id=locked.run_id).exists()):
+        raise RunOwnershipConflict("A previously active or enrolled Run cannot become a new admission.")
+    request.setdefault("client_request_id", locked.run_id)
+    identity, request = _identity(organization=locked.organization, principal=principal,
+                                  workflow=locked.workflow, payload=request)
+    if identity["github_repo"] != locked.github_repo:
+        raise RunOwnershipConflict("The named execution has different admitted repository inputs.")
+    if admitted_run_for_key(identity["dispatch_key"], lock=True) is not None:
+        raise RunOwnershipConflict("The original dispatch key already owns an admission.")
+    facts = getattr(settings, "ARTICLES_RUN_FACT_AUTHORITY_ENABLED", False) is True
+    events = getattr(settings, "ARTICLES_RUN_EVENT_AUTHORITY_ENABLED", False) is True
+    if events and not facts:
+        raise RunOwnershipConflict("Event authority requires the complete backend fact owner.")
+    receipt = {"schema_version": 1, "identity": identity, "reservation_run_id": locked.run_id, "fixed_run_id": True,
+               "authority": {"backend_facts": facts, "event_protocol": 1 if events else None}}
+    wire = wire_identity(receipt)
+    ticket = {"schema_version": 1, "execution_id": "admit:" + evidence_digest(wire), "generation": 0,
+              "admission_digest": evidence_digest(wire), "request_digest": identity["request_digest"],
+              "scope": deepcopy(identity["scope"])}
+    request.update({WIRE_REQUEST_KEY: wire, WIRE_EXECUTION_KEY: ticket})
+    result = {**result, OWNER_RESULT_KEY: receipt, OWNER_EXECUTION_KEY: {
+        "current_execution_id": ticket["execution_id"], "tickets": {ticket["execution_id"]: ticket}}}
+    ContentFactoryRun.objects.filter(pk=locked.pk).update(run_request=request, result=result)
+    run.run_request, run.result = request, result
     return run
 
 

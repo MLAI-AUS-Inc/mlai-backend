@@ -3,8 +3,9 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from threading import Barrier
 
-from django.db import close_old_connections, connection
+from django.db import close_old_connections, connection, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
+from django.utils import timezone
 from unittest import skipUnless
 
 from organizations.models import Organization
@@ -14,7 +15,7 @@ from .run_ownership import (
     EVENT_RESULT_KEY, OWNER_EXECUTION_KEY, OWNER_RESULT_KEY, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY,
     RunOwnershipConflict, admitted_run_for_key, authorized_event_generation, bind_admitted_run,
     current_execution_ticket, owner_receipt, prepare_owned_callback, require_event_execution,
-    require_event_identity, reserve_admitted_run, scheduler_principal, user_principal,
+    require_event_identity, reserve_admitted_run, scheduler_principal, seal_new_run_admission, user_principal,
 )
 
 FLAGS = {"ARTICLES_RUN_OWNERSHIP_ENABLED": True, "ARTICLES_RUN_FACT_AUTHORITY_ENABLED": False,
@@ -122,6 +123,54 @@ class RunAdmissionTests(TestCase):
         self.assertEqual(bind_admitted_run(run, run.run_id).pk, run.pk)
         with self.assertRaises(RunOwnershipConflict):
             bind_admitted_run(run, "different-child")
+
+    def test_seal_new_named_run_retains_charge_approval_and_exact_clocks(self):
+        from .website_contract import evidence_digest
+        from roo.models import Ledger
+        from django.contrib.auth import get_user_model
+        user = get_user_model().objects.create_user(email="r3-seal@example.test")
+        ledger = Ledger.objects.create(user=user, kind="SPEND", source="CONTENT_FACTORY",
+            delta=-6, delta_microroo=-6_000_000, idempotency_key="synthetic-original-r3-charge")
+        charge_before = Ledger.objects.values().get(pk=ledger.pk)
+        request = self.payload(client_request_id="named-publish", roo_points_ledger_id=ledger.pk,
+            original_billing_source_run_id="original-draft", approved_body_sha256="b" * 64)
+        retained = {"article_approval_v1": {"approved_body_sha256": "b" * 64},
+                    "points_v1": {"state": "carried", "original_key": ledger.idempotency_key}}
+        with transaction.atomic():
+            run = ContentFactoryRun.objects.create(run_id="named-publish", organization=self.org,
+                workflow="auto_discovery", domain=self.org.domain, run_request=request, result=retained)
+            before = ContentFactoryRun.objects.values().get(pk=run.pk)
+            seal_new_run_admission(run, created=True, principal=self.principal)
+        run.refresh_from_db()
+        self.assertEqual(owner_receipt(run)["identity"]["request_digest"], evidence_digest(request))
+        for key, value in retained.items():
+            self.assertEqual(run.result[key], value)
+        self.assertEqual(run.created_at, before["created_at"])
+        self.assertEqual(run.updated_at, before["updated_at"])
+        self.assertEqual(Ledger.objects.values().get(pk=ledger.pk), charge_before)
+        self.assertEqual(Ledger.objects.count(), 1)
+
+    def test_seal_never_enrolls_existing_or_previously_active_execution(self):
+        for field, value in ((None, None), ("progress_message_ts", "123.4"), ("current_step", "writing"),
+                             ("last_event_emitted_at", timezone.now())):
+            with self.subTest(field=field), transaction.atomic():
+                request = self.payload(client_request_id="seal-" + str(field))
+                kwargs = {field: value} if field else {}
+                run = ContentFactoryRun.objects.create(run_id=request["client_request_id"], organization=self.org,
+                    workflow="auto_discovery", domain=self.org.domain, run_request=request, **kwargs)
+                before = ContentFactoryRun.objects.values().get(pk=run.pk)
+                with self.assertRaises(RunOwnershipConflict):
+                    seal_new_run_admission(run, created=bool(field), principal=self.principal)
+                self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before)
+
+    def test_seal_rolls_back_with_new_creation_before_any_dispatch(self):
+        with self.assertRaises(RuntimeError):
+            with transaction.atomic():
+                run = ContentFactoryRun.objects.create(run_id="rollback-new", organization=self.org,
+                    workflow="auto_discovery", domain=self.org.domain, run_request=self.payload(client_request_id="rollback-new"))
+                seal_new_run_admission(run, created=True, principal=self.principal)
+                raise RuntimeError("synthetic crash before dispatch")
+        self.assertFalse(ContentFactoryRun.objects.filter(run_id="rollback-new").exists())
 
     def test_scheduler_has_explicit_service_not_substituted_owner(self):
         run = reserve_admitted_run(organization=self.org, principal=scheduler_principal("island_refresh"),
