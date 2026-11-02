@@ -8308,6 +8308,10 @@ def _restart_article_run(*, run, context):
     client_request_id = f"vibe-article-restart:{run.run_id}:{uuid.uuid4().hex}"
     payload["client_request_id"] = client_request_id
     payload.pop("dispatch_outbox_reserved", None)
+    # Freeze the same verified requester policy as the queue before reserving
+    # the child operation; adding it afterwards changes the immutable digest.
+    from .p2_foundation import stamp_run_request
+    stamp_run_request(payload, organization=context.organization, requester_user_id=context.profile.user.pk)
     reservation_error = _reserve_article_start_connection(context, payload)
     if reservation_error is not None:
         return None, reservation_error
