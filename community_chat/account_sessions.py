@@ -185,7 +185,7 @@ def rotate_account_session(raw_refresh_token, *, required_origin=None, required_
     return AccountSessionCredentials(session, access_token, refresh_token)
 
 
-def revoke_account_session(raw_refresh_token, *, required_origin=None):
+def revoke_account_session(raw_refresh_token, *, required_origin=None, required_public_key=None):
     if not str(raw_refresh_token).startswith(REFRESH_TOKEN_PREFIX):
         raise InvalidAccountSession("invalid_session")
     now = timezone.now()
@@ -198,6 +198,7 @@ def revoke_account_session(raw_refresh_token, *, required_origin=None):
         )
         if not _valid_session(session, now):
             raise InvalidAccountSession("invalid_session")
+        validate_browser_account_binding(session, required_public_key)
         if required_origin is not None and not secrets.compare_digest(
             session.origin,
             required_origin,

@@ -952,7 +952,18 @@ class AccountSessionLogoutView(APIView):
                 str(request.headers.get("Origin") or "").strip().rstrip("/")
             )
         try:
-            revoke_account_session(raw_token, required_origin=required_origin)
+            revoke_account_session(
+                raw_token, required_origin=required_origin,
+                required_public_key=(
+                    request.headers.get("X-MLAI-Public-Key") if not explicit_token else None
+                ),
+            )
+        except InvalidBrowserAccountBinding:
+            response = Response(
+                {"error": "account_identity_mismatch"}, status=status.HTTP_401_UNAUTHORIZED
+            )
+            response["Cache-Control"] = "no-store"
+            return response
         except InvalidAccountSession:
             response = Response(
                 {"error": "invalid_session"},
