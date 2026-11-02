@@ -105,6 +105,10 @@ def safe_template_seed(body):
 
 def delivered_content(run):
     """Conservatively detect persisted delivery before granting no-value refunds."""
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import has_verified_delivery
+        return has_verified_delivery(run)
     result = getattr(run, "result", None) or {}
     from django.conf import settings
     if getattr(settings, "ARTICLES_REGISTRY_REFUNDS_ENABLED", False) and result.get("draft_ready_v1"):
@@ -134,7 +138,10 @@ def publish_child_binding(config, source_run, payload, remote_data, *, reviewed_
         raise WebsiteAuthorityError("website_repository_changed", "This saved draft belongs to an older website repository. Start a newly reviewed publishing draft.")
     original_request = getattr(source_run, "run_request", None) or {}
     if original_request.get("expected_source_sha") and original_request["expected_source_sha"] != connection.verified_sha:
-        raise WebsiteAuthorityError("website_source_changed", "The verified website source changed since this draft. Review a new publishing revision.")
+        # A newly admitted publication may consume a separately reviewed ref.
+        # Its source remains pinned; only the fresh destination uses default.
+        from .run_review_source import publication_binding_source
+        publication_binding_source(source_run, connection)
     target = connection.targets.filter(generation=connection.generation,
         target_key=getattr(config, "default_publish_target_id", None), source_sha=connection.verified_sha,
         verified_at__isnull=False).first()

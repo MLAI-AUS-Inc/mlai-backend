@@ -1,0 +1,783 @@
+{
+  "fixture_version": 1,
+  "producer": "Actual PostgreSQL admission -> actual initialized, started, failed CF run -> authenticated cancel and history GET",
+  "fixture_boundary": "Disposable local data; only preview stop is an offline response. No production execution or refund occurred.",
+  "original_backend_fixture": {
+    "fixture_version": 1,
+    "producer": "actual PostgreSQL reserve_entitlement + reserve_admitted_run + bind_admitted_run",
+    "run_id": "verified-worker",
+    "workflow": "article_generation",
+    "domain": "new-99e5852d.example.test",
+    "github_repo": "",
+    "run_request": {
+      "topic": "Retained article",
+      "domain": "new-99e5852d.example.test",
+      "free_domain": false,
+      "delivery_mode": "content_only",
+      "roo_points_cost": 0,
+      "client_request_id": "verified-original",
+      "roo_points_action": "article_generation",
+      "roo_points_required": 0,
+      "expected_cost_points": 0,
+      "roo_points_ledger_id": "623",
+      "roo_points_authorized": true,
+      "roo_points_entitlement": "first_article",
+      "delivery_mode_confirmed": true,
+      "backend_run_admission_v1": {
+        "scope": {
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "deletion_epoch": null,
+          "operation_attempt": null,
+          "expected_source_sha": null,
+          "connection_target_id": null,
+          "connection_generation": null,
+          "website_connection_id": null
+        },
+        "domain": "new-99e5852d.example.test",
+        "workflow": "article_generation",
+        "principal": {
+          "kind": "user",
+          "user_id": "1374",
+          "actor_id": "mlai_user:1374"
+        },
+        "github_repo": "",
+        "dispatch_key": "verified-original",
+        "event_protocol": 1,
+        "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+        "schema_version": 1,
+        "organization_id": "3228"
+      },
+      "backend_run_execution_v1": {
+        "scope": {
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "deletion_epoch": null,
+          "operation_attempt": null,
+          "expected_source_sha": null,
+          "connection_target_id": null,
+          "connection_generation": null,
+          "website_connection_id": null
+        },
+        "generation": 0,
+        "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+        "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+        "schema_version": 1,
+        "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+      },
+      "roo_points_billing_status": "entitled"
+    },
+    "admission": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "new-99e5852d.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "1374",
+        "actor_id": "mlai_user:1374"
+      },
+      "github_repo": "",
+      "dispatch_key": "verified-original",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "organization_id": "3228",
+      "event_protocol": 1
+    },
+    "execution": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+    },
+    "initial_status": "queued",
+    "canonical_body": "# Retained article\n\nThe independently readable saved body.",
+    "canonical_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "backend_review_gate": {
+      "module": "content_factory.article_publish_approval.article_review_identity_is_complete",
+      "live_preview_fields": [
+        "previewUrl",
+        "exactRender",
+        "resumeGeneration",
+        "proof.commitSha"
+      ],
+      "quality_fields": [
+        "status",
+        "preview_url",
+        "resume_generation",
+        "inputs_sha256"
+      ],
+      "accepted_quality_statuses": [
+        "passed",
+        "passed_no_baseline",
+        "advisory_findings"
+      ]
+    }
+  },
+  "source_request": {
+    "topic": "Retained article",
+    "domain": "new-99e5852d.example.test",
+    "free_domain": false,
+    "delivery_mode": "content_only",
+    "roo_points_cost": 0,
+    "client_request_id": "verified-original",
+    "roo_points_action": "article_generation",
+    "roo_points_required": 0,
+    "expected_cost_points": 0,
+    "roo_points_ledger_id": "623",
+    "roo_points_authorized": true,
+    "roo_points_entitlement": "first_article",
+    "delivery_mode_confirmed": true,
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "new-99e5852d.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "1374",
+        "actor_id": "mlai_user:1374"
+      },
+      "github_repo": "",
+      "dispatch_key": "verified-original",
+      "event_protocol": 1,
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "organization_id": "3228"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+    },
+    "roo_points_billing_status": "entitled",
+    "github_repo": ""
+  },
+  "cancel_request": {
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "new-99e5852d.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "1374",
+        "actor_id": "mlai_user:1374"
+      },
+      "github_repo": "",
+      "dispatch_key": "verified-original",
+      "event_protocol": 1,
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "organization_id": "3228"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+    },
+    "cancellation_reason": "system_stop",
+    "cancelled_by": "system",
+    "expected_cancellation_v1": {
+      "version": 1,
+      "run_id": "verified-worker",
+      "goal_id": null,
+      "scope": {
+        "github_repo": "",
+        "client_request_id": "verified-original"
+      }
+    }
+  },
+  "cancel_response": {
+    "status": "cancelled",
+    "job_id": "verified-worker",
+    "run_id": "verified-worker",
+    "workflow": "direct_generate",
+    "current_step": "cancelled",
+    "message": "Article run cancelled.",
+    "cleanup": {
+      "artifacts": {
+        "deleted_paths": [
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-terminal-settlement-f_jjiqv8/verified-worker/steps",
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-terminal-settlement-f_jjiqv8/verified-worker/verification_summary.json",
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-terminal-settlement-f_jjiqv8/verified-worker/tool_calls.jsonl"
+        ],
+        "errors": []
+      },
+      "live_preview": {
+        "status": "stopped",
+        "attempts": 1,
+        "cleanup_pending": false,
+        "reason": "preview_stopped",
+        "retain_repository_branch": true
+      }
+    },
+    "reconciliation_required": false,
+    "article_cancellation_v1": {
+      "version": 1,
+      "purpose": "article_cancellation",
+      "run_id": "verified-worker",
+      "goal_id": null,
+      "scope": {
+        "github_repo": "",
+        "client_request_id": "verified-original"
+      },
+      "generation": 0,
+      "state_version": 7,
+      "outcome": "no_article_effect",
+      "cancelled": true,
+      "watermark": {
+        "operation_id": null,
+        "attempt": null,
+        "cancelled": true
+      },
+      "delivered_value": false,
+      "receipt_id": "e61e6df15d94da0893fc357c85a81a91aad35532914b6b7e691c1b15e4c86ad1"
+    },
+    "publication_evidence_v1": null,
+    "job_url": "/api/runs/verified-worker",
+    "action": "cancel",
+    "accepted": true,
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "new-99e5852d.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "1374",
+        "actor_id": "mlai_user:1374"
+      },
+      "github_repo": "",
+      "dispatch_key": "verified-original",
+      "event_protocol": 1,
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "organization_id": "3228"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+    },
+    "terminal_settlement_v1": {
+      "schema_version": 1,
+      "run_id": "verified-worker",
+      "backend_run_admission_v1": {
+        "scope": {
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "deletion_epoch": null,
+          "operation_attempt": null,
+          "expected_source_sha": null,
+          "connection_target_id": null,
+          "connection_generation": null,
+          "website_connection_id": null
+        },
+        "domain": "new-99e5852d.example.test",
+        "workflow": "article_generation",
+        "principal": {
+          "kind": "user",
+          "user_id": "1374",
+          "actor_id": "mlai_user:1374"
+        },
+        "github_repo": "",
+        "dispatch_key": "verified-original",
+        "event_protocol": 1,
+        "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+        "schema_version": 1,
+        "organization_id": "3228"
+      },
+      "backend_run_execution_v1": {
+        "scope": {
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "deletion_epoch": null,
+          "operation_attempt": null,
+          "expected_source_sha": null,
+          "connection_target_id": null,
+          "connection_generation": null,
+          "website_connection_id": null
+        },
+        "generation": 0,
+        "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+        "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+        "schema_version": 1,
+        "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+      },
+      "status": "closed_no_effects",
+      "event_cursor": 12,
+      "closed_at": "2026-11-02T19:32:21.214453+00:00",
+      "receipt_sha256": "7d3cd7053f34e71311a138aa38d8e4e59ee888f1571b8379b9c5090ea1dc2faf"
+    }
+  },
+  "replay_response": {
+    "status": "cancelled",
+    "job_id": "verified-worker",
+    "run_id": "verified-worker",
+    "action": "cancel",
+    "accepted": true,
+    "backend_run_admission_v1": {
+      "dispatch_key": "verified-original",
+      "domain": "new-99e5852d.example.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "3228",
+      "principal": {
+        "actor_id": "mlai_user:1374",
+        "kind": "user",
+        "user_id": "1374"
+      },
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "article_generation"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "generation": 0,
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "terminal_settlement_v1": {
+      "backend_run_admission_v1": {
+        "dispatch_key": "verified-original",
+        "domain": "new-99e5852d.example.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "3228",
+        "principal": {
+          "actor_id": "mlai_user:1374",
+          "kind": "user",
+          "user_id": "1374"
+        },
+        "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "article_generation"
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+        "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+        "generation": 0,
+        "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "closed_at": "2026-11-02T19:32:21.214453+00:00",
+      "event_cursor": 12,
+      "receipt_sha256": "7d3cd7053f34e71311a138aa38d8e4e59ee888f1571b8379b9c5090ea1dc2faf",
+      "run_id": "verified-worker",
+      "schema_version": 1,
+      "status": "closed_no_effects"
+    },
+    "reconciliation_required": false,
+    "article_cancellation_v1": {
+      "version": 1,
+      "purpose": "article_cancellation",
+      "run_id": "verified-worker",
+      "goal_id": null,
+      "scope": {
+        "github_repo": "",
+        "client_request_id": "verified-original"
+      },
+      "generation": 0,
+      "state_version": 7,
+      "outcome": "no_article_effect",
+      "cancelled": true,
+      "watermark": {
+        "operation_id": null,
+        "attempt": null,
+        "cancelled": true
+      },
+      "delivered_value": false,
+      "receipt_id": "e61e6df15d94da0893fc357c85a81a91aad35532914b6b7e691c1b15e4c86ad1"
+    },
+    "cleanup": {
+      "artifacts": {
+        "deleted_paths": [
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-terminal-settlement-f_jjiqv8/verified-worker/steps",
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-terminal-settlement-f_jjiqv8/verified-worker/verification_summary.json",
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-terminal-settlement-f_jjiqv8/verified-worker/tool_calls.jsonl"
+        ],
+        "errors": []
+      },
+      "live_preview": {
+        "status": "stopped",
+        "attempts": 1,
+        "cleanup_pending": false,
+        "reason": "preview_stopped",
+        "retain_repository_branch": true
+      }
+    },
+    "job_url": "/api/runs/verified-worker"
+  },
+  "events_response": {
+    "schema_version": 1,
+    "run_id": "verified-worker",
+    "batches": [
+      {
+        "event": "run_events_v2",
+        "event_type": "run_events_v2",
+        "schema_version": 1,
+        "run_id": "verified-worker",
+        "backend_run_admission_v1": {
+          "dispatch_key": "verified-original",
+          "domain": "new-99e5852d.example.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "3228",
+          "principal": {
+            "actor_id": "mlai_user:1374",
+            "kind": "user",
+            "user_id": "1374"
+          },
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "article_generation"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "generation": 0,
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "events": [
+          {
+            "at": "2026-11-02T19:32:21.158200+00:00",
+            "digest": "fa8c82f23c4c134f421a6001c824fb7fa8f3e3b7eb32b1f29944ffe1f13fb0e4",
+            "generation": 0,
+            "seq": 1,
+            "state_version": 1,
+            "status": "queued",
+            "step": "plan_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:32:21.164950+00:00",
+            "digest": "66818c23115cd35efbaf9daa28dc57d6aabbb5eabdc608fa33f57ec3ddfcd47a",
+            "generation": 0,
+            "seq": 2,
+            "state_version": 2,
+            "status": "running",
+            "step": "plan_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:32:21.164950+00:00",
+            "attempt": 1,
+            "digest": "bcc17f6b262baf71980e774c2bcc9e44db4efbf932b51346df1da1f793cf1893",
+            "generation": 0,
+            "seq": 3,
+            "state_version": 2,
+            "step": "plan_article",
+            "type": "step_started"
+          },
+          {
+            "at": "2026-11-02T19:32:21.171318+00:00",
+            "digest": "67ca992705b4b2e28db583741655109469a93903fb92619b2f06cb4ffc04670a",
+            "generation": 0,
+            "seq": 4,
+            "state_version": 3,
+            "status": "running",
+            "step": "plan_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:32:21.171318+00:00",
+            "attempt": 1,
+            "digest": "c2db58e0cae59ce0408ecd5f33b1932dd573496001d992ff1ab1b4c83633ecb1",
+            "generation": 0,
+            "seq": 5,
+            "state_version": 3,
+            "status": "failed",
+            "step": "plan_article",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T19:32:21.176158+00:00",
+            "digest": "ad1dde7c6ce5ce17da684172c7e8c27329af2b13d7163b3d5f89a9ccaa4eccc3",
+            "generation": 0,
+            "seq": 6,
+            "state_version": 4,
+            "status": "failed",
+            "step": "plan_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:32:21.181854+00:00",
+            "digest": "5aede44bb56349a639aac92fc6489d3452faa860af85b2c2c83a16c39874fd7b",
+            "generation": 0,
+            "seq": 7,
+            "state_version": 5,
+            "status": "failed",
+            "step": "plan_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:32:21.201897+00:00",
+            "digest": "757f47d2101cd86264052f43dfe9be4fbda20bca51191e4ed0de8364d9f9dee4",
+            "generation": 0,
+            "seq": 8,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "cancelled",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:32:21.201897+00:00",
+            "attempt": 1,
+            "digest": "8ea0820544ee162a2ae462b992274249bdf144c2719dc4326bcdcbeb7ad7ece5",
+            "generation": 0,
+            "seq": 9,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "plan_article",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T19:32:21.201897+00:00",
+            "attempt": 0,
+            "digest": "c2e0814b34f2d48b19451105b46fd0e4a1a712edb5322bdb053671c6b7432ec9",
+            "generation": 0,
+            "seq": 10,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "assemble_article",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T19:32:21.201897+00:00",
+            "attempt": 0,
+            "digest": "a17549b7a8a752e67d8b5ba0ed0901198032fb9ff8b9911162c323f5208d8eda",
+            "generation": 0,
+            "seq": 11,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "render_article",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T19:32:21.208600+00:00",
+            "digest": "44a7d3501133b78be48bff94cacbf5ac5c30e09d659f7785db960468ae5e3019",
+            "generation": 0,
+            "seq": 12,
+            "state_version": 7,
+            "status": "cancelled",
+            "step": "cancelled",
+            "type": "run_state"
+          }
+        ],
+        "event_id": "bf9e158f6dc247400760a8011c891e9427feb02a0e3a9fba142af115b4d2a949",
+        "emitted_at": "2026-11-02T19:32:21.208600+00:00"
+      }
+    ],
+    "next_cursor": 12,
+    "has_more": false
+  },
+  "evidence_response": {
+    "schema_version": 1,
+    "run_id": "verified-worker",
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "new-99e5852d.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "1374",
+        "actor_id": "mlai_user:1374"
+      },
+      "github_repo": "",
+      "dispatch_key": "verified-original",
+      "event_protocol": 1,
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "organization_id": "3228"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+    },
+    "evidence": []
+  }
+}

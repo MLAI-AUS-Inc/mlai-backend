@@ -61,9 +61,15 @@ def claims_count(run):
 
 def ready_before_preview(run, organization=None):
     """Accept a CF-authored readiness receipt only for an enrolled live article."""
-    if run is None or run.status in {"cancelled", "denied"}:
+    if run is None:
         return False
     org = organization or getattr(run, "organization", None)
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .founder_draft_views import is_delivered_article
+        return bool(is_delivered_article(run) and p2_foundation.p2_applies(org))
+    if run.status in {"cancelled", "denied"}:
+        return False
     receipt = mapping(mapping(run.result).get("draft_ready_v1"))
     try:
         at = parse_datetime(receipt.get("at")) if isinstance(receipt.get("at"), str) else None
@@ -225,7 +231,8 @@ def run_decision(organization, run, *, config, user, now, queue=None, follow_pub
             copy_id = "done_copy_ready_ladder_exhausted" if mapping(exhausted).get("exhausted_at") else "done_copy_ready_strategy"
     if copy_id is None and count:
         copy_id = "ask_check_highlighted"
-    if copy_id is None and ready_before_preview(run, organization) and getattr(run, "approval_state", None) != "approved":
+    from .founder_journey_contract import effective_approval_state
+    if copy_id is None and ready_before_preview(run, organization) and effective_approval_state(run) != "approved":
         copy_id = "ask_review_draft"
     if copy_id is None and code in {"SITE_TEST_CHANGE_REQUIRED", "BRANCH_PROTECTION_APPROVAL_REQUIRED"}:
         copy_id = "ask_approve_on_github_site_test" if code == "SITE_TEST_CHANGE_REQUIRED" else "ask_approve_on_github_protected"

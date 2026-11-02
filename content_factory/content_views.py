@@ -789,6 +789,7 @@ class ContentConfirmView(APIView):
     permission_classes = [HasStrictRooApiKey]
 
     def post(self, request):
+        from content_factory.run_backend_facts import logical_client_request_id, update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
 
         validation_error = _validate_roo_content_request(request)
@@ -869,7 +870,7 @@ class ContentConfirmView(APIView):
                     }
                     if request.data.get("notification_context"):
                         child_request_meta["notification_context"] = request.data.get("notification_context")
-                    ContentFactoryJob.objects.update_or_create(
+                    update_or_create_job_facts(
                         job_id=new_job_id,
                         defaults={
                             "domain": domain,
@@ -884,7 +885,7 @@ class ContentConfirmView(APIView):
                                 or source_job.slack_thread_ts
                             ),
                             "progress_message_ts": progress_message_ts or source_job.progress_message_ts,
-                            "client_request_id": source_job.client_request_id,
+                            "client_request_id": logical_client_request_id(new_job_id) or source_job.client_request_id,
                             "billing_source_job_id": source_job.billing_source_job_id or source_job.job_id,
                             "billing_amount": source_job.billing_amount,
                             "billing_status": "reused",
@@ -954,6 +955,7 @@ class ContentJobConfirmView(APIView):
     permission_classes = [HasStrictRooApiKey]
 
     def post(self, request, job_id):
+        from content_factory.run_backend_facts import logical_client_request_id, save_job_facts, update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.article_generation import confirm_topic, ArticleGenerationError
 
@@ -1035,7 +1037,7 @@ class ContentJobConfirmView(APIView):
         job.slack_user_id = slack_user_id
         # A competing confirmation may already have saved article billing on
         # this source. Never overwrite that lineage with this stale snapshot.
-        job.save(update_fields=["selected_keyword", "slack_user_id", "updated_at"])
+        save_job_facts(job, update_fields=["selected_keyword", "slack_user_id", "updated_at"])
 
         # Trigger article generation via Content Factory HTTP API
         try:
@@ -1069,7 +1071,7 @@ class ContentJobConfirmView(APIView):
             # Narrow update_fields: confirm_topic's deferred-charge path may have
             # rewritten request_meta/billing on a fresh instance of this row.
             job.status = 'confirmed'
-            job.save(update_fields=["status", "updated_at"])
+            save_job_facts(job, update_fields=["status", "updated_at"])
             # Deferred confirmation may have replaced the research payment and
             # key on a fresh source instance. Carry that saved article lineage.
             job.refresh_from_db()
@@ -1092,7 +1094,7 @@ class ContentJobConfirmView(APIView):
                 }
                 if notification_context:
                     child_request_meta["notification_context"] = notification_context
-                ContentFactoryJob.objects.update_or_create(
+                update_or_create_job_facts(
                     job_id=new_job_id,
                     defaults={
                         "domain": resolved_domain,
@@ -1103,7 +1105,7 @@ class ContentJobConfirmView(APIView):
                         "slack_root_message_ts": job.slack_root_message_ts or job.slack_thread_ts,
                         "slack_thread_ts": job.slack_thread_ts,
                         "progress_message_ts": job.progress_message_ts,
-                        "client_request_id": job.client_request_id,
+                        "client_request_id": logical_client_request_id(new_job_id) or job.client_request_id,
                         "billing_source_job_id": job.billing_source_job_id or job.job_id,
                         "billing_amount": job.billing_amount,
                         "billing_status": "reused",
@@ -1117,7 +1119,7 @@ class ContentJobConfirmView(APIView):
             if target_job and result_status in {"blocked", "auth_required"}:
                 if target_job.status != result_status:
                     target_job.status = result_status
-                    target_job.save(update_fields=["status", "updated_at"])
+                    save_job_facts(target_job, update_fields=["status", "updated_at"])
             if target_job and result_status not in {"awaiting_delivery_mode", "blocked", "auth_required"}:
                 upsert_live_progress_card(
                     target_job,
@@ -1125,7 +1127,7 @@ class ContentJobConfirmView(APIView):
                 )
             if target_job and result_status == "awaiting_delivery_mode":
                 target_job.status = "awaiting_delivery_mode"
-                target_job.save(update_fields=["status", "updated_at"])
+                save_job_facts(target_job, update_fields=["status", "updated_at"])
             from integrations.services.daily_discovery import mark_scheduled_dispatch_confirmed
 
             mark_scheduled_dispatch_confirmed(job_id=job.job_id)
@@ -1217,6 +1219,7 @@ class ContentJobDeliveryModeView(APIView):
     permission_classes = [HasStrictRooApiKey]
 
     def post(self, request, job_id):
+        from content_factory.run_backend_facts import save_job_facts
         from content_factory.models import ContentFactoryJob
 
         validation_error = _validate_roo_content_request(request)
@@ -1235,7 +1238,7 @@ class ContentJobDeliveryModeView(APIView):
         request_meta["delivery_mode"] = delivery_mode
         request_meta["delivery_mode_confirmed"] = True
         job.request_meta = request_meta
-        job.save(update_fields=["request_meta", "updated_at"])
+        save_job_facts(job, update_fields=["request_meta", "updated_at"])
 
         try:
             result = set_article_delivery_mode(job_id, delivery_mode)
@@ -1246,11 +1249,11 @@ class ContentJobDeliveryModeView(APIView):
         if status_code == status.HTTP_200_OK:
             job.status = "generating"
             job.error_message = ""
-            job.save(update_fields=["status", "error_message", "updated_at"])
+            save_job_facts(job, update_fields=["status", "error_message", "updated_at"])
         else:
             job.status = "awaiting_delivery_mode"
             job.error_message = result.get("error") or result.get("message") or ""
-            job.save(update_fields=["status", "error_message", "updated_at"])
+            save_job_facts(job, update_fields=["status", "error_message", "updated_at"])
 
         return Response(result, status=status_code)
 
@@ -1264,6 +1267,7 @@ class ContentJobCancelView(APIView):
     permission_classes = [HasStrictRooApiKey]
 
     def post(self, request, job_id):
+        from content_factory.run_backend_facts import save_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.daily_discovery import mark_scheduled_dispatch_cancelled
 
@@ -1288,7 +1292,7 @@ class ContentJobCancelView(APIView):
         job.last_progress_milestone_key = "cancelled"
         job.last_progress_updated_at = timezone.now()
         job.still_working_pinged_at = None
-        job.save(
+        save_job_facts(job,
             update_fields=[
                 "status",
                 "slack_user_id",
@@ -1345,6 +1349,11 @@ class ArticleSystemDecisionView(APIView):
         if not config:
             return Response({"error": f"No content config found for {normalized_domain}"}, status=status.HTTP_404_NOT_FOUND)
 
+        from .run_ownership import admission_enabled
+        if decision == "scaffold" and admission_enabled():
+            from integrations.services.github import standalone_reviewed_setup_required
+            return Response(standalone_reviewed_setup_required(), status=status.HTTP_409_CONFLICT)
+
         if decision == 'use_detected':
             article_system = resolve_article_system(config)
             article_system.update(
@@ -1392,6 +1401,8 @@ class ArticleSystemDecisionView(APIView):
             github_token=creds['token'],
             github_repo=creds['repo'],
         )
+        if isinstance(scaffold_result, dict) and scaffold_result.get("status") == "needs_user":
+            return Response(scaffold_result, status=status.HTTP_409_CONFLICT)
         return Response(
             {
                 "status": "queued",

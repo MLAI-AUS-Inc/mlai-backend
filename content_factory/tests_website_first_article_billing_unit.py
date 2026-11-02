@@ -16,6 +16,13 @@ from .website_contract import WebsiteAuthorityError
 from . import vibe_marketing_views as views
 
 
+class NoAdmittedRuns(list):
+    """Empty legacy selection supporting the guard's real QuerySet iteration."""
+
+    def iterator(self, *args, **kwargs):
+        return iter(self)
+
+
 @override_settings(ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=True, ARTICLES_SETUP_CONSENT_ENABLED=True,
     ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED=True, ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS=["7"],
     ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=["7"])
@@ -229,7 +236,7 @@ class FirstArticleBillingTests(SimpleTestCase):
             patch("roo.services.PointsService.refund",return_value=(refund,True)) as credit, \
             patch.object(ContentFactoryJob.objects,"filter"), \
             patch.object(ContentFactoryRun.objects,"filter") as runs:
-            runs.return_value.filter.return_value=[]
+            runs.return_value.filter.return_value=NoAdmittedRuns()
             billing.release(self.op,reason="Final technical failure")
             billing.release(self.op,reason="Replay")
         self.assertEqual(credit.call_count,1)
@@ -254,7 +261,7 @@ class FirstArticleBillingTests(SimpleTestCase):
         self.refunds.return_value.first.return_value=self.ledger
         with patch("roo.services.PointsService.refund",return_value=(SimpleNamespace(id=22,pk=22),True)) as credit, \
             patch.object(ContentFactoryJob.objects,"filter"),patch.object(ContentFactoryRun.objects,"filter") as runs:
-            runs.return_value.filter.return_value=[]
+            runs.return_value.filter.return_value=NoAdmittedRuns()
             billing.release(self.op,reason="Cancelled")
         credit.assert_called_once()
 
@@ -285,7 +292,7 @@ class FirstArticleBillingTests(SimpleTestCase):
             patch.object(refunds.transaction,"atomic",side_effect=lambda: nullcontext()), \
             patch("roo.services.PointsService.refund",return_value=(SimpleNamespace(id=22,pk=22),True)) as credit, \
             patch.object(ContentFactoryJob.objects,"filter"),patch.object(ContentFactoryRun.objects,"filter") as runs:
-            runs.return_value.filter.return_value=[]
+            runs.return_value.filter.return_value=NoAdmittedRuns()
             self.assertEqual(refunds.advance_refund(row.pk,now=self.now),"completed")
             self.assertIsNone(refunds.advance_refund(row.pk,now=self.now))
         credit.assert_called_once(); self.assertEqual(row.receipt["status"],"credited")
@@ -417,7 +424,7 @@ class FirstArticleBillingTests(SimpleTestCase):
                     self.refunds.return_value.first.return_value = self.ledger
                     with override_settings(ARTICLES_FIRST_ARTICLE_GOAL_ENABLED=False), \
                         patch.object(ContentFactoryJob.objects, "filter"):
-                        runs.return_value.filter.return_value = []
+                        runs.return_value.filter.return_value = NoAdmittedRuns()
                         self.assertEqual(refunds.advance_refund(row.pk, now=self.now), "completed")
                         self.assertIsNone(refunds.advance_refund(row.pk, now=self.now))
                     credit.assert_called_once()

@@ -382,6 +382,7 @@ class JobUpdateCallSiteGuardTest(SimpleTestCase):
         ("integrations/services/article_generation.py", "_refund_content_factory_request"),
         ("content_factory/dispatch_binding.py", "_rebind_billing_job"),
     }
+    RUN_OUTPUT_SITES = {("content_factory/run_backend_facts.py", "_project")}
     SIGNAL_SKIPPING = {"update", "bulk_update", "bulk_create", "_update"}
     SKIP_PARTS = {".git", "node_modules", "venv", ".venv", "site-packages", "__pycache__", "migrations", "tests"}
 
@@ -442,19 +443,27 @@ class JobUpdateCallSiteGuardTest(SimpleTestCase):
                 continue
             yield relative.as_posix(), path
 
-    def test_every_job_queryset_write_mirrors(self):
+    def test_every_job_queryset_write_has_an_explicit_owner(self):
         found = {}
         for relative, path in self._source_files():
             for site_path, function, line in self.job_write_sites(path.read_text(), relative):
                 found.setdefault((site_path, function), []).append(line)
-        self.assertEqual(set(found), self.MIRRORED_SITES,
-                         "A ContentFactoryJob queryset write skips post_save: call "
-                         "content_factory.job_mirror.mirror_jobs_to_runs after it and list it here.")
+        self.assertFalse(set(found) - self.MIRRORED_SITES - self.RUN_OUTPUT_SITES,
+                         "A Job queryset write needs its explicit legacy mirror or canonical Run output owner.")
+        self.assertTrue(self.RUN_OUTPUT_SITES <= set(found))
         for relative, function in self.MIRRORED_SITES:
             tree = ast.parse((ROOT / relative).read_text())
             node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == function)
             calls = {getattr(n.func, "id", getattr(n.func, "attr", "")) for n in ast.walk(node) if isinstance(n, ast.Call)}
             self.assertTrue(calls & {"mirror_jobs_to_runs", "mirror_job_to_run"}, (relative, function))
+            self.assertTrue((relative, function) in found or "update_job_facts" in calls,
+                            "A migrated legacy adapter must route its patch through the typed owner API.")
+        for relative, function in self.RUN_OUTPUT_SITES:
+            tree = ast.parse((ROOT / relative).read_text())
+            node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == function)
+            calls = {getattr(n.func, "id", getattr(n.func, "attr", "")) for n in ast.walk(node) if isinstance(n, ast.Call)}
+            self.assertIn("backend_fact_projection", calls)
+            self.assertFalse(calls & {"mirror_jobs_to_runs", "mirror_job_to_run"})
 
     def test_guard_catches_new_write_shapes(self):
         source = '''

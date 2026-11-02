@@ -55,6 +55,29 @@ class WebsiteAuthorityError(ValueError):
         return result
 
 
+# These are local command refusals, not producer failure classifications.
+RUN_COMMAND_CONFLICT_CODES = frozenset({
+    "run_execution_closed", "run_stop_requested", "run_execution_owned",
+    "review_source_changed", "review_source_unavailable",
+})
+
+
+class RunCommandConflict(WebsiteAuthorityError):
+    """Closed backend authority conflicts retain their purpose under B1 rollout.
+
+    Worker failure envelopes still pass through the registry-only base class.
+    Callers cannot use this type for an arbitrary provider or worker code.
+    """
+    def __init__(self, code, message, *, status=409, retryable=False):
+        if type(code) is not str or code not in RUN_COMMAND_CONFLICT_CODES:
+            raise ValueError("Unknown backend Run command conflict.")
+        self.code, self.status = code, status
+        self.authority_code = self.causal_code = code
+        self.field_errors, self.retryable, self.failure = [], retryable, None
+        self.taxonomy_policy = self.taxonomy_observe = False
+        ValueError.__init__(self, message)
+
+
 def positive_integer(value, *, name, optional=False):
     """Reject booleans and fractional numbers in identifiers and generations."""
     if optional and value in (None, ""):

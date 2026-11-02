@@ -117,6 +117,10 @@ def publication_state(run, *, result=None):
 
 def useful_delivery(run, *, result=None):
     """A completed package or article review is value; unreviewed source is not."""
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import has_verified_delivery
+        return has_verified_delivery(run)
     result = mapping(run.result if result is None else result)
     acceptance = mapping(getattr(run, "acceptance_summary", None))
     request = mapping(run.run_request)

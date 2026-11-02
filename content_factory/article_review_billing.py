@@ -68,7 +68,8 @@ def reserve_image_charge(*, user, context, run, payload):
             "fieldId": payload.get("fieldId"), "userId": user.pk, "recordedAt": timezone.now().isoformat()}
         receipts[identity] = receipt
         saved.result = {**result, "article_image_billing": receipts}
-        saved.save(update_fields=["result", "updated_at"])
+        from .website_run_authority import event_owned
+        saved.save(update_fields=["result"] if event_owned(saved) else ["result", "updated_at"])
         run.result = saved.result
     return receipt, None
 
@@ -96,7 +97,8 @@ def settle_image_charge(*, user, run, receipt, rejected=False, pending=False):
                 reference_type="CONTENT_FACTORY_IMAGE", reference_id=receipt["identity"])
         receipts[receipt["identity"]] = {**receipt, "status": "refunded" if rejected else "pending" if pending else "accepted"}
         saved.result = {**(saved.result or {}), "article_image_billing": receipts}
-        saved.save(update_fields=["result", "updated_at"])
+        from .website_run_authority import event_owned
+        saved.save(update_fields=["result"] if event_owned(saved) else ["result", "updated_at"])
         run.result = saved.result
 
 

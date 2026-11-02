@@ -314,7 +314,8 @@ def _observe_live_article(article, live_url, pr_state, now):
             records[str(article.id)] = receipt
             result["release_observations"] = records
             run.result = result
-            run.save(update_fields=["result", "updated_at"])
+            from .website_run_authority import event_owned
+            run.save(update_fields=["result"] if event_owned(run) else ["result", "updated_at"])
     return receipt
 
 

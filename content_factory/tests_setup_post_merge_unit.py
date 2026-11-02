@@ -70,7 +70,7 @@ class SettledSetupTests(SimpleTestCase):
                 setup_run("elsewhere", github_repo="fixture/other"), setup_run("setup-3"))) as rows:
             self.assertEqual(authority.settled_setup_run(connection, source_sha=HEAD).run_id, "setup-3")
             self.assertIsNone(authority.settled_setup_run(connection, source_sha=OTHER))
-        self.assertEqual(rows.call_args.kwargs["run_request__connection_generation"], 3)
+        self.assertIn(("run_request__connection_generation", 3), rows.call_args.args[0].children[1].children)
         # TalaThrive PR #40 carried no kit (native CI needed configuration): the kit is next, not CI proof.
         with patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=newest_first(setup_run(kit=False))):
             self.assertIsNone(authority.settled_setup_run(connection, source_sha=HEAD))
@@ -162,7 +162,9 @@ class PostMergePrepareTests(SimpleTestCase):
                 connection = SimpleNamespace(pk="website", generation=3, organization_id=7, organization=SimpleNamespace(domain="fixture.test"),
                     github_repo="fixture/site", operations=Mock())
                 config = SimpleNamespace(website_connection=connection)
-                with patch.object(prepare, "authority_guard", return_value=nullcontext(connection)), \
+                op.connection = connection
+                with patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=MagicMock()), \
+                        patch.object(prepare, "authority_guard", return_value=nullcontext(connection)), \
                         patch.object(prepare, "contract_for", return_value={}), \
                         patch("content_factory.website_goal.enrolled", return_value=False), \
                         patch("content_factory.website_goal_runner.owns_goal", return_value=False), \

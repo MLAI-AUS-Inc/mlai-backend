@@ -369,6 +369,7 @@ def scan_github_project(
     Raises:
         ScanError: If validation fails or the external call fails.
     """
+    from content_factory.run_backend_facts import create_job_facts
     try:
         request_source = require_roo_request_source(request_source)
     except ValueError as exc:
@@ -488,7 +489,9 @@ def scan_github_project(
 
         from content_factory.website_connections import dispatch_contract
         payload.update(dispatch_contract(resolved_domain, payload, action="scan"))
-        cf_response = http_requests.post(
+        from content_factory.dispatch_admission import post_dispatch, reserve_user_dispatch
+        admitted = reserve_user_dispatch(payload=payload, workflow="repo_scan", domain=resolved_domain, actor_id=slack_user_id)
+        cf_response = post_dispatch(admitted, http_requests.post,
             scan_endpoint,
             json=payload,
             headers=headers,
@@ -530,7 +533,7 @@ def scan_github_project(
 
             # Create a ContentFactoryJob so callback handlers can look up thread context
             try:
-                ContentFactoryJob.objects.create(
+                create_job_facts(
                     job_id=job_id,
                     domain=resolved_domain,
                     slack_user_id=slack_user_id,
@@ -711,6 +714,13 @@ def get_latest_repo_sha(token: str, repo_name: str) -> str:
     return data['sha']
 
 
+def standalone_reviewed_setup_required():
+    """Return the closed handoff for an old command without current setup consent."""
+    return {"status": "needs_user", "error_code": "reviewed_setup_required",
+        "next_action": "review_website_setup", "next_path": "/my-startup/website",
+        "message": "Open My startup, then Website, and review the current articles setup before starting."}
+
+
 def scaffold_articles_directory(
     domain: str,
     slack_user_id: str,
@@ -734,7 +744,12 @@ def scaffold_articles_directory(
     """
     from content_factory.website_connections import require_unlocked_remote_call
     require_unlocked_remote_call()
-    from content_factory.models import ContentFactoryJob
+    from content_factory.run_ownership import admission_enabled
+    if admission_enabled():
+        # This legacy command carries no reviewed surface or Roo receipt.
+        # The current setup route owns the complete typed recipe and admission.
+        return standalone_reviewed_setup_required()
+    from content_factory.run_backend_facts import create_job_facts
 
     content_factory_url = getattr(settings, 'CONTENT_FACTORY_URL', 'http://localhost:8001')
     scaffold_endpoint = f"{content_factory_url.rstrip('/')}/api/runs/scaffold"
@@ -755,7 +770,9 @@ def scaffold_articles_directory(
     try:
         from content_factory.website_connections import dispatch_contract
         payload.update(dispatch_contract(domain, payload, action="setup"))
-        response = http_requests.post(
+        from content_factory.dispatch_admission import post_dispatch, reserve_user_dispatch
+        admitted = reserve_user_dispatch(payload=payload, workflow="scaffold_articles", domain=domain, actor_id=slack_user_id)
+        response = post_dispatch(admitted, http_requests.post,
             scaffold_endpoint,
             json=payload,
             headers=headers,
@@ -769,7 +786,7 @@ def scaffold_articles_directory(
                 job_id = data.get('job_id')
 
                 if job_id:
-                    ContentFactoryJob.objects.create(
+                    create_job_facts(
                         job_id=job_id,
                         domain=domain,
                         slack_user_id=slack_user_id,
@@ -815,6 +832,7 @@ def decide_scan_scaffold(
     slack_thread_ts: str = None,
 ) -> dict:
     """Approve or deny a scaffold proposal for a repo scan run."""
+    from content_factory.run_backend_facts import save_job_facts, update_or_create_job_facts
     from content_factory.website_connections import require_unlocked_remote_call
     require_unlocked_remote_call()
     from content_factory.models import ContentFactoryJob
@@ -842,16 +860,41 @@ def decide_scan_scaffold(
         domain,
     )
 
+    admitted_child = None
+    from content_factory.run_ownership import RunOwnershipConflict
     try:
         from content_factory.website_connections import dispatch_contract
         binding = dispatch_contract(domain, {}, action="setup", source_run_id=scan_run_id) if normalized_decision == "approve" else {}
+        if normalized_decision == "approve":
+            from workflow_runs.models import ContentFactoryRun
+            from content_factory.run_child_admission import prepare_scan_child_dispatch
+            from integrations.services.github_installations import resolve_user_for_actor_id
+            parent = ContentFactoryRun.objects.filter(run_id=scan_run_id).first()
+            from content_factory.run_ownership import admission_enabled
+            if parent is None and admission_enabled():
+                raise ScanError("Run a fresh website scan before approving this setup.")
+            if parent is not None:
+                if parent.domain != domain:
+                    raise ScanError("The approved scan belongs to a different startup.")
+                admitted_child = prepare_scan_child_dispatch(run=parent,
+                    user=resolve_user_for_actor_id(slack_user_id), actor_id=slack_user_id, payload=binding)
         response = http_requests.post(
             action_endpoint,
             json=binding,
             headers=headers,
             timeout=(3, 30),
         )
-        data = response.json() if response.content else {}
+        try:
+            data = response.json() if response.content else {}
+        except ValueError:
+            if admitted_child is None:
+                raise
+            from content_factory.dispatch_admission import resolve_dispatch_outcome
+            holding = resolve_dispatch_outcome(admitted_child)
+            return {"status_code": holding.status_code, "data": holding.json()}
+        if admitted_child is not None:
+            from content_factory.run_child_admission import accept_scan_child_response
+            accept_scan_child_response(admitted_child, data, status_code=response.status_code)
 
         if response.status_code in [200, 202]:
             from content_factory.vibe_marketing_views import _remote_response_write_guard
@@ -868,11 +911,11 @@ def decide_scan_scaffold(
                         }
                     )
                     parent_job.request_meta = parent_meta
-                    parent_job.save(update_fields=['status', 'request_meta', 'updated_at'])
+                    save_job_facts(parent_job, update_fields=['status', 'request_meta', 'updated_at'])
 
                 scaffold_job_id = data.get('scaffold_job_id')
                 if normalized_decision == 'approve' and scaffold_job_id:
-                    ContentFactoryJob.objects.update_or_create(
+                    update_or_create_job_facts(
                         job_id=scaffold_job_id,
                         defaults={
                             'domain': domain,
@@ -904,7 +947,13 @@ def decide_scan_scaffold(
             "status_code": response.status_code,
             "data": data or {"error": response.text or "Unknown Content Factory error"},
         }
+    except RunOwnershipConflict as exc:
+        raise ScanError("The scan approval or current website permission changed.") from exc
     except http_requests.exceptions.RequestException as e:
+        if admitted_child is not None:
+            from content_factory.dispatch_admission import resolve_dispatch_outcome
+            holding = resolve_dispatch_outcome(admitted_child)
+            return {"status_code": holding.status_code, "data": holding.json()}
         logger.error("Failed to connect to Content Factory for scaffold %s: %s", normalized_decision, e)
         raise ScanError(f"Failed to submit scaffold {normalized_decision}: {str(e)}")
 

@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ("contracts/failure-codes.json", "contracts/failure-envelope-v1.schema.json", "contracts/setup-delivery-v1.schema.json")
 SOURCE_REPOSITORY = "drsamdonegan/content-factory"
 FIELDS = {"code", "error_code", "errorCode", "blocking_code", "blockingCode", "reasonCode", "reason_code", "failure_code", "model_adapter_blocking_code"}
-CONSTRUCTORS = {"WebsiteAuthorityError": 0}
+CONSTRUCTORS = {"WebsiteAuthorityError": 0, "RunCommandConflict": 0}
 # P2 (IF-P2-27): a package's own emitter-audit fragment may hold only these keys.
 FRAGMENT_DIRECTORY = "contracts/failure-emitter-scopes.d"
 FRAGMENT_KEYS = frozenset({"dynamic_adapters", "nonfailure_sites"})

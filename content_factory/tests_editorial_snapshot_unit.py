@@ -275,6 +275,15 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
                                       "content_factory.setup_delivery_receiver": delivery})
         seam.start()
         self.addCleanup(seam.stop)
+        # The real R3 selector now reads the same retained rows before handing
+        # unmarked snapshots to this legacy persistence seam. Keep that read
+        # truthful; do not replace the ownership predicate or its decision.
+        model_seam = patch("workflow_runs.models.ContentFactoryRun", self.model)
+        model_seam.start()
+        self.addCleanup(model_seam.stop)
+        owner_atomic = patch("content_factory.run_ownership.transaction", SimpleNamespace(atomic=self.atomic))
+        owner_atomic.start()
+        self.addCleanup(owner_atomic.stop)
         names = {"_apply_run_snapshot", "_sync_content_factory_run_snapshot", "_content_factory_run_snapshot_unchanged", "_merge_django_owned_run_result", "_merge_django_owned_run_request", "_run_fields", "_step_fields", "_attempt_fields", "_assign_changed_fields", "_parse_optional_datetime"}
         tree = ast.parse((root / "service_views.py").read_text())
         nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names) or
@@ -317,11 +326,11 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         return row
 
     def query(self, **kwargs):
-        return SimpleNamespace(first=lambda: self.rows.get(kwargs["run_id"]))
+        return SimpleNamespace(first=lambda: self.rows.get(kwargs.get("run_id")))
 
     def locked_query(self, **kwargs):
         self.assertTrue(self.in_transaction)
-        self.calls.append(("lock", kwargs["run_id"]))
+        self.calls.append(("lock", kwargs.get("run_id")))
         return self.query(**kwargs)
 
     def save_snapshot(self, *, run_id, defaults):
@@ -492,7 +501,10 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         self.assertEqual(self.put(incoming).data["error"], "run_cancelled")
         self.existing.status = "completed"
         self.assertEqual(self.put(incoming).data["sync_status"], "ignored_terminal_state")
-        self.assertNotIn("transaction", self.calls)
+        # The new ownership selector may read-lock an unmarked row; it must
+        # not write a Run or any steps after this legacy terminal response.
+        self.assertNotIn("write", self.calls)
+        self.steps.objects.update_or_create.assert_not_called()
 
     def test_sqlite_retry_rereads_before_sync_and_preserves_brief(self):
         calls = 0

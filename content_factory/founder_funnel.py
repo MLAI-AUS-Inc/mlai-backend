@@ -60,7 +60,8 @@ def has_first_draft(organization):
     if organization_has_delivered_draft(organization.pk):
         return True
     runs = ContentFactoryRun.objects.filter(organization=organization, workflow__in=ARTICLE_WORKFLOWS).exclude(status__in=['cancelled', 'denied'])
-    if runs.filter(steps__step_key='package_content_delivery', steps__status='completed', steps__completed_at__isnull=False).exists():
+    from .run_reconciliation import legacy_event_rows
+    if runs.filter(legacy_event_rows(), steps__step_key='package_content_delivery', steps__status='completed', steps__completed_at__isnull=False).exists():
         return True
     return any(draft_time(run) for run in runs.only('status', 'result'))
 
@@ -127,11 +128,15 @@ def _organization_draft_proofs(organization_id, *, using):
     proofs = {}
     for run in runs:
         at = draft_time(run)
-        if at or run.status in {'completed', 'awaiting_approval'}:
+        from .run_reconciliation import authoritative_run
+        if at or not authoritative_run(run) and run.status in {'completed', 'awaiting_approval'}:
             _add_draft_proof(proofs, run.run_id, at=at, created_at=run.created_at)
     for step in ContentFactoryRunStep.objects.using(using).filter(run_id__in=by_id, step_key='package_content_delivery',
             status='completed', completed_at__isnull=False).values('run_id', 'completed_at'):
         run = by_id[step['run_id']]
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(run):
+            continue
         _add_draft_proof(proofs, run.run_id, at=step['completed_at'], created_at=run.created_at)
     return proofs
 
@@ -168,6 +173,11 @@ def remember_first_draft(organization_id, *, run_id, at=None, using=DEFAULT_DB_A
 
 def draft_time(run):
     """The writer's immutable readiness receipt, with a known revision."""
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import verified_draft_ready
+        if not verified_draft_ready(run):
+            return None
     receipt = mapping(mapping(run.result).get('draft_ready_v1'))
     if (run.status not in {'cancelled', 'denied'} and type(receipt.get('version')) is int
             and receipt['version'] == 1 and isinstance(receipt.get('revision'), str)
@@ -248,13 +258,17 @@ def journey_funnel(*, since, until, using=DEFAULT_DB_ALIAS):
             org_mark(run.organization_id, 'first_article_started', run.created_at)
             org_mark(run.organization_id, 'queued', run.created_at)
             ready = draft_time(run)
-            if ready or run.status in {'completed', 'awaiting_approval'}:
+            from .run_reconciliation import authoritative_run
+            if ready or not authoritative_run(run) and run.status in {'completed', 'awaiting_approval'}:
                 _add_draft_proof(draft_proofs[run.organization_id], run.run_id, at=ready, created_at=run.created_at)
         elif run.status == 'completed':
             org_mark(run.organization_id, 'research_done', timestamp(mapping(run.result).get('completed_at')))
     for step in ContentFactoryRunStep.objects.using(using).filter(run_id__in=by_id,
             status='completed', completed_at__isnull=False).values('run_id', 'step_key', 'completed_at'):
         run = by_id[step['run_id']]
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(run):
+            continue
         if run.workflow in ARTICLE_WORKFLOWS and run.status not in {'cancelled', 'denied'}:
             if step['step_key'] == 'package_content_delivery':
                 _add_draft_proof(draft_proofs[run.organization_id], run.run_id, at=step['completed_at'], created_at=run.created_at)

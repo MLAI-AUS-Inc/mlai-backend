@@ -423,6 +423,7 @@ def public_payload(organization, *, user, config=None):
                             and _is_owner(user, organization))
     return {
         "version": 1,
+        **({"contractVersion": 2} if new else {}),
         "cohort": NEW_JOURNEY if new else LEGACY,
         "optInAvailable": opt_in_available,
         "staffView": bool(getattr(user, "is_staff", False)),
@@ -455,11 +456,13 @@ def account_payload(user):
         return None
     companies = _profile_companies(user)
     configs = _configs_by_org(companies)
+    admitted = {str(company.pk): NEW_JOURNEY for company in companies
+        if cohort(company.organization, configs.get(company.organization_id, _EmptyConfig)) == NEW_JOURNEY}
     return {
         "version": 1,
+        **({"contractVersion": 2} if admitted else {}),
         "newStartupCohort": new_startup_cohort(),
-        "companies": {str(company.pk): NEW_JOURNEY for company in companies
-                      if cohort(company.organization, configs.get(company.organization_id, _EmptyConfig)) == NEW_JOURNEY},
+        "companies": admitted,
     }
 
 

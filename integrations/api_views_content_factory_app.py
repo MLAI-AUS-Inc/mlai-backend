@@ -228,6 +228,15 @@ def _content_factory_request(method: str, path: str, *, payload: dict | None = N
     kwargs = {"headers": _content_factory_headers(), "timeout": (3, 30)}
     if payload is not None:
         kwargs["json"] = payload
+    if method.lower() == "post" and path == "/api/runs/scan" and payload is not None:
+        from content_factory.dispatch_admission import post_dispatch, reserve_user_dispatch
+        from content_factory.run_ownership import WIRE_REQUEST_KEY, admission_enabled
+        if admission_enabled() or WIRE_REQUEST_KEY in payload:
+            from content_factory.website_connections import dispatch_contract
+            payload.update(dispatch_contract(payload.get("domain"), payload, action="scan"))
+            admitted = reserve_user_dispatch(payload=payload, workflow="repo_scan", domain=payload.get("domain"),
+                actor_id=payload.get("requested_by_slack_user_id") or payload.get("slack_user_id"))
+            return post_dispatch(admitted, request, url, **kwargs)
     return request(url, **kwargs)
 
 
@@ -313,7 +322,8 @@ def _create_local_run_placeholder(*, run_id: str, workflow: str, domain: str, gi
 
 
 def _create_job_tracking(*, run_id: str, domain: str, actor_id: str, status_value: str, request_meta: dict):
-    ContentFactoryJob.objects.update_or_create(
+    from content_factory.run_backend_facts import update_or_create_job_facts
+    update_or_create_job_facts(
         job_id=run_id,
         defaults={
             "domain": domain,
@@ -881,13 +891,50 @@ class ContentFactoryAppRunControlView(APIView):
         if action not in {"approve", "deny", "resume"}:
             return Response({"error": "Unsupported action"}, status=status.HTTP_400_BAD_REQUEST)
 
+        from content_factory.run_ownership import RunOwnershipConflict
         try:
+            control_payload = {}
+            admitted_child = None
+            from content_factory.run_reconciliation import authoritative_run
+            if authoritative_run(run) and action in {"approve", "deny"} and (action != "approve" or run.workflow not in {"scan", "repo_scan", "content_factory_scan"}):
+                from content_factory.run_execution_control import current_execution_request
+                from content_factory.run_ownership import (SCOPE_FIELDS, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY,
+                    current_execution_ticket, owner_receipt, wire_identity)
+                current = current_execution_request(run)
+                control_payload.update({field: current[field] for field in (*SCOPE_FIELDS,
+                    "configuration_revision", "github_installation_id") if field in current})
+                control_payload.update({WIRE_REQUEST_KEY: wire_identity(owner_receipt(run)),
+                    WIRE_EXECUTION_KEY: current_execution_ticket(run)})
             if action != "deny":
                 with _run_projection_scope(run, {}, action="setup"):
                     pass
-            response = _content_factory_request("post", f"/api/runs/{run_id}/{action}", payload={})
+            if action == "approve":
+                from content_factory.run_child_admission import prepare_scan_child_dispatch
+                from content_factory.run_ownership import owner_receipt, admission_enabled
+                if (owner_receipt(run) is not None or admission_enabled()) and run.workflow in {"scan", "repo_scan", "content_factory_scan"}:
+                    admitted_child = prepare_scan_child_dispatch(run=run, user=request.user,
+                        actor_id=actor_id, payload=control_payload)
+            elif action == "resume":
+                from content_factory.run_ownership import owner_receipt
+                if (owner_receipt(run) or {}).get("authority", {}).get("event_protocol") == 1:
+                    from content_factory.website_connections import scoped_run_contract
+                    from content_factory.website_contract import connection_contract
+                    if connection_contract(scoped_run_contract(run)):
+                        from content_factory.website_operations import advance_workflow_attempt
+                        control_payload.update(advance_workflow_attempt(run))
+                    from content_factory.run_user_resume import user_resume_payload
+                    command_key = request.headers.get("Idempotency-Key") or next((request.data.get(key) for key in
+                        ("idempotency_key", "idempotencyKey", "clientRequestId") if request.data.get(key)), None)
+                    control_payload = user_resume_payload(run=run, user=request.user,
+                        command_key=command_key, payload=control_payload)
+            if action == "deny" and authoritative_run(run):
+                from content_factory.run_user_stop import record_user_denial
+                record_user_denial(run, user=request.user, actor_id=actor_id)
+            response = _content_factory_request("post", f"/api/runs/{run_id}/{action}", payload=control_payload)
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
+        except RunOwnershipConflict:
+            return Response({"error": "The scan approval or current website permission changed."}, status=409)
         except (http_requests.exceptions.RequestException, ArticleGenerationError) as exc:
             return Response({"error": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
@@ -895,6 +942,18 @@ class ContentFactoryAppRunControlView(APIView):
             return _proxy_error(response)
 
         payload = _response_json(response)
+        if admitted_child is not None:
+            from content_factory.run_child_admission import accept_scan_child_response
+            accept_scan_child_response(admitted_child, payload, status_code=response.status_code)
+        from content_factory.run_ownership import owner_receipt
+        if (owner_receipt(run) or {}).get("authority", {}).get("event_protocol") == 1:
+            # A transport acknowledgement cannot become lifecycle authority.
+            # The appended typed events own status/steps and execution clocks.
+            if action == "deny":
+                from content_factory.run_owned_observations import refresh_owned_run
+                refresh_owned_run(run)
+            run.refresh_from_db()
+            return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
         remote_run = _sync_remote_run_payload(run_id, payload)
         if remote_run:
             return Response(_serialize_content_factory_run(remote_run), status=status.HTTP_200_OK)

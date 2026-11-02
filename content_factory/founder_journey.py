@@ -581,7 +581,7 @@ def _audience_known(organization, config, facts) -> bool:
     return audience_for(organization, config, facts) is not None
 
 
-def project_founder_journey(organization, *, user, company, now=None) -> dict:
+def project_founder_journey(organization, *, user, company, now=None, run_id=None) -> dict:
     """The IF-P1-03 journey body for this company, with its ``etag``.
 
     A legacy organisation (``is_new_journey`` false) returns the legacy body
@@ -608,14 +608,41 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
     connection = _connection(organization)
     setup_run = _setup_run(organization)
     site = _site_profile(config)
-    run = latest_article_run(organization)
+    if run_id is not None:
+        import re
+        from django.http import Http404
+        from workflow_runs.models import ContentFactoryRun
+        from .run_state import ARTICLE_WORKFLOWS
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}", run_id):
+            raise Http404
+        run = ContentFactoryRun.objects.filter(organization_id=organization.pk, run_id=run_id,
+            workflow__in=ARTICLE_WORKFLOWS | set(SETUP_WORKFLOWS)).first()
+        if run is None or is_hidden_run(run):
+            raise Http404
+        setup_run = run if run.workflow in SETUP_WORKFLOWS else None
+    else:
+        run = latest_article_run(organization)
     decision = None
     facts = {"etaSeconds": None, "queuePosition": None, "switchTopicAvailable": False}
 
     from . import founder_journey_p2 as p2
     from .p2_foundation import policy_v2_applies, p2_applies
     p2_active = p2_applies(organization)
-    if policy_v2_applies(organization):
+    from .run_reconciliation import authoritative_run
+    from .founder_draft_views import is_delivered_article
+    if (run is not None and run.status in {"failed", "blocked", "cancelled", "denied"}
+            and authoritative_run(run) and is_delivered_article(run)):
+        # A later execution stop cannot revoke the independently earned body.
+        # This affects presentation only; the article DTO retains typed status.
+        live = _live_article(organization, run)
+        if live is not None and _https_or_none(live.live_url):
+            decision = _decide("done", "done", "done_live", next_kind="view_article", run_id=run.run_id,
+                url=_https_or_none(live.live_url))
+        elif copied_or_posted(config, run.run_id):
+            decision = _decide("done", "done", "done_copy_ready", next_kind="view_draft", run_id=run.run_id)
+        else:
+            decision = _decide("review", "your_turn", "review", action="review_draft", run_id=run.run_id)
+    if decision is None and policy_v2_applies(organization):
         queue = writing_facts(run, now=now) if run is not None and run.status == "queued" else None
         decision = p2.run_decision(organization, run, config=config, user=user, now=now, queue=queue)
         if decision is None:
@@ -689,7 +716,8 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
 
     if decision is None and run is not None and run.status in DELIVERED_STATUSES:
         mode = delivery_mode(run)
-        approved = str(getattr(run, "approval_state", "") or "") == "approved"
+        from .founder_journey_contract import effective_approval_state
+        approved = effective_approval_state(run) == "approved"
         if mode == "content_only":
             # A copied or posted draft is done (rule 9), after setup and publishing.
             if not copied_or_posted(config, run.run_id):
@@ -727,6 +755,11 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
             copy_id = "working_website_update" if decision["stage"] == "publishing" else "working_slow" if decision.get("holdingReason") == "slow" else "working"
             decision = p2.line(copy_id, run=run, notify=p2.emailable(organization, user))
 
+    if run_id is not None:
+        if decision.get("runId") not in {None, run_id}:
+            decision = _decide("writing", "working", "still_working", next_kind="view_progress", run_id=run_id)
+        else:
+            decision["runId"] = run_id
     payload = {
         "version": VERSION, "companyId": company_id, "cohort": cohorts.NEW_JOURNEY,
         "stage": decision["stage"], "state": decision["state"], "headline": decision["headline"],
@@ -784,7 +817,11 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
     action_id = (payload["action"] or {}).get("id")
     logger.info("founder_journey_projection org=%s stage=%s state=%s action=%s", organization.pk,
                 payload["stage"], payload["state"], action_id or "")
-    return _with_etag(payload)
+    from .founder_journey_contract import enrich_journey
+    payload = enrich_journey(payload, organization=organization, company=company, config=config,
+        user=user, run=run, connection=connection, setup_run=setup_run)
+    from .founder_journey_contract import validate_journey
+    return validate_journey(_with_etag(payload))
 
 
 def switch_topic_admissible(organization, *, user, company, run, config=None, now=None) -> bool:
@@ -920,7 +957,8 @@ def _live_article(organization, run=None):
 
 def _publishing_or_done(*, organization, config, marker, run, connection):
     """Rules 8 and 9: publishing while the site updates, then done."""
-    if run is not None and run.status in DELIVERED_STATUSES and str(getattr(run, "approval_state", "") or "") == "approved" \
+    from .founder_journey_contract import effective_approval_state
+    if run is not None and run.status in DELIVERED_STATUSES and effective_approval_state(run) == "approved" \
             and delivery_mode(run) != "content_only":
         live = _live_article(organization, run)
         if live is None:

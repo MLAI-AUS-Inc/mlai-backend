@@ -75,7 +75,9 @@ def run_observed(sender, instance, created, raw=False, using='default', **kwargs
         milestones.append(('draft_ready', ready, 'writer.draft_ready_v1'))
     elif instance.workflow in ARTICLE_WORKFLOWS and instance.status in {'completed', 'awaiting_approval'}:
         # Legacy delivery is known, but its historic timestamp is not.
-        after_commit(lambda: remember_first_draft(org_id, run_id=run_id, using=using), using=using)
+        from .run_reconciliation import authoritative_run
+        if not authoritative_run(instance):
+            after_commit(lambda: remember_first_draft(org_id, run_id=run_id, using=using), using=using)
     if instance.workflow in RESEARCH_WORKFLOWS and instance.status == 'completed':
         milestones.append(('research_done', timestamp(mapping(instance.result).get('completed_at')) or timezone.now(),
                            'research.completed_observed'))
@@ -89,6 +91,9 @@ def package_ready(sender, instance, raw=False, using='default', **kwargs):
     if raw or instance.step_key != 'package_content_delivery' or instance.status != 'completed' or not instance.completed_at:
         return
     run, at = instance.run, instance.completed_at
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        return
     if run.organization_id and run.workflow in ARTICLE_WORKFLOWS and run.status not in {'cancelled', 'denied'}:
         after_commit(lambda: emit_for_organization('draft_ready', run.organization_id,
             at=at, run_id=run.run_id, source='writer.package_content_delivery', using=using), using=using)

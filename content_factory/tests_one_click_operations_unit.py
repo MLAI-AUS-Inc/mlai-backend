@@ -207,6 +207,11 @@ class BillingClarityTests(SimpleTestCase):
 
 
 class DispatchOutboxTests(SimpleTestCase):
+    def setUp(self):
+        from workflow_runs.models import ContentFactoryRun
+        lookup = self.enterContext(patch.object(ContentFactoryRun.objects, "filter"))
+        lookup.return_value.filter.return_value.first.return_value = None
+
     def test_unconfirmed_prior_delivery_cannot_refund_on_a_new_http_refusal(self):
         from .dispatch_outbox import dispatch_outcome
         self.assertEqual(dispatch_outcome(401, {"detail": "Unavailable"}), ("pending", True))

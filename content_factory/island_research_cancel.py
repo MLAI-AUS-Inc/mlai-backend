@@ -15,9 +15,28 @@ def is_island_research_run(run):
     return run.workflow == "island_refresh" and bool((run.run_request or {}).get("island_research_brief"))
 
 
-def cancel_island_research(*, run, context, payload):
+def cancel_island_research(*, run, context, payload, user=None):
     """Stop the owned worker run, retaining its brief and idempotent refund."""
     from . import vibe_marketing_views as views
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from founder_tools.services import user_may_use_organization
+        from .run_execution_control import current_execution_request
+        from .run_ownership import current_execution_ticket, wire_identity, owner_receipt, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, SCOPE_FIELDS
+        from .run_owned_observations import refresh_owned_run
+        actor = getattr(user, "pk", None)
+        if (actor is None or context.organization.pk != run.organization_id
+                or not user.is_active or not user_may_use_organization(user, run.organization)):
+            return Response({"detail": "Current startup permission is required to stop this research."}, status=403)
+        current = current_execution_request(run)
+        request = {**dict(payload or {}), **{field: current.get(field) for field in (*SCOPE_FIELDS,
+            "configuration_revision", "github_installation_id") if field in current},
+            WIRE_REQUEST_KEY: wire_identity(owner_receipt(run)), WIRE_EXECUTION_KEY: current_execution_ticket(run)}
+        if run.status not in TERMINAL:
+            views._call_content_factory_run_action(run_id=run.run_id, action="cancel", payload=request,
+                workflow=run.workflow, timeout=(3, 15), transport_errors_are_pending=True)
+        fresh = refresh_owned_run(run)
+        return Response(views._serialize_run(fresh, context=context), status=202)
 
     if (run.run_request or {}).get("dispatch_pending_resolution"):
         return Response({"detail": "Research dispatch is still being confirmed. Please try cancelling again shortly."}, status=409)

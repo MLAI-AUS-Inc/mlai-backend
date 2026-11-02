@@ -634,7 +634,9 @@ class PortablePreviewRearmTests(SimpleTestCase):
                 patch.object(views.http_client, "post", side_effect=lambda url, **kwargs: http("POST", post)), \
                 patch.object(views.http_client, "get", side_effect=lambda url, **kwargs: http("GET", get)), \
                 patch.object(views.transaction, "atomic", return_value=nullcontext()), \
+                patch.object(views.ContentFactoryRun.objects, "filter") as canonical, \
                 patch.object(views.ContentFactoryRun.objects, "select_for_update") as locked:
+            canonical.return_value.first.return_value = None  # Unmarked legacy preview fixture.
             locked.return_value.get.return_value = run
             while clock[0] - start < timedelta(minutes=minutes):
                 self.assertIs(views._ensure_article_live_preview(run), run)

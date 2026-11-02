@@ -8,6 +8,7 @@ from .website_runtime_observation import WebsiteRuntimeObservationView
 from .hosted_article_views import (HostedArticlePublicationServiceView, HostedArticleSiteServiceView,
                                    HostedArticleSiteSourceServiceView)
 from .preview_domain_claim import PreviewDomainClaimServiceView
+from .run_execution_control_views import RunExecutionTicketView
 
 urlpatterns = [
     path('articles/runtime-observation/', WebsiteRuntimeObservationView.as_view(), name='articles_runtime_observation'),
@@ -73,6 +74,8 @@ urlpatterns = [
     path('runs/<str:run_id>/preview', views.ContentFactoryRunPreviewView.as_view(), name='content_factory_run_preview_no_slash'),
     path('runs/<str:run_id>/artifacts/', views.ContentFactoryRunArtifactsView.as_view(), name='content_factory_run_artifacts'),
     path('runs/<str:run_id>/artifacts', views.ContentFactoryRunArtifactsView.as_view(), name='content_factory_run_artifacts_no_slash'),
+    path('runs/<str:run_id>/execution-ticket/', RunExecutionTicketView.as_view(), name='content_factory_execution_ticket'),
+    path('runs/<str:run_id>/execution-ticket', RunExecutionTicketView.as_view()),
     path('runs/<str:run_id>/<str:action>/', views.ContentFactoryRunControlView.as_view(), name='content_factory_run_control'),
     path('runs/<str:run_id>/<str:action>', views.ContentFactoryRunControlView.as_view(), name='content_factory_run_control_no_slash'),
 ]

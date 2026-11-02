@@ -53,7 +53,7 @@ def dispatch_failure_details(outcome, payload, *, refund=True):
     raise ValueError("A dispatch failure requires a confirmed no-work outcome.")
 
 
-def reserve_dispatch(*, organization, payload, endpoint="article", workflow="article_generation", billing_user_id=None, actor_id=""):
+def reserve_dispatch(*, organization, payload, endpoint="article", workflow="article_generation", billing_user_id=None, actor_id="", _staff_support_run=None):
     """Write this row inside the transaction that creates its Roo spend."""
     if not transaction.get_connection().in_atomic_block:
         raise RuntimeError("Article dispatch and its Roo charge must share a transaction.")
@@ -62,6 +62,17 @@ def reserve_dispatch(*, organization, payload, endpoint="article", workflow="art
         raise ValueError("A bounded article request identity is required.")
     from .p2_foundation import stamp_run_request, P2_BACKEND_REQUEST_KEYS
     stamp_run_request(payload, organization=organization, requester_user_id=payload.get("roo_points_requested_by_user_id"))
+    from .run_ownership import WIRE_REQUEST_KEY, admission_enabled, reserve_admitted_run, user_principal
+    if admission_enabled() or WIRE_REQUEST_KEY in payload:
+        principal = user_principal(payload.get("roo_points_requested_by_user_id"), actor_id)
+        if _staff_support_run is not None:
+            from .run_staff_support import require_staff_support
+            from .run_ownership import owner_receipt
+            require_staff_support(_staff_support_run)
+            receipt = owner_receipt(_staff_support_run)
+            if receipt["identity"]["dispatch_key"] != key or receipt["identity"]["principal"] != principal:
+                raise ValueError("The staff continuation does not match its actual requester.")
+        reserve_admitted_run(organization=organization, principal=principal, workflow=workflow, payload=payload)
     saved = sanitized_evidence(payload)
     identity = {key: value for key, value in saved.items() if not key.startswith("roo_points_") and key not in {"dispatch_outbox_reserved", "roo_points_gate", *P2_BACKEND_REQUEST_KEYS}}
     envelope = {"request": saved, "endpoint": endpoint, "workflow": workflow,
@@ -135,6 +146,11 @@ def _deliver(row):
     from .portable_drafts import original_portable_run
     from .website_operations import OPERATION_FIELDS
     request = dict(row.payload["request"])
+    from .run_ownership import STAFF_SUPPORT_RESULT_KEY, admitted_run_for_key
+    admitted = admitted_run_for_key(row.client_request_id)
+    if admitted is not None and STAFF_SUPPORT_RESULT_KEY in (admitted.result or {}):
+        from .run_staff_support import require_staff_support
+        require_staff_support(admitted)
     remote = _content_factory_remote_config()
     if not remote["enabled"]:
         return "pending", "dispatch_worker_unavailable", ""
@@ -175,8 +191,14 @@ def _deliver(row):
             return "pending", str(policy_error.data.get("code") or "editorial_policy_recheck_required")[:100], ""
         from integrations.services.article_generation import require_article_activation
         requester = get_user_model().objects.get(pk=request["roo_points_requested_by_user_id"], is_active=True)
-        require_article_activation(domain=row.organization.domain, actor_id=row.payload.get("actor_id") or "",
-            user=requester, expected_repo=request.get("github_repo", ""), article_request=request)
+        from .run_ownership import STAFF_SUPPORT_RESULT_KEY, admitted_run_for_key
+        admitted = admitted_run_for_key(row.client_request_id)
+        if admitted is not None and STAFF_SUPPORT_RESULT_KEY in (admitted.result or {}):
+            from .run_staff_support import require_staff_support
+            require_staff_support(admitted)
+        else:
+            require_article_activation(domain=row.organization.domain, actor_id=row.payload.get("actor_id") or "",
+                user=requester, expected_repo=request.get("github_repo", ""), article_request=request)
         if not portable:
             from .vibe_marketing_views import _validate_article_start_reservation
             # Provider admission examines today's configuration outside SQL.

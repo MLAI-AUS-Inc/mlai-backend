@@ -53,6 +53,10 @@ def _failure(run):
 
 
 def _direct_delivery(run):
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import has_verified_delivery
+        return has_verified_delivery(run)
     result = _mapping(run.result)
     return (bool(result.get("draft_ready_v1")) or useful_delivery(run) or delivered_content(run)
             or publication_state(run) == "article")
@@ -214,12 +218,18 @@ def _write_receipt(run, *, state, points=0, original_key=None, refund_ledger_id=
 
 def apply_refund_decision(run, decision, *, now=None) -> dict:
     """Settle once under locks, rechecking evidence and the actual debit before crediting."""
+    from content_factory.run_backend_facts import save_job_facts
     from workflow_runs.models import ContentFactoryRun
     from roo.services import PointsService, IdempotencyConflictError
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        return points_receipt(run)
     if not enabled():
         return points_receipt(run)
     with transaction.atomic():
         locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        if authoritative_run(locked):
+            return points_receipt(locked)
         previous = points_receipt(locked)
         if previous.get("state") in {"refunded", "released", "kept"}:
             return previous
@@ -249,7 +259,7 @@ def apply_refund_decision(run, decision, *, now=None) -> dict:
             from .models import ContentFactoryJob
             for job in ContentFactoryJob.objects.filter(billing_ledger_id=spend.pk):
                 job.billing_status = "refunded"
-                job.save(update_fields=["billing_status"])
+                save_job_facts(job, update_fields=["billing_status"])
         elif action == "release":
             original = _original_free_run(locked)
             if original is None:
@@ -313,6 +323,9 @@ def carry_charge(*, source_run, new_run) -> dict:
         source, target = locked[source_run.pk], locked[new_run.pk]
         if source.organization_id != target.organization_id:
             raise ValueError("A charge cannot move between startups.")
+        from .run_ownership import owner_receipt
+        if owner_receipt(target) is not None:
+            raise ValueError("An admitted continuation cannot replace its original payment request.")
         spend = _original_spend(source) if paid_article_request(_mapping(source.run_request)) else None
         if spend and spend.service_refunds.exists():
             raise ValueError("A refunded charge cannot fund another run.")
@@ -339,7 +352,8 @@ def run_refund_sweep(now=None, limit=None) -> dict:
         return {"skipped": "flag_off"}
     from workflow_runs.models import ContentFactoryRun
     limit = max(1, min(int(limit or getattr(settings, "ARTICLES_SELF_HEAL_SWEEP_LIMIT", 50)), 500))
-    query = ContentFactoryRun.objects.filter(status__in=TERMINAL_STATUSES).filter(
+    from .run_reconciliation import legacy_event_rows
+    query = ContentFactoryRun.objects.filter(legacy_event_rows(), status__in=TERMINAL_STATUSES).filter(
         ~Q(result__has_key="points_v1") | ~Q(result__points_v1__state__in=SETTLED_STATES)).order_by("pk")
     result = {"processed": 0, "refunded": 0, "released": 0}
     remaining = []

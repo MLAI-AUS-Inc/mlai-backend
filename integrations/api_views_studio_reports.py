@@ -30,7 +30,9 @@ class StudioReportPrepareView(APIView):
     def post(self, request):
         data = request.data
         try:
-            if (not isinstance(data, dict) or set(data) != {"owner", "team", "cutoff", "nonce"}
+            if (not isinstance(data, dict) or set(data) not in ({"owner", "team", "cutoff", "nonce"},
+                                                              {"owner", "team", "cutoff", "nonce", "mode"})
+                    or data.get('mode', 'strict') not in {'strict', 'latest'}
                     or any(not isinstance(data[key], str) for key in data)
                     or re.fullmatch(r"[a-f0-9]{64}", data["nonce"]) is None):
                 raise ValueError
@@ -52,6 +54,8 @@ class StudioReportPrepareView(APIView):
                 connection = ExternalServiceConnection.objects.select_for_update().get(
                     id=scope["xero_connection_id"], organization_id=scope["organization_id"], provider="xero")
                 def get(path, **kwargs):
+                    if not (path == '/Invoices' or re.fullmatch(r'/(Payments|BankTransactions)/[a-fA-F0-9-]{36}', path)):
+                        raise SourceIncomplete('finance_read_path_invalid')
                     if time.monotonic() >= deadline:
                         raise SourceIncomplete("finance_time_limit")
                     return _xero_get_json(connection, path, **kwargs)

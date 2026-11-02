@@ -1,5 +1,36 @@
 # Private Studio report preparation
 
+## Daily/latest projections
+
+The private Roo worker can request `mode: "latest"` for its daily refresh and
+on-demand views. The default remains `strict`; scheduled Friday deliveries keep
+that mode. Latest permits only `hours_coverage_missing` and
+`new_invoices_require_review` as explicitly labelled partial data. All finance,
+mail discovery, scope, unresolved allocation and cutoff errors still withhold
+the snapshot. Both modes are signed and use separate preparation identities.
+
+`source_freshness` records finance check time, original work review/coverage,
+latest submitted work date, pending email count and gap codes. The finance
+envelope may advance; work review timestamps and reviewed Gmail IDs never do.
+This is not autonomous approval of contractor invoices. Xero supplier bills
+may omit the worked hours and project/date evidence; those remain review work.
+The job reads accounting APIs only and OAuth rotation stays backend-owned.
+
+For clients with both subscriptions and reimbursable expenses, set
+`credit_description_prefix` in the private scope to the reviewed subscription
+description prefix (for example `Example Studio subscription`). Every line
+must match to make a new invoice credit-eligible. Empty, mixed and unknown
+lines remain cash-only; review classification if the invoice convention changes.
+The projection includes `credit_eligible` per invoice and `credit_amount_cents`
+per receipt while preserving its full cash amount and invoice reconciliation.
+Legacy mapped historical receipts preserve their reviewed credit allocation.
+No Xero invoice, payment or bank transaction is edited.
+
+The daily scheduler and publication live in Roo's private worker; no new backend
+process, database table or migration is required. Deploy this API before
+enabling Roo's latest/daily flags. Read failures and Xero 429 continue to use the
+existing durable cooldown shared across request cutoffs.
+
 `POST /api/v1/integrations/studio-reports/prepare` is disabled by default.
 It reloads approved work records, discovers contractor invoices in the treasury
 mailbox, and reads client invoices and reconciled receipts from Xero. It never

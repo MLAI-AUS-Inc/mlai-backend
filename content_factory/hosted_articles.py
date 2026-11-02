@@ -249,7 +249,15 @@ def _require_approval_actor(run, actor_id):
 def _require_publication_active(site, run):
     if not enabled() or site.state != HostedArticleSite.State.ACTIVE:
         raise HostedPublishError("hosted_site_not_active", "Hosted publishing is not switched on for this website.")
-    if run.status in {'cancelled', 'denied', 'stopped'}:
+    from .run_ownership import user_stop_intent
+    from .run_terminal_settlement import terminal_execution_closed
+    try:
+        closed = terminal_execution_closed(run)
+    except ValueError as exc:
+        raise HostedPublishError("hosted_publish_not_allowed", "This publishing obligation is no longer available.", status=403) from exc
+    if closed:
+        raise HostedPublishError("hosted_publish_not_allowed", "This publishing obligation was settled.", status=403)
+    if user_stop_intent(run) or run.status in {'cancelled', 'denied', 'stopped'}:
         raise HostedPublishError("hosted_publish_not_allowed", "This publishing request was stopped.", status=403)
 
 
@@ -423,17 +431,34 @@ def record_progress(*, domain: str, run_id: str, data: dict) -> HostedArticlePub
         result = run.result if isinstance(run.result, dict) else {}
         if (run is not None and isinstance(result.get("article_approval_v1"), dict)
                 and result["article_approval_v1"].get("source") == "publish_reviewed"):
+            from .website_run_authority import event_owned
+            owned = event_owned(run)
+            if owned:
+                from .run_ownership import HOSTED_PUBLICATION_OBSERVATION_KEY
+                result = {**result, HOSTED_PUBLICATION_OBSERVATION_KEY: {
+                    "schema_version": 1, "publication_id": str(publication.pk), "site_id": str(site.pk),
+                    "status": str(target), "revision_digest": publication.revision_digest,
+                    "observed_at": now.isoformat()}}
             if target == Status.LIVE:
                 url = f"https://{site.domain}{site.base_path}{publication.slug}/"
                 result = {**result, "deploy_v1": {"url": url, "provider": "mlai_hosted", "verified_at": now.isoformat()},
                           "channel_v1": {"version": 1, "channel": "hosted", "waiting_to_publish": False, "at": now.isoformat()}}
-                ContentFactoryRun.objects.filter(pk=run.pk).update(status="completed", current_step="hosted_publish",
-                    result=result, updated_at=now)
+                if owned:
+                    ContentFactoryRun.objects.filter(pk=run.pk).update(result=result)
+                else:
+                    ContentFactoryRun.objects.filter(pk=run.pk).update(status="completed", current_step="hosted_publish",
+                        result=result, updated_at=now)
             elif target == Status.RENDERING:
-                ContentFactoryRun.objects.filter(pk=run.pk).update(status="running", current_step="hosted_publish", updated_at=now)
+                if owned:
+                    ContentFactoryRun.objects.filter(pk=run.pk).update(result=result)
+                else:
+                    ContentFactoryRun.objects.filter(pk=run.pk).update(status="running", current_step="hosted_publish", updated_at=now)
             elif target == Status.FAILED:
-                result = {**result, "error_code": "HOSTED_PREVIEW_UNAVAILABLE"}
-                ContentFactoryRun.objects.filter(pk=run.pk).update(status="failed", current_step="hosted_publish", result=result, updated_at=now)
+                if owned:
+                    ContentFactoryRun.objects.filter(pk=run.pk).update(result=result)
+                else:
+                    result = {**result, "error_code": "HOSTED_PREVIEW_UNAVAILABLE"}
+                    ContentFactoryRun.objects.filter(pk=run.pk).update(status="failed", current_step="hosted_publish", result=result, updated_at=now)
     return publication
 
 

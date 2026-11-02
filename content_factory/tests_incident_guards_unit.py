@@ -484,7 +484,7 @@ class IncidentFacadeReplays(SimpleTestCase):
         from . import vibe_marketing_views as views
         connection = SimpleNamespace(pk=uuid.uuid4(), generation=3, github_repo="current/site", repository_id=42)
         config = SimpleNamespace(website_connection=connection)
-        run = SimpleNamespace(run_id="old-draft", workflow="article_generation", run_request={"website_connection_id": str(connection.pk), "connection_generation": 2}, github_repo="older/site")
+        run = SimpleNamespace(run_id="old-draft", workflow="article_generation", result={}, run_request={"website_connection_id": str(connection.pk), "connection_generation": 2}, github_repo="older/site")
         context = SimpleNamespace(organization=object())
         request = SimpleNamespace(user=SimpleNamespace(pk=8), data={})
         with patch.object(views, "_resolve_context_or_response", return_value=(context, None)), \
@@ -509,7 +509,7 @@ class IncidentFacadeReplays(SimpleTestCase):
         with patch.object(review.views, "_run_has_external_publish_evidence", return_value=False), \
                 patch.object(review.views, "_latest_review_ready_component_revision", return_value=None), \
                 patch.object(review, "remote_review", return_value={"revision": "next"}) as remote:
-            result = view.post(SimpleNamespace(data=payload), run.run_id)
+            result = view.post(SimpleNamespace(data=payload, user=SimpleNamespace(pk=9)), run.run_id)
         self.assertEqual(result.status_code, 200)
         self.assertEqual(remote.call_args.kwargs["payload"], payload)
 
@@ -526,7 +526,7 @@ class IncidentFacadeReplays(SimpleTestCase):
 
     def test_portable_preview_grant_never_enters_repository_guard(self):
         request = {"delivery_mode": "content_only", "delivery_mode_confirmed": True}
-        run = SimpleNamespace(run_id="draft-1", run_request=request, domain="synthetic.test", organization_id=4)
+        run = SimpleNamespace(run_id="draft-1", run_request=request, domain="synthetic.test", organization_id=4, result={})
         intent = evidence_digest({key: request.get(key) for key in ("delivery_mode", "delivery_mode_confirmed", "source_run_id")})
         token = signing.dumps({"run": run.run_id, "organization": 4, "domain": run.domain, "portable": True, "intent_digest": intent}, salt=SALT)
         view = ArticlePreviewLeaseProxyView(); view.kwargs = {"token": token}
@@ -1185,6 +1185,9 @@ class IncidentBillingReplays(SimpleTestCase):
         from roo.services import PointsService
         from .models import ContentFactoryJob
         from workflow_runs.models import ContentFactoryRun
+        class LegacyRows(list):
+            def iterator(self):
+                return iter(self)
         user = SimpleNamespace(pk=8)
         run = SimpleNamespace(run_id="paid-draft", run_request={"client_request_id": "draft-identity"}, save=Mock())
         original = SimpleNamespace(id=9, delta_microroo=-12_000_000)
@@ -1193,7 +1196,7 @@ class IncidentBillingReplays(SimpleTestCase):
                 patch.object(ContentFactoryJob.objects, "filter") as jobs, \
                 patch.object(ContentFactoryRun.objects, "filter") as runs:
             ledgers.return_value.first.return_value = original
-            runs.return_value.filter.return_value = [run]
+            runs.return_value.filter.return_value = LegacyRows([run])
             generation._refund_content_factory_request(user=user, slack_user_id="founder", article_request={"client_request_id": "draft-identity"}, resolved_domain="paid.example", reason="No saved delivery")
             self.assertEqual(run.run_request["roo_points_billing_status"], "refunded")
             self.assertFalse(run.run_request["roo_points_authorized"])

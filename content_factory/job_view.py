@@ -61,6 +61,9 @@ class RunJobView:
         values = {"run": run, "job_id": run.legacy_job_id or run.run_id}
         for job_field, column in JOB_TO_RUN_FIELDS.items():
             values[job_field] = getattr(run, column)
+        from .run_ownership import owns_backend_facts, owner_receipt
+        if owns_backend_facts(run):
+            values["client_request_id"] = owner_receipt(run)["identity"]["dispatch_key"]
         for name, value in values.items():
             object.__setattr__(self, name, value)
 
