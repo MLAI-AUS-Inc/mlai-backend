@@ -106,6 +106,76 @@ class CommunityChatAccountSessionTests(TestCase):
             str(self.challenge.installation_id),
         )
 
+    def test_browser_cookie_rejects_another_local_identity_before_account_read(self):
+        _, credentials, client = self.web_session()
+        original_used_at = credentials.session.last_used_at
+        for binding in (public_key(52), "", "not-a-key", "A" * 64):
+            with self.subTest(binding=binding):
+                response = client.get(
+                    reverse("community_chat_account"),
+                    HTTP_X_MLAI_PUBLIC_KEY=binding,
+                )
+                self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+                self.assertEqual(response.data["error"], "account_identity_mismatch")
+                self.assertNotIn("profile", response.data)
+                credentials.session.refresh_from_db()
+                self.assertEqual(credentials.session.last_used_at, original_used_at)
+
+    def test_browser_cookie_accepts_its_current_local_identity(self):
+        challenge, _, client = self.web_session()
+        response = client.get(
+            reverse("community_chat_account"),
+            HTTP_X_MLAI_PUBLIC_KEY=challenge.public_key,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["session"]["public_key"], challenge.public_key)
+
+    def test_browser_binding_header_does_not_change_native_bearer_authentication(self):
+        response = self.bearer_client().get(
+            reverse("community_chat_account"),
+            HTTP_X_MLAI_PUBLIC_KEY=public_key(52),
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_foreign_cookie_refresh_does_not_rotate_or_replace_credentials(self):
+        challenge, credentials, client = self.web_session()
+        client.cookies["mlai_chat_refresh"] = credentials.refresh_token
+        original_hashes = (
+            credentials.session.access_token_hash, credentials.session.refresh_token_hash
+        )
+        for binding in (public_key(52), "", "invalid"):
+            with self.subTest(binding=binding):
+                response = client.post(
+                    reverse("community_chat_session_refresh"), {}, format="json",
+                    HTTP_ORIGIN=ORIGIN, HTTP_X_MLAI_PUBLIC_KEY=binding,
+                )
+                self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+                self.assertEqual(response.data["error"], "account_identity_mismatch")
+                self.assertNotIn("mlai_chat_access", response.cookies)
+                self.assertNotIn("mlai_chat_refresh", response.cookies)
+                credentials.session.refresh_from_db()
+                self.assertEqual(
+                    (credentials.session.access_token_hash, credentials.session.refresh_token_hash),
+                    original_hashes,
+                )
+        response = client.post(
+            reverse("community_chat_session_refresh"), {}, format="json",
+            HTTP_ORIGIN=ORIGIN, HTTP_X_MLAI_PUBLIC_KEY=challenge.public_key,
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("mlai_chat_access", response.cookies)
+
+    @override_settings(CORS_ALLOWED_ORIGINS=[ORIGIN])
+    def test_browser_identity_header_is_allowed_by_credentialed_preflight(self):
+        response = APIClient().options(
+            reverse("community_chat_account"),
+            HTTP_ORIGIN=ORIGIN,
+            HTTP_ACCESS_CONTROL_REQUEST_METHOD="GET",
+            HTTP_ACCESS_CONTROL_REQUEST_HEADERS="x-mlai-public-key",
+        )
+        self.assertEqual(response["Access-Control-Allow-Origin"], ORIGIN)
+        self.assertIn("x-mlai-public-key", response["Access-Control-Allow-Headers"])
+
     def test_public_profile_batch_resolves_current_and_historical_verified_devices(self):
         user_model = get_user_model()
         verified_user = user_model.objects.create_user(

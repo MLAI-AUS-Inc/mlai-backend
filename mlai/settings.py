@@ -344,6 +344,7 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_HEADERS = (
     *default_headers,
     "x-request-id",
+    "x-mlai-public-key",
     "idempotency-key",
     "x-mlai-slack-catalog-kinds",
     # P1 founder journey poll (GET /api/v1/my-startup/journey/) revalidates

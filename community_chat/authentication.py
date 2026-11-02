@@ -11,6 +11,7 @@ from .account_cookies import ACCESS_COOKIE
 from .account_sessions import (
     ACCESS_TOKEN_PREFIX,
     InvalidAccountSession,
+    InvalidBrowserAccountBinding,
     authenticate_access_token,
 )
 
@@ -117,7 +118,17 @@ class CommunityChatAccountAuthentication(BaseAuthentication):
         else:
             return None
         try:
-            session = authenticate_access_token(raw_token)
+            if cookie_authenticated:
+                session = authenticate_access_token(
+                    raw_token, required_public_key=request.headers.get("X-MLAI-Public-Key")
+                )
+            else:
+                session = authenticate_access_token(raw_token)
+        except InvalidBrowserAccountBinding as exc:
+            raise AuthenticationFailed({
+                "error": "account_identity_mismatch",
+                "detail": "Sign in to MLAI Chat again to continue.",
+            }) from exc
         except InvalidAccountSession as exc:
             raise AuthenticationFailed("MLAI Chat session has expired.") from exc
         if cookie_authenticated and request.method not in {
