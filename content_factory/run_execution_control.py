@@ -122,8 +122,11 @@ def require_current_principal(run):
             raise ExecutionControlDenied("execution_permission_changed") from exc
     principal = owner_receipt(run)["identity"]["principal"]
     if principal.get("kind") != "user":
-        # Scheduler continuation needs a service-specific current permission
-        # gate; an invented founder or a billing owner is never a substitute.
+        if principal == {"kind": "scheduler", "service": "island_refresh"}:
+            from .run_nightly_authority import require_nightly_principal
+            require_nightly_principal(run)
+            return
+        # Every other service still needs its own current permission gate.
         raise ExecutionControlDenied("execution_principal_unavailable")
     user = get_user_model().objects.filter(pk=principal["user_id"], is_active=True).first()
     if user is None:

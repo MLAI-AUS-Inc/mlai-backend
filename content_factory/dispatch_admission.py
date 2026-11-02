@@ -29,6 +29,11 @@ def reserve_scheduler_dispatch(*, payload, workflow, organization, service):
     """Reserve a declared scheduler execution without substituting a founder."""
     if not admission_enabled() and WIRE_REQUEST_KEY not in payload:
         return None
+    if service == "island_refresh" and workflow == "island_refresh":
+        version = payload.get("island_refresh_recovery_version", 1)
+        if type(version) is not int or version != 1:
+            raise RunOwnershipConflict("The original nightly recovery contract cannot change.")
+        payload["island_refresh_recovery_version"] = 1
     return reserve_admitted_run(organization=organization, principal=scheduler_principal(service),
         workflow=workflow, payload=payload)
 
