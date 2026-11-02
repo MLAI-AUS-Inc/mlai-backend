@@ -1545,7 +1545,8 @@ def record_publish_merge_intent(run, pull, pr_number, *, action="merge", source_
             "operation_id": binding.get("operation_id"), "recorded_at": timezone.now().isoformat()}
         locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
         locked.result = {**dict(locked.result or {}), "publish_merge_intent": intent}
-        locked.save(update_fields=["result", "updated_at"])
+        from .website_run_authority import event_owned
+        locked.save(update_fields=["result"] if event_owned(locked) else ["result", "updated_at"])
         run.result = locked.result
     return intent
 

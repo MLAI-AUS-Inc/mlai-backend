@@ -67,6 +67,13 @@ class OwnedHostedProviderTests(TestCase):
         self.assertEqual(after["result"][HOSTED_PUBLICATION_OBSERVATION_KEY]["status"], "failed")
         self.assertNotIn("error_code", after["result"])
 
+    def test_pending_user_denial_blocks_hosted_provider_progress_before_execution_terminal(self):
+        from .run_user_stop import record_user_denial
+        record_user_denial(self.run, user=self.user, actor_id=f"mlai_user:{self.user.pk}")
+        with self.assertRaises(hosted.HostedPublishError):
+            self.progress(status="rendering", article=article(), revision_digest=DIGEST)
+        self.assert_execution_retained()
+
 
 @override_settings(**FLAGS)
 class OwnedNativeVerificationTests(WebsiteDatabaseFixture, TransactionTestCase):
@@ -217,3 +224,54 @@ class OwnedNativeVerificationTests(WebsiteDatabaseFixture, TransactionTestCase):
             Path(os.environ["FOUNDER_EXPORT_LEGACY_NATIVE_FIXTURE"]).write_text(json.dumps({
                 "schema_version": 1, "source_request": raw, "source_status": source_status,
                 "legacy_source_v1": descriptor, "payload": sent[0]}, indent=2) + "\n")
+
+    def test_provider_merge_preserves_concurrent_typed_history_and_all_execution_fields(self):
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_event_authority import batch
+        from .vibe_marketing_views import _save_setup_merge_result
+        stale = self.run
+        response = receive_authoritative_run_events(batch(stale, [{"status": "running"}]))
+        self.assertEqual(response.status_code, 200, response.data)
+        before = ContentFactoryRun.objects.values().get(pk=stale.pk)
+        _save_setup_merge_result(stale, checks_status="success", merge_response={"merged": True, "sha": "d" * 40})
+        after = ContentFactoryRun.objects.values().get(pk=stale.pk)
+        for field in ("status", "current_step", "approval_state", "run_request", "created_at", "updated_at", "last_event_emitted_at", "reconciled_at"):
+            self.assertEqual(after[field], before[field], field)
+        self.assertEqual(after["result"]["run_owner_events_v1"], before["result"]["run_owner_events_v1"])
+        self.assertEqual(after["result"]["merge_status"], "merged")
+        self.assertEqual(stale.status, before["status"])
+
+    def test_provider_result_rejects_replaced_control_history_and_stale_execution(self):
+        from .run_provider_facts import save_provider_result
+        from .run_backend_facts import BackendFactConflict
+        from .tests_run_event_authority import advance_ticket
+        baseline = deepcopy(self.run.result)
+        proposed = {**deepcopy(baseline), "run_owner_v1": {"changed": True}}
+        with self.assertRaises(BackendFactConflict):
+            save_provider_result(self.run, proposed, baseline=baseline, legacy_fields=["result", "updated_at"])
+        fresh = ContentFactoryRun.objects.get(pk=self.run.pk)
+        advance_ticket(fresh)
+        before = ContentFactoryRun.objects.values().get(pk=fresh.pk)
+        with self.assertRaises(BackendFactConflict):
+            save_provider_result(self.run, {**baseline, "merge_status": "merged"}, baseline=baseline,
+                legacy_fields=["result", "updated_at"])
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=fresh.pk), before)
+
+    def test_owned_selection_release_changes_only_selection_fact_not_run_clocks(self):
+        from .run_event_authority import receive_authoritative_run_events
+        from .tests_run_event_authority import batch
+        from .island_removal import release_from_selections
+        from .island_selection import STATE_KEY
+        state = {"selected_ids": ["one"], "managed_proposal_ids": ["one"], "managed_slugs": ["gardens"],
+            "groups": [{"slug": "gardens", "proposal_ids": ["one"]}], "revision": 1}
+        response = receive_authoritative_run_events(batch(self.run, [{"status": "completed"}]))
+        self.assertEqual(response.status_code, 200, response.data)
+        self.run.refresh_from_db()
+        ContentFactoryRun.objects.filter(pk=self.run.pk).update(result={**self.run.result, STATE_KEY: state})
+        before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        with transaction.atomic():
+            release_from_selections(self.org, "gardens")
+        after = ContentFactoryRun.objects.values().get(pk=self.run.pk)
+        self.assertEqual(after["result"][STATE_KEY]["managed_slugs"], [])
+        for field in ("status", "run_request", "updated_at", "created_at", "last_event_emitted_at", "reconciled_at"):
+            self.assertEqual(after[field], before[field], field)

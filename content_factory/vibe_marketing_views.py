@@ -6769,6 +6769,9 @@ def _save_setup_merge_result(run, *, checks_status, merge_response=None, merged_
     _apply_setup_merge_result. The owner's tree-verified GitHub merge records
     under the push webhook's connection lock (website_reconciliation).
     """
+    from copy import deepcopy
+    from .run_provider_facts import save_provider_result
+    baseline = deepcopy(run.result or {})
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
     pr_url = _pull_request_url_from_run(run)
@@ -6815,11 +6818,15 @@ def _save_setup_merge_result(run, *, checks_status, merge_response=None, merged_
     run.status = ContentFactoryRunStatus.COMPLETED
     run.current_step = "merged"
     run.approval_state = ContentFactoryApprovalState.APPROVED
-    run.save(update_fields=["status", "current_step", "approval_state", "result", "updated_at"])
+    save_provider_result(run, result, baseline=baseline,
+        legacy_fields=["status", "current_step", "approval_state", "result", "updated_at"])
     return run
 
 
 def _mark_setup_merge_blocked(*, run, config, reason="", status_value="manual_merge_required", checks_source=None):
+    from copy import deepcopy
+    from .run_provider_facts import save_provider_result
+    baseline = deepcopy(run.result or {})
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
     status_value = str(status_value or "manual_merge_required").strip()
@@ -6856,7 +6863,7 @@ def _mark_setup_merge_blocked(*, run, config, reason="", status_value="manual_me
     result["article_system_setup"] = setup
     run.result = sanitize_json_for_postgres(result)
     run.current_step = status_value
-    run.save(update_fields=["current_step", "result", "updated_at"])
+    save_provider_result(run, run.result, baseline=baseline, legacy_fields=["current_step", "result", "updated_at"])
 
     article_system = dict(config.article_system or {})
     pending = dict(article_system.get("pending_article_system_setup") or {})
@@ -6893,6 +6900,9 @@ def _apply_setup_auto_merge_pending(*, run, config, reason=""):
     and _refresh_pending_article_system_setup_pr_status finalizes once GitHub merges."""
     status_value = "publishing"
     reason = str(reason or "Publishing to production. GitHub will merge automatically once required checks pass.").strip()
+    from copy import deepcopy
+    from .run_provider_facts import save_provider_result
+    baseline = deepcopy(run.result or {})
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
     for target in (result, setup):
@@ -6913,7 +6923,7 @@ def _apply_setup_auto_merge_pending(*, run, config, reason=""):
     result["article_system_setup"] = setup
     run.result = sanitize_json_for_postgres(result)
     run.current_step = status_value
-    run.save(update_fields=["current_step", "result", "updated_at"])
+    save_provider_result(run, run.result, baseline=baseline, legacy_fields=["current_step", "result", "updated_at"])
     if config is not None:
         article_system = dict(config.article_system or {})
         pending = dict(article_system.get("pending_article_system_setup") or {})
@@ -6957,6 +6967,9 @@ def _setup_pr_reverification_record(run):
 
 def _mark_setup_pr_changes_checking(*, run, config):
     """Show the publish as in flight while Content Factory re-verifies the new head."""
+    from copy import deepcopy
+    from .run_provider_facts import save_provider_result
+    baseline = deepcopy(run.result or {})
     result = dict(run.result or {})
     setup = dict(result.get("article_system_setup") or {})
     for payload in (result, setup):
@@ -6964,7 +6977,7 @@ def _mark_setup_pr_changes_checking(*, run, config):
             merge_blocked_reason="", mergeBlockedReason="")
     result["article_system_setup"] = setup
     run.result = sanitize_json_for_postgres(result)
-    run.save(update_fields=["result", "updated_at"])
+    save_provider_result(run, run.result, baseline=baseline, legacy_fields=["result", "updated_at"])
     if config is not None:
         article_system = dict(config.article_system or {})
         pending = dict(article_system.get("pending_article_system_setup") or {})
@@ -7583,6 +7596,9 @@ def _check_and_merge_publish_pr(*, run, context):
     {"outcome": "merged" | "already_merged" | "pending" | "no_repo" | "no_pr"
     | "error", "detail": str, "checks": dict}.
     """
+    from copy import deepcopy
+    from .run_provider_facts import save_provider_result
+    baseline = deepcopy(run.result or {})
     from .p2_foundation import run_merge_policy, BACKEND_WORKER
     if run_merge_policy(run) == BACKEND_WORKER:
         return {"outcome": "pending", "detail": "Waiting for the publication worker.", "checks": {"state": "pending"}}
@@ -7622,7 +7638,7 @@ def _check_and_merge_publish_pr(*, run, context):
             result.pop("merge_blocked_reason", None)
             result.pop("publish_auto_merge_state", None)
             run.result = result
-            run.save(update_fields=["result", "updated_at"])
+            save_provider_result(run, result, baseline=baseline, legacy_fields=["result", "updated_at"])
             return {"outcome": "already_merged", "detail": "Pull request is already merged.", "checks": checks}
         if not checks.get("ready"):
             result = dict(run.result or {})
@@ -7630,7 +7646,7 @@ def _check_and_merge_publish_pr(*, run, context):
             result["checks_status"] = str(checks.get("state") or "blocked")
             result["merge_blocked_reason"] = checks.get("message")
             run.result = result
-            run.save(update_fields=["result", "updated_at"])
+            save_provider_result(run, result, baseline=baseline, legacy_fields=["result", "updated_at"])
             return {
                 "outcome": "pending",
                 "detail": checks.get("message") or "Publish PR checks are not ready.",
@@ -7649,7 +7665,7 @@ def _check_and_merge_publish_pr(*, run, context):
                 result=dict(run.result or {})
                 result.update(merge_status="manual_merge_required" if policy["decision"]=="needs_user" else "pending",
                     merge_blocked_reason=policy["reason"],checks_status=checks.get("state"))
-                run.result=result;run.save(update_fields=["result","updated_at"])
+                run.result=result;save_provider_result(run, result, baseline=baseline, legacy_fields=["result", "updated_at"])
                 return {"outcome":"manual_required" if policy["decision"]=="needs_user" else "pending",
                     "detail":policy["reason"],"checks":checks}
         if not goal_merge:
@@ -7674,7 +7690,7 @@ def _check_and_merge_publish_pr(*, run, context):
             result=dict(run.result or {})
             result.update(merge_status="manual_merge_required" if refusal["decision"]=="needs_user" else "pending",
                 merge_blocked_reason=refusal["reason"])
-            run.result=result;run.save(update_fields=["result","updated_at"])
+            run.result=result;save_provider_result(run, result, baseline=baseline, legacy_fields=["result", "updated_at"])
             return {"outcome":"manual_required" if refusal["decision"]=="needs_user" else "pending","detail":refusal["reason"],"checks":{}}
         return {"outcome": "error", "detail": str(exc), "checks": {}}
 
@@ -7683,7 +7699,7 @@ def _check_and_merge_publish_pr(*, run, context):
         refusal=setup_merge_refusal(merged.get("message"))
         result=dict(run.result or {})
         result.update(merge_status="manual_merge_required" if refusal["decision"]=="needs_user" else "pending",merge_blocked_reason=refusal["reason"])
-        run.result=result;run.save(update_fields=["result","updated_at"])
+        run.result=result;save_provider_result(run, result, baseline=baseline, legacy_fields=["result", "updated_at"])
         return {"outcome":"manual_required" if refusal["decision"]=="needs_user" else "pending","detail":refusal["reason"],"checks":checks}
     result = dict(run.result or {})
     result["merge_status"] = "merged"
@@ -7695,7 +7711,7 @@ def _check_and_merge_publish_pr(*, run, context):
     result.pop("publish_auto_merge_state", None)
     run.result = result
     run.status = ContentFactoryRunStatus.COMPLETED
-    run.save(update_fields=["status", "result", "updated_at"])
+    save_provider_result(run, result, baseline=baseline, legacy_fields=["status", "result", "updated_at"])
     return {"outcome": "merged", "detail": "Pull request merged.", "checks": checks}
 
 

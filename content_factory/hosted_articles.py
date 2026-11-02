@@ -249,7 +249,8 @@ def _require_approval_actor(run, actor_id):
 def _require_publication_active(site, run):
     if not enabled() or site.state != HostedArticleSite.State.ACTIVE:
         raise HostedPublishError("hosted_site_not_active", "Hosted publishing is not switched on for this website.")
-    if run.status in {'cancelled', 'denied', 'stopped'}:
+    from .run_ownership import user_stop_intent
+    if user_stop_intent(run) or run.status in {'cancelled', 'denied', 'stopped'}:
         raise HostedPublishError("hosted_publish_not_allowed", "This publishing request was stopped.", status=403)
 
 

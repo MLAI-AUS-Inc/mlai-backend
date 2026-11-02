@@ -1,18 +1,21 @@
 """Read current admitted execution authority without adding a recovery writer."""
 from datetime import timedelta
 
-from .run_ownership import owner_receipt
-
-
 def event_owned(run):
     """An existing event owner keeps authority when new-admission flags change."""
+    result = getattr(run, "result", None)
+    if not isinstance(result, dict) or "run_owner_v1" not in result:
+        return False
+    from .run_ownership import owner_receipt
     return (owner_receipt(run) or {}).get("authority", {}).get("event_protocol") == 1
 
 
 def execution_request(run):
     """Read original inputs with only the backend-issued current scope applied."""
-    from .run_execution_control import current_execution_request
-    return current_execution_request(run) if event_owned(run) else (getattr(run, "run_request", None) or {})
+    if event_owned(run):
+        from .run_execution_control import current_execution_request
+        return current_execution_request(run)
+    return getattr(run, "run_request", None) or {}
 
 
 def owned_goal_child(op, *, include_completed=True):
