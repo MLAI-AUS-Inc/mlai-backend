@@ -103,6 +103,9 @@ jobs:
     - name: Check test-module assignment
       run: python scripts/check_test_assignment.py
 
+    - name: Validate selected test labels without database access
+      run: python scripts/test_without_database.py --collect-ci-selection
+
     - name: Test private Studio source preparation without database access
       run: python scripts/test_without_database.py integrations.tests_studio_report_source
 
@@ -637,10 +640,10 @@ jobs:
           integrations.tests_slack_connector_authority \
           integrations.tests_startup_updates.StartupUpdateSlackBackfillViewTest \
           vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_maps_create_authority_error_to_connector_auth_response \
-          vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_maps_refresh_authority_error_to_connector_auth_response \
+          vibe_raising.tests.VibeRaisingApiTests.test_startup_update_run_keeps_active_authority_frozen \
           vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_maps_create_authority_error_to_connector_auth_response \
-          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_maps_redispatch_refresh_authority_error_to_connector_auth_response \
-          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_maps_active_refresh_authority_error_to_connector_auth_response \
+          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_redispatches_without_replacing_frozen_authority \
+          vibe_raising.tests.VibeRaisingApiTests.test_email_draft_start_keeps_active_authority_frozen \
           integrations.tests_humanitix \
           integrations.tests_xero_reconciliation \
           integrations.tests_smart_scan \
