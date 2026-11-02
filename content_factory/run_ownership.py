@@ -29,6 +29,7 @@ ARTICLE_PUBLISH_CONTROL_RESULT_KEY = "run_owner_article_publish_control_v1"
 VERIFIED_DELIVERY_RESULT_KEY = "run_owner_verified_delivery_v1"
 USER_STOP_RESULT_KEY = "run_owner_user_stop_v1"
 REVIEW_SOURCE_RESULT_KEY = "review_source_v1"
+HOSTED_PUBLICATION_OBSERVATION_KEY = "hosted_publication_observation_v1"
 WIRE_REQUEST_KEY = "backend_run_admission_v1"
 WIRE_EXECUTION_KEY = "backend_run_execution_v1"
 BUDGET_KEY = "backend_run_budget_v1"
@@ -36,7 +37,8 @@ R3_BACKEND_RESULT_KEYS = frozenset({OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, EVENT
                                   DISPATCH_RESULT_KEY, HOSTED_OBSERVATION_KEY,
                                   RECONCILIATION_RESULT_KEY, CONTROL_RESULT_KEY, CHILDREN_RESULT_KEY,
                                   ARTICLE_CHARGE_RESULT_KEY, ARTICLE_PUBLISH_APPROVAL_RESULT_KEY, ARTICLE_PUBLISH_CONTROL_RESULT_KEY,
-                                  VERIFIED_DELIVERY_RESULT_KEY, USER_STOP_RESULT_KEY, REVIEW_SOURCE_RESULT_KEY})
+                                  VERIFIED_DELIVERY_RESULT_KEY, USER_STOP_RESULT_KEY, REVIEW_SOURCE_RESULT_KEY,
+                                  HOSTED_PUBLICATION_OBSERVATION_KEY})
 R3_BACKEND_REQUEST_KEYS = frozenset({WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY})
 SCOPE_FIELDS = (*CONNECTION_FIELDS, *OPERATION_FIELDS, "expected_source_sha", "source_run_id")
 SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation", "hosted_auto_register"})

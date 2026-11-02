@@ -194,7 +194,7 @@ class WebsiteConnectionActionView(APIView):
                 operation = verify_cleanup_deployment(config, data=request.data)
             elif action in {"custom-contract", "ci-attestation"}:
                 from .website_support import owner_support_operation
-                operation = owner_support_operation(context, config, action=action, data=dict(request.data))
+                operation = owner_support_operation(context, config, action=action, data=dict(request.data), user=request.user)
             elif action == "cancel-operation":
                 from .website_operations import cancel_operation
                 operation = cancel_operation(config, data=request.data, idempotency_key=key)
