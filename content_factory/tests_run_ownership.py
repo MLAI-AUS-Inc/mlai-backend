@@ -11,9 +11,10 @@ from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStep, ContentFactoryRunStepAttempt
 
 from .run_ownership import (
-    EVENT_RESULT_KEY, OWNER_EXECUTION_KEY, OWNER_RESULT_KEY, WIRE_REQUEST_KEY,
+    EVENT_RESULT_KEY, OWNER_EXECUTION_KEY, OWNER_RESULT_KEY, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY,
     RunOwnershipConflict, admitted_run_for_key, authorized_event_generation, bind_admitted_run,
-    owner_receipt, require_event_identity, reserve_admitted_run, scheduler_principal, user_principal,
+    current_execution_ticket, owner_receipt, prepare_owned_callback, require_event_execution,
+    require_event_identity, reserve_admitted_run, scheduler_principal, user_principal,
 )
 
 FLAGS = {"ARTICLES_RUN_OWNERSHIP_ENABLED": True, "ARTICLES_RUN_FACT_AUTHORITY_ENABLED": False,
@@ -165,6 +166,45 @@ class RunAdmissionTests(TestCase):
             require_event_identity(run, {WIRE_REQUEST_KEY: payload[WIRE_REQUEST_KEY]})
         with override_settings(ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=True), self.assertRaises(RunOwnershipConflict):
             self.reserve(self.payload(client_request_id="new-event-key"))
+
+    def test_callback_validates_typed_version_and_ticket_before_any_binding(self):
+        payload = self.payload()
+        run = self.reserve(payload)
+        valid = {**payload, "generation": 0, "state_version": 1, "workflow": "auto_discovery"}
+        for change in ({"generation": True}, {"generation": 1}, {"state_version": None},
+                       {WIRE_REQUEST_KEY: {}}, {WIRE_EXECUTION_KEY: {}}, {"workflow": "repo_scan"}):
+            with self.subTest(change=change), self.assertRaises(RunOwnershipConflict):
+                prepare_owned_callback({**valid, **change}, "callback-worker")
+            run.refresh_from_db()
+            self.assertEqual(run.run_id, "admitted-key")
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        bound = prepare_owned_callback(valid, "callback-worker")
+        self.assertEqual(bound.pk, run.pk)
+        self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), {**before, "run_id": "callback-worker"})
+
+    def test_unknown_admission_and_missing_echo_cannot_materialize_callback(self):
+        payload = self.payload()
+        run = self.reserve(payload)
+        with self.assertRaises(RunOwnershipConflict):
+            prepare_owned_callback({"client_request_id": "admitted-key", "generation": 0, "state_version": 1}, "new-worker")
+        with self.assertRaises(RunOwnershipConflict):
+            prepare_owned_callback({**payload, WIRE_REQUEST_KEY: {"dispatch_key": "foreign"},
+                "client_request_id": "foreign", "generation": 0, "state_version": 1}, "new-worker")
+        self.assertEqual(ContentFactoryRun.objects.count(), 1)
+        self.assertIsNone(prepare_owned_callback({"generation": 0, "state_version": 1}, "legacy-unknown"))
+        run.refresh_from_db()
+        self.assertEqual(run.run_id, "admitted-key")
+
+    def test_ticket_scope_and_bool_versions_are_exact_and_cannot_be_self_granted(self):
+        payload = self.payload()
+        run = self.reserve(payload)
+        self.assertEqual(require_event_execution(run, payload, generation=0, current=True), current_execution_ticket(run))
+        for change in ({"generation": True}, {"scope": {}}, {"execution_id": "foreign"},
+                       {"request_digest": "a" * 64}, {"admission_digest": "a" * 64}):
+            bad = deepcopy(payload)
+            bad[WIRE_EXECUTION_KEY].update(change)
+            with self.subTest(change=change), self.assertRaises(RunOwnershipConflict):
+                require_event_execution(run, bad, generation=bad[WIRE_EXECUTION_KEY].get("generation"))
 
 
 @skipUnless(connection.vendor == "postgresql", "Concurrency requires PostgreSQL row locking.")

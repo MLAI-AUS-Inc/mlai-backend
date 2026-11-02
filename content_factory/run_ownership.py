@@ -17,6 +17,7 @@ OWNER_RESULT_KEY = "run_owner_v1"
 OWNER_EXECUTION_KEY = "run_owner_execution_v1"
 EVENT_RESULT_KEY = "run_owner_events_v1"
 WIRE_REQUEST_KEY = "backend_run_admission_v1"
+WIRE_EXECUTION_KEY = "backend_run_execution_v1"
 SCOPE_FIELDS = (*CONNECTION_FIELDS, *OPERATION_FIELDS, "expected_source_sha", "source_run_id")
 SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation"})
 WORKER_WORKFLOW_ALIASES = {
@@ -59,20 +60,44 @@ def wire_identity(receipt):
 
 def authorized_event_generation(run):
     """The backend-authorized generation; worker observations cannot raise it."""
+    return current_execution_ticket(run)["generation"]
+
+
+def current_execution_ticket(run):
+    """Return the exact current backend ticket, never a worker-derived scope."""
     result = run.result if isinstance(run.result, dict) else {}
     execution = result.get(OWNER_EXECUTION_KEY)
-    generation = execution.get("generation") if isinstance(execution, dict) else None
-    if owner_receipt(run) is None or type(generation) is not int or generation < 0:
+    tickets = execution.get("tickets") if isinstance(execution, dict) else None
+    ticket = tickets.get(execution.get("current_execution_id")) if isinstance(tickets, dict) else None
+    if (owner_receipt(run) is None or not isinstance(ticket, dict)
+            or type(ticket.get("generation")) is not int or ticket["generation"] < 0):
         raise RunOwnershipConflict("This execution has no authorized generation.")
-    return generation
+    return deepcopy(ticket)
 
 
-def require_event_identity(run, payload):
-    """Validate an exact authoritative-event echo against existing admission."""
+def require_event_execution(run, payload, *, generation=None, current=False):
+    """Check an exact retained ticket; old tickets are history, not current work."""
+    result = run.result if isinstance(run.result, dict) else {}
+    execution = result.get(OWNER_EXECUTION_KEY)
+    wire = payload.get(WIRE_EXECUTION_KEY) if isinstance(payload, dict) else None
+    identifier = wire.get("execution_id") if isinstance(wire, dict) else None
+    tickets = execution.get("tickets") if isinstance(execution, dict) else None
+    ticket = tickets.get(identifier) if isinstance(tickets, dict) and isinstance(identifier, str) else None
     receipt = owner_receipt(run)
-    if (receipt is None or receipt["authority"].get("event_protocol") != 1
-            or not isinstance(payload, dict) or not _exact(payload.get(WIRE_REQUEST_KEY), wire_identity(receipt))):
-        raise RunOwnershipConflict("The event does not match an admitted event owner.")
+    if (receipt is None or not isinstance(ticket, dict) or not _exact(wire, ticket)
+            or ticket.get("admission_digest") != evidence_digest(wire_identity(receipt))
+            or (generation is not None and (type(generation) is not int or generation != ticket.get("generation")))
+            or (current and execution.get("current_execution_id") != identifier)):
+        raise RunOwnershipConflict("The observation does not carry an authorized execution ticket.")
+    return deepcopy(ticket)
+
+
+def require_admission_identity(run, payload):
+    """Validate an exact internal echo without granting lifecycle authority."""
+    receipt = owner_receipt(run)
+    if (receipt is None or not isinstance(payload, dict)
+            or not _exact(payload.get(WIRE_REQUEST_KEY), wire_identity(receipt))):
+        raise RunOwnershipConflict("The observation does not match its admitted execution.")
     identity = receipt["identity"]
     if (str(run.organization_id) != identity.get("organization_id")
             or run.workflow != identity.get("workflow") or run.domain != identity.get("domain")
@@ -85,6 +110,59 @@ def require_event_identity(run, payload):
     if "worker_workflow" in payload and not worker_workflow_allowed(identity["workflow"], payload["worker_workflow"]):
         raise RunOwnershipConflict("The worker workflow does not match its admitted operation.")
     return receipt
+
+
+def require_event_identity(run, payload):
+    """Validate an exact authoritative-event echo against existing admission."""
+    receipt = require_admission_identity(run, payload)
+    if receipt["authority"].get("event_protocol") != 1:
+        raise RunOwnershipConflict("This admission does not own authoritative events.")
+    return receipt
+
+
+def prepare_owned_callback(payload, remote_run_id):
+    """Validate before alias adoption; never materialize an unknown admission.
+
+    Returns None for an unmarked legacy execution. Owned observations require
+    the full immutable echo and an already backend-authorized generation.
+    The caller still applies its original current-rights and side-effect gates.
+    """
+    from workflow_runs.models import ContentFactoryRun
+    from .run_state import execution_version
+    request = payload.get("run_request") if isinstance(payload.get("run_request"), dict) else {}
+    wire = payload.get(WIRE_REQUEST_KEY, request.get(WIRE_REQUEST_KEY))
+    execution_wire = payload.get(WIRE_EXECUTION_KEY, request.get(WIRE_EXECUTION_KEY))
+    key = payload.get("client_request_id") or request.get("client_request_id")
+    if not key and isinstance(wire, dict):
+        key = wire.get("dispatch_key")
+    with transaction.atomic():
+        run = admitted_run_for_key(key, lock=True)
+        if run is None:
+            existing = ContentFactoryRun.objects.select_for_update().filter(run_id=remote_run_id).first()
+            if owner_receipt(existing) is not None:
+                run = existing
+            elif wire is not None:
+                raise RunOwnershipConflict("The original backend admission is not available.")
+            else:
+                return None
+        receipt = owner_receipt(run)
+        observed_workflow = payload.get("workflow")
+        if observed_workflow is not None and not worker_workflow_allowed(receipt["identity"]["workflow"], observed_workflow):
+            raise RunOwnershipConflict("The worker workflow does not match the admitted operation.")
+        envelope = {**payload, WIRE_REQUEST_KEY: wire, "workflow": receipt["identity"]["workflow"]}
+        require_admission_identity(run, envelope)
+        try:
+            version = execution_version(payload)
+        except ValueError as exc:
+            raise RunOwnershipConflict("A complete typed execution version is required.") from exc
+        if version is None or version[0] != authorized_event_generation(run):
+            raise RunOwnershipConflict("The worker generation has not been authorized by the backend.")
+        require_event_execution(run, {WIRE_EXECUTION_KEY: execution_wire}, generation=version[0], current=True)
+        bound = bind_admitted_run(run, remote_run_id)
+        # Snapshot/callback normalization is limited to the verified alias. Its
+        # immutable backend admission and source request are never rewritten.
+        payload["workflow"] = receipt["identity"]["workflow"]
+        return bound
 
 
 def _exact(left, right):
@@ -124,7 +202,8 @@ def _identity(*, organization, principal, workflow, payload):
         principal = scheduler_principal(principal.get("service"))
     else:
         raise RunOwnershipConflict("An admitted principal is required.")
-    request = sanitized_evidence({key: value for key, value in payload.items() if key != WIRE_REQUEST_KEY})
+    request = sanitized_evidence({key: value for key, value in payload.items()
+                                  if key not in {WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY}})
     connection = connection_contract(request)
     scope = {field: deepcopy(connection.get(field, request.get(field))) for field in SCOPE_FIELDS}
     return {"schema_version": 1, "dispatch_key": key, "organization_id": str(organization.pk),
@@ -159,6 +238,9 @@ def reserve_admitted_run(*, organization, principal, workflow, payload):
     receipt = {"schema_version": 1, "identity": identity,
                "authority": {"backend_facts": facts, "event_protocol": 1 if events else None}}
     wire = wire_identity(receipt)
+    ticket = {"schema_version": 1, "execution_id": "admit:" + evidence_digest(wire), "generation": 0,
+              "admission_digest": evidence_digest(wire), "request_digest": identity["request_digest"],
+              "scope": deepcopy(identity["scope"])}
     with transaction.atomic():
         # Serialize retries even after the initial key has been renamed to its
         # worker ID; run_id uniqueness alone no longer guards that lookup.
@@ -173,8 +255,9 @@ def reserve_admitted_run(*, organization, principal, workflow, payload):
                 run_id=identity["dispatch_key"], defaults={"organization": organization,
                     "workflow": workflow, "domain": organization.domain, "github_repo": identity["github_repo"],
                     "slack_user_id": principal.get("actor_id", ""), "status": ContentFactoryRunStatus.QUEUED,
-                    "current_step": "queued", "run_request": {**request, WIRE_REQUEST_KEY: wire},
-                    "result": {OWNER_RESULT_KEY: receipt, OWNER_EXECUTION_KEY: {"generation": 0}}})
+                    "current_step": "queued", "run_request": {**request, WIRE_REQUEST_KEY: wire, WIRE_EXECUTION_KEY: ticket},
+                    "result": {OWNER_RESULT_KEY: receipt, OWNER_EXECUTION_KEY: {
+                        "current_execution_id": ticket["execution_id"], "tickets": {ticket["execution_id"]: ticket}}}})
             if not created and owner_receipt(run) is None:
                 raise RunOwnershipConflict("An existing legacy execution already owns that key.")
         saved = owner_receipt(run)
@@ -183,7 +266,9 @@ def reserve_admitted_run(*, organization, principal, workflow, payload):
                 or run.github_repo != identity["github_repo"]):
             raise RunOwnershipConflict("The dispatch key already owns different admitted inputs.")
         wire = wire_identity(saved)
+        ticket = current_execution_ticket(run)
     payload[WIRE_REQUEST_KEY] = wire
+    payload[WIRE_EXECUTION_KEY] = ticket
     return run
 
 
