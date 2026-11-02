@@ -30,6 +30,9 @@ def _body(payload):
 
 
 def _budget(run_id):
+    from django.db import connection
+    if connection.in_atomic_block:
+        raise ExecutionControlDenied("execution_history_pending", pending=True)
     from .reconciliation import _remote_base_url, _remote_headers
     base, headers = _remote_base_url(), _remote_headers()
     if not base or not headers.get("X-API-KEY"):
@@ -54,12 +57,18 @@ def _budget(run_id):
 def _require_active(run):
     receipt = owner_receipt(run)
     if (receipt is None or receipt["authority"].get("event_protocol") != 1
-            or run.status not in {"queued", "running"}):
+            or run.status not in {"queued", "running"}
+            or run.approval_state not in {"not_required", "approved"}):
         raise ExecutionControlDenied("execution_not_active")
     # A worker cannot turn a needs-user/unsupported stop into a new retry by
     # leaving its mutable lifecycle label as running.
-    failure = (run.result or {}).get("failure")
-    if isinstance(failure, dict) and failure.get("failure_class") in {"needs_user", "unsupported", "waiting"}:
+    from .run_ownership import EVENT_RESULT_KEY
+    projection = (run.result or {}).get(EVENT_RESULT_KEY, {}).get("projection", {})
+    failures = [(run.result or {}).get("failure")]
+    if projection.get("execution_id") == current_execution_ticket(run)["execution_id"]:
+        failures.append(projection.get("failure"))
+    if any(isinstance(failure, dict) and failure.get("failure_class") in {"needs_user", "unsupported", "waiting"}
+           for failure in failures):
         raise ExecutionControlDenied("execution_requires_review")
 
 
@@ -119,6 +128,11 @@ def grant_automatic_execution(run_id, payload):
             meta = (run.result or {}).get(RECONCILIATION_RESULT_KEY, {})
             if (type(meta.get("cursor")) is not int or cursor != meta["cursor"]
                     or meta.get("has_more") is True or meta.get("claim") is not None):
+                raise ExecutionControlDenied("execution_history_pending", pending=True)
+            from .run_ownership import EVENT_RESULT_KEY
+            projection = (run.result or {}).get(EVENT_RESULT_KEY, {}).get("projection", {})
+            if (projection.get("execution_id") != current_execution_ticket(run)["execution_id"]
+                    or projection.get("status") not in {"queued", "running"}):
                 raise ExecutionControlDenied("execution_history_pending", pending=True)
             record_budget_observation(run, budget)
             ticket = append_execution_ticket(run, control_key=payload["control_key"], reason=payload["reason"],

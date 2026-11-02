@@ -60,6 +60,12 @@ class ExecutionTicketTests(TestCase):
                 self.assertEqual(after[key], value, key)
         self.assertEqual(list(Ledger.objects.values()), before_ledgers)
 
+    def test_pair_commit_before_receipt_replay_can_echo_the_issued_ticket(self):
+        first = self.append()
+        second = self.append(expected_execution_id=first["execution_id"])
+        self.assertEqual(first, second)
+        self.assertEqual(second["generation"], 1)
+
     def test_scope_ticket_changes_only_effective_source_and_preserves_original(self):
         scope = {**current_execution_ticket(self.run)["scope"], "expected_source_sha": "c" * 40,
                  "operation_attempt": 2}
@@ -99,7 +105,8 @@ class ExecutionTicketTests(TestCase):
     def test_unknown_and_exhausted_budget_never_advances(self):
         for changes in ({"used_model_usd_upper_bound": None}, {"used_model_usd_upper_bound": "5.00"},
                         {"used_model_usd_upper_bound": "NaN"}, {"used_model_tokens": 50000},
-                        {"event_cursor": True}, {"uncertain_calls": -1}, {BUDGET_KEY: {**BUDGET, "max_model_usd": "99"}}):
+                        {"event_cursor": True}, {"uncertain_calls": -1}, {BUDGET_KEY: {**BUDGET, "schema_version": True}},
+                        {BUDGET_KEY: {**BUDGET, "max_model_usd": "99"}}):
             with self.subTest(changes=changes), self.assertRaises(ExecutionControlDenied):
                 validate_budget_observation(self.run, self.observation(**changes))
         self.assertEqual(validate_budget_observation(self.run, self.observation()), 0)

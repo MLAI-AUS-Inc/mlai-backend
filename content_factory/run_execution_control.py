@@ -140,7 +140,8 @@ def append_execution_ticket(run, *, control_key, reason, scope=None, increment_g
         command = prior.get("command", {})
         if (command.get("reason") != reason or command.get("increment_generation") is not increment_generation
                 or scope is not None and evidence_digest(command.get("scope")) != evidence_digest(scope)
-                or expected_execution_id is not None and prior.get("previous_execution_id") != expected_execution_id):
+                or expected_execution_id is not None and expected_execution_id not in {
+                    prior.get("previous_execution_id"), prior.get("execution_id")}):
             raise ExecutionControlDenied("execution_control_key_conflict")
         ticket = execution["tickets"].get(prior.get("execution_id"))
         if not isinstance(ticket, dict):
@@ -186,7 +187,8 @@ def validate_budget_observation(run, payload):
     budget = (run.run_request or {}).get(BUDGET_KEY)
     if (not valid_control_budget(budget) or not isinstance(payload, dict) or set(payload) != expected
             or type(payload.get("schema_version")) is not int or payload["schema_version"] != 1
-            or payload.get("run_id") != run.run_id or payload.get(BUDGET_KEY) != budget):
+            or payload.get("run_id") != run.run_id or not valid_control_budget(payload.get(BUDGET_KEY))
+            or evidence_digest(payload.get(BUDGET_KEY)) != evidence_digest(budget)):
         raise ExecutionControlDenied("execution_budget_unavailable")
     require_admission_identity(run, payload)
     require_event_execution(run, payload, current=True)
