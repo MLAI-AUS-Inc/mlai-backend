@@ -19608,7 +19608,7 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
     command = ContentCommand(user=user, data=data)
     run_id = run_id or run.run_id
     from .p2_foundation import run_merge_policy, BACKEND_WORKER
-    owned_kind = _run_mapping(_run_mapping(run.result).get("publish_pr_v1")).get("kind")
+    owned_kind = _run_mapping(_run_mapping(getattr(run, "result", None)).get("publish_pr_v1")).get("kind") if action == "approve" else None
     if action == "approve" and owned_kind in {"proxy", "scaffold"} and run_merge_policy(run) == BACKEND_WORKER:
         # A completed proxy/scaffold has no article approval pipeline. This
         # owner click records consent; the sweep owns its only merge path.
