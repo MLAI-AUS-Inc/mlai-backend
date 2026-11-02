@@ -201,11 +201,14 @@ def _rebind_billing_job(token: str, real: str) -> None:
     the token id at dispatch time; move it to the real run id so the charge
     stays discoverable (revision flow reads it by run-id lineage)."""
     try:
+        from content_factory.job_mirror import mirror_jobs_to_runs
         from content_factory.models import ContentFactoryJob
 
-        if ContentFactoryJob.objects.filter(job_id=real).exists():
-            return
-        ContentFactoryJob.objects.filter(job_id=token).update(job_id=real)
+        if not ContentFactoryJob.objects.filter(job_id=real).exists():
+            ContentFactoryJob.objects.filter(job_id=token).update(job_id=real)
+        # The real id's Job now owns the bound run (an orphaned token Job never
+        # mirrors onto it); a full copy also clears the run's legacy_job_id.
+        mirror_jobs_to_runs(ContentFactoryJob.objects.filter(job_id=real))
     except Exception:  # pragma: no cover - best-effort billing continuity
         logger.warning(
             "content_factory_dispatch_token_job_rebind_failed token=%s run_id=%s",

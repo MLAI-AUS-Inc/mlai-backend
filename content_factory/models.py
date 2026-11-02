@@ -1137,6 +1137,15 @@ class WrittenArticle(models.Model):
         blank=True,
         related_name='articles'
     )
+    # The same execution's run, filled by backfill_run_job_fields. Replaces
+    # `job` once the job/run merge removes ContentFactoryJob.
+    run = models.ForeignKey(
+        "workflow_runs.ContentFactoryRun",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="written_articles",
+    )
 
     # Historical writing decisions. Never resolve labels from today's catalogue.
     editorial_snapshot = models.JSONField(null=True, blank=True, default=None)

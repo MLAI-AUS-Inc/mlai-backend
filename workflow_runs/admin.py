@@ -18,6 +18,7 @@ class ContentFactoryRunAdmin(admin.ModelAdmin):
     search_fields = ('run_id', 'domain', 'github_repo', 'slack_user_id')
     ordering = ('-updated_at',)
     readonly_fields = ('created_at', 'updated_at')
+    raw_id_fields = ('billing_ledger',)
     inlines = [ContentFactoryRunStepInline]
 
 
