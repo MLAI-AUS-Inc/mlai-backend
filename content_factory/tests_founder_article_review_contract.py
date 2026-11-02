@@ -38,12 +38,13 @@ class FounderReviewContractTests(TransactionTestCase):
         self.assertEqual(value.status_code, 200, value.data)
         self.assertEqual(remote.call_count, 1)
         envelope = value.data['articleReview']
-        self.assertEqual(set(envelope), {'contractVersion', 'companyId', 'runId', 'review', 'access', 'candidateFailures', 'pollAfterMs'})
+        self.assertEqual(set(envelope), {'contractVersion', 'companyId', 'runId', 'review', 'access', 'preferences', 'candidateFailures', 'pollAfterMs'})
         self.assertEqual((envelope['contractVersion'], envelope['companyId'], envelope['runId']),
             (2, str(self.company.pk), self.run.run_id))
         self.assertEqual(envelope['review'], originals[0])
         self.assertEqual({key: item for key, item in value.data.items() if key != 'articleReview'}, originals[0])
         self.assertEqual(envelope['access'], {'canEdit': True, 'canApprove': True})
+        self.assertEqual(envelope['preferences'], {'voice': {'canEdit': False, 'value': None}})
         self.assertEqual(envelope['candidateFailures'], [])
         self.assertEqual(envelope['pollAfterMs'], 2000 if originals[0].get('previewPending') is True else 60000)
         envelope['review']['revision'] = 'mutated-private-copy'

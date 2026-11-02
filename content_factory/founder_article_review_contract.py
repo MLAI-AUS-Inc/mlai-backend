@@ -94,8 +94,10 @@ def scoped_review_response(response, *, context, run, user, latest_run=None):
         return response
     original = deepcopy(response.data)
     access = _current_access(run, user=user, organization=organization, review=original, latest_run=latest_run)
+    from .founder_article_preferences import review_preferences
     response.data = {**response.data, 'articleReview': {'contractVersion': 2,
         'companyId': str(company.pk), 'runId': run.run_id, 'review': original,
-        'access': access, 'candidateFailures': candidate_failures(original),
+        'access': access, 'preferences': review_preferences(organization=organization, user=user),
+        'candidateFailures': candidate_failures(original),
         'pollAfterMs': poll_after_ms(original)}}
     return response
