@@ -87,7 +87,7 @@ class FounderJourneyBootstrapTests(_Client, TestCase):
             with self.subTest(view):
                 on = self.bootstrap(built, view, ALL_P1_FLAGS_ON)
                 self.assertEqual(on["founderJourney"], {
-                    "version": 1, "cohort": "new_journey", "optInAvailable": False, "staffView": False,
+                    "version": 1, "contractVersion": 2, "cohort": "new_journey", "optInAvailable": False, "staffView": False,
                     "copyReadyBeforeVerification": True})
                 self.assertNotIn("founderJourney", self.bootstrap(built, view, WITHOUT_V2))
                 self.assertNotIn("founderJourney", self.bootstrap(built, view, FLAGS_OFF))
