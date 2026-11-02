@@ -511,6 +511,8 @@ def card_payload(context, user, config=None) -> dict:
         "profile": {"name": facts["name"], "oneLiner": facts["oneLiner"], "logoUrl": facts["logoUrl"],
                     "authorName": facts["authorName"]},
         "firstArticle": first_article,
+        **({"access": {"canStart": _first_article_write_allowed(user, organization, config)}}
+            if cohorts.is_new_journey(organization, config) else {}),
     }
 
 
@@ -529,10 +531,23 @@ def _owner_id(organization):
     return organization_owner_user_id(organization)
 
 
+def _first_article_write_allowed(user, organization, config=None):
+    from founder_tools import startup_team
+    if not startup_team._valid_user(user) or _owner_id(organization) != user.pk:
+        return False
+    config = config if config is not None else cohorts._config_for(organization)
+    strategy = getattr(config, "pillar_strategy", None)
+    strategy = strategy if isinstance(strategy, dict) else {}
+    roster = startup_team._roster(config)
+    return not (startup_team.KEY in strategy and roster is None or roster and roster.get("frozen"))
+
+
 def require_owner(user, organization) -> None:
     """Raise a 403 refusal unless ``user`` owns the organisation."""
     if organization is None or _owner_id(organization) != getattr(user, "pk", None):
         raise FirstArticleRefusal(403, DETAIL_OWNER_ONLY, "owner_only")
+    if not _first_article_write_allowed(user, organization):
+        raise FirstArticleRefusal(403, "This startup is read only.", "not_available")
 
 
 def _text_field(data, key, low, high, *, reason, detail):

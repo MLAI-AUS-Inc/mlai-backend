@@ -29,11 +29,27 @@ class FounderArticleContractTests(JourneyFixture, TestCase):
                 response = FirstArticleCardView.as_view()(request)
             self.assertEqual(response.status_code, 200, response.data)
             self.assertEqual(response.data["version"], 1)
+            self.assertEqual(response.data["access"], {"canStart": True})
             self.assertEqual(response.data["topic"] is None, name == "custom_required")
             cases.append({"name": name, "companyId": str(self.company.pk), "payload": response.data})
         target = os.environ.get("FOUNDER_EXPORT_R5_FIRST_CARD")
         if target:
             Path(target).write_text(json.dumps({"source": "actual authenticated HTTP card; synthetic local organization, nullable case uses empty topic source, no worker/model effects", "cases": cases}, indent=2) + "\n")
+
+    def test_first_card_permission_is_actual_command_right_not_next_step_eligibility(self):
+        from .content_first_article import card_payload, require_owner, FirstArticleRefusal
+        from founder_tools.services import get_founder_company_context
+        context = get_founder_company_context(self.owner, company_id=self.company.pk)
+        self.describe("")
+        self.assertTrue(card_payload(context, self.owner)["access"]["canStart"])
+        config = self.built.config
+        config.pillar_strategy = {**config.pillar_strategy, "startup_team": {
+            "version": 1, "owner_user_id": self.owner.pk, "frozen": True, "members": []}}
+        config.save(update_fields=["pillar_strategy"])
+        self.assertFalse(card_payload(context, self.owner)["access"]["canStart"])
+        with self.assertRaises(FirstArticleRefusal) as error:
+            require_owner(self.owner, self.org)
+        self.assertEqual(error.exception.status, 403)
 
     def test_portable_first_article_never_requires_repository_capability(self):
         self.describe(self.one_liner, target_audience="Australian physiotherapy clinics")

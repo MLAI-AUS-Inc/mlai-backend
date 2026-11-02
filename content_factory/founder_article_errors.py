@@ -22,9 +22,13 @@ REASON_COPY = {
     "not_ready": ("Your article is still being prepared", "Your saved progress will update when the draft is ready.", "View progress"),
     "invalid_key": ("This request needs a new save attempt", "Your saved work is still here. Try the action again.", "Try again"),
     "in_progress": ("Working on it", "Your original request is still being confirmed.", "View progress"),
+    "not_available": ("This step isn't available right now", "Refresh your startup details, then try again.", "Try again"),
+    "invalid_profile": ("Check your startup details", "Add your startup name and a short description, then try again.", "Edit details"),
+    "operation_conflict": ("Check the saved request", "This request already records different details. Review the current details before continuing.", "Review details"),
     "daily_cap": ("Articles are busy today", "Please try starting this article again tomorrow.", None),
 }
 COMMAND_COPY = {
+    "roo_points_quote_changed": ("Check the updated price", "The price changed before your article started. Refresh the details before continuing.", "Refresh details"),
     "run_execution_closed": ("This article request is closed", "Start a new article to continue.", "Write an article"),
     "run_stop_requested": ("Confirming your stop request", "Your saved progress is still available while the run stops.", "View progress"),
     "run_execution_owned": ("Follow your saved run", "Review the saved run's current progress before continuing.", "View progress"),
@@ -35,7 +39,7 @@ CLASS_COPY = {
     "transient": ("Please try again shortly", "We couldn't connect. Your saved progress is still available.", "Try again"),
     "waiting": ("Working on it", "The saved run is waiting for its next update.", "View progress"),
     "needs_user": ("Your turn", "Review the saved article before continuing.", "Review article"),
-    "unsupported": ("Choose a publishing option", "You can write a draft in the app and connect a website later.", "View progress"),
+    "unsupported": ("Publishing needs a check", "Your saved progress is still available. You can continue with a draft.", "View progress"),
 }
 GENERIC_COPY = ("Check your saved progress", "We couldn't complete this request. Review your saved progress before trying again.", "View progress")
 
@@ -51,6 +55,8 @@ def article_error_envelope(body):
     entry = known.get(code, {})
     reason = body.get("reason")
     selected = COMMAND_COPY.get(code) or (REASON_COPY.get(reason) if isinstance(reason, str) else None)
+    if code == "INSUFFICIENT_ROO_POINTS":
+        selected = ("Add points to continue", "Your article hasn't started yet.", "Get points")
     headline, text, button = selected or CLASS_COPY.get(entry.get("failure_class"), GENERIC_COPY)
     return {"contractVersion": 2, "failure": {"code": code,
         "copy": {"headline": headline, "body": text, "button": button}}}
