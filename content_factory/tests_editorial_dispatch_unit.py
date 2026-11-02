@@ -689,6 +689,7 @@ class AtomicArticleChargeTests(unittest.TestCase):
             self.assertEqual(kwargs['payload']['roo_points_requested_by_user_id'], 2)
             self.assertEqual(kwargs['payload']['roo_points_billing_user_id'], 7)
         with patch.object(views, 'get_content_factory_article_cost_points', return_value=6), \
+                patch('content_factory.p2_foundation.merge_policy_for', return_value=None), \
                 patch.object(views, '_refresh_article_editorial_payload', return_value=None), \
                 patch.object(views, '_reserve_article_start_connection', return_value=None), \
                 patch.object(views, '_validate_article_start_admission', side_effect=admission), \

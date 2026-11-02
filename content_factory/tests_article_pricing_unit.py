@@ -265,6 +265,10 @@ class ArticleAdmissionQuoteTests(SimpleTestCase):
         outboxes = self.enterContext(patch("content_factory.dispatch_models.ContentFactoryDispatchOutbox.objects.filter"))
         outboxes.return_value.first.return_value = None
         self.editorial = self.enterContext(patch.object(views, "_refresh_article_editorial_payload", return_value=None))
+        # Preserve real stamping; only membership/merge policy reads the
+        # database. Persisted authority and escrow are tested by the PostgreSQL
+        # provider-chain suite rather than these isolated pricing fixtures.
+        self.enterContext(patch("content_factory.p2_foundation.merge_policy_for", return_value=None))
         self.reservation = self.enterContext(patch.object(views, "_reserve_article_start_connection", return_value=None))
         self.admission = self.enterContext(patch.object(views, "_validate_article_start_admission"))
         self.enterContext(patch.object(views, "_validate_article_start_reservation"))
