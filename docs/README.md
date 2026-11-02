@@ -28,6 +28,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [Job to Run cutover](run-job-cutover.md) — parity, copied identity, historical coverage and rollback
+
 - [19 October backend consolidation audit](articles-backend-rollup-audit-2026-10-19.md) — retained reliability fixes, deferred prototypes, exact component heads and release boundaries
 
 - [Interrupted article publication observation](articles-publication-observation.md) — bounded positive GitHub evidence, exact original intent and preserved settlement obligations
@@ -183,6 +185,7 @@ identified as current by a maintained architecture document.
 - [Startup Progress dashboard and chart disclosure](startup-progress.md)
 
 - [Chat startup updates](community-chat-startup-updates.md): founder setup, draft, review, approval and community API.
+- [Pulse generation reliability](pulse-generation-reliability.md): source preflight, exact worker receipts, fenced recovery, bounded collection and local acceptance checks.
 - [Shared update benefits](shared-update-benefits.md): sharing requirements, grandfathered discounts, points and rollout dependencies.
 
 - [Website connection lifecycle and repository consent](website-connections.md) — schema, API, revocation, reviewed cleanup, and local verification.

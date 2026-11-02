@@ -187,6 +187,11 @@ class StartupOverviewTests(SimpleTestCase):
 
     def generation_request(self, *, overview=None, include_overview=True, active_run=None, financial_history=None):
         from vibe_raising import views as founder_views
+        if active_run:
+            active_run.run_request = {
+                'input_sources': ['manual_documents'], 'manual_summary': 'Monthly evidence',
+                'manual_document_ids': [], 'audience_visibility': ['just_me'], **active_run.run_request,
+            }
         org, company, binding = Obj(id=7), Obj(organization=Obj()), Obj(id=2, google_connection_id=None)
         body = {'updateDate': '2026-09-30'}
         if include_overview:

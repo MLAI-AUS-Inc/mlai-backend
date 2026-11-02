@@ -83,7 +83,7 @@ def _same_company_charge(ledger, *, organization_id, domain, key):
     return read_job_flag("same_company_charge",
         from_job=lambda: ContentFactoryJob.objects.filter(domain__iexact=domain, client_request_id=key,
             billing_ledger_id=ledger.pk).exists(),
-        from_run=lambda: job_runs().filter(domain__iexact=domain, client_request_id=key,
+        from_run=lambda: job_runs().filter(job_domain__iexact=domain, client_request_id=key,
             billing_ledger_id=ledger.pk).exists())
 
 

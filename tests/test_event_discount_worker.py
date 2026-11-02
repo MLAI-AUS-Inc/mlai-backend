@@ -1,6 +1,9 @@
 """Database/network-free worker supervision and rollout boundary checks."""
 
 import argparse
+import os
+import subprocess
+import sys
 from io import StringIO
 from pathlib import Path
 import unittest
@@ -84,6 +87,22 @@ class EventDiscountWorkerTests(unittest.TestCase):
         self.assertIn("read_env_value ROO_EVENT_DISCOUNTS_ENABLED", deploy)
         self.assertIn("issuance requires its supervised reconciliation worker", deploy)
         self.assertIn('runtime_services+=("\\${event_discount_runtime_services[@]}")', deploy)
+
+
+class EventDiscountRuntimeSettingsTests(unittest.TestCase):
+    def test_worker_flag_reaches_settings_from_the_deployment_environment(self):
+        script = """
+from unittest.mock import patch
+with patch('dotenv.load_dotenv', return_value=False), patch('socket.socket.connect', side_effect=AssertionError('No network')):
+    from mlai import settings
+    assert settings.ROO_EVENT_DISCOUNT_WORKER_ENABLED is True
+    assert settings.ROO_EVENT_DISCOUNTS_ENABLED is True
+"""
+        result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, check=False,
+            env={"PATH": os.defpath, "APP_ENV": "test", "DEBUG": "true", "SECRET_KEY": "synthetic-settings-test",
+                "DATABASE_URL": "sqlite:///:memory:", "ROO_EVENT_DISCOUNTS_ENABLED": "true", "ROO_EVENT_DISCOUNT_WORKER_ENABLED": "true"},
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

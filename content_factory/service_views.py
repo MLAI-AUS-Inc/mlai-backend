@@ -9060,6 +9060,17 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                     "status": data["status"], "run_request": data.get("run_request") or {},
                 },
             )
+        if existing_run.workflow == "startup_monthly_update":
+            from startup_updates.execution import validate_execution
+            validate_execution(existing_run, data.get("pulse_execution_token"))
+            if existing_run.run_request:
+                from copy import deepcopy
+                data["run_request"] = deepcopy(existing_run.run_request)
+            for key in ("source_preflight", "source_discovery", "event_source_progress"):
+                if key in (existing_run.result or {}):
+                    data.setdefault("result", {})[key] = existing_run.result[key]
+            if isinstance(data.get("result"), dict) and "_pulse_execution" in (existing_run.result or {}):
+                data["result"]["_pulse_execution"] = existing_run.result["_pulse_execution"]
         original_request = existing_run.run_request if isinstance(existing_run.run_request, dict) else {}
         previous_pr_url = (existing_run.result if isinstance(existing_run.result, dict) else {}).get("pr_url")
         from .portable_drafts import portable_run_update_allowed
@@ -9242,7 +9253,7 @@ class ContentFactoryRunView(APIView):
 
     @guarded_service_write("config_write", only_repository=True, portable=True, cancellation_receipts=True, observation_fallback=True)
     def _put_legacy(self, request, run_id: str):
-        return _apply_run_snapshot(run_id, request.data,
+        return _apply_run_snapshot(run_id, {**request.data, "pulse_execution_token": request.headers.get("X-Pulse-Execution-Token")},
             ack=request.headers.get("X-Run-Sync-Response", "").strip().lower() == "ack")
 
 

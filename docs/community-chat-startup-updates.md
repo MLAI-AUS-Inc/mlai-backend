@@ -34,6 +34,7 @@ All paths are under `/api/v1/community-chat/startups/`. Except the signed browse
 | `generate/` | POST | Explicit company, targetMonth, selected inputSources, optional notes/document IDs |
 | `runs/active/`, `runs/<id>/`, `runs/<id>/results/` | GET | Existing persisted run contract, restricted to this company's domain |
 | `runs/<id>/cancel/` | POST | Existing scoped cancellation and cleanup |
+| `runs/<id>/retry/` | POST | Recheck the same owned run and safely resume its pinned evidence/revisions |
 
 The facade delegates domain behavior to the existing services rather than duplicating startup state. Generation uses the existing active-run deduplication; clients disable duplicate submission. It does not introduce a new durable idempotency-key protocol. Polling backs off from 2.5 to 15 seconds, stops on terminal status, and pauses in background. Completed drafts refresh the archive. Failed status reads offer retry.
 
@@ -115,24 +116,26 @@ Bootstrap advertises `capabilities.draftReadyPush: false`. Completed runs record
 
 These additions create no schema changes. The local checks cover every signed OAuth provider, API-key delegation, cross-company disconnect isolation, exact-revision deletion, source selection and completion deduplication. They do not prove live provider consent, successful real-device OAuth, or push delivery. Live acceptance requires the founder's provider accounts and an approved environment.
 
-## Linear authentication failures
+## Connection preflight and Linear authentication failures
 
-Pulse refreshes an expired Linear access token before its draft-creation
-transaction. A rejected or missing refresh credential marks that exact connection
+Pulse now saves the generation request and checks every selected source before
+collection or model work. See [Pulse generation reliability](pulse-generation-reliability.md)
+for the durable barrier, recovery and worker receipt contract.
+An expired Linear access token is refreshed during source preparation.
+A rejected or missing refresh credential marks that exact connection
 version as `error`, with a safe reconnect warning; `sources/` exposes it as
 `needs_reauth`. The warning is recorded again after a failed draft transaction
 rolls back, without overwriting a newer OAuth reconnection. Saved credentials
 and imported evidence are retained. Successful refresh or reconnection clears
 the warning.
 
-`generate/` returns HTTP 409 with `code: startup_update_sources_unavailable`,
-`unavailableSources: ["linear"]`, and a message offering reconnection or removal
-of Linear from this update. It does not return a Chat-session authentication
-error. Removing Linear from `inputSources` permits generation with the remaining
-selected sources; the backend never silently removes a selected source or
-substitutes cached Linear evidence. Network failures and provider outages return
-HTTP 503 without marking the credentials as revoked; rate limits include
-`Retry-After`. These changes require no schema migration.
+Run status exposes `sourceChecks` for every selection, including a safe reconnect
+message for Linear rather than a Chat-session authentication error. Failed checks
+remain visible after reopening Pulse. A changed source selection starts a new
+request; retrying the saved run retains its original sources. The backend never
+silently removes a selected source or substitutes another account's evidence.
+Transient checks wait and retry without treating credentials as revoked.
+These changes require no schema migration.
 
 ## Valley queue availability
 

@@ -269,6 +269,9 @@ class MonthlyEvidencePipelineTests(StartupUpdateApiTestCase):
         binding = UserStartupBinding.objects.create(user=self.user, organization=self.organization, google_connection=self.google_connection)
         self.run = create_startup_update_run(organization=self.organization, binding=binding, target_month=date(2026, 3, 1))
         self.run.run_request["input_sources"] = ["gmail", "xero"]
+        # These serializer fixtures start after the separately tested source barrier.
+        self.run.run_request["source_preflight_complete"] = True
+        self.run.run_request["source_connection_pins"] = None  # Legacy stored-evidence fixture.
         self.run.save(update_fields=["run_request"])
         from integrations.tests_connectors import _xero_profit_and_loss_report
         report = _xero_profit_and_loss_report(total_income="100", total_expenses="0", net_profit="100")

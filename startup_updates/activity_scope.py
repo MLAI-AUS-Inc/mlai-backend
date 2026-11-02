@@ -206,3 +206,41 @@ def prepare_activity_classification(run_request, provider, queryset):
     queryset.update(relevance_label="pending", relevance_score=0, relevance_reason="",
         needs_extraction=False, extraction_hints={}, classified_at=None, extraction_status="hydrated")
     return {**run_request, "activity_prepared_sources": [*prepared, provider]}
+
+
+def discover_resource_page(user, organization, provider, state):
+    """Advance one durable resource page, without a fixed catalog-size limit."""
+    state = dict(state or {})
+    if state.get("complete"):
+        return state
+    cursor = state.get("cursor")
+    seen = list(state.get("visited") or [])
+    if provider == "linear":
+        from startup_updates.models import LinearProjectSelection
+        connection = external_connectors._latest_linear_connection(user, organization)
+        if connection is None:
+            raise external_connectors.ConnectorOAuthError("Reconnect Linear.")
+        payload = external_connectors._linear_graphql_request(connection,
+            external_connectors.LINEAR_PROJECT_LIST_QUERY, {"first": 100, "after": cursor})
+        catalog = payload.get("projects") or {}
+        rows = catalog.get("nodes") or []
+        ids = []
+        for row in rows:
+            if row.get("id"):
+                LinearProjectSelection.objects.update_or_create(connection=connection, linear_project_id=str(row["id"]),
+                    defaults={"user": user, "organization": organization, "project_name": row.get("name") or row["id"], "raw_payload": row})
+                ids.append(str(row["id"]))
+        info = catalog.get("pageInfo") or {}
+        next_cursor = info.get("endCursor") if info.get("hasNextPage") else None
+        if info.get("hasNextPage") and not next_cursor:
+            raise ValueError("Linear returned a missing continuation cursor.")
+    else:
+        fetch, key, id_key = {"slack": (external_connectors.serialize_slack_channels, "channels", "channelId"),
+            "google_analytics": (external_connectors.serialize_google_analytics_properties, "properties", "propertyId")}[provider]
+        payload = fetch(user, organization=organization, cursor=cursor, limit=200)
+        ids = [str(row[id_key]) for row in payload.get(key, []) if row.get(id_key)]
+        next_cursor = payload.get("nextCursor")
+    if next_cursor and (next_cursor == cursor or next_cursor in seen):
+        raise ValueError("Source discovery returned a repeated cursor.")
+    return {"ids": list(dict.fromkeys([*state.get("ids", []), *ids])), "cursor": next_cursor,
+        "visited": [*seen, next_cursor] if next_cursor else seen, "complete": not bool(next_cursor)}
