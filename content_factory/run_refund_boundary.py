@@ -28,6 +28,7 @@ def no_start_refund_allowed(*, user, article_request, resolved_domain):
             return False
     for ledger_id in ledger_ids:
         lookup |= (Q(billing_ledger_id=ledger_id) | Q(run_request__roo_points_ledger_id=str(ledger_id))
+                   | Q(run_request__roo_points_ledger_id=ledger_id)
                    | Q(result__run_owner_article_charge_v1__ledger_id=ledger_id))
     owned = ContentFactoryRun.objects.filter(lookup).filter(result__run_owner_v1__isnull=False)
     if not any(authoritative_run(run) for run in owned.iterator()):

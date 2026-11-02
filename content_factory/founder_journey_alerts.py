@@ -406,10 +406,13 @@ def organizations_with_delivered_drafts(organization_ids, *, using="default") ->
     if not ids:
         return set()
     written = WrittenArticle.objects.using(using).filter(organization_id__in=ids).values_list("organization_id", flat=True)
-    drafted = (ContentFactoryRun.objects.using(using)
-               .filter(organization_id__in=ids, workflow__in=ARTICLE_WORKFLOWS, status__in=DELIVERED_DRAFT_STATUSES)
-               .values_list("organization_id", flat=True))
-    return set(written) | set(drafted)
+    from .run_reconciliation import authoritative_run
+    from .run_verified_delivery import has_verified_delivery
+    drafted = ContentFactoryRun.objects.using(using).filter(organization_id__in=ids,
+        workflow__in=ARTICLE_WORKFLOWS).only("organization_id", "run_id", "workflow", "domain", "github_repo", "status", "result")
+    return set(written) | {run.organization_id for run in drafted
+        if has_verified_delivery(run) if authoritative_run(run)} | {run.organization_id
+        for run in drafted if not authoritative_run(run) and run.status in DELIVERED_DRAFT_STATUSES}
 
 
 # --- Detection ---------------------------------------------------------------

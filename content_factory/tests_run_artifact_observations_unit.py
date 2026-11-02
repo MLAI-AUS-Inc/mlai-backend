@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
@@ -35,6 +36,38 @@ def rehash(value):
 
 
 class TypedArtifactCandidateTests(SimpleTestCase):
+    def test_actual_cf_wrapper_only_reaches_typed_bridge_and_never_the_v1_projector(self):
+        from .run_owned_observations import maybe_receive_owned_observation
+        value = json.loads((Path(__file__).parent / "fixtures/r3_owned_delivery_wrapper.json").read_text())["body"]
+        run = owner({**value, "run_id": value["delivery_v1"]["run_id"], "evidence": []})
+        before = deepcopy(run.__dict__)
+        with patch("content_factory.run_owned_observations.admitted_run_for_key", return_value=run), \
+                patch("content_factory.run_verified_delivery.project_verified_delivery", return_value={"status": "observation_only"}) as bridge, \
+                patch("content_factory.setup_delivery_receiver._project_state") as legacy:
+            response = maybe_receive_owned_observation(value, expected_kind="run_snapshot", run_id=run.run_id)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["disposition"], "observation_only")
+        bridge.assert_called_once_with(run.run_id)
+        legacy.assert_not_called()
+        self.assertEqual(run.__dict__, before)
+
+    def test_cf_wrapper_creation_ticket_cannot_be_replaced_or_unknown_fields_accepted(self):
+        from .run_owned_observations import maybe_receive_owned_observation
+        original = json.loads((Path(__file__).parent / "fixtures/r3_owned_delivery_wrapper.json").read_text())["body"]
+        run = owner({**original, "run_id": original["delivery_v1"]["run_id"], "evidence": []})
+        for mode in ("ticket", "extra", "scope"):
+            value = deepcopy(original)
+            if mode == "ticket":
+                value[WIRE_EXECUTION_KEY]["execution_id"] = "invented-ticket"
+            elif mode == "extra":
+                value["status"] = "completed"
+            else:
+                value[WIRE_EXECUTION_KEY]["scope"]["operation_attempt"] += 1
+            with patch("content_factory.run_owned_observations.admitted_run_for_key", return_value=run), \
+                    patch("content_factory.run_verified_delivery.project_verified_delivery") as bridge:
+                self.assertEqual(maybe_receive_owned_observation(value).status_code, 409)
+                bridge.assert_not_called()
+
     def test_actual_producer_fixture_is_compatible_without_any_run_or_approval_effect(self):
         value = fixture()
         run = owner(value)

@@ -3756,6 +3756,10 @@ class ContentFactoryCallbackView(APIView):
     def post(self, request):
         if isinstance(request.data, dict) and request.data.get("event") == "run_events_v2":
             return self._post_admitted_events(request.data)
+        from .run_owned_observations import maybe_receive_owned_observation
+        observation = maybe_receive_owned_observation(request.data, expected_kind="setup_callback")
+        if observation is not None:
+            return observation
         from .setup_delivery_receiver import is_setup_delivery, receive_setup_delivery
         if not isinstance(request.data, dict) or is_setup_delivery(request.data):
             return receive_setup_delivery(request.data, expected_kind="setup_callback")
@@ -3908,6 +3912,9 @@ class ContentFactoryCallbackView(APIView):
         # Order before *any* handler can mutate state, refund or notify. Use the
         # existing run JSON and row lock; no schema migration is required.
         run_id = str(data.get("run_id") or job_id)
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(ContentFactoryRun.objects.filter(run_id=run_id).first()):
+            return Response({"error": "owned_callback_requires_observation_boundary", "retryable": True}, status=409)
         from .run_ownership import RunOwnershipConflict, prepare_owned_callback
         try:
             prepare_owned_callback(data, run_id)
@@ -9116,6 +9123,9 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             .prefetch_related("steps", "steps__attempt_history")
         )
         existing_run = locked_runs.filter(run_id=run_id).first()
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(existing_run):
+            return existing_run, False
         created = False
         if existing_run is None:
             # A missing-row lock does not reserve a run id. Validate before
@@ -9317,6 +9327,10 @@ class ContentFactoryRunView(APIView):
         return Response(_serialize_content_factory_run(run, include_admission=True), status=status.HTTP_200_OK)
 
     def put(self, request, run_id: str):
+        from .run_owned_observations import maybe_receive_owned_observation
+        observation = maybe_receive_owned_observation(request.data, run_id=run_id, expected_kind="run_snapshot")
+        if observation is not None:
+            return observation
         from .setup_delivery_receiver import is_setup_delivery, receive_setup_delivery
         if not isinstance(request.data, dict) or is_setup_delivery(request.data):
             return receive_setup_delivery(request.data, expected_kind="run_snapshot", path_run_id=run_id)
@@ -9417,6 +9431,10 @@ def _record_p2_pull_request(run, previous_url):
 
 
 def _apply_run_snapshot(run_id, payload, *, ack=False):
+    from .run_owned_observations import maybe_receive_owned_observation
+    observation = maybe_receive_owned_observation(payload, run_id=run_id, expected_kind="run_snapshot")
+    if observation is not None:
+        return observation
     from .snapshot_meaning import final_refusal
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     payload = sanitize_json_for_postgres(dict(payload))

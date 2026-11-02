@@ -105,6 +105,10 @@ def safe_template_seed(body):
 
 def delivered_content(run):
     """Conservatively detect persisted delivery before granting no-value refunds."""
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import has_verified_delivery
+        return has_verified_delivery(run)
     result = getattr(run, "result", None) or {}
     from django.conf import settings
     if getattr(settings, "ARTICLES_REGISTRY_REFUNDS_ENABLED", False) and result.get("draft_ready_v1"):

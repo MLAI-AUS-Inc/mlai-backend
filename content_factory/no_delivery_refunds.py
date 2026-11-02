@@ -53,6 +53,10 @@ def _failure(run):
 
 
 def _direct_delivery(run):
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import has_verified_delivery
+        return has_verified_delivery(run)
     result = _mapping(run.result)
     return (bool(result.get("draft_ready_v1")) or useful_delivery(run) or delivered_content(run)
             or publication_state(run) == "article")

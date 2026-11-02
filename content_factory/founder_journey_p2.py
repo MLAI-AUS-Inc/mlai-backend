@@ -63,6 +63,11 @@ def ready_before_preview(run, organization=None):
     """Accept a CF-authored readiness receipt only for an enrolled live article."""
     if run is None or run.status in {"cancelled", "denied"}:
         return False
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import verified_draft_ready
+        if not verified_draft_ready(run):
+            return False
     org = organization or getattr(run, "organization", None)
     receipt = mapping(mapping(run.result).get("draft_ready_v1"))
     try:
