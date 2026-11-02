@@ -3512,8 +3512,7 @@
         }
       },
       "required": [
-        "operationId",
-        "expectedRevision"
+        "operationId"
       ]
     },
     "FounderArticlePublishRequest": {
