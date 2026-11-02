@@ -18827,7 +18827,8 @@ class VibeMarketingArticleView(APIView):
 class VibeMarketingRunView(APIView):
     def get(self, request, run_id):
         started_at = time.perf_counter()
-        view = "status" if str(request.query_params.get("view") or "").strip().lower() == "status" else "full"
+        requested_view = str(request.query_params.get("view") or "").strip().lower()
+        view = "status" if requested_view == "status" else "full"
         context, error_response = _resolve_context_or_response(request, require_domain=False)
         if error_response:
             return error_response
@@ -18852,6 +18853,13 @@ class VibeMarketingRunView(APIView):
             )
         if not _run_belongs_to_context(run, context):
             return Response({"detail": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
+        if requested_view == 'route':
+            from .founder_journey import is_hidden_run
+            from .founder_journey_cohort import is_new_journey
+            if not is_new_journey(context.organization) or is_hidden_run(run):
+                return Response({'detail': 'Run not found.'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'contractVersion': 2, 'companyId': str(context.company.pk),
+                'runId': run.run_id, 'kind': 'article' if run.workflow in ARTICLE_WORKFLOWS else 'advanced'})
         if run.workflow in ARTICLE_WORKFLOWS and not _is_publish_child_run(run):
             latest_revision = _latest_review_ready_component_revision(run, context)
             if latest_revision is not None:

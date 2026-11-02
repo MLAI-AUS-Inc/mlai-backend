@@ -7,14 +7,62 @@ from unittest.mock import patch
 
 from django.http import Http404
 from django.test import TestCase
+from workflow_runs.models import ContentFactoryRun
 
 from .founder_journey_contract import FounderContractMismatch, STEPS, validate_journey
 from .tests_founder_journey_unit import JourneyFixture, make_run
 from .founder_journey_testing import make_named_legacy_org
 from . import founder_journey as journey
+from . import vibe_marketing_views as views
 
 
 class FounderArticleContractTests(JourneyFixture, TestCase):
+    def route_response(self, run_id, *, company=None):
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from .vibe_marketing_views import VibeMarketingRunView
+        request = APIRequestFactory().get(f'/api/v1/vibe-marketing/runs/{run_id}/',
+            {'company_id': str((company or self.company).pk), 'view': 'route'})
+        force_authenticate(request, user=self.owner)
+        return VibeMarketingRunView.as_view()(request, run_id=run_id)
+
+    def test_actual_route_descriptor_classifies_only_article_workflows_without_observation_or_writes(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from .models import OrganizationContentConfig
+        from .run_state import ARTICLE_WORKFLOWS
+        rows = [make_run(self.org, workflow=workflow) for workflow in sorted(ARTICLE_WORKFLOWS | {
+            'repo_scan', 'article_system_setup', 'auto_discovery', 'island_refresh', 'article_publish'})]
+        before = list(ContentFactoryRun.objects.order_by('pk').values())
+        config = OrganizationContentConfig.objects.values().get(organization=self.org)
+        with patch.object(views, '_call_content_factory_run_status', side_effect=AssertionError('Route read cannot poll')), \
+                patch('requests.sessions.Session.request', side_effect=AssertionError('Route read cannot call providers')):
+            with CaptureQueriesContext(connection) as queries:
+                for run in rows:
+                    response = self.route_response(run.run_id)
+                    self.assertEqual(response.status_code, 200, response.data)
+                    self.assertEqual(response.data, {'contractVersion': 2, 'companyId': str(self.company.pk),
+                        'runId': run.run_id, 'kind': 'article' if run.workflow in ARTICLE_WORKFLOWS else 'advanced'})
+        self.assertFalse(any(row['sql'].lstrip().upper().startswith(('INSERT ', 'UPDATE ', 'DELETE ')) for row in queries))
+        self.assertEqual(list(ContentFactoryRun.objects.order_by('pk').values()), before)
+        self.assertEqual(OrganizationContentConfig.objects.values().get(organization=self.org), config)
+
+    def test_actual_route_descriptor_refuses_foreign_hidden_missing_and_legacy_scope_before_observation(self):
+        foreign = make_named_legacy_org('la_vie')
+        other = make_run(foreign.organization)
+        hidden = make_run(self.org, status='cancelled', result={'cancellation_reason': 'draft_deleted'})
+        with patch.object(views, '_call_content_factory_run_status', side_effect=AssertionError('No fallback observation')), \
+                patch('requests.sessions.Session.request', side_effect=AssertionError('No provider fallback')):
+            for identifier in (other.run_id, hidden.run_id, 'missing-route-run'):
+                response = self.route_response(identifier)
+                self.assertEqual(response.status_code, 404, response.data)
+                self.assertNotIn('kind', response.data)
+            from rest_framework.test import APIRequestFactory, force_authenticate
+            request = APIRequestFactory().get('/api/v1/vibe-marketing/runs/' + other.run_id,
+                {'company_id': str(foreign.company.pk), 'view': 'route'})
+            force_authenticate(request, user=foreign.owner)
+            response = views.VibeMarketingRunView.as_view()(request, run_id=other.run_id)
+            self.assertEqual(response.status_code, 404, response.data)
+
     def test_actual_first_article_http_cards_keep_nullable_topic_and_original_schema(self):
         from rest_framework.test import APIRequestFactory, force_authenticate
         from community_chat.my_startup_journey_views import FirstArticleCardView
