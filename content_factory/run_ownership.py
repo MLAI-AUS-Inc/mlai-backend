@@ -21,10 +21,12 @@ EVENT_RESULT_KEY = "run_owner_events_v1"
 DISPATCH_RESULT_KEY = "run_owner_dispatch_v1"
 HOSTED_OBSERVATION_KEY = "hosted_verification_observation_v1"
 RECONCILIATION_RESULT_KEY = "run_owner_reconciliation_v1"
+CONTROL_RESULT_KEY = "run_owner_control_v1"
 WIRE_REQUEST_KEY = "backend_run_admission_v1"
 WIRE_EXECUTION_KEY = "backend_run_execution_v1"
 R3_BACKEND_RESULT_KEYS = frozenset({OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, EVENT_RESULT_KEY,
-                                  DISPATCH_RESULT_KEY, HOSTED_OBSERVATION_KEY, RECONCILIATION_RESULT_KEY})
+                                  DISPATCH_RESULT_KEY, HOSTED_OBSERVATION_KEY,
+                                  RECONCILIATION_RESULT_KEY, CONTROL_RESULT_KEY})
 R3_BACKEND_REQUEST_KEYS = frozenset({WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY})
 SCOPE_FIELDS = (*CONNECTION_FIELDS, *OPERATION_FIELDS, "expected_source_sha", "source_run_id")
 SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation", "hosted_auto_register"})
@@ -379,6 +381,31 @@ def seal_new_run_admission(run, *, created, principal):
     return run
 
 
+def release_dispatch_transport_hold(run):
+    """Release only a proven dispatch transport hold on an already locked Run.
+
+    The internal caller must validate the trusted dispatch response or exact
+    callback admission/ticket before binding. Real execution stops, request
+    inputs, receipts and every original Run clock remain unchanged.
+    """
+    if not transaction.get_connection().in_atomic_block:
+        raise RunOwnershipConflict("A dispatch hold requires the canonical Run transaction.")
+    receipt = owner_receipt(run)
+    result = run.result if isinstance(run.result, dict) else {}
+    hold = result.get(DISPATCH_RESULT_KEY)
+    protocol = receipt["authority"].get("event_protocol") if receipt else None
+    if (type(protocol) is not int or protocol != 1 or not isinstance(hold, dict)
+            or hold.get("state") != "pending_resolution" or run.status != "blocked"
+            or run.current_step != "dispatch_pending_resolution"):
+        return run
+    from workflow_runs.models import ContentFactoryRun
+    changed = ContentFactoryRun.objects.filter(pk=run.pk, status="blocked",
+        current_step="dispatch_pending_resolution").update(status="queued", current_step="queued")
+    if changed:
+        run.status, run.current_step = "queued", "queued"
+    return run
+
+
 def bind_admitted_run(run, remote_run_id):
     """Attach an accepted worker ID without deleting history or changing clocks.
 
@@ -394,7 +421,7 @@ def bind_admitted_run(run, remote_run_id):
         if receipt is None:
             raise RunOwnershipConflict("Only a backend admission may bind a worker identity.")
         if locked.run_id == remote_run_id:
-            return locked
+            return release_dispatch_transport_hold(locked)
         if receipt.get("fixed_run_id") or locked.run_id != receipt.get("reservation_run_id", receipt["identity"]["dispatch_key"]):
             raise RunOwnershipConflict("The admitted execution already has another worker identity.")
         if ContentFactoryRun.objects.filter(run_id=remote_run_id).exclude(pk=locked.pk).exists():
@@ -418,4 +445,4 @@ def bind_admitted_run(run, remote_run_id):
             _rebind_billing_job(original_id, remote_run_id)
             if not ContentFactoryJob.objects.filter(pk=carrier.pk, job_id=remote_run_id).exists():
                 raise RunOwnershipConflict("The admitted legacy carrier could not be projected atomically.")
-        return locked
+        return release_dispatch_transport_hold(locked)

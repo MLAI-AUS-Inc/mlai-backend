@@ -246,6 +246,24 @@ class RunAdmissionTests(TestCase):
         self.assertEqual(list(ContentFactoryJob.objects.order_by("pk").values()), before)
 
     @override_settings(ARTICLES_RUN_FACT_AUTHORITY_ENABLED=True, ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=True)
+    def test_binding_releases_only_private_transport_hold_without_clock_or_receipt_rewrite(self):
+        from .dispatch_admission import pending_response
+        run = self.reserve()
+        pending_response(run)
+        run.refresh_from_db()
+        before = ContentFactoryRun.objects.values().get(pk=run.pk)
+        bound = bind_admitted_run(run, "real-from-held-dispatch")
+        after = ContentFactoryRun.objects.values().get(pk=run.pk)
+        self.assertEqual(after, {**before, "run_id": bound.run_id, "status": "queued", "current_step": "queued"})
+        for status, step in (("blocked", "verification"), ("failed", "dispatch_pending_resolution"),
+                             ("cancelled", "dispatch_pending_resolution"), ("denied", "dispatch_pending_resolution"),
+                             ("completed", "dispatch_pending_resolution")):
+            ContentFactoryRun.objects.filter(pk=run.pk).update(status=status, current_step=step)
+            with self.subTest(status=status, step=step):
+                again = bind_admitted_run(bound, bound.run_id)
+                self.assertEqual((again.status, again.current_step), (status, step))
+
+    @override_settings(ARTICLES_RUN_FACT_AUTHORITY_ENABLED=True, ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=True)
     def test_event_echo_requires_complete_exact_scope_and_protocol(self):
         payload = self.payload()
         run = self.reserve(payload)
