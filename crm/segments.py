@@ -24,6 +24,7 @@ from django.utils import timezone
 from community_chat.models import CommunityChatDevice, DeviceBindingStatus
 
 from .luma_guests import APPROVED, WAITLIST
+from .segment_trees import MAX_BYTES, MAX_DEPTH, MAX_NODES, MAX_SNAPSHOTS, builder_enabled, tree_q, validate_v2
 from .models import BlastDelivery, Channel, Contact, CrmEvent, EventRegistration
 from .queries import (
     PENDING,
@@ -129,6 +130,8 @@ def validate_definition(definition: Any) -> dict:
 
     if not isinstance(definition, dict):
         raise _invalid("", "expected_object")
+    if "version" in definition:
+        return validate_v2(definition)
     for key in definition:
         if key not in ("match", "rules", "exclude"):
             raise _invalid(_pointer(key), "unknown_key")
@@ -154,6 +157,13 @@ def _validate_rule(rule: Any, at: tuple) -> dict:
     if not isinstance(rule, dict):
         raise _invalid(_pointer(*at), "expected_object")
     rule_type = rule.get("type")
+    from .audience_profile_rules import PROFILE_RULE_TYPES, validate_profile_rule
+
+    if isinstance(rule_type, str) and rule_type in PROFILE_RULE_TYPES:
+        for key in rule:
+            if key != "type" and key not in PROFILE_RULE_TYPES[rule_type]["keys"]:
+                raise _invalid(_pointer(*at, key), "unknown_key")
+        return {"type": rule_type, **validate_profile_rule(rule, at)}
     spec = RULE_TYPES.get(rule_type) if isinstance(rule_type, str) else None
     if spec is None:
         raise _invalid(_pointer(*at, "type"), "unknown_rule_type")
@@ -188,6 +198,10 @@ def _last_attended_within_days(rule: dict, at: tuple) -> dict:
 
 
 def _engagement_stars(rule: dict, at: tuple) -> dict:
+    if rule.get("op") in ("is_set", "is_not_set"):
+        if rule.get("value") is not None:
+            raise _invalid(_pointer(*at, "value"), "not_allowed")
+        return {"op": rule["op"]}
     return {
         "op": _choice(COUNT_OPS)(rule.get("op"), at + ("op",)),
         "value": _integer(rule.get("value"), at + ("value",), 1, 5),
@@ -212,6 +226,8 @@ def _attribute(rule: dict, at: tuple) -> dict:
     key = rule.get("key")
     if not isinstance(key, str) or not ATTRIBUTE_KEY.match(key):
         raise _invalid(_pointer(*at, "key"), "invalid_attribute_key")
+    if key == "audience_profile_v1":
+        raise _invalid(_pointer(*at, "key"), "use_typed_audience_rule")
     return {"key": key, **_text_condition(rule, at)}
 
 
@@ -335,9 +351,16 @@ def definition_q(definition: dict, *, now: Optional[datetime] = None) -> Q:
     """The ``Contact`` filter for a validated definition, before any suppression."""
 
     now = now or timezone.now()
-    rules = [_rule_q(rule, ("rules", index), now) for index, rule in enumerate(definition["rules"])]
+    from .audience_profile_rules import ensure_activity_coverage
+
+    activity_as_of = ensure_activity_coverage(definition, now)
+    if definition.get("version") == 2:
+        return tree_q(definition, now=now, activity_as_of=activity_as_of)
+    rules = [_rule_q(rule, ("rules", index), now, activity_as_of=activity_as_of)
+             for index, rule in enumerate(definition["rules"])]
     excludes = [
-        _rule_q(rule, ("exclude", index), now) for index, rule in enumerate(definition["exclude"])
+        _rule_q(rule, ("exclude", index), now, activity_as_of=activity_as_of)
+        for index, rule in enumerate(definition["exclude"])
     ]
     combined = Q()
     if rules:
@@ -407,8 +430,12 @@ def _registrations(event: CrmEvent):
     return EventRegistration.objects.filter(registered_q(), event=event, contact=OuterRef("pk"))
 
 
-def _rule_q(rule: dict, at: tuple, now: datetime) -> Q:
+def _rule_q(rule: dict, at: tuple, now: datetime, *, activity_as_of=None) -> Q:
     rule_type = rule["type"]
+    from .audience_profile_rules import PROFILE_RULE_TYPES, profile_rule_q
+
+    if rule_type in PROFILE_RULE_TYPES:
+        return profile_rule_q(rule, now=now, activity_as_of=activity_as_of)
     if rule_type == "event_registration":
         # Removed and declined guests are not registered, whatever the statuses say.
         registrations = EventRegistration.objects.filter(registered_q(), contact=OuterRef("pk"))
@@ -424,6 +451,9 @@ def _rule_q(rule: dict, at: tuple, now: datetime) -> Q:
     if rule_type == "events_attended_count":
         return Q(**{f"events_attended_count__{_COUNT_LOOKUPS[rule['op']]}": rule["value"]})
     if rule_type == "engagement_stars":
+        if rule["op"] in ("is_set", "is_not_set"):
+            known = Q(Exists(Contact.objects.filter(pk=OuterRef("pk")).filter(engagement_stars_q("gte", 1))))
+            return known if rule["op"] == "is_set" else ~known
         return engagement_stars_q(rule["op"], rule["value"])
     if rule_type == "last_attended_within_days":
         return Q(last_attended_at__gte=now - timedelta(days=rule["value"]))
@@ -524,14 +554,26 @@ def quick_segment_definition(key: str, event: CrmEvent) -> dict:
 def catalog(*, tags: list, attributes: list, questions: list) -> dict:
     """What the segment builder's dropdowns offer."""
 
+    from .audience_profile_rules import PROFILE_RULE_TYPES
+
     return {
+        "builder_enabled": builder_enabled(),
+        "supported_definition_versions": [1, 2],
+        "capabilities": {
+            "nested_groups": True,
+            "saved_segment_snapshots": True,
+            "matched_preview": True,
+            "optimistic_concurrency": True,
+            "idempotent_create": True,
+        },
         "rule_types": [
             {"type": rule_type, "label": spec["label"], "available": spec["available"]}
-            for rule_type, spec in RULE_TYPES.items()
+            for rule_type, spec in {**RULE_TYPES, **PROFILE_RULE_TYPES}.items()
         ],
         "match": list(MATCH),
         "registration_statuses": list(REGISTRATION_STATUSES),
         "count_ops": list(COUNT_OPS),
+        "engagement_star_ops": [*COUNT_OPS, "is_set", "is_not_set"],
         "tag_ops": list(TAG_OPS),
         "text_ops": list(TEXT_OPS),
         "fields": [{"field": name, "label": label} for name, label in FIELDS.items()],
@@ -547,5 +589,9 @@ def catalog(*, tags: list, attributes: list, questions: list) -> dict:
             "text": MAX_TEXT,
             "days": MAX_DAYS,
             "answers_scanned": ANSWER_SCAN_LIMIT,
+            "depth": MAX_DEPTH,
+            "nodes": MAX_NODES,
+            "snapshots": MAX_SNAPSHOTS,
+            "definition_bytes": MAX_BYTES,
         },
     }
