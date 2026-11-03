@@ -190,7 +190,7 @@ def _existing_approved(current):
     return next((item for item in approved if item.get("allow_no_offer")), approved[0] if approved else None)
 
 
-def first_audience_response(context, owner_user_id, data) -> Response:
+def first_audience_response(context, owner_user_id, data, *, command_key=None, command_body=None) -> Response:
     """Save and approve the founder's one-sentence customer profile.
 
     ``context`` is the caller's ``FounderCompanyContext`` (already scoped to a
@@ -198,6 +198,9 @@ def first_audience_response(context, owner_user_id, data) -> Response:
     an approved audience already exists (including a replay), or the error
     response of ``mutate_catalog_response`` unchanged.
     """
+    if command_key is not None:
+        return _keyed_first_audience_response(context, owner_user_id, data,
+            command_key=command_key, command_body=command_body)
     from .editorial_views import mutate_catalog_response
 
     if not isinstance(data, dict):
@@ -251,3 +254,83 @@ def first_audience_response(context, owner_user_id, data) -> Response:
     )
     return Response(_payload(_strategy(organization), audience, country=country, startup_name=startup_name,
                              catalog=response.data), status=201)
+
+
+def _keyed_first_audience_response(context, owner_user_id, data, *, command_key=None, command_body=None) -> Response:
+    """Retain keyed v2 first-audience approval without changing IF08/no-key semantics."""
+    if command_key is None:
+        return first_audience_response(context, owner_user_id, data)
+    from django.db import transaction
+    from organizations.models import Organization
+    from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+    from .catalog_commands import KEY, CatalogCommandConflict, prepare_command, record_command
+    from .editorial_catalog import content_hash
+    from .editorial_views import _lock_catalog_owner
+    from .p2_foundation import p2_applies
+    original_body = data if command_body is None else command_body
+    stored = OrganizationContentConfig.objects.filter(organization=context.organization).first()
+    initial = stored.pillar_strategy if stored else {}
+    if not isinstance(initial, dict):
+        return Response({"error": "Stored catalogue requests cannot be verified."}, status=409)
+    if not p2_applies(context.organization) and KEY not in initial:
+        return first_audience_response(context, owner_user_id, data)
+    try:
+        with transaction.atomic():
+            organization = Organization.objects.select_for_update().get(pk=context.organization.pk)
+            _lock_catalog_owner(context, owner_user_id, organization)
+            config = OrganizationContentConfig.objects.select_for_update().filter(organization=organization).first()
+            strategy = config.pillar_strategy if config else {}
+            command = prepare_command(strategy=strategy, organization=organization, context=context,
+                user_id=owner_user_id, key=command_key, body=original_body, action="first_audience")
+            if command is None:
+                return first_audience_response(context, owner_user_id, data)
+            current = review_payload(strategy)
+            if command.replay:
+                selected = command.previous["selection"]
+                audience = next((item for item in current["audience_options"]
+                    if item["id"] == selected["id"] and item["version"] == selected["version"]
+                    and item["status"] == "approved" and content_hash(item) == selected["content_sha256"]), None)
+                if audience is None:
+                    raise CatalogCommandConflict("The audience from this request changed. Review the current catalogue.")
+                catalog = {**current, OFFER_PAGE_CHECKS_KEY: offer_page_check_payload(strategy)}
+                return Response(_payload(strategy, audience,
+                    country=country_from_location(getattr(context.company, "location", "")),
+                    startup_name=_startup_name(context), catalog=catalog),
+                    headers={"Idempotent-Replayed": "true",
+                        "X-Catalog-Command-Revision": str(command.previous["catalog_version"])})
+            parsed, message = _parse(data)
+            if message:
+                return Response({"error": message}, status=400)
+            description, name, version = parsed
+            if version != current["editorial_catalog_version"]:
+                raise CatalogCommandConflict("The catalogue changed. Review the current audience before continuing.")
+            existing = _existing_approved(current)
+            if existing is not None and (existing.get("description") != description or existing.get("name") != name):
+                raise CatalogCommandConflict("Another audience is already approved. Review it before continuing.")
+            response = first_audience_response(context, owner_user_id, data)
+            if response.status_code not in {200, 201}:
+                transaction.set_rollback(True)
+                # No remote work exists here; refuse without committing a partial command.
+                if response.status_code >= 500:
+                    raise CatalogCommandConflict("The audience request could not be confirmed.")
+                return response
+            config = OrganizationContentConfig.objects.select_for_update().get(organization=organization)
+            updated = config.pillar_strategy
+            audience = next((item for item in review_payload(updated)["audience_options"]
+                if item["id"] == response.data["audience_id"] and item["version"] == response.data["audience_version"]
+                and item["status"] == "approved"), None)
+            if audience is None:
+                raise CatalogCommandConflict("The accepted audience cannot be verified.")
+            config.pillar_strategy = record_command(original=strategy, updated=updated, body=original_body,
+                command=command, response=review_payload(updated), selection={"id": audience["id"],
+                    "version": audience["version"], "content_sha256": content_hash(audience)})
+            config.save(update_fields=["pillar_strategy", "updated_at"])
+            return response
+    except (PermissionError, VibeRaisingProfile.DoesNotExist):
+        return Response({"error": "Only the current active startup owner can change this catalogue."}, status=403)
+    except (Organization.DoesNotExist, VibeRaisingCompany.DoesNotExist):
+        return Response({"error": "Company configuration not found"}, status=404)
+    except CatalogCommandConflict as exc:
+        return Response({"error": str(exc), "code": "editorial_catalog_conflict"}, status=409)
+    except ValueError as exc:
+        return Response({"error": str(exc), "code": "invalid_editorial_catalog"}, status=400)
