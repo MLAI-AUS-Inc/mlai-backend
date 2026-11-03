@@ -240,6 +240,7 @@ class OwnedFirstArticleSwitchCommandTests(SwitchHTTPFixture, TransactionTestCase
         self.stopped = False
         self.close_available = True
         self.close_cursor = 2
+        self.closes = []
         super().setUp()
         self.enterContext(patch('requests.get', side_effect=self.history))
         self.enterContext(patch('requests.post', side_effect=self.close))
@@ -272,6 +273,7 @@ class OwnedFirstArticleSwitchCommandTests(SwitchHTTPFixture, TransactionTestCase
     def close(self, url, **kwargs):
         self.assertFalse(connection.in_atomic_block)
         self.assertTrue(url.endswith('/' + self.original.run_id + '/cancel'))
+        self.closes.append(deepcopy(kwargs['json']))
         if not self.close_available:
             return self.response({'status': 'cancelled'})
         from .run_ownership import WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, owner_receipt, wire_identity, current_execution_ticket
@@ -321,4 +323,40 @@ class OwnedFirstArticleSwitchCommandTests(SwitchHTTPFixture, TransactionTestCase
         response = self.switch()
         self.assertEqual(response.status_code, 503, response.data)
         self.assertEqual(list(free_rows(self.org).values()), before)
+        self.assertEqual(len(self.posted), 1)
+
+    def test_new_ticket_between_stop_preflight_and_transport_is_not_cancelled(self):
+        from .tests_run_event_authority import advance_ticket
+        original = views._call_content_factory_run_action
+        def changed(**kwargs):
+            advance_ticket(self.original)
+            return original(**kwargs)
+        def record_only(payload):
+            self.stops.append(deepcopy(payload))
+            return self.response({'status': 'cancelled'})
+        with patch.object(views, '_call_content_factory_run_action', side_effect=changed), \
+                patch.object(self, 'cancel_response', side_effect=record_only):
+            response = self.switch()
+        self.assertIn(response.status_code, (409, 503), response.data)
+        self.assertEqual(self.stops, [], 'The saved switch cannot cancel a subsequently granted execution.')
+        self.assertEqual(self.closes, [])
+        self.assertEqual(len(self.posted), 1)
+
+    def test_new_ticket_at_terminal_claim_is_not_closed_by_the_old_switch(self):
+        from . import run_terminal_settlement as terminal
+        from .tests_run_event_authority import advance_ticket, batch
+        from .run_event_authority import receive_authoritative_run_events
+        original = terminal._claim
+        def changed(run, now, **kwargs):
+            run.refresh_from_db()
+            ticket = advance_ticket(run)
+            received = receive_authoritative_run_events(batch(run,
+                [{'seq': 3, 'state_version': 1, 'status': 'cancelled'}], ticket))
+            self.assertEqual(received.status_code, 200, received.data)
+            return original(run, now, **kwargs)
+        with patch.object(terminal, '_claim', side_effect=changed):
+            response = self.switch()
+        self.assertEqual(response.status_code, 503, response.data)
+        self.assertEqual(len(self.stops), 1)
+        self.assertEqual(self.closes, [], 'The old switch cannot permanently close a subsequently granted execution.')
         self.assertEqual(len(self.posted), 1)

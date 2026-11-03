@@ -78,10 +78,13 @@ def _stop_original(context, user, claim):
                 views._call_content_factory_run_action(run_id=run.run_id, action='cancel',
                     payload={**cancellation_request_fields('superseded', 'system'),
                         'expected_cancellation_v1': expected_article_cancellation(run)},
-                    workflow=run.workflow, control_user=user, control_command_key='switch-' + claim[0])
+                    workflow=run.workflow, control_user=user, control_command_key='switch-' + claim[0],
+                    expected_run_binding=claim[1]['payload']['switch']['binding'])
             from .run_owned_observations import refresh_owned_run
             refresh_owned_run(run)
-            settle_authoritative_terminal(run.run_id)
+            run, _ = _cancelled(context, user, claim)
+            settle_authoritative_terminal(run.run_id,
+                expected_run_binding=claim[1]['payload']['switch']['binding'])
             run.refresh_from_db()
         if not terminal_closed_without_effects(run) or _free_obligation_state(run) != 'released':
             _pending()

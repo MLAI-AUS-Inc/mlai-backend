@@ -6174,8 +6174,8 @@
     {
       "path": "content_factory/first_article_switch_commands.py",
       "function": "_stop_original",
-      "function_sha256": "019edc811aefa4b85133e9f3516170aef0af9f5ef5a5b7703991ea037f1ddb86",
-      "reason": "Require original source binding. Owned grants can release only through existing exact terminal closure and complete journal settlement; legacy releases require validated bound no-effect receipt. No provider IO under SQL locks, no direct owned lifecycle writes, no new charge.",
+      "function_sha256": "79cf41625ea2ee7ba718122b5703427b6d8baee8403b0695a65862290e737d6f",
+      "reason": "Require original source binding. Owned grants can release only through existing exact terminal closure and complete journal settlement; legacy releases require validated bound no-effect receipt. No provider IO under SQL locks, no direct owned lifecycle writes, no new charge. Pass the saved original binding into cancellation transport and locked terminal claim; a concurrent execution grant must not be cancelled or closed by the old switch.",
       "test_refs": [
         "content_factory.tests_first_article_switch_commands",
         "content_factory.tests_first_article_commands",
@@ -6190,6 +6190,39 @@
       "test_refs": [
         "content_factory.tests_first_article_switch_commands",
         "content_factory.tests_first_article_commands",
+        "content_factory.tests_run_terminal_settlement"
+      ]
+    },
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "_call_content_factory_run_action",
+      "function_sha256": "c4cf45d272c1f1fcece40c88055fe287a01334e5c12ee62bdead3973a7176a8a",
+      "reason": "An optional trusted expected binding is compared against the same Run snapshot used to form the owned cancel envelope; a changed ticket cannot be substituted for the saved original intent. Existing unbound control behavior is unchanged.",
+      "test_refs": [
+        "content_factory.tests_first_article_switch_commands",
+        "content_factory.tests_run_owned_cancellation",
+        "content_factory.tests_run_terminal_settlement"
+      ]
+    },
+    {
+      "path": "content_factory/run_terminal_settlement.py",
+      "function": "_claim",
+      "function_sha256": "42eee3c6539b713ba91257199b4865fb0409e7c708cac036646b7e7e7834a19e",
+      "reason": "An optional original switch binding is checked after acquiring the Run lock and before any terminal metadata or remote closure claim. The existing complete-family settlement proof remains mandatory.",
+      "test_refs": [
+        "content_factory.tests_first_article_switch_commands",
+        "content_factory.tests_run_owned_cancellation",
+        "content_factory.tests_run_terminal_settlement"
+      ]
+    },
+    {
+      "path": "content_factory/run_terminal_settlement.py",
+      "function": "settle_authoritative_terminal",
+      "function_sha256": "ef895317a55d324cea0344b22fbb9c0d61821ed9587f6d124e2b08606a1c55aa",
+      "reason": "Pass the trusted expected binding to the locked claim; a binding mismatch returns pending without closing the new execution or changing its transport schedule. Existing autonomous settlement callers omit the optional fence.",
+      "test_refs": [
+        "content_factory.tests_first_article_switch_commands",
+        "content_factory.tests_run_owned_cancellation",
         "content_factory.tests_run_terminal_settlement"
       ]
     }

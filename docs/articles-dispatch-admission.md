@@ -61,6 +61,9 @@ validated, bound no-effect cancellation receipt. Current owner consent and free
 eligibility are rechecked before replacement admission, including in the actual
 debit/outbox transaction. Existing no-key and non-admitted behavior is unchanged.
 The command uses existing configuration receipts and requires no schema change.
+The original execution binding is also checked by the cancellation transport
+and under the terminal controller's claim lock. A concurrently granted execution
+cannot be cancelled or closed by a saved switch for its predecessor.
 
 `content_factory.tests_first_article_switch_commands` exercises this HTTP contract
 against disposable PostgreSQL using synthetic provider responses, including

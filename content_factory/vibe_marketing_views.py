@@ -15500,6 +15500,7 @@ def _call_content_factory_run_action(
     preserve_run_clock=False,
     control_user=None,
     control_command_key=None,
+    expected_run_binding=None,
 ):
     require_unlocked_remote_call()
     admitted_child = None
@@ -15508,6 +15509,11 @@ def _call_content_factory_run_action(
         from .run_execution_control import current_execution_request
         from .run_ownership import current_execution_ticket, owner_receipt, wire_identity, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, SCOPE_FIELDS
         current_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        if expected_run_binding is not None:
+            from .website_cancellation_retirement import run_binding
+            if current_run is None or run_binding(current_run) != expected_run_binding:
+                return {"error": "The original execution changed before cancellation.",
+                        "content_factory_status_code": 409, "retryable": False}
         if authoritative_run(current_run) and (action != "approve" or current_run.workflow not in SCAN_WORKFLOWS | {"scan"}):
             current = current_execution_request(current_run)
             payload = {**{key: value for key, value in dict(payload or {}).items() if key not in {*SCOPE_FIELDS,

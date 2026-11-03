@@ -423,9 +423,13 @@ def _close_remote(run):
         response.close()
 
 
-def _claim(run, now):
+def _claim(run, now, *, expected_run_binding=None):
     with transaction.atomic():
         run = _locked(run)
+        if expected_run_binding is not None:
+            from .website_cancellation_retirement import run_binding
+            if run_binding(run) != expected_run_binding:
+                raise TerminalSettlementPending('terminal_expected_binding_changed')
         meta = _meta(run)
         if terminal_execution_closed(run):
             _transport(run, now, 'already_settled', delay=3600)
@@ -647,7 +651,7 @@ def _settle(run, claim, now):
         return receipt
 
 
-def settle_authoritative_terminal(run_id, *, now=None):
+def settle_authoritative_terminal(run_id, *, now=None, expected_run_binding=None):
     """Close, independently drain, then settle one exact original obligation."""
     from workflow_runs.models import ContentFactoryRun
     from .run_reconciliation import reconcile_authoritative_run, authoritative_run
@@ -659,7 +663,7 @@ def settle_authoritative_terminal(run_id, *, now=None):
         return {'state': 'pending', 'reason': 'terminal_owner_missing'}
     claim = None
     try:
-        run, claim = _claim(run, now)
+        run, claim = _claim(run, now, expected_run_binding=expected_run_binding)
         if claim is None:
             saved = _meta(run).get(TERMINAL_SETTLEMENT_KEY)
             if saved is not None:
@@ -675,6 +679,8 @@ def settle_authoritative_terminal(run_id, *, now=None):
         return _settle(run, claim, now)
     except (ValueError, TypeError, KeyError, OverflowError, RecursionError, requests.RequestException) as exc:
         reason = str(exc) if isinstance(exc, TerminalSettlementPending) else 'terminal_proof_pending'
+        if reason == 'terminal_expected_binding_changed':
+            return {'state': 'pending', 'reason': reason}
         if claim is not None:
             try:
                 _finish(run, claim, now, reason)
