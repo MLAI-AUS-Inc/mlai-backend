@@ -486,7 +486,7 @@ class IncidentFacadeReplays(SimpleTestCase):
         config = SimpleNamespace(website_connection=connection)
         run = SimpleNamespace(run_id="old-draft", workflow="article_generation", result={}, run_request={"website_connection_id": str(connection.pk), "connection_generation": 2}, github_repo="older/site")
         context = SimpleNamespace(organization=object())
-        request = SimpleNamespace(user=SimpleNamespace(pk=8), data={})
+        request = SimpleNamespace(user=SimpleNamespace(pk=8), headers={}, data={})
         with patch.object(views, "_resolve_context_or_response", return_value=(context, None)), \
                 patch.object(views, "get_object_or_404", return_value=run), \
                 patch.object(views, "_run_belongs_to_context", return_value=True), \
@@ -505,11 +505,16 @@ class IncidentFacadeReplays(SimpleTestCase):
         run = SimpleNamespace(workflow="article_generation", run_id="draft-1")
         payload = {"action": "editTextBatch", "expectedRevision": "saved", "operationId": "op-1", "edits": [{"fieldId": "paragraph.0", "value": "Exact copy"}]}
         view = review.VibeMarketingArticleReviewView()
-        view._resolve_run = Mock(return_value=(object(), run, None))
-        with patch.object(review.views, "_run_has_external_publish_evidence", return_value=False), \
+        from organizations.models import Organization
+        from .models import OrganizationContentConfig
+        context = SimpleNamespace(organization=Organization(pk=9, domain="fixture.test"))
+        view._resolve_run = Mock(return_value=(context, run, None))
+        empty_commands = SimpleNamespace(values_list=lambda *args, **kwargs: SimpleNamespace(first=lambda: None))
+        with patch.object(OrganizationContentConfig.objects, "filter", return_value=empty_commands), \
+                patch.object(review.views, "_run_has_external_publish_evidence", return_value=False), \
                 patch.object(review.views, "_latest_review_ready_component_revision", return_value=None), \
                 patch.object(review, "remote_review", return_value={"revision": "next"}) as remote:
-            result = view.post(SimpleNamespace(data=payload, user=SimpleNamespace(pk=9)), run.run_id)
+            result = view.post(SimpleNamespace(data=payload, headers={}, user=SimpleNamespace(pk=9)), run.run_id)
         self.assertEqual(result.status_code, 200)
         self.assertEqual(remote.call_args.kwargs["payload"], payload)
 

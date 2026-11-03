@@ -263,7 +263,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         self.refund.assert_not_called()
 
     def start(self, data=None):
-        return self.ns["_article_start_under_test"](None, SimpleNamespace(user=self.user, data=data if data is not None else {
+        return self.ns["_article_start_under_test"](None, SimpleNamespace(user=self.user, headers={}, data=data if data is not None else {
             "topic": "Delivery", "editorial_brief": selected_brief(),
         }))
 
