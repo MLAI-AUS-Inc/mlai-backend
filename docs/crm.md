@@ -31,11 +31,22 @@ Rules that hold everywhere:
 
 The `crm_luma_guest_sync` runner lives in `run_scheduled_discovery`. Each pass:
 
-1. Upserts the calendar catalogue (`list_all_events`). It reads no guest data.
-2. Picks up to `CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN` events that are upcoming or ended within `CRM_LUMA_SYNC_RECENT_DAYS`, least recently synced first.
+1. Upserts all approved calendar listings (`list_crm_events`): managed Luma events, Luma events managed elsewhere, and external listings. It exhausts pagination before writing and reads no guest data. An event appears once, keyed by its Luma event/listing ID.
+2. Picks up to `CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN` **managed Luma events** that are upcoming or ended within `CRM_LUMA_SYNC_RECENT_DAYS`, least recently synced first. View-only and external listings never enter guest sync, including resumed IDs and backfill commands.
 3. Replaces each event's registrations with Luma's current guest list, all approval statuses. Each event commits on its own.
 
 The runner is off unless `CRM_LUMA_SYNC_ENABLED=true`. It is cache-throttled to one pass per `CRM_LUMA_SYNC_INTERVAL_SECONDS`. Requests are spaced to `CRM_LUMA_REQUESTS_PER_MINUTE`, leaving room in the calendar key's 200/minute budget for Chat Home, Volunteer and Roo.
+
+CRM event summaries include `guest_data_status`: `available` after a managed
+event's first guest sync, `pending` before it, or `unavailable` for a view-only
+or external listing. Counts and reach are stored registration statistics, not
+the host's live guest totals; clients must not present them as current when
+this status is not `available`. Previously synced registrations and contact
+preferences are retained if an event's calendar access changes.
+
+A calendar API key cannot discover every event hosted by a separate Luma user.
+Hosted events outside this calendar require an authenticated source for that
+host account; calendar coverage alone must not be reported as account coverage.
 
 ### Pass budget
 

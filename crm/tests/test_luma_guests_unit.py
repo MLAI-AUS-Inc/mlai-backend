@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from django.test import SimpleTestCase, override_settings
 
-from crm.luma_guests import event_record, guest_record, one_guest_per_email
+from crm.luma_guests import can_sync_event_guests, event_record, guest_record, one_guest_per_email
 from crm.luma_sync import PacedSession, run_luma_guest_sync_scheduler
 from integrations.services.luma import LumaAPIError, LumaAttendeeReportService
 
@@ -94,7 +94,7 @@ class GuestRecordTests(SimpleTestCase):
 
 
 class EventRecordTests(SimpleTestCase):
-    def test_managed_event_is_kept_and_external_listing_is_skipped(self):
+    def test_calendar_listings_are_kept_without_implying_guest_access(self):
         managed = event_record(
             {
                 "id": "evt-1",
@@ -109,8 +109,14 @@ class EventRecordTests(SimpleTestCase):
         self.assertEqual(managed.luma_event_id, "evt-1")
         self.assertEqual(managed.cover_url, "")
         self.assertEqual(managed.start_at, datetime(2026, 10, 1, 8, tzinfo=timezone.utc))
-        self.assertIsNone(event_record({"id": "evt-2", "platform": "external"}))
-        self.assertIsNone(event_record({"id": "evt-3", "access": "view"}))
+        self.assertTrue(can_sync_event_guests(managed.raw))
+        for payload in (
+            {"id": "ext-2", "platform": "external", "access": "manage"},
+            {"id": "evt-3", "platform": "luma", "access": "view"},
+            {"id": "evt-4", "platform": "luma"},
+        ):
+            self.assertIsNotNone(event_record(payload))
+            self.assertFalse(can_sync_event_guests(payload))
         self.assertIsNone(event_record({"name": "no id"}))
 
 
