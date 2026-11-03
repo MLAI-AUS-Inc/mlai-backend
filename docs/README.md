@@ -188,6 +188,7 @@ identified as current by a maintained architecture document.
 
 - [Chat startup updates](community-chat-startup-updates.md): founder setup, draft, review, approval and community API.
 - [Pulse generation reliability](pulse-generation-reliability.md): source preflight, exact worker receipts, fenced recovery, bounded collection and local acceptance checks.
+- [Pulse financial refresh](pulse-financial-refresh.md): independent provider refresh, immutable chart previews, scoped saves and preserved writing/publication.
 - [Shared update benefits](shared-update-benefits.md): sharing requirements, grandfathered discounts, points and rollout dependencies.
 
 - [Website connection lifecycle and repository consent](website-connections.md) — schema, API, revocation, reviewed cleanup, and local verification.

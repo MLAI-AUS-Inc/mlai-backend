@@ -24,6 +24,7 @@ from .presentation import update_payload
 from .publication import approved_updates
 from .lifecycle import delete_update, source_capabilities, validate_generation_sources
 from .source_preferences import source_preferences
+from vibe_raising.financial_refresh_views import FinancialRefreshView, FinancialRefreshStatusView
 
 
 def enabled():
@@ -85,6 +86,15 @@ class BootstrapView(ChatStartupAccess, APIView):
 
 class CompaniesView(ChatStartupAccess, FounderToolsCompanyView):
     requires_company = False
+
+
+class RefreshFinancialsView(ChatStartupAccess, FinancialRefreshView):
+    """Use the same owner-scoped refresh through revocable Chat authentication."""
+
+
+class RefreshFinancialsStatusView(ChatStartupAccess, FinancialRefreshStatusView):
+    """Keep financial polling in Chat's dedicated poll throttle bucket."""
+    startup_read_bucket = "poll"
 
 
 class ActiveCompanyView(ChatStartupAccess, FounderToolsActiveCompanyView):

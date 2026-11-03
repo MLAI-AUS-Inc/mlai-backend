@@ -288,6 +288,7 @@ class VibeRaisingMonthlyUpdateUpsertSerializer(AliasInputSerializer):
     coverImage = serializers.DictField(required=False, allow_null=True)
     chartSelections = serializers.ListField(child=serializers.DictField(), max_length=12, required=False)
     financialHistorySelection = FinancialHistorySelectionField(required=False)
+    financialCandidateId = serializers.CharField(required=False, max_length=100, allow_blank=False)
     month = serializers.CharField()
     year = serializers.IntegerField(min_value=2000, max_value=2100)
     audienceVisibility = AudienceVisibilityField(required=False)
