@@ -1,4 +1,5 @@
 """Actual original-debit proof for the terminal continuation fence."""
+from django.db import connections
 from copy import deepcopy
 from unittest.mock import patch
 from django.test import TransactionTestCase, override_settings
@@ -503,7 +504,7 @@ class ActualPairedTerminalSettlementTests(TransactionTestCase):
             try:
                 return terminal.settle_authoritative_terminal(run.run_id)
             finally:
-                close_old_connections()
+                connections.close_all()
         with patch.object(terminal.requests, 'post', side_effect=post) as cancel, \
                 patch.object(terminal.requests, 'get', side_effect=lambda *a, **kw: self.response(page)), ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(invoke)

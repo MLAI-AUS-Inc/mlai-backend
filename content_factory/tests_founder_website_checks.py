@@ -1,4 +1,5 @@
 """Free scheduling, exact-key replay, real owner fences and unchanged manual admission."""
+from django.db import connections
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from unittest.mock import patch
@@ -159,7 +160,7 @@ class WebsiteCheckTests(TransactionTestCase):
         def worker():
             close_old_connections()
             try:return self.sweep()
-            finally:close_old_connections()
+            finally:connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
             list(pool.map(lambda _:worker(),range(2)))
         self.assertEqual(len(self.queued),1)

@@ -1,4 +1,5 @@
 """P2.7 M1-M12: real durable claims with mocked outbound provider effects."""
+from django.db import connections
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
@@ -283,7 +284,7 @@ class MergeWorkerTests(TransactionTestCase):
             try:
                 barrier.wait(timeout=10)
                 return self.sweep()
-            finally:close_old_connections()
+            finally:connections.close_all()
         with self.providers(), ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: sweep(), range(2)))
         self.assertEqual(sum(row["merged"] for row in results), 1)

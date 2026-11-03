@@ -1,4 +1,5 @@
 """Persisted staff access, recovery idempotency, incident dedupe and load gates."""
+from django.db import connections
 from dataclasses import dataclass
 from datetime import timedelta
 from time import monotonic
@@ -394,7 +395,7 @@ class StaffConcurrencyTests(TransactionTestCase):
             except BaseException as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connections.close_all()
         with fake_provider("content_factory.failure_policy_engine", decide=lambda *a, **k: {}, apply=apply):
             first = Thread(target=invoke)
             first.start()

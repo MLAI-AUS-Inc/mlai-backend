@@ -1,4 +1,5 @@
 """Actual canonical patches and compatibility output, without provider effects."""
+from django.db import connections
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from threading import Barrier
@@ -105,7 +106,7 @@ class BackendFactTests(TransactionTestCase):
                 barrier.wait(timeout=10)
                 save_job_facts(job, update_fields=[name])
             finally:
-                close_old_connections()
+                connections.close_all()
         with ThreadPoolExecutor(2) as pool:
             futures = [pool.submit(write, first, "status", "needs_review"),
                        pool.submit(write, second, "progress_message_ts", "123.456")]

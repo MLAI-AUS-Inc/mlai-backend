@@ -1,4 +1,5 @@
 """Recovery schedules, limits, consent fences and durable idempotency."""
+from django.db import connections
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from io import StringIO
@@ -139,6 +140,9 @@ class PolicyTests(TransactionTestCase):
         self.seed(run, first_failed_at=(self.now - timedelta(minutes=1)).isoformat())
         decision = engine.decide(run, now=self.now)
         calls = []
+        # Keep strong references so garbage collection cannot hide a leaked
+        # persistent worker connection before PostgreSQL test-database teardown.
+        worker_connections = []
         def execute(*args, **kwargs):
             self.assertFalse(connection.in_atomic_block)
             calls.append(args[0].run_id)
@@ -146,13 +150,24 @@ class PolicyTests(TransactionTestCase):
             close_old_connections()
             try:
                 current = ContentFactoryRun.objects.select_related('organization').get(pk=run.pk)
+                worker_connections.append((connections['default'], connection.connection.info.backend_pid))
                 return engine.apply(current, decision, now=self.now)
             finally:
-                close_old_connections()
+                connections.close_all()
         with patch.object(engine, '_execute_run', side_effect=execute), ThreadPoolExecutor(max_workers=2) as pool:
             rows = list(pool.map(lambda _: worker(), range(2)))
         self.assertEqual(calls, [run.run_id])
         self.assertEqual([row['attempts'] for row in rows], [1, 1])
+        worker_pids = [pid for _, pid in worker_connections]
+        deadline = time.monotonic() + 1
+        while True:
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT pid FROM pg_stat_activity WHERE pid = ANY(%s)', [worker_pids])
+                remaining = cursor.fetchall()
+            if not remaining or time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        self.assertEqual(remaining, [], 'Finished test workers must close their own PostgreSQL sessions.')
 
     def test_legacy_dry_run_never_changes_runs_or_calls_providers(self):
         legacy = make_named_legacy_org('pawshare')

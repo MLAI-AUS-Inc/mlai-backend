@@ -1,4 +1,5 @@
 """Persisted P2 dispatch, settlement and duplicate-write acceptance tests."""
+from django.db import connections
 from copy import deepcopy
 from datetime import timedelta
 from types import SimpleNamespace
@@ -456,7 +457,7 @@ class ConcurrencyTests(TransactionTestCase):
             except Exception as exc:
                 failures.append(repr(exc))
             finally:
-                close_old_connections()
+                connections.close_all()
         threads = [Thread(target=settle, args=(item.pk,)) for item in (run, child)]
         for thread in threads: thread.start()
         for thread in threads: thread.join(timeout=20)
@@ -491,7 +492,7 @@ class ConcurrencyTests(TransactionTestCase):
             except Exception as exc:
                 failures.append(repr(exc))
             finally:
-                close_old_connections()
+                connections.close_all()
         with patch.object(FounderToolsProfileView, "_save_profile", slow_save):
             first = Thread(target=save)
             first.start()

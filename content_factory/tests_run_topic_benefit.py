@@ -1,4 +1,5 @@
 """Actual topic grant/debit constructors and verified benefit transaction proofs."""
+from django.db import connections
 from copy import deepcopy
 import json
 import os
@@ -543,7 +544,7 @@ class TopicBenefitTests(TransactionTestCase):
             try:
                 return project_verified_topics(run.run_id)
             finally:
-                close_old_connections()
+                connections.close_all()
         with patch("requests.get", side_effect=get), ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: invoke(), range(2)))
         self.assertTrue(all(row["verified"] == ["topic_selection_v1"] for row in results))
@@ -567,7 +568,7 @@ class TopicBenefitTests(TransactionTestCase):
             try:
                 return settle_authoritative_terminal(run.run_id)
             finally:
-                close_old_connections()
+                connections.close_all()
         with patch("requests.post", side_effect=post) as cancel, patch("requests.get", return_value=self.remote(page)), \
                 ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(invoke)

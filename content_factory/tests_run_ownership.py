@@ -1,4 +1,5 @@
 """Actual database admission/binding tests; no provider calls are made."""
+from django.db import connections
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from threading import Barrier
@@ -342,7 +343,7 @@ class ConcurrentRunAdmissionTests(TransactionTestCase):
                     workflow="auto_discovery", payload={"domain": org.domain, "client_request_id": "concurrent-key"})
                 return run.pk
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: reserve(), range(2)))

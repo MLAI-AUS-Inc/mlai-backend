@@ -1,4 +1,5 @@
 """Actual withdrawal, original-charge and canonical scope transaction proofs."""
+from django.db import connections
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import timedelta
@@ -194,7 +195,7 @@ class DispatchSettlementTests(TransactionTestCase):
             try:
                 return settle.settle_authoritative_dispatch(run.run_id, now=self.now)
             finally:
-                close_old_connections()
+                connections.close_all()
         with patch.object(settle.requests, "post", side_effect=post) as post, ThreadPoolExecutor(2) as pool:
             first = pool.submit(execute)
             self.assertTrue(entered.wait(timeout=10))

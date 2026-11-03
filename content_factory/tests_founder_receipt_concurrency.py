@@ -1,4 +1,5 @@
 """Actual concurrent HTTP receipts preserve the first successful acknowledgement."""
+from django.db import connections
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from unittest.mock import patch
@@ -33,7 +34,7 @@ class ConcurrentDraftReceiptTests(TransactionTestCase):
             self.assertEqual(response.status_code, 200, response.data)
             return response.json()
         finally:
-            close_old_connections()
+            connections.close_all()
 
     def assert_no_execution_or_money_effect(self):
         self.assertEqual(ContentFactoryRun.objects.values().get(pk=self.run.pk), self.before)

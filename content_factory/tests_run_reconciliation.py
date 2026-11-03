@@ -1,4 +1,5 @@
 """Real transaction/lease proofs for admitted all-workflow history pulls."""
+from django.db import connections
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import timedelta
@@ -668,7 +669,7 @@ class AuthoritativeReconciliationTests(TransactionTestCase):
             try:
                 return self.sweep(limit=1)
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with patch.object(reconcile.requests, "get", side_effect=get) as get, ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(sweep)

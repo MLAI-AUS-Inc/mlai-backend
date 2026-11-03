@@ -1,4 +1,5 @@
 """Independent persisted regressions for goal authority, lease ownership and PR accounting."""
+from django.db import connections
 from datetime import timedelta
 from threading import Event, Thread
 from unittest.mock import patch
@@ -82,7 +83,7 @@ class PolicyReviewTests(TransactionTestCase):
             except BaseException as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connections.close_all()
         with patch.object(engine, '_execute_run', side_effect=execute):
             first = Thread(target=invoke, args=(self.now,))
             first.start()
@@ -188,7 +189,7 @@ class PolicyReviewTests(TransactionTestCase):
             except BaseException as exc:
                 errors.append(exc)
             finally:
-                close_old_connections()
+                connections.close_all()
         with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', side_effect=remote):
             first = Thread(target=invoke, args=(self.now,))
             first.start()

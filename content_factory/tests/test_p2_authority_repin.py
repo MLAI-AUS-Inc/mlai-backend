@@ -1,4 +1,5 @@
 """Source re-pin preserves tenant, authorization, money and original run identity."""
+from django.db import connections
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -218,7 +219,7 @@ class SourceRepinTests(TransactionTestCase):
             except WebsiteAuthorityError as error:
                 return error.authority_code
             finally:
-                close_old_connections()
+                connections.close_all()
         with patch('content_factory.website_connections.verify_repository_head', side_effect=verify), \
              patch('content_factory.website_connections.verify_repository_native_target'), ThreadPoolExecutor(2) as pool:
             futures = [pool.submit(apply) for _ in range(2)]

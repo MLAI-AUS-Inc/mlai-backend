@@ -1,4 +1,5 @@
 """Persisted membership boundaries, privacy, owner consent and concurrency."""
+from django.db import connections
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 import json
@@ -279,7 +280,7 @@ class TeamTests(TransactionTestCase):
             except teams.TeamError as error:
                 return error.reason
             finally:
-                close_old_connections()
+                connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
             result = list(pool.map(lambda _: approve(), range(2)))
         self.assertCountEqual(result, ['approved', 'request_closed'])

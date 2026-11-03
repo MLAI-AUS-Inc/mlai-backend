@@ -1,4 +1,5 @@
 """Current team consent fences owned hosted publication callbacks and replay."""
+from django.db import connections
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from copy import deepcopy
 from threading import Event
@@ -235,14 +236,14 @@ class HostedPublishAuthorityTests(TransactionTestCase):
         def publish():
             close_old_connections()
             try: return self.rendering().status
-            finally: close_old_connections()
+            finally: connections.close_all()
 
         def remove():
             close_old_connections()
             try:
                 removal_started.set()
                 return teams.update_member(organization=self.org, user=self.owner, member_id=self.member_id, remove=True)
-            finally: close_old_connections()
+            finally: connections.close_all()
 
         with patch.object(hosted, 'require_current_publish_rights', side_effect=admitted), ThreadPoolExecutor(max_workers=2) as pool:
             publisher = pool.submit(publish)

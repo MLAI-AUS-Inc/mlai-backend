@@ -1,4 +1,5 @@
 """Real row-lock/transaction proofs for the default-off admitted event protocol."""
+from django.db import connections
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from threading import Barrier
@@ -259,7 +260,7 @@ class EventConcurrencyTests(TransactionTestCase):
                 response = receive_authoritative_run_events(deepcopy(raw))
                 return response.status_code, response.data
             finally:
-                close_old_connections()
+                connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: send(), range(2)))
         self.assertEqual([row[0] for row in results], [200, 200])
@@ -278,7 +279,7 @@ class EventConcurrencyTests(TransactionTestCase):
                 barrier.wait(timeout=10)
                 return receive_authoritative_run_events(batch(run, [{"status": status}])).status_code
             finally:
-                close_old_connections()
+                connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(send, ["running", "failed"]))
         self.assertEqual(sorted(results), [200, 409])

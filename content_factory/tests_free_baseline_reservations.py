@@ -1,4 +1,5 @@
 """Real manual/auto admission shares one original rolling free allowance."""
+from django.db import connections
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from unittest import skipUnless
@@ -88,7 +89,7 @@ class FreeBaselineReservationsTests(TransactionTestCase):
         def manual():
             close_old_connections()
             try:return self.manual()
-            finally:close_old_connections()
+            finally:connections.close_all()
         with patch.object(views,'_queue_content_factory_run',side_effect=queue):
             with ThreadPoolExecutor(max_workers=1) as pool:
                 future=pool.submit(manual)
@@ -109,7 +110,7 @@ class FreeBaselineReservationsTests(TransactionTestCase):
         def automatic():
             close_old_connections()
             try:return checks.run_founder_website_check_sweep()
-            finally:close_old_connections()
+            finally:connections.close_all()
         with patch.object(views,'_queue_content_factory_run',side_effect=queue):
             with ThreadPoolExecutor(max_workers=1) as pool:
                 future=pool.submit(automatic)

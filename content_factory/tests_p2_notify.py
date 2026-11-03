@@ -1,4 +1,5 @@
 """Real PostgreSQL ledger/rights tests with all outbound delivery mocked."""
+from django.db import connections
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import timedelta
@@ -344,7 +345,7 @@ class NotificationTests(TransactionTestCase):
                 ContentFactoryRun.objects.filter(pk=run.pk).update(status="running", updated_at=moved_at,
                     result={"callback_nonce": "new-cf-state"})
             finally:
-                done.set();close_old_connections()
+                done.set();connections.close_all()
         manager = OrganizationContentConfig.objects
         original = manager.bulk_update
         def reserve(*args, **kwargs):
@@ -383,7 +384,7 @@ class NotificationTests(TransactionTestCase):
         def reserve():
             close_old_connections()
             try:return alerts.queue_founder_journey_alerts_batch(specs, now=self.now)
-            finally:close_old_connections()
+            finally:connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: reserve(), range(2)))
         self.assertEqual(sum(result["created"] for result in results), 1)
@@ -414,7 +415,7 @@ class NotificationTests(TransactionTestCase):
         def drain():
             close_old_connections()
             try:return transitions.drain(self.now)
-            finally:close_old_connections()
+            finally:connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: drain(), range(2)))
         self.assertEqual(sum(result["sent"] for result in results), 1)

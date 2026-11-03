@@ -1,4 +1,5 @@
 """Authenticated first-start retries retain the original debit, grant and dispatch."""
+from django.db import connections
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -145,7 +146,7 @@ class FirstArticleCommandTests(CardFixture, TransactionTestCase):
                 client = APIClient(); client.force_authenticate(self.owner)
                 return self.post(client=client)
             finally:
-                close_old_connections()
+                connections.close_all()
         with patch.object(views, 'start_article_generation', side_effect=delayed), \
                 patch('django.core.cache.cache.add', side_effect=ConnectionError('Synthetic unavailable cache')), \
                 ThreadPoolExecutor(max_workers=1) as pool:
