@@ -82,6 +82,26 @@ startup rights and exact outgoing admission/ticket. It persists `dispatching`
 before HTTP. An unknown response never expires into permission to resend. A
 known command acknowledgement does not establish execution status, stopped
 effects, grant release or refund; those remain with the existing typed event
-and settlement controllers. Changed bodies/actions/tickets conflict. Keyed
-group deletion is outside this single-run contract. Unkeyed and legacy controls,
-resume and other actions retain their existing behavior.
+and settlement controllers. Changed bodies/actions/tickets conflict. Keyed group
+deletion captures every original member and recorded PR URL before work, checks
+each target again before transport and replays only the retained group outcome.
+A new sibling cannot silently join an existing delete. Unkeyed and legacy
+controls, resume and other actions retain their existing behavior.
+
+New-journey keyed topic feedback/restore, written-article discard, and the
+first-author settings save use private `founder_library_commands_v1` receipts.
+Feedback changes and accepted receipts share one SQL transaction; replay reads
+the original feedback row without reactivating a subsequently restored topic.
+Discard captures the original article and lineage, retains uncertainty before
+remote cancellation, and commits local deletion/keyword changes with its receipt.
+A known remote refusal does not become execution or refund authority. Unknown
+remote cancellation preserves the local article and cannot be resent by replay.
+Current publication status and permission are rechecked before deletion.
+
+Author saves retain the exact company/authors/default-author body before photo
+storage and atomically commit the accepted receipt with existing settings writes.
+Replays read current settings without rewriting old names or copying photos
+again. An unknown storage result stays held. These receipts contain minimal
+identity/outcome metadata, not complete cached bootstrap responses. Existing
+receipt bindings remain enforceable when the cohort is disabled, so the same
+header cannot escape through the legacy path with a changed body.

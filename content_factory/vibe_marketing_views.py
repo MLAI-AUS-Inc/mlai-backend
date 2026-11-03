@@ -155,6 +155,7 @@ from content_factory.topic_feedback import (
     restore_topic_feedback,
     serialize_topic_feedback,
 )
+from .founder_library_commands import atomic_author_settings
 from content_factory.topic_coverage import build_topic_coverage_memory, match_covered_topic
 from content_factory.vibe_marketing_workflows import (
     DISCOVERY_WORKFLOWS,
@@ -15613,6 +15614,8 @@ def _call_content_factory_run_action(
 
     from .founder_run_commands import before_transport, observe_acknowledgement
     before_transport(run_id=run_id, action=action, payload=payload)
+    from . import founder_library_commands
+    founder_library_commands.before_transport(run_id=run_id, action=action, payload=payload)
     try:
         response = http_client.post(
             f"{remote_config['base_url']}/api/runs/{run_id}/{action}",
@@ -16518,6 +16521,11 @@ class VibeMarketingTopicFeedbackView(APIView):
         if error_response:
             return error_response
 
+        from . import founder_library_commands as library
+        if library.applies(request, context):
+            return library.local(request=request, context=context, action="topic_feedback", resource="topics",
+                invoke=lambda: self.post(request))
+
         keyword = str(request.data.get("keyword") or "").strip()
         if not keyword:
             return Response({"detail": "keyword is required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -16543,6 +16551,11 @@ class VibeMarketingTopicFeedbackRestoreView(APIView):
         context, error_response = _resolve_context_or_response(request, require_domain=True)
         if error_response:
             return error_response
+
+        from . import founder_library_commands as library
+        if library.applies(request, context):
+            return library.local(request=request, context=context, action="topic_restore", resource=feedback_id,
+                invoke=lambda: self.post(request, feedback_id))
 
         try:
             feedback = TopicFeedback.objects.select_related("organization").get(
@@ -16688,6 +16701,11 @@ class VibeMarketingWrittenArticleDiscardView(APIView):
         if error_response:
             return error_response
 
+        from . import founder_library_commands as library
+        if library.applies(request, context):
+            return library.external(request=request, context=context, action="discard", resource=article_id,
+                invoke=lambda: self.post(request, article_id))
+
         article = WrittenArticle.objects.filter(organization=context.organization, id=article_id).first()
         if article is None:
             # Also the double-click case: the first request deleted the row.
@@ -16706,7 +16724,9 @@ class VibeMarketingWrittenArticleDiscardView(APIView):
             )
         article.refresh_from_db()
 
-        members = _written_article_lineage_members(article, context.organization)
+        members = library.discard_members()
+        if members is None:
+            members = _written_article_lineage_members(article, context.organization)
 
         # Stale-status hardening: a row still marked "written" whose runs carry
         # PR evidence means persistence never caught the promote step; advance
@@ -16758,12 +16778,13 @@ class VibeMarketingWrittenArticleDiscardView(APIView):
                 timeout=(2, 8),
                 transport_errors_are_pending=True,
             )
+            library.discard_cancel_response(member.run_id, remote_results[member.pk])
 
         cancelled_run_ids = []
         keyword_text = article.primary_keyword
         slug = article.slug
         normalized_keyword = _normalize_keyword_memory(article.primary_keyword)
-        with transaction.atomic():
+        with library.local_commit("discard"):
             for member in members:
                 _cancel_local_article_run(
                     run=member,
@@ -16805,6 +16826,8 @@ class VibeMarketingWrittenArticleDiscardView(APIView):
                     status_changed_at=timezone.now(),
                 )
             article.delete()
+            library.accept_local("discard", {"discarded": True, "articleId": str(article_id),
+                "slug": slug, "keyword": keyword_text, "cancelledRunIds": cancelled_run_ids})
 
         logger.info(
             "written_article_discarded org=%s article=%s slug=%s cancelled_runs=%s",
@@ -16827,6 +16850,14 @@ class VibeMarketingWrittenArticleDiscardView(APIView):
 
 class VibeMarketingSettingsView(APIView):
     def put(self, request):
+        from . import founder_library_commands as library
+        if library.settings_candidate(request):
+            context, error = _resolve_context_or_response(request, require_domain=True)
+            if error:
+                return error
+            if library.applies(request, context, authors=True):
+                return library.external(request=request, context=context, action="authors", resource=context.company.pk,
+                    invoke=lambda: self.put(request))
         from founder_tools.profile_fields import validate_profile_fields
         from rest_framework.exceptions import ValidationError
 
@@ -16875,6 +16906,8 @@ class VibeMarketingSettingsView(APIView):
         if company.organization_id:
             previous = normalize_authors(OrganizationContentConfig.objects.filter(
                 organization_id=company.organization_id).values_list("authors", flat=True).first())
+        from .founder_library_commands import before_author_photos
+        before_author_photos()
         try:
             return store_author_photos(
                 normalize_authors(request.data.get("authors", request.data.get("authorsData"))),
@@ -16886,6 +16919,7 @@ class VibeMarketingSettingsView(APIView):
                              "authorId": exc.author_id}, status=exc.status)
 
     @transaction.atomic
+    @atomic_author_settings
     def _save_settings(self, request):
         _profile, company, error_response = _resolve_profile_company_or_response(request)
         if error_response:
@@ -20367,7 +20401,9 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             # The owner deleted this draft card: cancel the run they pressed and
             # every sibling still going. Delivered, failed and earlier-stopped
             # siblings keep their outcome; they are only hidden from the drafts list.
-            group = _article_draft_group_members(run, context.organization)
+            group = founder_run_commands.group_members()
+            if group is None:
+                group = _article_draft_group_members(run, context.organization)
             members = [member for member in group
                 if member.pk == run.pk or member.status not in DRAFT_DELETE_KEEPS_STATUSES]
             kept_siblings = [member for member in group if member not in members]
@@ -20376,6 +20412,7 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             cancelled_ids = []
             protected_ids = []
             blocked_reasons = set()
+            founder_run_commands.begin_group()
             for member in members:
                 has_pr_link = _run_has_external_publish_evidence(member)
                 pull_requests = []
@@ -20383,9 +20420,9 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
                     # Deleting the draft must not orphan a PR it opened: close
                     # it (or confirm it is closed) first. A setup PR copied onto
                     # a setup-blocked draft is not the draft's to close.
-                    pull_requests = [
-                        close_draft_pull_request(config, url) for url in _draft_pull_request_urls(member)
-                    ]
+                    for url in _draft_pull_request_urls(member):
+                        founder_run_commands.before_group_cleanup(member.run_id, url)
+                        pull_requests.append(close_draft_pull_request(config, url))
                     kept = [item for item in pull_requests if not item["ok"]]
                     if kept:
                         protected_ids.append(member.run_id)
@@ -20404,8 +20441,9 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
                     cleanup = member_remote.get("cleanup") if isinstance(member_remote.get("cleanup"), dict) else {}
                     member_remote = {**member_remote, "cleanup": {**cleanup, "pull_requests": pull_requests}}
                 try:
-                    _cancel_local_article_run(run=member, organization=context.organization, remote_data=member_remote,
-                        cancellation_reason="draft_deleted", cancelled_by="owner")
+                    with founder_run_commands.group_projection(member.run_id):
+                        _cancel_local_article_run(run=member, organization=context.organization, remote_data=member_remote,
+                            cancellation_reason="draft_deleted", cancelled_by="owner")
                 except (ValueError, TypeError):
                     protected_ids.append(member.run_id)
                     continue
@@ -20417,13 +20455,18 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
                         # A kept attempt's own draft PR is closed (or confirmed
                         # closed) before it is hidden, exactly as a cancelled
                         # member's is; one that cannot be closed stays visible.
-                        kept = [item for item in (close_draft_pull_request(config, url)
-                            for url in _draft_pull_request_urls(sibling)) if not item["ok"]]
+                        kept = []
+                        for url in _draft_pull_request_urls(sibling):
+                            founder_run_commands.before_group_cleanup(sibling.run_id, url)
+                            cleanup = close_draft_pull_request(config, url)
+                            if not cleanup["ok"]:
+                                kept.append(cleanup)
                         if kept:
                             protected_ids.append(sibling.run_id)
                             blocked_reasons.update(item["reason"] for item in kept)
                             continue
-                    _hide_kept_draft_sibling(sibling, now=hidden_at)
+                    with founder_run_commands.group_projection(sibling.run_id):
+                        _hide_kept_draft_sibling(sibling, now=hidden_at)
 
             if not cancelled_ids and protected_ids:
                 detail = (

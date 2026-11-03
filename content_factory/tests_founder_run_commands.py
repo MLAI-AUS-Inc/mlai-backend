@@ -293,11 +293,96 @@ class FounderRunCommandTests(TransactionTestCase):
             self.assertEqual(outbound.call_count, 1)
         self.assert_no_execution_or_billing_writes()
 
-    def test_keyed_group_cancel_is_not_a_single_run_command(self):
+    def test_keyed_group_cancel_replays_its_original_outcome(self):
         with self.remote("cancel") as outbound:
             result = self.post("cancel", {**self.body, "cancelGroup": True})
-        self.assertEqual(result.status_code, 400, result.data)
+            replay = self.post("cancel", {**self.body, "cancelGroup": True})
+            changed = self.post("cancel")
+        self.assertEqual((result.status_code, replay.status_code, changed.status_code), (202, 202, 409), result.data)
+        self.assertEqual(replay.data["cancelledRunIds"], [self.run.run_id])
+        self.assertEqual(replay.data["protectedRunIds"], [])
+        self.assertEqual(outbound.call_count, 1)
+        self.assert_no_execution_or_billing_writes()
+
+    def sibling(self):
+        from .run_ownership import reserve_admitted_run, bind_admitted_run, user_principal, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY
+        raw = {k: deepcopy(v) for k, v in self.run.run_request.items() if k not in {WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY}}
+        raw.update(client_request_id="same-group-sibling", source_run_id=self.run.run_id)
+        return bind_admitted_run(reserve_admitted_run(organization=self.org,
+            principal=user_principal(self.user.pk, f"mlai_user:{self.user.pk}"),
+            workflow="article_generation", payload=raw), "same-group-worker")
+
+    def test_group_multiple_bound_targets_each_submit_once_and_replay_without_effects(self):
+        sibling = self.sibling()
+        def accepted(url, **kwargs):
+            return paired.response({"status": "cancelled", "run_id": url.split("/")[-2]})
+        with self.remote("cancel", side_effect=accepted) as outbound:
+            first = self.post("cancel", {**self.body, "cancel_group": True})
+            replay = self.post("cancel", {**self.body, "cancel_group": True})
+        self.assertEqual((first.status_code, replay.status_code), (202, 202), first.data)
+        self.assertEqual(set(replay.data["cancelledRunIds"]), {self.run.run_id, sibling.run_id})
+        self.assertEqual(outbound.call_count, 2)
+
+    def test_group_unknown_second_target_holds_the_whole_original_command(self):
+        import requests
+        self.sibling()
+        posted = []
+        def accepted_or_unknown(url, **kwargs):
+            posted.append(url)
+            if len(posted) == 2: raise requests.Timeout("Synthetic group acknowledgement loss")
+            return paired.response({"status": "cancelled", "run_id": url.split("/")[-2]})
+        with self.remote("cancel", side_effect=accepted_or_unknown) as outbound:
+            first = self.post("cancel", {**self.body, "cancel_group": True})
+            replay = self.post("cancel", {**self.body, "cancel_group": True})
+        self.assertEqual((first.status_code, replay.status_code), (503, 503), first.data)
+        self.assertEqual(outbound.call_count, 2)
+
+    def test_group_cannot_expand_to_a_sibling_added_after_the_original_snapshot(self):
+        original = commands.begin_group
+        sibling_ids = []
+        def changed():
+            sibling_ids.append(self.sibling().run_id)
+            return original()
+        with self.remote("cancel") as outbound, patch.object(commands, "begin_group", side_effect=changed):
+            response = self.post("cancel", {**self.body, "cancel_group": True})
+        self.assertEqual(response.status_code, 202, response.data)
+        self.assertEqual(response.data["cancelledRunIds"], [self.run.run_id])
+        self.assertEqual(outbound.call_count, 1)
+        self.assertNotIn(sibling_ids[0], outbound.call_args.args[0])
+
+    def test_group_cannot_close_a_pr_added_after_the_original_snapshot(self):
+        from . import draft_pull_request_cleanup
+        original = commands.group_members
+        def changed():
+            members = original()
+            for member in members:
+                result = {**member.result, "pr_url": "https://github.com/synthetic/new/pull/2"}
+                ContentFactoryRun.objects.filter(pk=member.pk).update(result=result)
+                member.refresh_from_db()
+            return members
+        with self.remote("cancel") as outbound, patch.object(commands, "group_members", side_effect=changed), \
+                patch.object(draft_pull_request_cleanup, "close_draft_pull_request", wraps=draft_pull_request_cleanup.close_draft_pull_request) as cleanup:
+            result = self.post("cancel", {**self.body, "cancelGroup": True})
+        self.assertEqual(result.status_code, 409, result.data)
         outbound.assert_not_called()
+        cleanup.assert_not_called()
+
+    def test_group_cannot_hide_a_kept_sibling_after_permission_revocation(self):
+        from .vibe_marketing_views import DRAFT_DELETED_AT_KEY
+        sibling = self.sibling()
+        ContentFactoryRun.objects.filter(pk=sibling.pk).update(status="completed")
+        original = commands.group_projection
+        @contextmanager
+        def revoked(run_id):
+            if run_id == sibling.run_id:
+                User.objects.filter(pk=self.user.pk).update(is_active=False)
+            with original(run_id): yield
+        with self.remote("cancel") as outbound, patch.object(commands, "group_projection", side_effect=revoked):
+            result = self.post("cancel", {**self.body, "cancelGroup": True})
+        self.assertEqual(result.status_code, 403, result.data)
+        sibling.refresh_from_db()
+        self.assertNotIn(DRAFT_DELETED_AT_KEY, sibling.result)
+        self.assertEqual(outbound.call_count, 1)
 
     def test_key_validation_precedes_external_effects(self):
         with self.remote("cancel") as outbound:

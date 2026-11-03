@@ -66,7 +66,10 @@ def _claim(context, user, run, action, data, header):
         digest, body_hash = identity(header, data)
     except FirstArticleRefusal as exc:
         raise CommandRefused("invalid_key", 400) from exc
-    if not isinstance(data, dict) or data.get("cancel_group") or data.get("cancelGroup"):
+    if not isinstance(data, dict):
+        raise CommandRefused("invalid_command", 400)
+    group = bool(data.get("cancel_group") or data.get("cancelGroup"))
+    if group and action != "cancel":
         raise CommandRefused("invalid_command", 400)
     with startup_team._locked(context.organization) as (config, roster):
         principal = _authorized(context, user, action, roster)
@@ -83,8 +86,11 @@ def _claim(context, user, run, action, data, header):
         if receipt is not None:
             if not isinstance(receipt, dict) or any(receipt.get(key) != value for key, value in expected.items()):
                 raise CommandRefused()
+            if group:
+                for target in receipt.get("targets", []):
+                    _source(context, target["run_pk"], target["binding"])
             if receipt.get("state") == "accepted":
-                return None, current_run
+                return None, current_run, deepcopy(receipt.get("outcome", {}))
             # There is deliberately no clock expiry on an unknown external effect.
             if receipt.get("state") != "ready":
                 raise CommandRefused("command_pending", 503)
@@ -95,11 +101,25 @@ def _claim(context, user, run, action, data, header):
             raise CommandRefused("revision_required", 400)
         if revision is not None and revision != (current_run.result.get("articleExport") or {}).get("revision"):
             raise CommandRefused("revision_changed", 409)
-        receipt = {**expected, "state": "claimed", "token": secrets.token_hex(16)}
+        targets = None
+        if group:
+            from . import vibe_marketing_views as views
+            from .website_cancellation_retirement import run_binding
+            targets = receipt.get("targets") if receipt else None
+            if targets is None:
+                targets = [{"run_pk": member.pk, "run_id": member.run_id, "binding": run_binding(member),
+                    "pull_requests": list(views._draft_pull_request_urls(member))}
+                    for member in views._article_draft_group_members(current_run, context.organization)]
+            if (not targets or len(targets) > 200 or any(not target["binding"] for target in targets)
+                    or not any(target["run_pk"] == run.pk for target in targets)):
+                raise CommandRefused()
+        receipt = {**expected, "state": "claimed", "token": secrets.token_hex(16),
+            **({"targets": targets} if group else {})}
         strategy[KEY] = {**commands, digest: receipt}
         _save(config, strategy)
         return {"context": context, "user": user, "digest": digest, "receipt": receipt,
-            "data": deepcopy(data), "transport_started": False, "acknowledged": False}, current_run
+            "data": deepcopy(data), "transport_started": False, "acknowledged": False,
+            "submitted": set(), "acknowledged_targets": set()}, current_run, {}
 
 
 @contextmanager
@@ -124,16 +144,78 @@ def before_transport(*, run_id, action, payload):
         return
     from .run_ownership import require_event_identity, require_event_execution
     with _locked(claim) as (config, strategy, receipt, run):
-        if receipt["state"] != "claimed" or action != receipt["action"] or run_id != receipt["run_id"]:
+        group = "targets" in receipt
+        if (receipt["state"] != ("dispatching" if group else "claimed") or action != receipt["action"]
+                or not group and run_id != receipt["run_id"] or run_id in claim["submitted"]):
             raise CommandRefused()
+        if group:
+            run = _group_target(claim, receipt, run_id)
         try:
-            require_event_identity(run, payload)
-            require_event_execution(run, payload, current=True)
+            from .run_reconciliation import authoritative_run
+            if authoritative_run(run):
+                require_event_identity(run, payload)
+                require_event_execution(run, payload, current=True)
         except ValueError as exc:
             raise CommandRefused() from exc
         receipt["state"] = "dispatching"
         _save(config, strategy)
         claim["transport_started"] = True
+        claim["submitted"].add(run_id)
+
+
+def _group_target(claim, receipt, run_id):
+    target = next((item for item in receipt["targets"] if item["run_id"] == run_id), None)
+    if target is None:
+        raise CommandRefused()
+    return _source(claim["context"], target["run_pk"], target["binding"])[0]
+
+
+def group_members():
+    """Use only the group captured by the original command, never newer siblings."""
+    claim = _active.get()
+    if claim is None or "targets" not in claim["receipt"]:
+        return None
+    with _locked(claim) as (_config, _strategy, receipt, _run):
+        return [_group_target(claim, receipt, target["run_id"]) for target in receipt["targets"]]
+
+
+def begin_group():
+    """Persist uncertainty before cleanup, hiding, or any group cancellation."""
+    claim = _active.get()
+    if claim is None or "targets" not in claim["receipt"]:
+        return
+    with _locked(claim) as (config, strategy, receipt, _run):
+        if receipt["state"] != "claimed":
+            raise CommandRefused()
+        receipt["state"] = "dispatching"
+        _save(config, strategy)
+        claim["transport_started"] = True
+
+
+def before_group_cleanup(run_id, url):
+    """A group command cannot close a newly discovered or unrelated PR."""
+    claim = _active.get()
+    if claim is None or "targets" not in claim["receipt"]:
+        return
+    with _locked(claim) as (_config, _strategy, receipt, _run):
+        _group_target(claim, receipt, run_id)
+        target = next(item for item in receipt["targets"] if item["run_id"] == run_id)
+        if receipt["state"] != "dispatching" or url not in target["pull_requests"]:
+            raise CommandRefused()
+
+
+@contextmanager
+def group_projection(run_id):
+    """Recheck current rights before a group writes local cancellation metadata."""
+    from django.db import transaction
+    claim = _active.get()
+    if claim is None or "targets" not in claim["receipt"]:
+        with transaction.atomic():
+            yield
+        return
+    with _locked(claim) as (_config, _strategy, receipt, _run):
+        _group_target(claim, receipt, run_id)
+        yield
 
 
 def validate_prior_approval(run):
@@ -154,7 +236,7 @@ def observe_acknowledgement(*, run_id, action, data):
     if claim is None:
         return
     original = claim["receipt"]
-    if not isinstance(data, dict) or run_id != original["run_id"] or action != original["action"]:
+    if (not isinstance(data, dict) or run_id not in claim["submitted"] or action != original["action"]):
         return
     if (data.get("run_id") != run_id or data.get("error") or data.get("accepted") is False
             or data.get("allowed") is False or data.get("action", action) != action):
@@ -167,6 +249,8 @@ def observe_acknowledgement(*, run_id, action, data):
     from .run_ownership import WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, require_event_identity, require_event_execution
     if WIRE_REQUEST_KEY in data or WIRE_EXECUTION_KEY in data:
         with _locked(claim) as (_config, _strategy, _receipt, run):
+            if "targets" in original:
+                run = _group_target(claim, original, run_id)
             try:
                 require_event_identity(run, data)
                 require_event_execution(run, data, current=True)
@@ -178,15 +262,25 @@ def observe_acknowledgement(*, run_id, action, data):
         # The existing deny protocol returns run_id/status; cancellation may
         # additionally carry closure proof, which only its settlement owner uses.
         claim["acknowledged"] = data.get("status") == {"deny": "denied", "cancel": "cancelled"}[action]
+    if claim["acknowledged"]:
+        claim["acknowledged_targets"].add(run_id)
 
 
 def _finish(claim, response):
     accepted = 200 <= response.status_code < 300
-    if accepted and claim["transport_started"] and not claim["acknowledged"]:
+    group = "targets" in claim["receipt"]
+    if accepted and claim["transport_started"] and (
+            claim["submitted"] != claim["acknowledged_targets"] if group else not claim["acknowledged"]):
         raise CommandRefused("command_pending", 503)
     with _locked(claim) as (config, strategy, receipt, _run):
         if accepted:
             receipt["state"] = "accepted"
+            if group:
+                allowed = {target["run_id"] for target in receipt["targets"]}
+                outcome = {key: response.data.get(key, []) for key in ("cancelledRunIds", "protectedRunIds")}
+                if any(not isinstance(value, list) or any(item not in allowed for item in value) for value in outcome.values()):
+                    raise CommandRefused()
+                receipt["outcome"] = outcome
         elif not claim["transport_started"]:
             receipt["state"] = "ready"
         _save(config, strategy)
@@ -211,9 +305,9 @@ def execute(*, context, user, run, action, data, header, invoke):
     from . import vibe_marketing_views as views
     claim = None
     try:
-        claim, current_run = _claim(context, user, run, action, data, header)
+        claim, current_run, outcome = _claim(context, user, run, action, data, header)
         if claim is None:
-            return Response(views._serialize_run(current_run, context=context), status=202)
+            return Response({**views._serialize_run(current_run, context=context), **outcome}, status=202)
         token = _active.set(claim)
         try:
             response = invoke(current_run)

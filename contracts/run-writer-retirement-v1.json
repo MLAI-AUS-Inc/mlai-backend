@@ -3045,16 +3045,17 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5ba5b270a596a319755f64ebcdc1e617e63cddf54a9cc790f1db1aeb7fc7698a",
+      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_run_current_review.py",
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
-        "content_factory/tests_founder_run_commands.py"
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3177,16 +3178,17 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5ba5b270a596a319755f64ebcdc1e617e63cddf54a9cc790f1db1aeb7fc7698a",
+      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_run_current_review.py",
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
-        "content_factory/tests_founder_run_commands.py"
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3206,16 +3208,17 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5ba5b270a596a319755f64ebcdc1e617e63cddf54a9cc790f1db1aeb7fc7698a",
+      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_run_current_review.py",
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
-        "content_factory/tests_founder_run_commands.py"
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3237,16 +3240,17 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5ba5b270a596a319755f64ebcdc1e617e63cddf54a9cc790f1db1aeb7fc7698a",
+      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_run_current_review.py",
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
-        "content_factory/tests_founder_run_commands.py"
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3507,16 +3511,17 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "5ba5b270a596a319755f64ebcdc1e617e63cddf54a9cc790f1db1aeb7fc7698a",
+      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_run_current_review.py",
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
-        "content_factory/tests_founder_run_commands.py"
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -6201,9 +6206,10 @@
     {
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_call_content_factory_run_action",
-      "function_sha256": "0062dcbae02d0a101edeab8626f743b7632428ebb705dbd13e0d9b0ee412401e",
-      "reason": "Exact original control receipt, current active principal and outgoing admission/ticket are rechecked under SQL lock immediately before marking the external POST permanently uncertain; no transport occurs under that lock.",
+      "function_sha256": "3ed430c5275aa9ef34170eaf21084251367404a551a0ab872cf256528fdb0f23",
+      "reason": "Exact original control receipt, current active principal and outgoing admission/ticket are rechecked under SQL lock immediately before marking the external POST permanently uncertain; no transport occurs under that lock. Group operations retain the original member set and use the same before-transport identity gate; unknown effects remain held.",
       "test_refs": [
+        "content_factory/tests_founder_library_commands.py",
         "content_factory/tests_founder_run_commands.py"
       ]
     },
@@ -6232,18 +6238,20 @@
     {
       "path": "content_factory/founder_run_commands.py",
       "function": "before_transport",
-      "function_sha256": "594f9786d2d232a4838d883dd682e04c9c99f54a9b7762a20ed877e248b6a163",
-      "reason": "Original binding plus current account and publish/write rights guard the only new command effect boundary. The dispatching state never expires.",
+      "function_sha256": "1446c3b29b03387b8c7f81bbd6183b340f97d331e0627043eefbdfdd8d943329",
+      "reason": "Original binding plus current account and publish/write rights guard the only new command effect boundary. The dispatching state never expires. Group operations retain the original member set and use the same before-transport identity gate; unknown effects remain held.",
       "test_refs": [
+        "content_factory/tests_founder_library_commands.py",
         "content_factory/tests_founder_run_commands.py"
       ]
     },
     {
       "path": "content_factory/founder_run_commands.py",
       "function": "execute",
-      "function_sha256": "5f664cc60958e1697ab0741662fd1cbc804b4791041bfaf652e3fc0067ceed59",
-      "reason": "Durable accepted metadata replays a current authorized projection of the original Run, before prior consent noop and without another CF POST. No execution state or grant is written.",
+      "function_sha256": "12bec38fe435bde2786361f73729b2731a1864dfed00eeac777f767e0b095c30",
+      "reason": "Durable accepted metadata replays a current authorized projection of the original Run, before prior consent noop and without another CF POST. No execution state or grant is written. Group operations retain the original member set and use the same before-transport identity gate; unknown effects remain held.",
       "test_refs": [
+        "content_factory/tests_founder_library_commands.py",
         "content_factory/tests_founder_run_commands.py"
       ]
     },
@@ -6259,19 +6267,152 @@
     {
       "path": "content_factory/founder_run_commands.py",
       "function": "observe_acknowledgement",
-      "function_sha256": "b487fb0fd7de3c804eb2197c4eae8f26eeb63674a2121fe6b82ea25217fdf106",
-      "reason": "A successful response is command acceptance only; run/action/status/rejection and any supplied admission/ticket must match. No cancellation/effect or billing conclusion is inferred.",
+      "function_sha256": "0088fb262ccfda88a029159465c5e8a408a4acc606fa90a0523e9cf709eb8869",
+      "reason": "A successful response is command acceptance only; run/action/status/rejection and any supplied admission/ticket must match. No cancellation/effect or billing conclusion is inferred. Group operations retain the original member set and use the same before-transport identity gate; unknown effects remain held.",
       "test_refs": [
+        "content_factory/tests_founder_library_commands.py",
         "content_factory/tests_founder_run_commands.py"
       ]
     },
     {
       "path": "content_factory/founder_run_commands.py",
       "function": "_claim",
-      "function_sha256": "784408800efbb87dfba9bbfab6d1ccec7a125a336e4763d5b6855f4a3bc829c5",
-      "reason": "The exact header/body, company, principal, action, Run and original binding are durably compared under the current startup lock before prior consent can noop.",
+      "function_sha256": "ddca0bf9bbe746d6ef2c513faa761cd00d1fc64050674ccaa06d19291b71851b",
+      "reason": "The exact header/body, company, principal, action, Run and original binding are durably compared under the current startup lock before prior consent can noop. Group operations retain the original member set and use the same before-transport identity gate; unknown effects remain held.",
+      "test_refs": [
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_founder_run_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_run_commands.py",
+      "function": "begin_group",
+      "function_sha256": "d5ec8cda8cc8d47c7d625ee0a0f02614ae33faa371ade093cd3c5fae072a82c0",
+      "reason": "Current principal/resource identity, permanent unknown-effect custody and atomic local acceptance were reviewed. No Run lifecycle or financial authority is introduced; original group members and discard article remain bound.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_run_commands.py",
+      "function": "before_group_cleanup",
+      "function_sha256": "d4d3842e3525cefb635e6d96eecc7c5da7f4bf62f8ba8563405fb76ec83ea203",
+      "reason": "Current principal/resource identity, permanent unknown-effect custody and atomic local acceptance were reviewed. No Run lifecycle or financial authority is introduced; original group members and discard article remain bound.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_library_commands.py",
+      "function": "local",
+      "function_sha256": "c3147f5954089f0c60a72b0c7ccf6a0aae4c009939003e75b43ae5590ea5d3b5",
+      "reason": "Current principal/resource identity, permanent unknown-effect custody and atomic local acceptance were reviewed. No Run lifecycle or financial authority is introduced; original group members and discard article remain bound.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_library_commands.py",
+      "function": "_claim",
+      "function_sha256": "1755f98a05f7e4af92d67a62f11e7427f228c75dcb9551c1f80c4bee785865f4",
+      "reason": "Current principal/resource identity, permanent unknown-effect custody and atomic local acceptance were reviewed. No Run lifecycle or financial authority is introduced; original group members and discard article remain bound. Refused local requests retain their original article/member identity, and local commit rechecks every original ticket after external cancellation.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_library_commands.py",
+      "function": "before_transport",
+      "function_sha256": "79d7034aa1a47f5d44fda2521ba9c4df805200cf2efd1f95f1346baf64ea33b2",
+      "reason": "Current principal/resource identity, permanent unknown-effect custody and atomic local acceptance were reviewed. No Run lifecycle or financial authority is introduced; original group members and discard article remain bound.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_library_commands.py",
+      "function": "local_commit",
+      "function_sha256": "02faaf6bf4d9a7c610294669accf3fb732661ee5320e0fbee5e899af70112216",
+      "reason": "Current principal/resource identity, permanent unknown-effect custody and atomic local acceptance were reviewed. No Run lifecycle or financial authority is introduced; original group members and discard article remain bound. Refused local requests retain their original article/member identity, and local commit rechecks every original ticket after external cancellation.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_library_commands.py",
+      "function": "accept_local",
+      "function_sha256": "ea80b326a4a871ee1552a94c3336e24273956b0c232c1704c83017e4697c942b",
+      "reason": "Current principal/resource identity, permanent unknown-effect custody and atomic local acceptance were reviewed. No Run lifecycle or financial authority is introduced; original group members and discard article remain bound.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_library_commands.py",
+      "function": "before_author_photos",
+      "function_sha256": "888aa79960affa629c36ea785048a2bf667ef332d1e9a763923b3a2f0c54c8f5",
+      "reason": "Current principal/resource identity, permanent unknown-effect custody and atomic local acceptance were reviewed. No Run lifecycle or financial authority is introduced; original group members and discard article remain bound.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_library_commands.py",
+      "function": "atomic_author_settings",
+      "function_sha256": "a431f93766c55003dbe32c9ae61b98a4f0b34aa49ff8fe8cd4ec1d4783dc2038",
+      "reason": "Current principal/resource identity, permanent unknown-effect custody and atomic local acceptance were reviewed. No Run lifecycle or financial authority is introduced; original group members and discard article remain bound.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_founder_library_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_run_commands.py",
+      "function": "group_projection",
+      "function_sha256": "c37595787e30f0d56274c7b4f5ff71c86eec3a57176f1ffcef21535ee399b8a5",
+      "reason": "Current principal and original member binding are rechecked before local group cancellation metadata or hiding a kept sibling; no HTTP under the SQL guard.",
       "test_refs": [
         "content_factory/tests_founder_run_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "VibeMarketingSettingsView.put",
+      "function_sha256": "eea8018f76a6c58f2c6e44f14cf988a4915d7a547bb6ef01e2ceefdaf7ccb4ec",
+      "reason": "Only keyed new-journey first-author bodies enter the retained command boundary; accepted receipt and existing settings writes commit together. Existing no-key/general settings semantics and validation remain intact.",
+      "test_refs": [
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_author_photos_unit.py",
+        "content_factory/tests_startup_settings_unit.py"
+      ]
+    },
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "VibeMarketingSettingsView._save_settings",
+      "function_sha256": "ff39d97949a89164f71ce2572e93fe599a313ebac6677246b2b476548094aa19",
+      "reason": "Only keyed new-journey first-author bodies enter the retained command boundary; accepted receipt and existing settings writes commit together. Existing no-key/general settings semantics and validation remain intact.",
+      "test_refs": [
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_author_photos_unit.py",
+        "content_factory/tests_startup_settings_unit.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_library_commands.py",
+      "function": "settings_candidate",
+      "function_sha256": "f329aebb8dbe2a4af6a878da1b95af58fb10d112a3f0fc4033e07f19dc45800e",
+      "reason": "Only author-only bodies or already-retained exact headers enter this command path. General first-domain settings keep their original validation/write behavior; a retained header cannot escape into unrelated settings.",
+      "test_refs": [
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_startup_settings_unit.py"
       ]
     }
   ],

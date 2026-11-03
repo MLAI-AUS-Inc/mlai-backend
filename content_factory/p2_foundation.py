@@ -33,7 +33,7 @@ P2_BACKEND_RESULT_KEYS = frozenset({
 # IF-P2-26: run-request keys the backend owns; a snapshot never introduces or changes them.
 P2_BACKEND_REQUEST_KEYS = frozenset({"self_heal_policy_v1", "merge_policy"})
 # IF-P2-28: pillar_strategy keys that are backend bookkeeping, never strategy.
-P2_PRIVATE_STRATEGY_KEYS = ('self_heal', 'startup_team', 'founder_notices', 'founder_funnel', 'first_article_commands', 'paid_article_commands', 'founder_run_commands_v1', 'editorial_catalog_commands_v1')
+P2_PRIVATE_STRATEGY_KEYS = ('self_heal', 'startup_team', 'founder_notices', 'founder_funnel', 'first_article_commands', 'paid_article_commands', 'founder_run_commands_v1', 'editorial_catalog_commands_v1', 'founder_library_commands_v1')
 
 STAMP_KEY = "self_heal_policy_v1"
 MERGE_POLICY_KEY = "merge_policy"
