@@ -74,7 +74,7 @@ class AudienceTests(SimpleTestCase):
         binding = Obj(user=Obj(), user_id=9, organization=Obj(), google_connection=None, id=3)
         organization = Obj(id=1, domain="startup.invalid", startup_profile=None)
         with ExitStack() as stack:
-            stack.enter_context(patch("integrations.services.external_connectors.google_connection_for_org", return_value=None))
+            stack.enter_context(patch.object(services, "google_connection_for_binding", return_value=None))
             stack.enter_context(patch.object(services, "get_open_startup_update_run", return_value=None))
             stack.enter_context(patch.object(services, "supersede_conflicting_startup_update_runs"))
             stack.enter_context(patch.object(services, "build_external_context_for_sources", return_value={}))
@@ -89,6 +89,7 @@ class AudienceTests(SimpleTestCase):
         self.assertEqual(payload["audience_visibility"], ["public"])
         self.assertEqual(payload["financial_history_selection"], {"enabled": True, "shareAmounts": False, "refresh": False})
         self.assertNotIn("published_at", payload)
+        self.assertEqual(payload["source_connection_pins"], {})
 
 
 @override_settings(COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED=True)

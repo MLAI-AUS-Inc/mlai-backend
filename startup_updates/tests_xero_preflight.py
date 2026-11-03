@@ -37,7 +37,9 @@ class XeroPreflightHttpTests(SimpleTestCase):
         self.query.exclude.return_value.order_by.return_value.first.return_value = self.connection
 
     def check(self):
-        with patch.object(ExternalServiceConnection.objects, "filter", return_value=self.query), patch.object(ec, "_xero_required_token", return_value="synthetic-token"):
+        with patch.object(ExternalServiceConnection.objects, "filter", return_value=self.query), \
+             patch("integrations.services.source_accounts.report_account_id", return_value=None), \
+             patch.object(ec, "_xero_required_token", return_value="synthetic-token"):
             return check_sources(["xero"], lambda _: probe_source("xero", user="user-a", organization="startup-a"))[0]
 
     def test_real_empty_429_preserves_wait_and_reconnect_cannot_reset_shared_quota(self):
