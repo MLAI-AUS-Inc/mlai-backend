@@ -71,6 +71,11 @@ and coalesces equivalent in-flight requests with the same owner, update identity
 revision, sources, connection identities and reporting settings. A repeated
 request ID with changed inputs fails rather than mutating an earlier job.
 
+New refreshes pin the owner's selected report account for each provider. A
+missing or disconnected explicit choice requires reconnection; it never falls
+back to another tenant. Changing the selected account affects new requests only:
+an existing request, including retries, keeps its original connection pins.
+
 A bounded two-thread fast path advances saved stages. Each stage claims a
 180-second lease and commits only while its token still owns the job. Provider
 reads happen outside the job transaction; existing connector credential rotation

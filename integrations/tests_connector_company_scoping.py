@@ -62,7 +62,7 @@ class ConnectorCompanyScopingTests(TestCase):
             token_type="bearer",
             token_expires_at=None,
             scopes=[],
-            external_account_id="",
+            external_account_id=f"notion-workspace-{organization.pk}",
             account_label=organization.name,
         )
 

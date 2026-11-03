@@ -515,7 +515,7 @@ class CoverImageTests(SimpleTestCase):
         org = Obj(id=7, startup_profile=None, domain='acme.example')
         binding = Obj(id=8, google_connection=None, user=Obj(), organization=org, user_id=1)
         with ExitStack() as stack:
-            stack.enter_context(patch('integrations.services.external_connectors.google_connection_for_org', return_value=None))
+            stack.enter_context(patch.object(services, 'google_connection_for_binding', return_value=None))
             stack.enter_context(patch.object(services, 'get_open_startup_update_run', return_value=None))
             stack.enter_context(patch.object(services, 'supersede_conflicting_startup_update_runs'))
             stack.enter_context(patch.object(services, 'build_external_context_for_sources', return_value={}))
@@ -527,6 +527,7 @@ class CoverImageTests(SimpleTestCase):
         request = runs.create.call_args.kwargs['run_request']
         self.assertEqual(request['cover_image'], cover)
         self.assertEqual(request['manual_summary'], 'A good month')
+        self.assertEqual(request['source_connection_pins'], {})
 
     def test_cover_does_not_disclose_arbitrary_metadata(self):
         from startup_updates.disclosure import shared_update
