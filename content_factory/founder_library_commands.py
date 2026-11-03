@@ -62,7 +62,7 @@ def applies(request, context, *, authors=False):
     strategy = OrganizationContentConfig.objects.filter(organization=context.organization).values_list("pillar_strategy", flat=True).first() or {}
     saved = strategy.get(KEY, {})
     retained = not isinstance(saved, dict) or digest is not None and digest in saved
-    return retained or (is_new_journey(context.organization)
+    return retained or ((KEY in strategy or is_new_journey(context.organization))
         and (not authors or bool({"authors", "authorsData"} & request.data.keys())
             and set(request.data) <= AUTHOR_FIELDS))
 
@@ -136,6 +136,9 @@ def local(*, request, context, action, resource, invoke):
             if receipt is not None and receipt.get("state") != "accepted":
                 raise CommandRefused("command_pending", 503)
             if receipt is None:
+                from .founder_journey_cohort import is_new_journey
+                if not is_new_journey(context.organization):
+                    raise CommandRefused("journey_changed")
                 token = _active.set({"local": True})
                 try:
                     result = invoke()

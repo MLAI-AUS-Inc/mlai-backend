@@ -105,3 +105,5 @@ again. An unknown storage result stays held. These receipts contain minimal
 identity/outcome metadata, not complete cached bootstrap responses. Existing
 receipt bindings remain enforceable when the cohort is disabled, so the same
 header cannot escape through the legacy path with a changed body.
+
+Once the library command namespace is enrolled, disabling the new-journey flag retains the keyed boundary: original accepted commands can project current authorized state, while unseen topic, restore, discard and author-only commands are refused before effects. Unrelated general settings and never-enrolled legacy callers keep their existing validation.

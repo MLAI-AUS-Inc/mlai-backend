@@ -390,3 +390,90 @@ class FounderLibraryCommandTests(TransactionTestCase):
         self.assertEqual(result.status_code, 409, result.data)
         self.assertTrue(WrittenArticle.objects.filter(pk=article.pk).exists())
         self.assertEqual(outbound.call_count, 1)
+
+    def test_enrolled_flag_off_refuses_unseen_topic_but_keeps_original_replay(self):
+        first = self.send("topic-feedback", self.topic)
+        self.assertEqual(first.status_code, 201, first.data)
+        config = OrganizationContentConfig.objects.values().get(organization=self.org)
+        rows = list(TopicFeedback.objects.values())
+        with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False):
+            unseen = self.send("topic-feedback", {**self.topic, "keyword": "New topic"}, key="new-off-topic")
+            replay = self.send("topic-feedback", self.topic)
+        self.assertEqual((unseen.status_code, replay.status_code), (409, 201), unseen.data)
+        self.assertEqual(list(TopicFeedback.objects.values()), rows)
+        self.assertEqual(OrganizationContentConfig.objects.values().get(organization=self.org), config)
+        self.assertEqual(Ledger.objects.count(), 0)
+
+    def test_enrolled_flag_off_refuses_unseen_restore_and_replays_original_restore(self):
+        first = self.send("topic-feedback", self.topic)
+        url = f"topic-feedback/{first.data['id']}/restore"
+        before = list(TopicFeedback.objects.values())
+        with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False):
+            unseen = self.send(url, key="original-restore")
+        self.assertEqual(unseen.status_code, 409, unseen.data)
+        self.assertEqual(list(TopicFeedback.objects.values()), before)
+        self.assertEqual(self.send(url, key="original-restore").status_code, 200)
+        saved = list(TopicFeedback.objects.values())
+        receipts = self.receipts()
+        with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False):
+            replay = self.send(url, key="original-restore")
+        self.assertEqual(replay.status_code, 200, replay.data)
+        self.assertEqual(list(TopicFeedback.objects.values()), saved)
+        self.assertEqual(self.receipts(), receipts)
+        self.assertEqual(Ledger.objects.count(), 0)
+
+    def test_enrolled_flag_off_refuses_unseen_author_without_photo_or_profile_effect(self):
+        self.assertEqual(self.send("settings", self.author, method="put").status_code, 200)
+        body = {**self.author, "authors": [{**self.author["authors"][0], "avatarUrl": "https://photo.example/new.jpg"}]}
+        before = OrganizationContentConfig.objects.values().get(organization=self.org)
+        with patch("content_factory.author_photos.copy_photo", return_value="/stored/new.jpg") as copy:
+            with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False):
+                unseen = self.send("settings", body, key="new-off-author", method="put")
+                replay = self.send("settings", self.author, method="put")
+            self.assertEqual((unseen.status_code, replay.status_code), (409, 200), unseen.data)
+            copy.assert_not_called()
+            self.assertEqual(OrganizationContentConfig.objects.values().get(organization=self.org), before)
+            self.assertEqual(self.send("settings", body, key="new-off-author", method="put").status_code, 200)
+            self.assertEqual(copy.call_count, 1)
+        self.assertEqual(Ledger.objects.count(), 0)
+
+    def test_enrolled_flag_off_refuses_unseen_discard_and_retains_later_acceptance(self):
+        self.assertEqual(self.send("topic-feedback", self.topic).status_code, 201)
+        article, run = self.article()
+        url = f"written-articles/{article.pk}/discard"
+        before = {"article": list(WrittenArticle.objects.values()), "keywords": list(ResearchedKeyword.objects.values()),
+            "run": ContentFactoryRun.objects.values().get(pk=run.pk), "receipts": self.receipts()}
+        with self.cancellation(run) as outbound:
+            with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False):
+                unseen = self.send(url, key="new-off-discard")
+            self.assertEqual(unseen.status_code, 409, unseen.data)
+            outbound.assert_not_called()
+            self.assertEqual(list(WrittenArticle.objects.values()), before["article"])
+            self.assertEqual(list(ResearchedKeyword.objects.values()), before["keywords"])
+            self.assertEqual(ContentFactoryRun.objects.values().get(pk=run.pk), before["run"])
+            self.assertEqual(self.receipts(), before["receipts"])
+            accepted = self.send(url, key="new-off-discard")
+            self.assertEqual(accepted.status_code, 200, accepted.data)
+            saved = self.receipts()
+            with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False):
+                replay = self.send(url, key="new-off-discard")
+            self.assertEqual(replay.status_code, 200, replay.data)
+            self.assertEqual(replay.data, accepted.data)
+            self.assertEqual(outbound.call_count, 1)
+            self.assertEqual(self.receipts(), saved)
+        self.assertEqual(Ledger.objects.count(), 0)
+
+    def test_unenrolled_flag_off_keyed_topic_keeps_legacy_compatibility(self):
+        with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False):
+            response = self.send("topic-feedback", self.topic)
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(self.receipts(), {})
+
+    def test_enrolled_flag_off_keeps_unrelated_general_settings_compatible(self):
+        self.assertEqual(self.send("settings", self.author, method="put").status_code, 200)
+        receipts = self.receipts()
+        with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False):
+            response = self.send("settings", {"companyId": str(self.company.pk), "brandName": "Updated brand"},
+                key="unrelated-general-settings", method="put")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(self.receipts(), receipts)

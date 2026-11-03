@@ -6307,8 +6307,8 @@
     {
       "path": "content_factory/founder_library_commands.py",
       "function": "local",
-      "function_sha256": "c3147f5954089f0c60a72b0c7ccf6a0aae4c009939003e75b43ae5590ea5d3b5",
-      "reason": "Current principal/resource identity, permanent unknown-effect custody and atomic local acceptance were reviewed. No Run lifecycle or financial authority is introduced; original group members and discard article remain bound.",
+      "function_sha256": "6d8d47f2e04cf0efdf911b21fc819c979d49779fdb2a4cbf6fd8b5acb6c9d4f2",
+      "reason": "Current principal/resource identity, permanent unknown-effect custody and atomic local acceptance were reviewed. No Run lifecycle or financial authority is introduced; original group members and discard article remain bound. Enrolled library namespace retains keyed command custody when rollout is off; unseen commands are refused under the organization lock without local or external effects.",
       "test_refs": [
         "content_factory/tests_founder_run_commands.py",
         "content_factory/tests_founder_library_commands.py"
@@ -6642,6 +6642,15 @@
       "reason": "A retained v2 header remains bound to its original raw body even when the body caller key is removed, emptied or changed. Only protected local receipt membership, malformed retained namespace or a backend-only outbox marker refuses legacy fallthrough; genuinely unseen no-key/v1 header-only paths keep their legacy delegation. These reads grant no new authority or effects.",
       "test_refs": [
         "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_library_commands.py",
+      "function": "applies",
+      "function_sha256": "bf7ec17c8a786d8028ec22d33486afbac8f45fc7b1b54f0a02866a1d694ac5a9",
+      "reason": "Retain the exact-key library boundary after namespace enrollment even when rollout is off. Author enrollment remains limited to author-only bodies or an already bound header; unrelated general settings and no-key legacy calls preserve their existing paths.",
+      "test_refs": [
+        "content_factory/tests_founder_library_commands.py"
       ]
     }
   ],
