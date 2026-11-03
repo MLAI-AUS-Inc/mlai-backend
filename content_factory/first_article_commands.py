@@ -39,6 +39,8 @@ def recheck_current_claim(context, user, payload):
             or payload.get('client_request_id') != original['client_request_id']):
         _refuse()
     with startup_team._locked(context.organization) as (_, _roster):
+        from django.contrib.auth import get_user_model
+        user = get_user_model().objects.filter(pk=user_id, is_active=True).first()
         require_owner(user, context.organization)
         config = OrganizationContentConfig.objects.select_for_update().get(organization=context.organization)
         current = (config.pillar_strategy or {}).get(KEY, {}).get(digest)
@@ -92,8 +94,10 @@ def claim(context, user, header, data, prepare):
     from .content_first_article import FirstArticleRefusal, require_owner
     digest, body_hash = identity(header, data)
     with startup_team._locked(context.organization) as (_, _roster):
+        from django.contrib.auth import get_user_model
         from .models import OrganizationContentConfig
         config = OrganizationContentConfig.objects.select_for_update().get(organization=context.organization)
+        user = get_user_model().objects.filter(pk=getattr(user, 'pk', None), is_active=True).first()
         require_owner(user, context.organization)
         strategy = deepcopy(config.pillar_strategy or {})
         commands = strategy.get(KEY, {})

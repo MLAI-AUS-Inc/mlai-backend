@@ -114,7 +114,8 @@ class FirstArticleSwitchTopicView(_FirstArticleAccess):
         if not self._applies():
             return _not_found()
         try:
-            status, body = first_articles.switch_topic(self._context(), request.user, request.data)
+            status, body = first_articles.switch_topic(self._context(), request.user, request.data,
+                idempotency_key=request.headers.get('Idempotency-Key'))
         except first_articles.FirstArticleRefusal as refusal:
             return self._refused(refusal)
         return Response(body, status=status)

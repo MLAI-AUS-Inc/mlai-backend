@@ -1010,7 +1010,7 @@ def start_first_article(context, user, data, *, attempt_source="start", idempote
         return _dispatch(context, user, prepared, brief, entitlement, attempt_source=attempt_source)
 
 
-def switch_topic(context, user, data):
+def switch_topic(context, user, data, *, idempotency_key=None):
     """Cancel a slow free first-article run as ``superseded`` and start attempt 2. Returns ``(status, body)``.
 
     Allowed only while the journey says ``switchTopicAvailable`` for that run.
@@ -1021,6 +1021,9 @@ def switch_topic(context, user, data):
     started, so a refused switch leaves the running article untouched. A third
     attempt is never offered.
     """
+    if idempotency_key is not None and applies(context.organization):
+        from .first_article_switch_commands import switch_topic_command
+        return switch_topic_command(context, user, data, idempotency_key)
     from workflow_runs.models import ContentFactoryRun
     from .article_publication_evidence import cancellation_receipt
     from .first_article_entitlement import entitlement_state, release_entitlement

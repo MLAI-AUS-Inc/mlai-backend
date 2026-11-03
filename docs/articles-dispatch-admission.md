@@ -40,3 +40,28 @@ provider admission, schema3 promotion and parent allocation. Disposable
 PostgreSQL CI additionally covers persisted configuration changes, bounded
 unknown delivery, exact-key recovery and one-spend delivery. No database tests,
 provider actions or financial repairs are run locally.
+
+## Keyed first-article topic switches
+
+For the admitted founder journey, `POST /api/v1/my-startup/first-article/switch-topic/`
+with `Idempotency-Key` retains the authenticated owner, company, complete original
+body, original run identity and prepared replacement before requesting a stop.
+The key is a normal client UUID; both a custom topic and the catalogue shape
+`{runId, topicId, customTopic: null}` use this contract. A changed body conflicts.
+
+Replaying the same command recovers its exact replacement run or retained outbox,
+including after a lost acknowledgement, process restart or completed execution.
+The latest journey run is never a substitute acknowledgement. An active duplicate
+returns `409 in_progress`; an unconfirmed original stop returns `503 switch_pending`.
+Neither response admits another replacement or a paid fallback.
+
+An owned original requires the existing terminal controller's exact closure,
+fully drained journal and original grant release. Legacy originals require a
+validated, bound no-effect cancellation receipt. Current owner consent and free
+eligibility are rechecked before replacement admission, including in the actual
+debit/outbox transaction. Existing no-key and non-admitted behavior is unchanged.
+The command uses existing configuration receipts and requires no schema change.
+
+`content_factory.tests_first_article_switch_commands` exercises this HTTP contract
+against disposable PostgreSQL using synthetic provider responses, including
+concurrent requests, unavailable cache, lost acknowledgements and owned closure.

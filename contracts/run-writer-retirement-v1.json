@@ -5951,19 +5951,21 @@
     {
       "path": "content_factory/first_article_commands.py",
       "function": "claim",
-      "function_sha256": "1fdb32c64cd889e067be4a56c62f3fcc4c2e1b50e77ed7370f01fd64f73c9b5b",
-      "reason": "Bind actual current owner/company/header/body to immutable approved data and one server key under Org/config lock before effects; terminal/outbox replay cannot allocate a new debit.",
+      "function_sha256": "7b3747300183e1711a0f3c76e60e6a654f95dca15c15f75cc6698f029a1afcfd",
+      "reason": "Bind actual current owner/company/header/body to immutable approved data and one server key under Org/config lock before effects; terminal/outbox replay cannot allocate a new debit. Reload the active user from SQL inside the authority lock so a stale authenticated object cannot replay or admit work after revocation.",
       "test_refs": [
-        "content_factory.tests_first_article_commands"
+        "content_factory.tests_first_article_commands",
+        "content_factory.tests_first_article_switch_commands"
       ]
     },
     {
       "path": "content_factory/first_article_commands.py",
       "function": "recheck_current_claim",
-      "function_sha256": "ef740d80c7f68292383150607c206a4e96add292e95ced4b3733c114c41bc9a4",
-      "reason": "Private internal context only; under the actual debit/outbox transaction fresh owner/frozen authority and original retained claim are rechecked.",
+      "function_sha256": "bd68609ed03b1fd7fea002dc404141ffb356985e5c8ad475a2120f9f7d1b8e3a",
+      "reason": "Private internal context only; under the actual debit/outbox transaction fresh owner/frozen authority and original retained claim are rechecked. Reload the active user from SQL inside the authority lock so a stale authenticated object cannot replay or admit work after revocation.",
       "test_refs": [
-        "content_factory.tests_first_article_commands"
+        "content_factory.tests_first_article_commands",
+        "content_factory.tests_first_article_switch_commands"
       ]
     },
     {
@@ -6156,6 +6158,39 @@
       "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
       "test_refs": [
         "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/first_article_switch_commands.py",
+      "function": "_locked_claim",
+      "function_sha256": "e54e4977139d3ab1e49d7ba8114d8df155601e5daef6eef0659ffd124967b71e",
+      "reason": "Reload current active owner under the organization/configuration lock; require original lease, body, company, principal and prepared payload before reading or retaining switch progress.",
+      "test_refs": [
+        "content_factory.tests_first_article_switch_commands",
+        "content_factory.tests_first_article_commands",
+        "content_factory.tests_run_terminal_settlement"
+      ]
+    },
+    {
+      "path": "content_factory/first_article_switch_commands.py",
+      "function": "_stop_original",
+      "function_sha256": "019edc811aefa4b85133e9f3516170aef0af9f5ef5a5b7703991ea037f1ddb86",
+      "reason": "Require original source binding. Owned grants can release only through existing exact terminal closure and complete journal settlement; legacy releases require validated bound no-effect receipt. No provider IO under SQL locks, no direct owned lifecycle writes, no new charge.",
+      "test_refs": [
+        "content_factory.tests_first_article_switch_commands",
+        "content_factory.tests_first_article_commands",
+        "content_factory.tests_run_terminal_settlement"
+      ]
+    },
+    {
+      "path": "content_factory/first_article_switch_commands.py",
+      "function": "switch_topic_command",
+      "function_sha256": "9ea2b8cd1a6023af9fe63f353d56d6b8c30156b3376f0557979d5861799a63e1",
+      "reason": "Save original body, source binding and exact replacement before cancellation; recover only that command Run/outbox. Recheck free eligibility and current consent inside actual debit/outbox transaction. No latest-journey acknowledgement or paid fallback.",
+      "test_refs": [
+        "content_factory.tests_first_article_switch_commands",
+        "content_factory.tests_first_article_commands",
+        "content_factory.tests_run_terminal_settlement"
       ]
     }
   ],

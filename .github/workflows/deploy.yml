@@ -1006,6 +1006,7 @@ jobs:
           content_factory.tests_run_topic_delivery_unit \
           content_factory.tests_first_article_commands \
           content_factory.tests_paid_article_http_replay \
+          content_factory.tests_first_article_switch_commands \
           content_factory.tests_run_cancellation_tuple \
           content_factory.tests_run_review_metadata_clocks \
           content_factory.tests_founder_article_contract \
