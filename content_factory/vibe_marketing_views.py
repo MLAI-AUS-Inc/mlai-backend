@@ -996,6 +996,8 @@ def _charge_roo_points_for_article(request, *, context, payload: dict, goal_oper
             # A failed debit must roll back its provisional operation as well.
             from .first_article_commands import recheck_current_claim
             recheck_current_claim(context, request.user, payload)
+            from .paid_article_commands import recheck_current_claim as recheck_paid_http_claim
+            recheck_paid_http_claim(context, request.user, payload)
             connection_error = _reserve_article_start_connection(context, payload)
             if connection_error is not None:
                 return None, None, None, connection_error
@@ -18821,7 +18823,10 @@ class VibeMarketingArticleView(APIView):
             context, error_response = _resolve_context_or_response(request)
             if error_response:
                 return error_response
-        return start_article_generation(user=request.user, context=context, data=request.data)
+        from .paid_article_commands import execute
+        return execute(context=context, user=request.user, data=request.data,
+            header=request.headers.get('Idempotency-Key'),
+            start=lambda: start_article_generation(user=request.user, context=context, data=request.data))
 
 
 class VibeMarketingRunView(APIView):

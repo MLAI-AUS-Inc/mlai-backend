@@ -1,0 +1,16 @@
+{
+  "nonfailure_sites": [
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "execute",
+      "field": "code",
+      "expression": "'operation_conflict'",
+      "site_sha256": "7644e6b1343107d22f4e9483da7ec8bbd99f9c74398d8ac5a84e63edc0cd8951",
+      "adapter": "nonfailure_category",
+      "owner": "backend.r5_paid_article_commands",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "A bounded backend HTTP command conflict refuses changed body, tenant, current principal, malformed original receipt or concurrent confirmation before any new debit or dispatch. It is not a producer failure or execution lifecycle event.",
+      "test": "content_factory.tests_paid_article_http_replay.PaidArticleHttpReplayTests.test_changed_original_body_is_a_terminal_conflict_without_new_work"
+    }
+  ]
+}

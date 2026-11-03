@@ -84,6 +84,8 @@ def reserve_dispatch(*, organization, payload, endpoint="article", workflow="art
         raise WebsiteAuthorityError("dispatch_key_conflict", "That article request identity has different inputs.")
     if not created and row.state in {"failed", "cancelled"}:
         raise WebsiteAuthorityError("dispatch_already_refunded", "That article start was refunded. Start a fresh article request.")
+    from .paid_article_commands import bind_dispatch
+    bind_dispatch(row, created=created)
     return row
 
 

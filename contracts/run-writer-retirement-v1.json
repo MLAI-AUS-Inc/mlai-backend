@@ -2,8 +2,8 @@
   "schema_version": 1,
   "complete_for_reviewed_scope": true,
   "review_scope": "Bounded AST inventory of ContentFactoryRun/Step/Attempt lifecycle writes in content_factory and integrations, including original172 witnesses and expanded parameter/tuple aliases. Whole enclosing function AST hashes bind the manual source/caller decisions. Separate critical policy/control/observation contexts are pinned. This does not claim arbitrary dynamic SQL or all future alias coverage. No historical enrollment.",
-  "reviewed_source_parent": "81db0a4f5be88d70e1e7fd65e02e69eda5551037",
-  "reviewed_at": "2026-11-02T22:38:40.126282+00:00",
+  "reviewed_source_parent": "5d63b4dc1cb5e65b22e2aa5712b52a6104eddd46",
+  "reviewed_at": "2026-11-03T04:38:17.849199+00:00",
   "sites": [
     {
       "identity": "content_factory/article_editorial.py:upsert_written_article:0697dd48837225608a5041a22aced805bd473e6b52238f50664c6372a7011eca:1",
@@ -5979,11 +5979,12 @@
     {
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_charge_roo_points_for_article",
-      "function_sha256": "48477c367a44204a59f5c004c6c539c2feab93cf1df9e24efc2bdfcbd51c3eb9",
-      "reason": "Normalize owned portable scope before first immutable admission and recheck trusted internal command consent inside its real debit transaction; legacy inputs remain exact.",
+      "function_sha256": "d8e68ae9ab031575b879150262972c33ed769fbe10e5a30ea7a55dc5db05a207",
+      "reason": "Normalize owned portable scope before first immutable admission and recheck trusted internal command consent inside its real debit transaction; legacy inputs remain exact. Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
       "test_refs": [
         "content_factory.tests_first_article_commands",
-        "content_factory.tests_editorial_dispatch_unit"
+        "content_factory.tests_editorial_dispatch_unit",
+        "content_factory/tests_paid_article_http_replay.py"
       ]
     },
     {
@@ -6002,6 +6003,159 @@
       "reason": "Presentation-only review edit/consent access uses actual current rights and mutable source, stop/settlement/current review proof; no provider call or effect authority.",
       "test_refs": [
         "content_factory.tests_founder_article_review_contract"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "_exact",
+      "function_sha256": "84f38e4c51a32bdd8c89244b09ee9b0319cc405b44e3f1c1129234f5d3e46924",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "_identity",
+      "function_sha256": "405ece351160cf84a319aeb60fe427dafb168bc69fbc5b9207e05ec1348ff0bd",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "_confirmed_points",
+      "function_sha256": "4a25697b364d384e029b23d3ec56902f892c7d7559b4fbcc6b4d88262d557060",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "_cost_confirmed",
+      "function_sha256": "adbcde73e77a9bd6093c4aba57950244071fc291c9221301d5d97e1f2aceca75",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "_current_user",
+      "function_sha256": "0336f384aa69ab33fdeb8525ee30457e70349911339f12706a53d8e8498c67c0",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "_proof",
+      "function_sha256": "1f82c0c67556c263f251af258e9954471be6629a7645b46af95c29636762b7dc",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "_replay",
+      "function_sha256": "ac74d15b25b27867bbdd994e01c50088934db7aa09baee1eebde65b62c97c1c0",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "_claim",
+      "function_sha256": "94e616882b27db23fceebcd87051586e97d0e82b863881e3344682573198ccc3",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "recheck_current_claim",
+      "function_sha256": "bfd676c601668793ad6ed1ad80204a2525a933d7828207922c61b3aa27bbcb78",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "portable_member_context",
+      "function_sha256": "7dff75e35327d2f28cb462b68a7d74952a322aebc48cab2b3cc26a9bf1e5e8a0",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "bind_dispatch",
+      "function_sha256": "d6c0b7b1cacd48e8e0ca4a62cfe01055622bc40f5c414914320d26d5ea79ae3c",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "finish",
+      "function_sha256": "44fab252febf3c7fa341ba8c5812fca64f2bfcb255a11674569639d2e00a5886",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "execute",
+      "function_sha256": "808257b14020fe1b288fbfa1a734fa1ea35da1e811332b4ed2a99c8cb02407a4",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "PaidArticleCommandRefusal.__init__",
+      "function_sha256": "0860331169a91ad6db8ce4911f8eaf5957bb23c5cc0c23df2ab3243513cbad78",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "VibeMarketingArticleView.post",
+      "function_sha256": "d057fd738c3e8634b5174923636ad5d0ef22c1c561f50b238b4469dfa85835ce",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "content_factory/dispatch_outbox.py",
+      "function": "reserve_dispatch",
+      "function_sha256": "8ca4c498fc1956353de002f5d243c2159ad0ec783d541f1a9e909370eaa3aaba",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
+      ]
+    },
+    {
+      "path": "integrations/services/article_generation.py",
+      "function": "require_article_activation",
+      "function_sha256": "ba6c06e9fa6d5376dd8524692d279cb2e3212ca35c004ab1322cc2d91ac8c765",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
       ]
     }
   ],

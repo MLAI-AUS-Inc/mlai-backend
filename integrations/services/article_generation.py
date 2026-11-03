@@ -867,7 +867,11 @@ def require_article_activation(*, domain, actor_id, user=None, expected_repo="",
     try:
         context = founder_context_for_domain(user, normalize_domain(domain))
     except PermissionError as exc:
-        raise ArticleGenerationError(str(exc)) from exc
+        from content_factory.paid_article_commands import portable_member_context
+        context = (portable_member_context(user=user, actor_id=actor, domain=normalize_domain(domain),
+            article_request=article_request or {}) if not expected_repo else None)
+        if context is None:
+            raise ArticleGenerationError(str(exc)) from exc
     config = _get_config(context.organization)
     if explicit_portable_request(article_request or {}):
         from content_factory.website_contract import connection_contract
