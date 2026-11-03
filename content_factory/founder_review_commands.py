@@ -249,6 +249,12 @@ def _retains_identity(context, data, header):
     from .models import OrganizationContentConfig
     strategy = OrganizationContentConfig.objects.filter(organization=context.organization).values_list("pillar_strategy", flat=True).first()
     records = strategy.get(KEY) if isinstance(strategy, dict) else None
+    if isinstance(strategy, dict) and KEY in strategy and type(header) is str:
+        from .founder_journey_cohort import is_new_journey
+        if not isinstance(records, dict) or not is_new_journey(context.organization):
+            # Enrollment keeps governing malformed keyed calls after flag-off;
+            # they cannot reach unreceipted legacy effects with an unseen key.
+            return True
     return isinstance(records, dict) and any(hashlib.sha256(value.encode()).hexdigest() in records for value in candidates)
 
 

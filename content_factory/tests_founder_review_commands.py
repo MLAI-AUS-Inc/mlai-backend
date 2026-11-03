@@ -640,6 +640,37 @@ class FounderReviewCommandTests(TransactionTestCase):
         self._connected_refresh("failed", ready=True)
 
 
+    def test_enrolled_flag_off_malformed_unseen_comment_cannot_enter_legacy_sql(self):
+        from .models import VibeMarketingComponentComment
+        body = self.comment_body()
+        with self.reads(), patch("content_factory.vibe_marketing_views.http_client.request",
+                return_value=paired.response(self.fixture["article_review_response"])) as remote:
+            first = self.post("comments", body)
+            self.assertEqual(first.status_code, 201, first.data)
+            missing_revision = {key: value for key, value in self.comment_body("unseen-malformed-comment-operation").items()
+                if key != "expectedRevision"}
+            with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False):
+                refused = self.post("comments", missing_revision)
+                self.assertEqual(refused.status_code, 409, refused.data)
+                self.assertEqual(VibeMarketingComponentComment.objects.filter(run=self.run).count(), 1)
+                # The genuinely unkeyed legacy boundary keeps its old behavior.
+                legacy = self.client.post(self.url("comments"), missing_revision, format="json")
+                self.assertEqual(legacy.status_code, 201, legacy.data)
+        self.assertEqual(remote.call_count, 1)
+
+    def test_enrolled_flag_off_unseen_different_action_cannot_enter_another_review_handler(self):
+        from .article_review_views import VibeMarketingArticleReviewView
+        body = self.edit_body()
+        with self.reads(), patch("content_factory.vibe_marketing_views.http_client.request",
+                return_value=paired.response(self.fixture["article_review_response"])):
+            self.assertEqual(self.post("article-review", body).status_code, 200)
+            with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False), patch.object(
+                    VibeMarketingArticleReviewView, "_apply_update", side_effect=AssertionError("No legacy effect")):
+                response = self.post("article-review", {**body, "operationId": "unseen-other-review-operation",
+                    "action": "applyUpdate"})
+        self.assertEqual(response.status_code, 409, response.data)
+
+
 for _action in ("editText", "editTextBatch", "regenerateImage", "chooseImage", "refresh", "undo", "discardImage", "allowAI"):
     def _case(self, action=_action): self._review_action(action)
     setattr(FounderReviewCommandTests, f"test_review_{_action}_actual_http", _case)
