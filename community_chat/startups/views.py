@@ -189,6 +189,11 @@ class SourcesView(ChatStartupAccess, ConnectorSourcesStatusView):
             sources = [source_capabilities(source, preferences=preferences) for source in response.data.get("sources", [])]
             from .website_connections import website_connection_sources
             sources.extend(website_connection_sources(request.user, self.company))
+            from crm.access import crm_access
+            can_select_crm = crm_access(request)["can_view"]
+            for source in sources:
+                source["canSelectCrmAccounts"] = can_select_crm and source.get("provider") == "luma"
+
             response.data = {**response.data, "sources": sources, "connections": sources}
         return response
 

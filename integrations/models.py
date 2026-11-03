@@ -127,6 +127,8 @@ class GoogleConnection(models.Model):
         blank=True,
     )
     google_email = models.EmailField()
+    # Verified Google subject; legacy connections acquire it on reconnect.
+    provider_account_id = models.CharField(max_length=255, null=True, blank=True)
     refresh_token = EncryptedTextField()  # encrypted at rest
     scope = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
@@ -134,12 +136,12 @@ class GoogleConnection(models.Model):
 
     class Meta:
         constraints = [
-            # One Gmail mailbox per (user, startup). NULL-organization rows
-            # (legacy/unassigned) are treated as distinct by the DB and resolved
-            # at the app layer.
+            # Preserve each verified mailbox independently. NULL subjects keep
+            # existing legacy rows valid until their identity is verified.
             models.UniqueConstraint(
-                fields=["user", "organization"],
-                name="uniq_google_connection_user_org",
+                fields=["user", "organization", "provider_account_id"],
+                name="uniq_google_user_org_account",
+                nulls_distinct=False,
             ),
         ]
 

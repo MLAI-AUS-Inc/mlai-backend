@@ -342,6 +342,7 @@ class HumanitixConnectView(APIView):
                 request.user,
                 api_key,
                 company=_company_for_scope(request),
+                account_label=str(request.data.get("accountLabel") or "").strip()[:255],
             )
         except ConnectorConfigurationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)

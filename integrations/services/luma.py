@@ -51,6 +51,13 @@ class LumaAttendeeReportService:
         self.session = session or requests.Session()
         self.timeout = timeout
 
+    def get_calendar(self) -> Dict[str, Any]:
+        """Read the authenticated calendar identity for this API key."""
+        payload = self._get("/v1/calendars/get", params={})
+        if not isinstance(payload.get("id"), str) or not payload["id"].strip():
+            raise LumaAPIError("Luma did not return a calendar identity.")
+        return payload
+
     def build_attendee_report(
         self,
         *,

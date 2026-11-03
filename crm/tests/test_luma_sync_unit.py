@@ -121,6 +121,9 @@ class RunnerHandOverTests(SimpleTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self.cache.clear)
+        audit_patcher = patch("crm.luma_sync.CrmAuditEvent.objects.create")
+        self.audit = audit_patcher.start()
+        self.addCleanup(audit_patcher.stop)
 
     @staticmethod
     def summary(*, left=(), failed=()):
@@ -171,6 +174,7 @@ class RunnerHandOverTests(SimpleTestCase):
         self.assertEqual(result["reason"], "luma_key_rejected")
         self.assertIsNone(self.cache.get(SYNC_RESUME_KEY))
         self.assertEqual(again["reason"], "throttled")
+        self.assertTrue(self.audit.call_args.kwargs["detail"]["source_failed"])
 
 
 class CatalogCoverageTests(SimpleTestCase):

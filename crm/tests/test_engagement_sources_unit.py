@@ -231,6 +231,9 @@ class ActivitySourceTests(SimpleTestCase):
         self.assertEqual(self.collect()["coverage"]["luma"]["status"], "partial")
         self.audit.rows[0]["detail"]["failed_events"] = ["evt-unavailable"]
         self.assertEqual(self.collect()["coverage"]["luma"]["status"], "stale")
+        for reason in ("source_set_changed", "source_failed"):
+            self.audit.rows[0]["detail"] = {reason: True}
+            self.assertEqual(self.collect()["coverage"]["luma"]["status"], "stale")
 
     def test_source_failure_is_not_zero_activity_and_does_not_leak_exception_text(self):
         with patch.object(sources, "_slack", side_effect=RuntimeError("secret personal data")):

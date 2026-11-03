@@ -638,3 +638,20 @@ Blasts and listmonk need no schema change: they use the tables in `crm.0001_init
 | Entry points | the scheduler runners (`crm_luma_guest_sync`, `crm_blast_dispatch`, `crm_listmonk_sync`), the management commands, the contacts API under `/api/v1/community-chat/crm/`, and the Twilio webhooks under `/api/v1/crm/webhooks/` |
 | Personal data | names, emails, phone numbers, employers and registration answers |
 | Retention | retention undecided |
+
+### Multiple source calendars
+
+The configured community Luma key remains a source. Additional calendars must be
+explicitly selected by an MLAI admin in Connections. Their encrypted credentials
+remain account-scoped. Scheduled CRM ingestion rechecks the selecting admin's
+active authority, unions listings by Luma event ID and reads one complete guest
+list only through a currently selected source with explicit manage access.
+External/view-only listings remain visible with unavailable guest data. Failed
+catalogue reads do not replace a complete catalogue with partial results.
+
+CRM ingestion uses normalized-email contact deduplication and event-ID activity
+provenance. Account aggregation never sends mail or updates marketing/WhatsApp
+consent. Preferences, unsubscribes and holds remain independent of engagement.
+Selecting CRM calendars does not combine financial metrics or alter report
+account choices. A calendar API key does not discover all events hosted by a
+person outside that calendar; a separately authenticated host source is needed.

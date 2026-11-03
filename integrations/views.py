@@ -358,10 +358,6 @@ def google_callback(request):
     if not code:
         return HttpResponseBadRequest("Missing code")
 
-    existing_connection = GoogleConnection.objects.filter(
-        user=user, organization=organization
-    ).first()
-
     # 3) Exchange code for tokens
     try:
         token_resp = requests.post(
@@ -385,14 +381,6 @@ def google_callback(request):
     if not access_token:
         return HttpResponseBadRequest("Missing access token in Google OAuth response.")
 
-    refresh_token = token_data.get("refresh_token") or (existing_connection.refresh_token if existing_connection else None)
-    scope = token_data.get("scope") or (existing_connection.scope if existing_connection else "")
-
-    if not refresh_token:
-        return HttpResponseBadRequest(
-            "Google did not return a refresh token. Revoke Gmail access in Google and reconnect with consent."
-        )
-
     # 4) Fetch the user's Google email
     try:
         ui_resp = requests.get(
@@ -401,23 +389,18 @@ def google_callback(request):
             timeout=(3, 20),
         )
         ui_resp.raise_for_status()
-        google_email = ui_resp.json().get("email")
-    except requests.RequestException:
+        userinfo = ui_resp.json()
+    except (requests.RequestException, ValueError):
         logger.exception("Failed to fetch Google userinfo for user %s", user.id)
         return HttpResponseBadRequest("Failed to fetch Google account details.")
 
-    # Update or create the connection
-    defaults = {
-        "google_email": google_email or (existing_connection.google_email if existing_connection else ""),
-        "scope": scope,
-        "refresh_token": refresh_token,
-    }
-
-    GoogleConnection.objects.update_or_create(
-        user=user,
-        organization=organization,
-        defaults=defaults,
-    )
+    from integrations.services.source_accounts import store_google_account
+    try:
+        if not isinstance(userinfo, dict):
+            raise ValueError("Google did not return account details.")
+        store_google_account(user=user, organization=organization, userinfo=userinfo, token_data=token_data)
+    except ValueError as exc:
+        return HttpResponseBadRequest(str(exc))
 
     # Redirect to frontend
     return oauth_return_redirect(success_url or _default_google_success_url())

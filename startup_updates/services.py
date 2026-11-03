@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from integrations.services.source_accounts import google_connection_for_binding
+
 from integrations.services.slack_source_privacy import slack_source_queryset
 
 from startup_updates.evidence_contract import customer_receipt
@@ -1366,12 +1368,25 @@ def publish_xero_metric_observations(
     run: Optional[ContentFactoryRun],
     start_date: date,
     end_date: date,
+    connection_id: Optional[int] = None,
 ) -> dict[str, Any]:
+    from integrations.services.source_accounts import metric_account_filter
+    # A background sync must publish only its own tenant. Legacy callers with
+    # several accounts need an explicit choice rather than combined totals.
+    pins = (run.run_request or {}).get("source_connection_pins") if run else None
+    if pins is not None:
+        connection_id = pins.get("xero") or 0
+    if connection_id is None:
+        ids = list(ExternalServiceConnection.objects.filter(organization=organization,
+            provider=ExternalServiceProvider.XERO).exclude(status="disconnected").values_list("pk", flat=True)[:2])
+        if len(ids) != 1:
+            return {"published_metric_count": 0, "warnings": ["Choose one Xero account before publishing financial metrics."]}
+        connection_id = ids[0]
     records = list(
         ExternalFinancialRecord.objects.filter(
             organization=organization,
             provider=ExternalServiceProvider.XERO,
-            **({"connection_id": (run.run_request.get("source_connection_pins") or {}).get("xero") or 0} if run and run.run_request.get("source_connection_pins") is not None else {}),
+            connection_id=connection_id,
         )
         .exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
         .order_by("transaction_date", "posted_at", "id")
@@ -1397,7 +1412,7 @@ def publish_xero_metric_observations(
         ExternalServiceConnection.objects.filter(
             organization=organization,
             provider=ExternalServiceProvider.XERO,
-            **({"pk": (run.run_request.get("source_connection_pins") or {}).get("xero") or 0} if run and run.run_request.get("source_connection_pins") is not None else {}),
+            pk=connection_id,
         )
         .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
         .order_by("id")
@@ -1437,7 +1452,9 @@ def publish_xero_metric_observations(
         metadata: dict[str, Any],
         confidence: float = 1.0,
     ) -> None:
-        metric, _created = StartupMetricObservation.objects.update_or_create(
+        metric, _created = StartupMetricObservation.objects.filter(
+            metric_account_filter(organization, ExternalServiceProvider.XERO, connection_id)
+        ).update_or_create(
             organization=organization,
             source_thread=None,
             source_provider=ExternalServiceProvider.XERO,
@@ -1454,7 +1471,7 @@ def publish_xero_metric_observations(
                 "evidence_message_ids": [],
                 "evidence_attachment_ids": [],
                 "source_record_ids": _record_ids(records_for_metric),
-                "source_metadata": metadata,
+                "source_metadata": {**metadata, "connection_id": connection_id},
                 "summary": summary,
             },
         )
@@ -1462,6 +1479,7 @@ def publish_xero_metric_observations(
 
     def delete_report_metrics(month: date) -> None:
         StartupMetricObservation.objects.filter(
+            metric_account_filter(organization, ExternalServiceProvider.XERO, connection_id),
             organization=organization,
             source_provider=ExternalServiceProvider.XERO,
             period_month=month,
@@ -1642,6 +1660,7 @@ def publish_xero_metric_observations(
                 # A successful profitable report supersedes obsolete loss
                 # estimates. Failed refreshes never reach this cleanup.
                 StartupMetricObservation.objects.filter(
+                    metric_account_filter(organization, ExternalServiceProvider.XERO, connection_id),
                     organization=organization, source_provider=ExternalServiceProvider.XERO,
                     period_month=report_month, unit=currency,
                     metric_key__in=["burnRate", "runway"],
@@ -1783,7 +1802,9 @@ def publish_xero_metric_observations(
                 ),
             )
         if end_date < _month_end(current_month):
-            StartupMetricObservation.objects.filter(organization=organization, period_month=current_month,
+            StartupMetricObservation.objects.filter(
+                metric_account_filter(organization, ExternalServiceProvider.XERO, connection_id),
+                organization=organization, period_month=current_month,
                 metric_key="revenueGrowthRate", source_provider=ExternalServiceProvider.XERO).delete()
         if end_date >= _month_end(current_month) and current_revenue and previous_revenue and previous_revenue["amount"] > 0:
             growth = (current_revenue["amount"] - previous_revenue["amount"]) / previous_revenue["amount"]
@@ -2212,16 +2233,8 @@ def _slack_connection_candidate_for_run(
             organization_id=expected.organization_id,
             provider=ExternalServiceProvider.SLACK,
         ).first()
-    return (
-        ExternalServiceConnection.objects.filter(
-            user_id=binding.user_id,
-            organization=organization,
-            provider=ExternalServiceProvider.SLACK,
-        )
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+    from integrations.services.source_accounts import connection_for_run
+    return connection_for_run(run, binding.user, organization, "slack")
 
 
 def pin_startup_update_run_slack_authority(
@@ -2348,23 +2361,13 @@ def build_linear_run_context(*, organization: Organization, selected_project_ids
     }
 
 
-def latest_external_connection_for_startup(
-    *,
-    user,
-    organization: Organization,
-    provider: str,
-) -> Optional[ExternalServiceConnection]:
-    # Strictly scoped to the startup's organization — no cross-org fallback, so
-    # one startup never borrows another startup's connection.
-    return (
-        user.external_service_connections.filter(
-            provider=provider,
-            organization=organization,
-        )
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+def latest_external_connection_for_startup(*, user, organization: Organization, provider: str) -> Optional[ExternalServiceConnection]:
+    """Resolve the owner's selected report account within this startup."""
+    from integrations.services.source_accounts import report_connection
+    return report_connection(user.external_service_connections.filter(
+        provider=provider, organization=organization,
+    ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED),
+        user=user, organization=organization, provider=provider)
 
 
 def build_notion_run_context(*, organization: Organization, connection_id=None) -> dict:
@@ -2455,6 +2458,7 @@ def build_luma_run_context(
     context_start = context_start_at.astimezone(local_tz).date()
     context_end = (context_end_at - timedelta(microseconds=1)).astimezone(local_tz).date()
 
+    from integrations.services.source_accounts import metric_account_filter
     connection = (
         ExternalServiceConnection.objects.filter(
             organization=organization,
@@ -2505,6 +2509,7 @@ def build_luma_run_context(
             "event_ids": list(metric.source_record_ids or []),
         }
         for metric in StartupMetricObservation.objects.filter(
+            metric_account_filter(organization, ExternalServiceProvider.LUMA, connection.pk if connection else -1),
             organization=organization,
             source_provider=ExternalServiceProvider.LUMA,
             period_month=month,
@@ -2703,7 +2708,9 @@ def refresh_startup_update_run_source_context(
     _slack_authority_locked: bool = False,
     execution_token=None,
 ) -> ContentFactoryRun:
+    from integrations.services.source_accounts import connection_for_run
     run_request = dict(run.run_request or {})
+    pins = run_request.get("source_connection_pins")
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
     if (
         ExternalServiceProvider.SLACK in set(selected_input_sources)
@@ -2775,6 +2782,7 @@ def refresh_startup_update_run_source_context(
             for selection in LinearProjectSelection.objects.filter(
                 organization=organization,
                 selected=True,
+                **({"connection_id": pins.get("linear") or 0} if pins is not None else {}),
             ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
         ]
     if "automatic_source_scope" in run_request and ExternalServiceProvider.LINEAR in set(selected_input_sources):
@@ -2787,11 +2795,7 @@ def refresh_startup_update_run_source_context(
             or organization.user_startup_bindings.select_related("user").first()
         )
         notion_connection = (
-            latest_external_connection_for_startup(
-                user=binding.user,
-                organization=organization,
-                provider=ExternalServiceProvider.NOTION,
-            )
+            connection_for_run(run, binding.user, organization, ExternalServiceProvider.NOTION)
             if binding is not None
             else None
         )
@@ -2808,11 +2812,7 @@ def refresh_startup_update_run_source_context(
             or organization.user_startup_bindings.select_related("user").first()
         )
         ga_connection = (
-            latest_external_connection_for_startup(
-                user=binding.user,
-                organization=organization,
-                provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
-            )
+            connection_for_run(run, binding.user, organization, ExternalServiceProvider.GOOGLE_ANALYTICS)
             if binding is not None
             else None
         )
@@ -3552,9 +3552,7 @@ def create_startup_update_run(
     selected_input_sources = normalize_startup_update_input_sources(input_sources)
     from integrations.services.external_connectors import google_connection_for_org
 
-    google_connection = binding.google_connection or google_connection_for_org(
-        binding.user, binding.organization
-    )
+    google_connection = google_connection_for_binding(binding)
     selected_source_set = set(selected_input_sources)
     google_connection_id = google_connection.id if google_connection else None
     step_order = build_startup_update_step_order(selected_input_sources)
@@ -3649,8 +3647,8 @@ def create_startup_update_run(
         run_request["backfill_window_end"] = (parse_datetime(narrative_period["end"]) - timedelta(microseconds=1)).isoformat()
         run_request["financial_cutoff"] = windows["narrative_end"].isoformat()
     from integrations.models import ExternalServiceConnection
-    pins = {provider: ExternalServiceConnection.objects.filter(user=binding.user, organization=organization,
-        provider=provider).exclude(status="disconnected").order_by("-updated_at", "-id").values_list("id", flat=True).first()
+    pins = {provider: getattr(latest_external_connection_for_startup(user=binding.user,
+        organization=organization, provider=provider), "pk", None)
         for provider in selected_input_sources if provider not in {"gmail", "manual_documents"}}
     if "gmail" in selected_input_sources:
         pins["gmail"] = google_connection_id
@@ -3661,11 +3659,8 @@ def create_startup_update_run(
         run_request["manual_document_ids"] = _normalize_manual_document_id_list(manual_document_ids)
         run_request["manual_summary"] = str(manual_summary or "").strip()
     if ExternalServiceProvider.NOTION in selected_source_set:
-        notion_connection = latest_external_connection_for_startup(
-            user=binding.user,
-            organization=organization,
-            provider=ExternalServiceProvider.NOTION,
-        )
+        notion_connection = ExternalServiceConnection.objects.filter(user=binding.user, organization=organization,
+            provider=ExternalServiceProvider.NOTION, pk=pins.get("notion") or 0).first()
         if notion_connection is not None:
             if notion_connection.organization_id != organization.id:
                 notion_connection.organization = organization
@@ -3673,11 +3668,8 @@ def create_startup_update_run(
             run_request["notion_connection_id"] = notion_connection.id
     selected_ga_property_ids = []
     if ExternalServiceProvider.GOOGLE_ANALYTICS in selected_source_set:
-        ga_connection = latest_external_connection_for_startup(
-            user=binding.user,
-            organization=organization,
-            provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
-        )
+        ga_connection = ExternalServiceConnection.objects.filter(user=binding.user, organization=organization,
+            provider=ExternalServiceProvider.GOOGLE_ANALYTICS, pk=pins.get("google_analytics") or 0).first()
         if ga_connection is not None:
             if ga_connection.organization_id != organization.id:
                 ga_connection.organization = organization
@@ -3705,6 +3697,7 @@ def create_startup_update_run(
             for selection in LinearProjectSelection.objects.filter(
                 organization=organization,
                 selected=True,
+                connection_id=pins.get("linear") or 0,
             ).exclude(connection__status=ExternalServiceConnectionStatus.DISCONNECTED)
         ]
         if automatic_source_scope:

@@ -637,6 +637,7 @@ def disconnect_gmail_for_user(
     delete_derived_data: bool = False,
     reason: str = "user_request",
     organization=_ACTIVE_MAILBOX,
+    connection_id=None,
 ) -> dict[str, Any]:
     # Disconnect the requested startup's mailbox (a founder may have one Gmail
     # per startup); without an explicit organization, the active startup's.
@@ -645,7 +646,11 @@ def disconnect_gmail_for_user(
         google_connection_for_org,
     )
 
-    if organization is _ACTIVE_MAILBOX:
+    if connection_id is not None:
+        from integrations.services.external_connectors import active_organization_for_user
+        org = active_organization_for_user(user) if organization is _ACTIVE_MAILBOX else organization
+        connection = GoogleConnection.objects.filter(pk=connection_id, user=user, organization=org).first()
+    elif organization is _ACTIVE_MAILBOX:
         connection = active_google_connection(user)
     else:
         connection = google_connection_for_org(user, organization)

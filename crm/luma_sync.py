@@ -94,14 +94,14 @@ class PacedSession(requests.Session):
         return super().request(*args, **kwargs)
 
 
-def build_luma_service() -> LumaAttendeeReportService:
-    api_key = str(getattr(settings, "LUMA_API_KEY", "") or "").strip()
-    if not api_key:
-        raise LumaConfigurationError("LUMA_API_KEY is not configured on mlai-backend.")
-    return LumaAttendeeReportService(
-        api_key=api_key,
-        session=PacedSession(settings.CRM_LUMA_REQUESTS_PER_MINUTE),
-    )
+def build_luma_service():
+    """Use the community calendar and only explicitly selected admin sources."""
+    from .source_accounts import build_combined_luma_source
+    def service(api_key):
+        return LumaAttendeeReportService(api_key=api_key,
+            session=PacedSession(settings.CRM_LUMA_REQUESTS_PER_MINUTE))
+    key = str(getattr(settings, "LUMA_API_KEY", "") or "").strip()
+    return build_combined_luma_source(service(key) if key else None, service)
 
 
 def sync_event_catalog(service: LumaAttendeeReportService) -> list[CrmEvent]:
@@ -133,17 +133,18 @@ def sync_event_catalog(service: LumaAttendeeReportService) -> list[CrmEvent]:
     return list(CrmEvent.objects.filter(luma_event_id__in=by_id))
 
 
-def events_due_for_guest_sync(*, now: datetime, recent_days: int, limit: int) -> list[CrmEvent]:
+def events_due_for_guest_sync(*, now: datetime, recent_days: int, limit: int, catalog_event_ids=None) -> list[CrmEvent]:
     """Upcoming events and recently ended ones, least recently synced first."""
 
     cutoff = now - timedelta(days=recent_days)
-    return list(
-        CrmEvent.objects.filter(
+    queryset = CrmEvent.objects.filter(
             Q(end_at__gte=cutoff) | Q(end_at__isnull=True, start_at__gte=cutoff),
             raw_payload__platform="luma",
             raw_payload__access="manage",
-        ).order_by(F("guests_synced_at").asc(nulls_first=True), "start_at")[:limit]
-    )
+        )
+    if catalog_event_ids is not None:
+        queryset = queryset.filter(luma_event_id__in=catalog_event_ids)
+    return list(queryset.order_by(F("guests_synced_at").asc(nulls_first=True), "start_at")[:limit])
 
 
 def sync_event_guests(
@@ -156,9 +157,11 @@ def sync_event_guests(
 ) -> dict:
     """Replace one event's registrations with Luma's current guest list."""
 
+    now = now or timezone.now()
     if not can_sync_event_guests(event.raw_payload):
         raise LumaConfigurationError("This calendar cannot read guests for the listed event.")
-    now = now or timezone.now()
+    if getattr(service, "preserve_preferences", False) is True:
+        consent_labels = whatsapp_labels = ()
     raw_guests = service.list_guests(event_id=event.luma_event_id, approval_status=None)
     parsed = [
         guest_record(raw, consent_labels=consent_labels, whatsapp_labels=whatsapp_labels)
@@ -169,7 +172,8 @@ def sync_event_guests(
 
     with transaction.atomic():
         contacts, created_count, consent_count, whatsapp_count = _upsert_contacts(
-            records, event=event, now=now
+            records, event=event, now=now,
+            preserve_preferences=getattr(service, "preserve_preferences", False) is True,
         )
         removed_ids = _replace_registrations(event, records, contacts, now=now)
         _refresh_event_counts(event, now=now)
@@ -209,7 +213,9 @@ def sync_recent_luma_guests(
     limit = settings.CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN if limit is None else limit
     if event_ids is None:
         catalog = sync_event_catalog(service)
-        due = events_due_for_guest_sync(now=now, recent_days=recent_days, limit=limit)
+        catalog_scope = ({"catalog_event_ids": [event.luma_event_id for event in catalog]}
+            if getattr(service, "preserve_preferences", False) is True else {})
+        due = events_due_for_guest_sync(now=now, recent_days=recent_days, limit=limit, **catalog_scope)
     else:
         catalog = None
         by_id = {
@@ -217,9 +223,10 @@ def sync_recent_luma_guests(
             for event in CrmEvent.objects.filter(luma_event_id__in=event_ids)
         }
         due = [by_id[event_id] for event_id in event_ids if event_id in by_id]
-    # Recheck resumed IDs as well: a previously managed event can become a
-    # view-only listing while its ID is waiting in the scheduler cache.
+    # Recheck resumed IDs if access changed during the scheduler pause.
     due = [event for event in due if can_sync_event_guests(event.raw_payload)]
+    if getattr(service, "preserve_preferences", False) is True:
+        due = [event for event in due if service.can_read_guests(event.raw_payload)]
     totals: Counter = Counter()
     failed_events: list[str] = []
     events_left: list[str] = []
@@ -282,8 +289,6 @@ def run_luma_guest_sync_scheduler(
 
     if not getattr(settings, "CRM_LUMA_SYNC_ENABLED", False):
         return {"status": "skipped", "reason": "disabled"}
-    if service is None and not str(getattr(settings, "LUMA_API_KEY", "") or "").strip():
-        return {"status": "skipped", "reason": "luma_not_configured"}
     if not cache.add(SYNC_THROTTLE_KEY, 1, timeout=settings.CRM_LUMA_SYNC_INTERVAL_SECONDS):
         return {"status": "skipped", "reason": "throttled"}
 
@@ -295,8 +300,15 @@ def run_luma_guest_sync_scheduler(
             deadline=clock() + PASS_SECONDS,
             clock=clock,
         )
+    except LumaConfigurationError:
+        cache.delete(SYNC_RESUME_KEY)
+        CrmAuditEvent.objects.create(action=CrmAuditEvent.Action.SYNC,
+            target_type="luma_calendar", detail={"source_failed": True, "reason": "not_configured"})
+        return {"status": "deferred", "reason": "luma_not_configured"}
     except LumaAPIError as exc:
         cache.delete(SYNC_RESUME_KEY)
+        CrmAuditEvent.objects.create(action=CrmAuditEvent.Action.SYNC,
+            target_type="luma_calendar", detail={"source_failed": True, "status_code": exc.status_code})
         if exc.status_code in (401, 403):
             return {"status": "failed", "reason": "luma_key_rejected", "status_code": exc.status_code}
         logger.warning("crm_luma_guest_sync deferred status_code=%s", exc.status_code)
@@ -347,7 +359,7 @@ def refresh_contact_rollups(contact_ids: Iterable) -> None:
 
 
 def _upsert_contacts(
-    records: list[LumaGuestRecord], *, event: CrmEvent, now: datetime
+    records: list[LumaGuestRecord], *, event: CrmEvent, now: datetime, preserve_preferences=False
 ) -> tuple[dict[str, Contact], int, int, int]:
     emails = [record.email for record in records]
     if not emails:
@@ -384,7 +396,7 @@ def _upsert_contacts(
             if not getattr(contact, name) and getattr(record, name):
                 setattr(contact, name, getattr(record, name))
                 dirty = True
-        if fill_phone(contact, record.phone, now=now):
+        if not preserve_preferences and fill_phone(contact, record.phone, now=now):
             dirty = True
         if contact.user_id is None and users.get(record.email):
             contact.user = users[record.email]

@@ -18,7 +18,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from founder_tools.models import VibeRaisingCompany
 from integrations.api_views_connectors import HumanitixConnectView, LumaConnectView
-from integrations.models import ExternalServiceConnection
+from integrations.models import ExternalServiceConnection, GoogleConnection
 from integrations.services.external_connectors import disconnect_external_connection
 from integrations.views import connector_connect
 from startup_updates.data_deletion import disconnect_gmail_for_user
@@ -170,6 +170,27 @@ class DisconnectView(ChatStartupAccess, APIView):
     """Manage defaults and disconnect only the chosen startup's own credentials."""
     def post(self, request, provider):
         provider = PROVIDER_ALIASES.get(provider, provider)
+        if "crmEnabled" in request.data:
+            from crm.access import crm_access
+            from crm.source_accounts import select_crm_source
+            from rest_framework.exceptions import PermissionDenied
+            if not crm_access(request)["can_view"]:
+                raise PermissionDenied("Only an MLAI admin can select community CRM sources.")
+            try:
+                row = select_crm_source(user=request.user, organization=self.company.organization,
+                    provider=provider, connection_id=request.data.get("connectionId"), enabled=request.data["crmEnabled"])
+            except ValueError as exc:
+                raise ValidationError(str(exc)) from exc
+            return Response({"connectionId": row.pk, "crmEnabled": request.data["crmEnabled"]})
+        if "reportAccountId" in request.data:
+            if provider not in UPDATE_PROVIDERS:
+                raise ValidationError("Choose a supported connection.")
+            from integrations.services.source_accounts import select_report_account
+            try:
+                connection = select_report_account(request.user, self.company.organization, provider, request.data["reportAccountId"])
+            except ValueError as exc:
+                raise ValidationError(str(exc)) from exc
+            return Response({"reportAccountId": connection.pk})
         return Response(set_source_preference(self.company, provider, request.data.get("enabled")))
 
     def delete(self, request, provider):
@@ -179,12 +200,25 @@ class DisconnectView(ChatStartupAccess, APIView):
         if self.company.organization is None:
             return Response({"status": "not_connected"})
         if provider == "gmail":
-            return Response(disconnect_gmail_for_user(request.user, organization=self.company.organization, delete_derived_data=False))
-        ids = list(ExternalServiceConnection.objects.filter(user=request.user,
-            organization=self.company.organization, provider=provider).exclude(status="disconnected").values_list("pk", flat=True))
-        for connection_id in ids:
-            disconnect_external_connection(request.user, connection_id)
-        return Response({"status": "disconnected"})
+            queryset = GoogleConnection.objects.filter(user=request.user, organization=self.company.organization)
+        else:
+            queryset = ExternalServiceConnection.objects.filter(user=request.user,
+                organization=self.company.organization, provider=provider).exclude(status="disconnected")
+        connection_id = request.data.get("connectionId")
+        if connection_id is None:
+            ids = list(queryset.values_list("pk", flat=True)[:2])
+            if len(ids) > 1:
+                raise ValidationError("Choose the account to disconnect.")
+            if not ids:
+                return Response({"status": "not_connected"})
+            connection_id = ids[0]
+        if isinstance(connection_id, bool) or not isinstance(connection_id, int) or not queryset.filter(pk=connection_id).exists():
+            raise ValidationError("That account is not connected to this startup.")
+        if provider == "gmail":
+            return Response(disconnect_gmail_for_user(request.user, organization=self.company.organization,
+                connection_id=connection_id, delete_derived_data=False))
+        disconnect_external_connection(request.user, connection_id)
+        return Response({"status": "disconnected", "connectionId": connection_id})
 
 
 def connect_browser(request):
