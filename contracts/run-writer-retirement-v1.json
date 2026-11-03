@@ -6414,6 +6414,226 @@
         "content_factory/tests_founder_library_commands.py",
         "content_factory/tests_startup_settings_unit.py"
       ]
+    },
+    {
+      "path": "content_factory/editorial_views.py",
+      "function": "mutate_catalog_response",
+      "function_sha256": "f7d4715990535b3c67d4c6357be0d835e78523482a04fd667450efc5b17d610e",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/editorial_views.py",
+      "function": "EditorialCatalogView._mutate",
+      "function_sha256": "63fe9678774649201f98a14fb662eee7e0d8137d933ec79230164794c6580bf9",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/editorial_views.py",
+      "function": "EditorialFirstAudienceView.post",
+      "function_sha256": "0d78fc16c83983d217b0d50b279858a23eedf8be81c0b23dac90642870b8ec75",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/editorial_views.py",
+      "function": "EditorialBriefSuggestionView.post",
+      "function_sha256": "28bccc26cf3b642c53796aa1b07b72d03670a9743e4869ef2dba38a23de9a40a",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/editorial_first_audience.py",
+      "function": "first_audience_response",
+      "function_sha256": "6a715578461034c81a4fc77abda18c28e5cb29394a150b21640709e40a98b930",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/editorial_first_audience.py",
+      "function": "_keyed_first_audience_response",
+      "function_sha256": "6d708ec8fc986a6b9752c6de0127fa172ecaa0668ce53928996515a72e54974b",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_commands.py",
+      "function": "_digest",
+      "function_sha256": "4580708adba3b1fbae516d0edd4fef6048f8a5eb1d23bf60336b4f893cc1ec8f",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_commands.py",
+      "function": "_nonnegative",
+      "function_sha256": "ab846a9db088bebb09f8b388129515a97e29465252a86f03898e3064d2e756d4",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_commands.py",
+      "function": "_valid_receipt",
+      "function_sha256": "85e63eb0292066b1d436aceeddce7bcb22e49b9a919937dc8cd1452cea77b1d7",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_commands.py",
+      "function": "_valid_selection",
+      "function_sha256": "74c75e1cc223577b9eed654b48ba6b536b962c2d8d51dc310e0bdb6f03ae4182",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_commands.py",
+      "function": "_receipts",
+      "function_sha256": "9be0df6f813b259052f91e398f90a47a3ff90c3ed2bc2a434c85db6e3859e0f0",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_commands.py",
+      "function": "_require_current_owner",
+      "function_sha256": "9aabe9b0d9f16870ab3bb27dab100405bed9a3f71f4486a1a23ffd18f134df04",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_commands.py",
+      "function": "prepare_command",
+      "function_sha256": "b433e69bad5562a72e9dbfa265a5603922346283006a9fee1f16bf616492a020",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_commands.py",
+      "function": "record_command",
+      "function_sha256": "ba651d45fca39a36e71896c7997faf0fb510ead27d55dd64c58aa650c2ade338",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_brief_commands.py",
+      "function": "valid_suggestion_receipt",
+      "function_sha256": "9f8d2c70429637e875d57863e5b4bc659265a82a54fa857f413f8c3b9b133335",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_brief_commands.py",
+      "function": "_response_shape",
+      "function_sha256": "989ab8a70807daf0d156f0dcf7be1c1256c9cd5fd58a83888cbd9ad923de3908",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_brief_commands.py",
+      "function": "_validate_body",
+      "function_sha256": "0089b149d1dfa70273a0a09fc08a509841c87cfde52bb1173c33e6d4563fff43",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_brief_commands.py",
+      "function": "_locked",
+      "function_sha256": "2f808fb62b243d032f24f436f577b69cef01d85dafcd47e77c92395c8bb36093",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_brief_commands.py",
+      "function": "_save",
+      "function_sha256": "83644e4d740e6eb1128e906db9f9354240c1f376204e93b7ae9b714afdede08d",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_brief_commands.py",
+      "function": "_validate_response",
+      "function_sha256": "c235359c7fdd4bb99d153d1b3d2619480c285e114a0501568797a6c396490eee",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_brief_commands.py",
+      "function": "_read_response",
+      "function_sha256": "4c6e750ae46b7ac65152fbf068f903571a35e5fedf2ddac79b30352555c6bd3c",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/catalog_brief_commands.py",
+      "function": "suggestion_response",
+      "function_sha256": "c7282b6835656459caa938677b1c52e05da3eef2ee1ce904a8ac668c72e996bd",
+      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "test_refs": [
+        "content_factory/tests_catalog_commands.py",
+        "content_factory/tests_catalog_brief_commands.py"
+      ]
     }
   ],
   "removed_prior_sites": [

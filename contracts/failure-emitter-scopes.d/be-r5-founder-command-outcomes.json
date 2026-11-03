@@ -1,0 +1,76 @@
+{
+  "nonfailure_sites": [
+    {
+      "path": "content_factory/catalog_brief_commands.py",
+      "function": "suggestion_response",
+      "field": "code",
+      "expression": "'editorial_suggestion_pending'",
+      "site_sha256": "6be859c8808525facbda73a74626179f8e4796968eff422dacdcdc945c80c706",
+      "adapter": "nonfailure_category",
+      "owner": "backend.r5_founder_http_commands",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Backend catalogue HTTP command validation, revision conflicts and permanently unknown brief-suggestion acknowledgements are local command outcomes, not producer execution failures. Exact raw-body receipts and current-owner SQL checks refuse new effects; the original failure registry is unchanged.",
+      "test": "content_factory.tests_catalog_brief_commands.CatalogBriefCommandTests.test_unknown_remote_ack_is_permanently_held_without_a_second_call"
+    },
+    {
+      "path": "content_factory/catalog_brief_commands.py",
+      "function": "suggestion_response",
+      "field": "code",
+      "expression": "'editorial_catalog_conflict'",
+      "site_sha256": "508b6773db3bddd7e67c85587567bedcd701db788916417416f4be32abcfc729",
+      "adapter": "nonfailure_category",
+      "owner": "backend.r5_founder_http_commands",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Backend catalogue HTTP command validation, revision conflicts and permanently unknown brief-suggestion acknowledgements are local command outcomes, not producer execution failures. Exact raw-body receipts and current-owner SQL checks refuse new effects; the original failure registry is unchanged.",
+      "test": "content_factory.tests_catalog_brief_commands.CatalogBriefCommandTests.test_unknown_remote_ack_is_permanently_held_without_a_second_call"
+    },
+    {
+      "path": "content_factory/catalog_brief_commands.py",
+      "function": "suggestion_response",
+      "field": "code",
+      "expression": "'invalid_editorial_catalog'",
+      "site_sha256": "5cd2d475233c5ff55a8a10c8bfc29b35933694e7536f55b7a63dfc3200b4a667",
+      "adapter": "nonfailure_category",
+      "owner": "backend.r5_founder_http_commands",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Backend catalogue HTTP command validation, revision conflicts and permanently unknown brief-suggestion acknowledgements are local command outcomes, not producer execution failures. Exact raw-body receipts and current-owner SQL checks refuse new effects; the original failure registry is unchanged.",
+      "test": "content_factory.tests_catalog_brief_commands.CatalogBriefCommandTests.test_unknown_remote_ack_is_permanently_held_without_a_second_call"
+    },
+    {
+      "path": "content_factory/editorial_first_audience.py",
+      "function": "_keyed_first_audience_response",
+      "field": "code",
+      "expression": "'editorial_catalog_conflict'",
+      "site_sha256": "1025a96b02624febe542ada699d25d1a86d5ca1d129feaf3b860eda44f1307c9",
+      "adapter": "nonfailure_category",
+      "owner": "backend.r5_founder_http_commands",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Backend catalogue HTTP command validation, revision conflicts and permanently unknown brief-suggestion acknowledgements are local command outcomes, not producer execution failures. Exact raw-body receipts and current-owner SQL checks refuse new effects; the original failure registry is unchanged.",
+      "test": "content_factory.tests_catalog_commands.CatalogCommandTests.test_same_key_changed_body_action_and_same_org_company_are_closed_conflicts"
+    },
+    {
+      "path": "content_factory/editorial_first_audience.py",
+      "function": "_keyed_first_audience_response",
+      "field": "code",
+      "expression": "'invalid_editorial_catalog'",
+      "site_sha256": "60ea7d61d00113f24593fe2920f25625cb00dda72a2745c38ffe1a0930f172b5",
+      "adapter": "nonfailure_category",
+      "owner": "backend.r5_founder_http_commands",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Backend catalogue HTTP command validation, revision conflicts and permanently unknown brief-suggestion acknowledgements are local command outcomes, not producer execution failures. Exact raw-body receipts and current-owner SQL checks refuse new effects; the original failure registry is unchanged.",
+      "test": "content_factory.tests_catalog_commands.CatalogCommandTests.test_same_key_changed_body_action_and_same_org_company_are_closed_conflicts"
+    },
+    {
+      "path": "content_factory/founder_run_commands.py",
+      "function": "_response",
+      "field": "code",
+      "expression": "exc.code",
+      "site_sha256": "b54d97e93a3c0773fc578199d360b01a9aa41a7ffb914892fcf28324befd1a48",
+      "adapter": "nonfailure_category",
+      "owner": "backend.r5_founder_http_commands",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Backend-owned HTTP command refusals use internal purpose codes for key, body, principal, revision, comment or unknown-ack conflicts. They do not serialize a CF failure, infer lifecycle or grant provider authority. Durable command contexts are independently pinned by the Run writer review manifest.",
+      "test": "content_factory.tests_founder_run_commands.FounderRunCommandTests.test_unknown_cancel_response_never_reposts_even_long_after_initial_request"
+    }
+  ]
+}
