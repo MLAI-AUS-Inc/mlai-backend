@@ -35,6 +35,7 @@ from .luma_guests import (
     WAITLIST,
     LumaEventRecord,
     LumaGuestRecord,
+    can_sync_event_guests,
     event_record,
     guest_record,
     one_guest_per_email,
@@ -104,9 +105,9 @@ def build_luma_service() -> LumaAttendeeReportService:
 
 
 def sync_event_catalog(service: LumaAttendeeReportService) -> list[CrmEvent]:
-    """Upsert every managed calendar event. Reads no guest data."""
+    """Upsert every approved calendar listing. Reads no guest data."""
 
-    records = [record for record in map(event_record, service.list_all_events()) if record]
+    records = [record for record in map(event_record, service.list_crm_events()) if record]
     by_id = {record.luma_event_id: record for record in records}
     existing = {
         event.luma_event_id: event
@@ -138,7 +139,9 @@ def events_due_for_guest_sync(*, now: datetime, recent_days: int, limit: int) ->
     cutoff = now - timedelta(days=recent_days)
     return list(
         CrmEvent.objects.filter(
-            Q(end_at__gte=cutoff) | Q(end_at__isnull=True, start_at__gte=cutoff)
+            Q(end_at__gte=cutoff) | Q(end_at__isnull=True, start_at__gte=cutoff),
+            raw_payload__platform="luma",
+            raw_payload__access="manage",
         ).order_by(F("guests_synced_at").asc(nulls_first=True), "start_at")[:limit]
     )
 
@@ -153,6 +156,8 @@ def sync_event_guests(
 ) -> dict:
     """Replace one event's registrations with Luma's current guest list."""
 
+    if not can_sync_event_guests(event.raw_payload):
+        raise LumaConfigurationError("This calendar cannot read guests for the listed event.")
     now = now or timezone.now()
     raw_guests = service.list_guests(event_id=event.luma_event_id, approval_status=None)
     parsed = [
@@ -212,6 +217,9 @@ def sync_recent_luma_guests(
             for event in CrmEvent.objects.filter(luma_event_id__in=event_ids)
         }
         due = [by_id[event_id] for event_id in event_ids if event_id in by_id]
+    # Recheck resumed IDs as well: a previously managed event can become a
+    # view-only listing while its ID is waiting in the scheduler cache.
+    due = [event for event in due if can_sync_event_guests(event.raw_payload)]
     totals: Counter = Counter()
     failed_events: list[str] = []
     events_left: list[str] = []

@@ -447,6 +447,17 @@ class InputTests(SimpleTestCase):
 
 
 class WireShapeTests(SimpleTestCase):
+    def test_event_guest_availability_distinguishes_missing_data_from_zero(self):
+        stats = {"counts": {"going": 0}, "reach": {"email": 0}}
+        event = CrmEvent(luma_event_id="evt-example", raw_payload={"platform": "luma", "access": "view"})
+        self.assertEqual(wire.event_summary(event, stats)["guest_data_status"], "unavailable")
+        event.raw_payload["access"] = "manage"
+        self.assertEqual(wire.event_summary(event, stats)["guest_data_status"], "pending")
+        event.guests_synced_at = NOW
+        self.assertEqual(wire.event_summary(event, stats)["guest_data_status"], "available")
+        event.raw_payload["platform"] = "external"
+        self.assertEqual(wire.event_summary(event, stats)["guest_data_status"], "unavailable")
+
     def contact(self, **fields):
         values = {
             "email": "ada@example.com",

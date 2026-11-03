@@ -49,20 +49,14 @@ class LumaGuestRecord:
 
 
 def event_record(raw: Any) -> Optional[LumaEventRecord]:
-    """Return a managed Luma event, or None for external or malformed listings.
-
-    External events are only listed on the calendar; their guests belong to
-    another host and cannot be read with the MLAI key.
-    """
+    """Return a calendar listing without treating visibility as guest access."""
 
     if not isinstance(raw, dict):
         return None
     event_id = _text(raw.get("id"), 255)
     if not event_id:
         return None
-    if str(raw.get("platform") or "luma").strip() != "luma":
-        return None
-    if str(raw.get("access") or "manage").strip() != "manage":
+    if str(raw.get("platform") or "luma").strip() not in {"luma", "external"}:
         return None
     return LumaEventRecord(
         luma_event_id=event_id,
@@ -75,6 +69,22 @@ def event_record(raw: Any) -> Optional[LumaEventRecord]:
         visibility=_text(raw.get("visibility"), 32),
         raw=raw,
     )
+
+
+def can_sync_event_guests(raw: Any) -> bool:
+    """Only explicit management access through the calendar key permits sync."""
+    return (
+        isinstance(raw, dict)
+        and raw.get("platform", "luma") == "luma"
+        and raw.get("access") == "manage"
+    )
+
+
+def event_guest_data_status(event: Any) -> str:
+    """Distinguish an unreadable or unsynced guest list from an empty one."""
+    if not can_sync_event_guests(event.raw_payload):
+        return "unavailable"
+    return "available" if event.guests_synced_at is not None else "pending"
 
 
 def guest_record(

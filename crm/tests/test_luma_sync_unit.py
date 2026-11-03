@@ -1,7 +1,7 @@
 """DB-free checks that a Luma guest sync pass stays inside the scheduler tick."""
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.core.cache.backends.locmem import LocMemCache
 from django.test import SimpleTestCase, override_settings
@@ -12,12 +12,15 @@ from crm.luma_sync import (
     SYNC_THROTTLE_KEY,
     run_luma_guest_sync_scheduler,
     sync_recent_luma_guests,
+    sync_event_catalog,
+    sync_event_guests,
+    events_due_for_guest_sync,
 )
-from integrations.services.luma import LumaAPIError
+from integrations.services.luma import LumaAPIError, LumaAttendeeReportService, LumaConfigurationError
 
 
 def events(*event_ids):
-    return [SimpleNamespace(luma_event_id=event_id) for event_id in event_ids]
+    return [SimpleNamespace(luma_event_id=event_id, raw_payload={"platform": "luma", "access": "manage"}) for event_id in event_ids]
 
 
 class PassBudgetTests(SimpleTestCase):
@@ -39,7 +42,7 @@ class PassBudgetTests(SimpleTestCase):
         ) as due_query, patch("crm.luma_sync.CrmEvent") as crm_event, patch(
             "crm.luma_sync.sync_event_guests", side_effect=sync_event_guests
         ), patch("crm.luma_sync.CrmAuditEvent"):
-            crm_event.objects.filter.return_value = events(*stored)
+            crm_event.objects.filter.return_value = [item if hasattr(item, "raw_payload") else events(item)[0] for item in stored]
             summary = sync_recent_luma_guests(
                 object(), deadline=60, clock=lambda: clock[0], **options
             )
@@ -71,6 +74,17 @@ class PassBudgetTests(SimpleTestCase):
         self.assertEqual(summary["events_left"], [])
         catalog.assert_not_called()
         due_query.assert_not_called()
+
+    def test_resumed_view_only_and_external_events_do_not_read_guests(self):
+        managed, listed, external = events("evt-managed", "evt-listed", "ext-listed")
+        listed.raw_payload["access"] = "view"
+        external.raw_payload["platform"] = "external"
+        summary, read, _, _ = self.run_pass(
+            event_ids=[listed.luma_event_id, external.luma_event_id, managed.luma_event_id],
+            stored=(listed, external, managed),
+        )
+        self.assertEqual(read, [managed.luma_event_id])
+        self.assertEqual(summary["events_due"], 1)
 
     def test_a_rejected_key_stops_the_pass(self):
         for status_code in (401, 403):
@@ -157,3 +171,53 @@ class RunnerHandOverTests(SimpleTestCase):
         self.assertEqual(result["reason"], "luma_key_rejected")
         self.assertIsNone(self.cache.get(SYNC_RESUME_KEY))
         self.assertEqual(again["reason"], "throttled")
+
+
+class CatalogCoverageTests(SimpleTestCase):
+    def test_direct_guest_sync_rejects_listed_event_before_any_request(self):
+        event = events("evt-listed")[0]
+        event.raw_payload["access"] = "view"
+        service = Mock()
+        with self.assertRaises(LumaConfigurationError):
+            sync_event_guests(service, event)
+        service.list_guests.assert_not_called()
+
+    def test_due_query_excludes_listed_events_before_applying_limit(self):
+        from django.utils import timezone
+        with patch("crm.luma_sync.CrmEvent") as model:
+            events_due_for_guest_sync(now=timezone.now(), recent_days=30, limit=5)
+        filters = model.objects.filter.call_args.kwargs
+        self.assertEqual(filters, {"raw_payload__platform": "luma", "raw_payload__access": "manage"})
+
+    def test_catalog_paginates_all_access_levels_without_guest_requests(self):
+        pages = [
+            {"entries": [{"id": "evt-managed", "platform": "luma", "access": "manage"}], "has_more": True, "next_cursor": "next"},
+            {"entries": [{"id": "evt-listed", "platform": "luma", "access": "view"}, {"id": "ext-listed", "platform": "external"}], "has_more": False},
+        ]
+        service = LumaAttendeeReportService(api_key="synthetic")
+        with patch.object(service, "_get", side_effect=pages) as get, patch("crm.luma_sync.CrmEvent") as model:
+            model.objects.filter.return_value = []
+            sync_event_catalog(service)
+            created = model.objects.bulk_create.call_args.args[0]
+        self.assertEqual(len(created), 3)
+        self.assertEqual([call.kwargs["luma_event_id"] for call in model.call_args_list], ["evt-managed", "evt-listed", "ext-listed"])
+        for call in get.call_args_list:
+            self.assertEqual(call.args[0], "/v1/calendars/events/list")
+            self.assertEqual(call.kwargs["params"]["access"], ["manage", "view"])
+            self.assertEqual(call.kwargs["params"]["platforms"], ["luma", "external"])
+            self.assertEqual(call.kwargs["params"]["status"], "approved")
+        self.assertEqual(get.call_args_list[1].kwargs["params"]["pagination_cursor"], "next")
+
+    def test_incomplete_calendar_scan_makes_no_database_writes(self):
+        for page in (
+            {"entries": [], "has_more": True},
+            {"entries": [], "has_more": True, "next_cursor": "repeated"},
+            {"entries": "invalid", "has_more": False},
+            {"entries": [None], "has_more": False},
+        ):
+            service = LumaAttendeeReportService(api_key="synthetic")
+            with patch.object(service, "_get", return_value=page), patch("crm.luma_sync.CrmEvent") as model:
+                with self.assertRaises(LumaAPIError):
+                    sync_event_catalog(service)
+                model.objects.bulk_create.assert_not_called()
+                model.objects.bulk_update.assert_not_called()

@@ -33,7 +33,11 @@ class Command(BaseCommand):
             raise CommandError(str(exc)) from exc
 
         catalog = sync_event_catalog(service)
-        events = CrmEvent.objects.filter(pk__in=[event.pk for event in catalog])
+        events = CrmEvent.objects.filter(
+            pk__in=[event.pk for event in catalog],
+            raw_payload__platform="luma",
+            raw_payload__access="manage",
+        )
         if options["since"]:
             try:
                 since = datetime.combine(
