@@ -78,7 +78,7 @@
       "identity": "content_factory/article_review_billing.py:reserve_image_charge:2a97725a6061bf50d6bbe7d0c66843df0fc89a75f165c6024ddc08d1911b5f6c:1",
       "path": "content_factory/article_review_billing.py",
       "function": "reserve_image_charge",
-      "line": 72,
+      "line": 73,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -90,13 +90,14 @@
         "saved"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ecc8d9dddac07dc22b613527e70bfbd3c7651949a4fd750bb3b3b5104805791f",
+      "function_sha256": "63e765409f8c5ef21983aff8c6c340deee418dca4d5b5b8aa8fea5eb35c471a4",
       "classification": "owned_backend_command_metadata",
       "test_refs": [
-        "content_factory/tests_run_retired_writers.py",
-        "content_factory/tests_run_provider_boundaries.py"
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_run_provider_boundaries.py",
+        "content_factory/tests_run_retired_writers.py"
       ],
-      "reason": "Fresh locked image charge receipt remains backend billing metadata; actual event owner saves result only, preserving original execution clocks.",
+      "reason": "Fresh locked image charge receipt remains backend billing metadata; actual event owner saves result only, preserving original execution clocks. The keyed review guard now rechecks current active reviewer and exact original ticket while the organization lock spans the actual image debit.",
       "guard": "event_owned(saved) update_fields split after existing payer/operation/actual debit/refund checks.",
       "pending_owner": null
     },
@@ -5715,6 +5716,56 @@
       "reason": "Saved run is AutomationRun, not CF execution. Dispatch child admission is separately audited at actual CF callers.",
       "guard": "AutomationRun constructor/query/type and status enum.",
       "pending_owner": null
+    },
+    {
+      "identity": "content_factory/founder_review_commands.py:_claim:b29cee1baed23cedf640e34925bec3c037e013f6be93d5b461701ce52ea3257d:1",
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_claim",
+      "line": 152,
+      "kind": "inferred_run_save",
+      "fields": [
+        "updated_at"
+      ],
+      "statement_sha256": "b29cee1baed23cedf640e34925bec3c037e013f6be93d5b461701ce52ea3257d",
+      "duplicate_ordinal": 1,
+      "direct_model_chain": false,
+      "inferred_receivers": [
+        "config"
+      ],
+      "local_guard_mentioned": false,
+      "function_sha256": "87f0f78049aeb107baeb0d86b5d77757ed3d40a08a64c06c680b95942a5167d3",
+      "classification": "non_cf_model",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py"
+      ],
+      "reason": "The saved config receiver is OrganizationContentConfig, not ContentFactoryRun. This is bounded private HTTP command acceptance metadata only.",
+      "guard": "Exact original body/key/company/principal/ticket, fresh current permission; no Run lifecycle or execution clock writes.",
+      "pending_owner": null
+    },
+    {
+      "identity": "content_factory/founder_review_commands.py:execute_comment:b29cee1baed23cedf640e34925bec3c037e013f6be93d5b461701ce52ea3257d:1",
+      "path": "content_factory/founder_review_commands.py",
+      "function": "execute_comment",
+      "line": 370,
+      "kind": "inferred_run_save",
+      "fields": [
+        "updated_at"
+      ],
+      "statement_sha256": "b29cee1baed23cedf640e34925bec3c037e013f6be93d5b461701ce52ea3257d",
+      "duplicate_ordinal": 1,
+      "direct_model_chain": false,
+      "inferred_receivers": [
+        "config"
+      ],
+      "local_guard_mentioned": false,
+      "function_sha256": "6850e0ae45d53754f7dd230c1a4f8c5f75ec68b0a02d66f6b7c88e514b954c81",
+      "classification": "non_cf_model",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py"
+      ],
+      "reason": "The saved config receiver is OrganizationContentConfig, not ContentFactoryRun. This is bounded private HTTP command acceptance metadata only.",
+      "guard": "Exact original body/key/company/principal/ticket, fresh current permission; no Run lifecycle or execution clock writes.",
+      "pending_owner": null
     }
   ],
   "control_contexts": [
@@ -6638,8 +6689,8 @@
     {
       "path": "content_factory/paid_article_commands.py",
       "function": "_retained_header",
-      "function_sha256": "89e15918468514e96c715b85c88ca2afe1053d2b439937c44a36d8d95b439f4c",
-      "reason": "A retained v2 header remains bound to its original raw body even when the body caller key is removed, emptied or changed. Only protected local receipt membership, malformed retained namespace or a backend-only outbox marker refuses legacy fallthrough; genuinely unseen no-key/v1 header-only paths keep their legacy delegation. These reads grant no new authority or effects.",
+      "function_sha256": "651a3183f691c9ab4d1a6e7c43c7fd9f1ccadfd4297a3f042a30b0f632da7d19",
+      "reason": "A retained v2 body/header binding cannot enter legacy on missing/empty/changed body key. Once the paid namespace exists and the current cohort is disabled, any supplied string header, including an empty malformed header, refuses new legacy effects even when its key is unseen. Genuinely unenrolled header-only calls, headerless legacy calls and unseen header-only calls while enabled retain their previous delegation; protected outbox markers and malformed retained state only deny.",
       "test_refs": [
         "content_factory/tests_paid_article_http_replay.py"
       ]
@@ -6651,6 +6702,259 @@
       "reason": "Retain the exact-key library boundary after namespace enrollment even when rollout is off. Author enrollment remains limited to author-only bodies or an already bound header; unrelated general settings and no-key legacy calls preserve their existing paths.",
       "test_refs": [
         "content_factory/tests_founder_library_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_digest",
+      "function_sha256": "aeb28255f725ffa018e07dd2736f14fd65a809579947e8a4addcd98792df0bd7",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_identity",
+      "function_sha256": "bf3a7cbe911e07dcb4048caafe05c11e95a5361a534bdf3b3c913e5c0b0d7787",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_binding",
+      "function_sha256": "f755b96df2afc5388ed782b1e825d4c0229352aaf872041cb33d13bc2e13f01c",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_authorize",
+      "function_sha256": "53dab0b7e45af8019ee2585c33af5556478dd951135d2949cf28a6313dba7726",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_valid",
+      "function_sha256": "fe05e42fe6c2a68756a64b81dd36a4f0f16e6ee0816c41c85e0177a0d188f956",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_strategy",
+      "function_sha256": "3d25bd91934373f725932218646fddcf7c45aff9a567623424fdc322dfa40c64",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_claim",
+      "function_sha256": "87f0f78049aeb107baeb0d86b5d77757ed3d40a08a64c06c680b95942a5167d3",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_dispatch",
+      "function_sha256": "a95f3c2fdf4393d619d31d88dfac17ef4a22a1889e7681ffa3437cfeb0c70bbf",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "require_current_effect",
+      "function_sha256": "435cfa913ddbeac57d9a9cda3bf9d3d5050f3e08b91a952593c65c046c1a2fb4",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "image_debit_guard",
+      "function_sha256": "fa6414f033a1bf1e4b95b814c1c52e857cc4c7ae1e43082ff48953c208175cc0",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_finish",
+      "function_sha256": "af408695d650bcc9246acce3ec2eeadcd72d2e54c47cee92d24195dc35ba3552",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_run_for_alert",
+      "function_sha256": "6a839b7e506eee5f392e1a7e20af6cc20141828c43d6b0eec4fca707d1db8f93",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_retains_identity",
+      "function_sha256": "cb36ce0d77a7a76e230d020b5a9605c4896947c631e6a9891dfe6f169f1e9523",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment. An enrolled namespace after cohort-off also holds malformed unseen keyed headers before legacy fallback; no-key and never-enrolled legacy behavior remains separate.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_conflict_response",
+      "function_sha256": "1f89614a24336724bbfc42a4bc4e8c7632b54bf67a89f79ce7004ddb2e4c07f1",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "execute",
+      "function_sha256": "6ee88c29fca8c446531febfaf0ca3ac0b6b5fbd6b429e4ee65464ba2e2430fe2",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "execute_comment",
+      "function_sha256": "6850e0ae45d53754f7dd230c1a4f8c5f75ec68b0a02d66f6b7c88e514b954c81",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/article_review_views.py",
+      "function": "remote_review",
+      "function_sha256": "eccd4cf128a7aaa99a5947fda4204302d5a261813f14de7b4965bd19a6fbcf3b",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/article_review_views.py",
+      "function": "VibeMarketingArticleReviewView.post",
+      "function_sha256": "85e35e091a3c2c1c8709717319dc0c9e2536aa67872f2fec6c42bf54dc3abdc0",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/article_review_views.py",
+      "function": "VibeMarketingArticleReviewView._post_review",
+      "function_sha256": "4e01e3d6d928000216a783c2650e6a4b3f9b4f672fec880bb872d925a51cdade",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/article_review_billing.py",
+      "function": "reserve_image_charge",
+      "function_sha256": "63e765409f8c5ef21983aff8c6c340deee418dca4d5b5b8aa8fea5eb35c471a4",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "VibeMarketingRunCommentsView.post",
+      "function_sha256": "276cc8b80eff4f672bace7df773e8b6031f01c3fd5b97468ce3dc0f83b232994",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "VibeMarketingRunCommentsView._post_comment",
+      "function_sha256": "2963727cc52850e4d24f9f4d9c3a40d618eef28317a514d4aac71976d301ed66",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_review_commands.py",
+      "function": "refresh_resume_required",
+      "function_sha256": "7c68aaeb6b880113372b5e8ba9370002f299e880477569ac4d6e4b390ebb12a2",
+      "reason": "A keyed connected failed/blocked preview refresh cannot implicitly reserve another execution ticket. After a read-only pending/error snapshot, require current effect and return explicit resume-required conflict before advance_workflow_attempt. Already-ready readback, legacy unkeyed and normal nonterminal refresh retain existing behavior. No attempt, clocks, budget or charge changes.",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py",
+        "content_factory/tests_article_review_update_unit.py",
+        "content_factory/tests_run_review_metadata_clocks.py"
       ]
     }
   ],

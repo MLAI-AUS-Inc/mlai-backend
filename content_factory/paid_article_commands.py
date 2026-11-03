@@ -311,16 +311,18 @@ def finish(context, claim):
 
 
 def _retained_header(context, header):
-    """A known v2 header cannot escape its body proof via the legacy path."""
-    if type(header) is not str or not header:
+    """Retained v2 custody cannot escape through a keyed legacy fallback."""
+    if type(header) is not str:
         return False
     from .models import OrganizationContentConfig
     from .dispatch_models import ContentFactoryDispatchOutbox
     strategy = OrganizationContentConfig.objects.filter(organization=context.organization).values_list(
         'pillar_strategy', flat=True).first()
     if isinstance(strategy, dict) and KEY in strategy:
+        from .founder_journey_cohort import is_new_journey
         commands = strategy[KEY]
-        if not isinstance(commands, dict) or hashlib.sha256(header.encode()).hexdigest() in commands:
+        if (not isinstance(commands, dict) or not is_new_journey(context.organization)
+                or hashlib.sha256(header.encode()).hexdigest() in commands):
             return True
     return ContentFactoryDispatchOutbox.objects.filter(client_request_id=header,
         payload__has_key=OUTBOX_KEY).exists()

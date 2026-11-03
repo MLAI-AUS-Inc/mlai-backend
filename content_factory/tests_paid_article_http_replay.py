@@ -545,6 +545,14 @@ class PaidArticleHttpReplayTests(CardFixture, TransactionTestCase):
             self.assertEqual(self.financial_dispatch_state(), before)
             self.config.refresh_from_db()
             self.assertEqual(self.config.pillar_strategy, strategy_before)
+        with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False), patch.object(
+                views, 'start_article_generation', side_effect=AssertionError('No enrolled keyed legacy fallthrough')):
+            response = self.client.post(self.url, missing_key, format='json',
+                HTTP_IDEMPOTENCY_KEY='unseen-header-with-original-no-outbox-claim')
+        self.assertEqual(response.status_code, 409, getattr(response, 'data', response.content))
+        self.assertEqual(self.financial_dispatch_state(), before)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.pillar_strategy, strategy_before)
 
     def test_retained_header_cannot_drop_or_change_original_body_key_on_or_off(self):
         self.start()
@@ -572,14 +580,46 @@ class PaidArticleHttpReplayTests(CardFixture, TransactionTestCase):
         body = deepcopy(self.body)
         body.pop('client_request_id')
         before = self.financial_dispatch_state()
-        for enabled in (True, False):
+        for enabled, header in ((True, 'genuinely-unseen-header-only-legacy'), (False, None)):
             with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=enabled), patch.object(
                     views, 'start_article_generation', return_value=Response({'legacy': True}, status=202)) as legacy:
-                response = self.client.post(self.url, body, format='json',
-                    HTTP_IDEMPOTENCY_KEY='genuinely-unseen-header-only-legacy')
+                headers = {'HTTP_IDEMPOTENCY_KEY': header} if header is not None else {}
+                response = self.client.post(self.url, body, format='json', **headers)
             self.assertEqual((response.status_code, response.json()), (202, {'legacy': True}))
             legacy.assert_called_once()
             self.assertEqual(self.financial_dispatch_state(), before)
+
+    def test_enrolled_flag_off_refuses_unseen_header_when_body_key_is_missing(self):
+        self.start()
+        self.client.raise_request_exception = False
+        body = deepcopy(self.body)
+        body.pop('client_request_id')
+        before = self.financial_dispatch_state()
+        self.config.refresh_from_db()
+        strategy_before = deepcopy(self.config.pillar_strategy)
+        config_before = type(self.config).objects.values().get(pk=self.config.pk)
+        for header in ('unseen-paid-header-while-disabled', ''):
+            with self.subTest(header=header), override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False):
+                response = self.client.post(self.url, body, format='json', HTTP_IDEMPOTENCY_KEY=header)
+                self.assertEqual(response.status_code, 409, getattr(response, 'data', response.content))
+                self.assertEqual(self.financial_dispatch_state(), before)
+                self.config.refresh_from_db()
+                self.assertEqual(self.config.pillar_strategy, strategy_before)
+                self.assertEqual(type(self.config).objects.values().get(pk=self.config.pk), config_before)
+
+    def test_unenrolled_flag_off_header_only_http_keeps_legacy_delegation(self):
+        from rest_framework.response import Response
+        body = deepcopy(self.body)
+        body.pop('client_request_id')
+        before = self.financial_dispatch_state()
+        with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False), patch.object(
+                views, 'start_article_generation', return_value=Response({'legacy': True}, status=202)) as legacy:
+            response = self.client.post(self.url, body, format='json', HTTP_IDEMPOTENCY_KEY='legacy-only-header')
+        self.assertEqual((response.status_code, response.json()), (202, {'legacy': True}))
+        legacy.assert_called_once()
+        self.assertEqual(self.financial_dispatch_state(), before)
+        self.config.refresh_from_db()
+        self.assertNotIn(commands.KEY, self.config.pillar_strategy)
 
     def test_protected_outbox_or_malformed_namespace_keeps_known_header_out_of_legacy(self):
         self.start()
