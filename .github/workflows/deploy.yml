@@ -1011,6 +1011,7 @@ jobs:
           content_factory.tests_catalog_commands \
           content_factory.tests_catalog_brief_commands \
           content_factory.tests_founder_library_commands \
+          content_factory.tests_library_schema_http \
           content_factory.tests_run_cancellation_tuple \
           content_factory.tests_run_review_metadata_clocks \
           content_factory.tests_founder_article_contract \
