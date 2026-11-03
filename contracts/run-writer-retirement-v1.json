@@ -6123,8 +6123,8 @@
     {
       "path": "content_factory/paid_article_commands.py",
       "function": "execute",
-      "function_sha256": "808257b14020fe1b288fbfa1a734fa1ea35da1e811332b4ed2a99c8cb02407a4",
-      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "function_sha256": "a7086aefbc3d367640f3f78c88b4983cd9e0de39ba38b3c722127f07715236b3",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority. Once the protected namespace exists, disabling new admissions refuses unseen or no-outbox keys instead of entering the legacy dispatcher; exact retained outbox replay still revalidates current authority.",
       "test_refs": [
         "content_factory/tests_paid_article_http_replay.py"
       ]

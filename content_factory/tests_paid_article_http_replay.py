@@ -498,6 +498,43 @@ class PaidArticleHttpReplayTests(CardFixture, TransactionTestCase):
         self.assertEqual((response.status_code, response.data['runId']), (202, run.run_id))
         self.assertEqual(self.financial_dispatch_state(), before)
 
+    def test_enrolled_namespace_refuses_unseen_http_keys_after_admission_flag_off(self):
+        run = self.start()
+        self.client.raise_request_exception = False
+        key = str(uuid4())
+        body = {**deepcopy(self.body), 'client_request_id': key,
+            'topic': 'A different clinic workflow', 'target_keyword': 'A different clinic workflow'}
+        before = self.financial_dispatch_state()
+        self.config.refresh_from_db()
+        strategy_before = deepcopy(self.config.pillar_strategy)
+        with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False):
+            response = self.client.post(self.url, body, format='json', HTTP_IDEMPOTENCY_KEY=key)
+            retained = self.post()
+        self.assertEqual(response.status_code, 409, getattr(response, 'data', response.content))
+        self.assertEqual((retained.status_code, retained.data['runId']), (202, run.run_id))
+        self.assertEqual(self.financial_dispatch_state(), before)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.pillar_strategy, strategy_before)
+
+    def test_flag_off_retains_no_outbox_command_without_entering_legacy_start(self):
+        self.client.raise_request_exception = False
+        with patch.object(views, '_charge_roo_points_for_article',
+                side_effect=ConnectionError('Synthetic pre-debit process interruption')):
+            first = self.post()
+        self.assertEqual(first.status_code, 500, getattr(first, 'data', first.content))
+        self.config.refresh_from_db()
+        self.assertIn(commands.KEY, self.config.pillar_strategy)
+        self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
+        before = self.financial_dispatch_state()
+        strategy_before = deepcopy(self.config.pillar_strategy)
+        with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False), patch.object(
+                views, 'start_article_generation', side_effect=AssertionError('No legacy fallthrough')):
+            response = self.post()
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(self.financial_dispatch_state(), before)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.pillar_strategy, strategy_before)
+
     def test_frozen_or_malformed_current_roster_cannot_replay_a_paid_command(self):
         self.start()
         for roster in [{'version': 1, 'owner_user_id': self.owner.pk, 'frozen': True}, ['invalid']]:

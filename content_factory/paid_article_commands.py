@@ -322,13 +322,11 @@ def execute(*, context, user, data, header, start):
         from .models import OrganizationContentConfig
         from .dispatch_models import ContentFactoryDispatchOutbox
         strategy = OrganizationContentConfig.objects.filter(organization=context.organization).values_list('pillar_strategy', flat=True).first()
-        commands = strategy.get(KEY) if isinstance(strategy, dict) else None
         present = isinstance(strategy, dict) and KEY in strategy
         key = data.get('client_request_id', data.get('clientRequestId'))
-        digest = hashlib.sha256(key.encode()).hexdigest() if type(key) is str else None
         original = ContentFactoryDispatchOutbox.objects.filter(client_request_id=key).first() if type(key) is str else None
         recorded_outbox = original is not None and isinstance(original.payload, dict) and OUTBOX_KEY in original.payload
-        if not recorded_outbox and (not present or isinstance(commands, dict) and digest not in commands):
+        if not recorded_outbox and not present:
             return start()
     claim = None
     try:
