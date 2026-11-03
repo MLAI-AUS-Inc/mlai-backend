@@ -125,7 +125,7 @@ jobs:
       run: python scripts/test_without_database.py crm.tests.test_luma_guests_unit crm.tests.test_luma_sync_unit crm.tests.test_contact_import_unit crm.tests.test_engagement_unit crm.tests.test_engagement_import_unit crm.tests.test_engagement_scoring_unit crm.tests.test_engagement_sources_unit crm.tests.test_engagement_refresh_unit crm.tests.test_newsletter_activity_import_unit crm.tests.test_phones_unit
 
     - name: Check CRM API, segment and admin gate rules without database access
-      run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit crm.tests.test_admin_gate_unit
+      run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit crm.tests.test_segment_trees_unit crm.tests.test_audience_profiles_unit crm.tests.test_audience_rules_unit crm.tests.test_admin_gate_unit
 
     - name: Check CRM blasts, sending domains and the listmonk client without database access
       run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit
@@ -763,7 +763,7 @@ jobs:
       run: python manage.py test crm.tests.test_contact_store_database --verbosity 2
 
     - name: Verify CRM API, segments and the admin gate on PostgreSQL
-      run: python manage.py test crm.tests.test_api_database crm.tests.test_segments_database crm.tests.test_admin_gate_database --verbosity 2
+      run: python manage.py test crm.tests.test_api_database crm.tests.test_segments_database crm.tests.test_segment_builder_database crm.tests.test_audience_catalog_database crm.tests.test_audience_profile_database crm.tests.test_admin_gate_database --verbosity 2
 
     - name: Verify CRM blasts, senders and listmonk feedback on PostgreSQL
       run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database --verbosity 2

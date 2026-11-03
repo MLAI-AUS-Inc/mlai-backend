@@ -3,6 +3,7 @@
 from django.urls import path
 
 from . import views
+from .profile_views import AudienceProfileMappingApplyView, AudienceProfileMappingPreviewView, AudienceProfileView
 
 urlpatterns = [
     path("access/", views.AccessView.as_view(), name="community_chat_crm_access"),
@@ -15,6 +16,21 @@ urlpatterns = [
         name="community_chat_crm_event_guests",
     ),
     path("contacts/", views.ContactsView.as_view(), name="community_chat_crm_contacts"),
+    path(
+        "contacts/<uuid:contact_id>/audience-profile/",
+        AudienceProfileView.as_view(),
+        name="community_chat_crm_contact_audience_profile",
+    ),
+    path(
+        "contacts/<uuid:contact_id>/audience-profile/preview/",
+        AudienceProfileMappingPreviewView.as_view(),
+        name="community_chat_crm_contact_audience_profile_preview",
+    ),
+    path(
+        "contacts/<uuid:contact_id>/audience-profile/import/",
+        AudienceProfileMappingApplyView.as_view(),
+        name="community_chat_crm_contact_audience_profile_import",
+    ),
     path(
         "contacts/<uuid:contact_id>/",
         views.ContactDetailView.as_view(),

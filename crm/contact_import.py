@@ -31,6 +31,7 @@ from community_chat.admin_access import require_mlai_admin
 from core.models import AccountBan
 
 from .emails import normalize_contact_email
+from .engagement import RESERVED_ATTRIBUTE_KEYS
 from .luma_sync import users_by_email
 from .contact_fields import fill_phone, grant_whatsapp_opt_in
 from .models import Channel, Contact, ContactConsentEvent, ContactImport, CrmAuditEvent
@@ -186,6 +187,8 @@ def plan_columns(
         if target is None:
             slug = re.sub(r"[^a-z0-9]+", "_", key).strip("_")
             target = f"attributes.{slug}" if slug else "ignore"
+            if slug in RESERVED_ATTRIBUTE_KEYS:
+                target = "ignore"
         if target not in ("ignore",) and not target.startswith("attributes."):
             used.add(target)
         plan[header] = target
@@ -209,6 +212,8 @@ def validate_column_plan(mapping) -> dict:
             raise ImportFileError("Column headers and fields must be text.", "invalid_mapping")
         if target not in TARGETS and not _ATTRIBUTE_TARGET.match(target):
             raise ImportFileError(f"Unknown field for column {header!r}.", "unknown_target")
+        if target.removeprefix("attributes.") in RESERVED_ATTRIBUTE_KEYS:
+            raise ImportFileError("System-owned audience and rating fields require a reviewed mapping.", "reserved_attribute")
         if target != "ignore" and not target.startswith("attributes."):
             if target in used:
                 raise ImportFileError(f"Two columns map to {target}.", "duplicate_target")
@@ -222,6 +227,8 @@ def validate_column_plan(mapping) -> dict:
 def parse_rows(rows: Iterable[dict], plan: dict, *, first_row_number: int = FIRST_DATA_ROW) -> ParsedFile:
     """Validate rows and keep one per email, merging duplicates into the first."""
 
+    if any(target.removeprefix("attributes.") in RESERVED_ATTRIBUTE_KEYS for target in plan.values()):
+        raise ImportFileError("System-owned attributes cannot be imported as ordinary fields.", "reserved_attribute")
     by_email: dict[str, ParsedRow] = {}
     counts: Counter = Counter()
     errors: list = []
@@ -562,6 +569,8 @@ def _apply_chunk(rows: list, consent: str, default_source: str, extra_tags: list
             contact.tags = merged_tags
             dirty = True
         for key, value in row.attributes.items():
+            if key in RESERVED_ATTRIBUTE_KEYS:
+                raise ImportFileError("System-owned attributes cannot be imported as ordinary fields.", "reserved_attribute")
             if key not in contact.attributes and len(contact.attributes) < MAX_ATTRIBUTE_KEYS:
                 contact.attributes[key] = value
                 dirty = True

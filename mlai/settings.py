@@ -349,6 +349,7 @@ CORS_ALLOW_HEADERS = (
     # P1 founder journey poll (GET /api/v1/my-startup/journey/) revalidates
     # with If-None-Match and reads the ETag cross-origin.
     "if-none-match",
+    "if-match",
 )
 CORS_EXPOSE_HEADERS = ["X-Request-ID", "Retry-After", "ETag"]
 
@@ -2329,6 +2330,7 @@ CRM_LUMA_WHATSAPP_QUESTION_LABELS = [
 # Contacts API for Chat owners and admins (/api/v1/community-chat/crm/).
 # Off by default; the API answers 404 crm_disabled until an operator enables it.
 COMMUNITY_CHAT_CRM_ENABLED = _env_is_true('COMMUNITY_CHAT_CRM_ENABLED', False)
+CRM_SEGMENT_BUILDER_V2_ENABLED = _env_is_true('CRM_SEGMENT_BUILDER_V2_ENABLED', True)
 # Email blasts go through a self-hosted listmonk (v6.2) reached on the
 # mlai-shared network, e.g. LISTMONK_BASE_URL=http://listmonk:9000, as a
 # listmonk API user. CRM_SENDING_ENABLED is the email kill switch; SMTP

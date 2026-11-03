@@ -223,42 +223,26 @@ def segment_count(definition: dict, *, now: datetime) -> Optional[int]:
     return audience.count()
 
 
-def save_segment(segment: Optional[Segment], data: dict, *, actor, now: datetime) -> Segment:
-    """Create a segment, or update the given one; a new definition is recounted."""
+def save_segment(
+    segment: Optional[Segment], data: dict, *, actor, now: datetime,
+    if_match=None, idempotency_key=None,
+) -> Segment:
+    """Create or atomically edit a saved audience, preserving legacy callers."""
 
-    require_mlai_admin(actor)
-    creating = segment is None
-    if creating:
-        segment = Segment(created_by=actor)
-    if "definition" in data:
-        segment.definition = validate_definition(data["definition"])
-        segment.last_count = segment_count(segment.definition, now=now)
-        segment.last_counted_at = now if segment.last_count is not None else None
-    elif creating:
-        raise CrmError("invalid_definition", pointer="/", reason="required")
-    for name in ("name", "description"):
-        if name in data:
-            setattr(segment, name, " ".join(data[name].split()) if name == "name" else data[name])
-    if not segment.name:
-        raise CrmError("invalid_request", fields={"name": ["blank"]})
-    with transaction.atomic():
-        segment.save()
-        audit(
-            actor,
-            CrmAuditEvent.Action.EDIT,
-            "segment",
-            segment.pk,
-            {"operation": "create" if creating else "update", "fields": sorted(data)},
-        )
-    return segment
+    from .segment_services import save_segment_atomic
+
+    return save_segment_atomic(
+        segment, data, actor=actor, now=now,
+        if_match=if_match, idempotency_key=idempotency_key,
+    )
 
 
-def delete_segment(segment: Segment, *, actor) -> None:
-    require_mlai_admin(actor)
-    segment_id = segment.pk
-    with transaction.atomic():
-        segment.delete()
-        audit(actor, CrmAuditEvent.Action.EDIT, "segment", segment_id, {"operation": "delete"})
+def delete_segment(segment: Segment, *, actor, if_match=None) -> None:
+    """Delete a saved audience after checking its edit token."""
+
+    from .segment_services import delete_segment_atomic
+
+    delete_segment_atomic(segment, actor=actor, if_match=if_match)
 
 
 _MAILBOX_FIELDS = ("display_name", "reply_to", "daily_limit", "enabled")

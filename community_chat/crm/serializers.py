@@ -13,6 +13,7 @@ from rest_framework import serializers
 from rest_framework.exceptions import ErrorDetail
 
 from crm.blasts import QUICK_SEGMENTS as BLAST_QUICK_SEGMENTS, mask_address
+from crm.audience_profiles import audience_profile
 from crm.contact_import import MAX_TAGS, clean_tags
 from crm.emails import normalize_contact_email
 from crm.engagement import (
@@ -205,6 +206,13 @@ class SegmentPreviewInput(StrictSerializer):
     definition = serializers.JSONField()
     purpose = serializers.ChoiceField(choices=PURPOSES, allow_null=True, required=False, default=None)
     event_id = serializers.UUIDField(allow_null=True, required=False, default=None)
+    offset = serializers.IntegerField(min_value=0, max_value=100000, required=False, default=0)
+    limit = serializers.IntegerField(min_value=1, max_value=50, required=False, default=20)
+    sort = serializers.ChoiceField(choices=("name",), required=False, default="name")
+    definition_hash = serializers.RegexField(r"^[0-9a-f]{64}$", required=False)
+    sample_scope = serializers.ChoiceField(
+        choices=("matches", "marketing_eligible"), required=False, default="matches"
+    )
 
 
 def _channel_list(**kwargs):
@@ -306,6 +314,8 @@ class BlastInput(StrictSerializer):
 class BlastSendInput(StrictSerializer):
     confirm = serializers.DictField(child=serializers.IntegerField(min_value=0))
     idempotency_key = serializers.CharField(max_length=64)
+    definition_hash = serializers.RegexField(r"^[0-9a-f]{64}$", required=False)
+    recipient_fingerprint = serializers.RegexField(r"^[0-9a-f]{64}$", required=False)
 
     def validate_confirm(self, value):
         if any(key not in Channel.values for key in value):
@@ -462,6 +472,7 @@ def contact_detail(contact: Contact, *, now, registrations, deliveries, replies,
         "city": contact.city,
         "linkedin_url": contact.linkedin_url,
         "attributes": editable_attributes(contact.attributes),
+        "audience_profile": audience_profile(contact.attributes),
         "source": contact.source,
         "first_seen_at": iso(contact.first_seen_at),
         "user": {"display_name": contact.user.full_name} if contact.user_id and contact.user else None,
@@ -860,11 +871,16 @@ def import_record(record: ContactImport) -> dict:
 
 
 def segment_dto(segment) -> dict:
+    from crm.segment_trees import definition_etag, definition_hash
+
     return {
         "id": str(segment.pk),
         "name": segment.name,
         "description": segment.description,
         "definition": segment.definition,
+        "definition_version": 2 if segment.definition.get("version") == 2 else 1,
+        "definition_hash": definition_hash(segment.definition),
+        "etag": definition_etag(segment),
         "last_count": segment.last_count,
         "last_counted_at": iso(segment.last_counted_at),
         "updated_at": iso(segment.updated_at),

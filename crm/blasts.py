@@ -18,6 +18,7 @@ dispatcher itself has no actor and isn't gated.
 from __future__ import annotations
 
 import logging
+import hashlib
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
@@ -57,6 +58,7 @@ from .queries import (
     sms_allowed_prefixes,
 )
 from .segments import definition_q, evaluate, quick_segment_definition, validate_definition
+from .segment_trees import definition_hash
 from .sms import GSM7, UCS2, compose_sms, estimate_cost, sms_segments
 
 logger = logging.getLogger(__name__)
@@ -265,6 +267,7 @@ class Audience:
 
     querysets: dict
     excluded: dict
+    definition: Optional[dict] = None
 
 
 def audience_definition(blast, *, now) -> Optional[dict]:
@@ -308,7 +311,7 @@ def resolve_audience(blast, *, now) -> Audience:
         definition, blast.purpose, blast.event, now=now
     )
     if not twilio_allowed(blast):
-        return Audience(querysets, excluded)
+        return Audience(querysets, excluded, definition)
 
     registered = EventRegistration.objects.filter(
         registered_q(), event_id=blast.event_id, contact=OuterRef("pk")
@@ -345,7 +348,7 @@ def resolve_audience(blast, *, now) -> Audience:
     )
     querysets[Channel.SMS] = matched.filter(sms)
     querysets[Channel.WHATSAPP] = matched.filter(whatsapp)
-    return Audience(querysets, excluded)
+    return Audience(querysets, excluded, definition)
 
 
 def people_count(audience: Audience, channels: Iterable[str]) -> int:
@@ -410,7 +413,7 @@ def channel_limits(blast, counts: dict, *, now) -> list:
 def audience_summary(blast, audience: Audience, *, now) -> dict:
     reachable = {channel: audience.querysets[channel].count() for channel in CHANNELS}
     chosen = [channel for channel in blast.channels or [] if channel in CHANNELS]
-    return audience_body(
+    body = audience_body(
         people=people_count(audience, chosen),
         reachable=reachable,
         excluded=audience.excluded,
@@ -418,6 +421,24 @@ def audience_summary(blast, audience: Audience, *, now) -> dict:
         whatsapp_cost=estimate_whatsapp_cost(reachable[Channel.WHATSAPP]),
         limits=channel_limits(blast, reachable, now=now),
     )
+    body["definition_hash"] = definition_hash(audience.definition) if audience.definition is not None else None
+    body["definition_version"] = 2 if (audience.definition or {}).get("version") == 2 else 1
+    body["recipient_fingerprint"] = recipient_fingerprint({
+        channel: audience.querysets[channel].order_by("pk").values_list("pk", flat=True).iterator(chunk_size=1000)
+        for channel in sorted(chosen)
+    })
+    return body
+
+
+def recipient_fingerprint(ordered_ids: dict) -> str:
+    """Hash channel membership without exposing contact IDs in the confirmation."""
+
+    digest = hashlib.sha256(b"crm-audience-recipients-v1\n")
+    for channel in sorted(ordered_ids):
+        digest.update((str(channel) + ":\n").encode("utf-8"))
+        for contact_id in ordered_ids[channel]:
+            digest.update((str(contact_id) + "\n").encode("ascii"))
+    return digest.hexdigest()
 
 
 def blast_audience(blast, *, now=None) -> dict:
@@ -464,7 +485,11 @@ def _confirmed(confirm, channel) -> Optional[int]:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def queue_blast(blast_id, *, confirm: dict, idempotency_key: str, actor, now=None) -> Blast:
+def queue_blast(
+    blast_id, *, confirm: dict, idempotency_key: str, actor, now=None,
+    definition_hash_confirm=None,
+    recipient_fingerprint_confirm=None,
+) -> Blast:
     """Check, recount and snapshot a draft, then queue it. The same key returns the same blast.
 
     Raises ``BlastError``: 403 ``channel_disabled``, 400 for an incomplete
@@ -495,6 +520,12 @@ def queue_blast(blast_id, *, confirm: dict, idempotency_key: str, actor, now=Non
             check_channels_available(blast.channels or [], status=403)
             check_ready(blast)
             audience = resolve_audience(blast, now=now)
+            resolved_hash = definition_hash(audience.definition) if audience.definition is not None else None
+            if (
+                (audience.definition or {}).get("version") == 2
+                or definition_hash_confirm is not None
+            ) and definition_hash_confirm != resolved_hash:
+                raise BlastError("audience_changed", 409, **audience_summary(blast, audience, now=now))
             columns = {
                 Channel.EMAIL: ("pk", "email", "marketing_consent"),
                 Channel.SMS: ("pk", "phone_e164"),
@@ -505,6 +536,14 @@ def queue_blast(blast_id, *, confirm: dict, idempotency_key: str, actor, now=Non
                 for channel in blast.channels
             }
             counts = {channel: len(rows) for channel, rows in recipients.items()}
+            membership_hash = recipient_fingerprint({
+                channel: sorted(row[0] for row in rows) for channel, rows in recipients.items()
+            })
+            if (
+                (audience.definition or {}).get("version") == 2
+                or recipient_fingerprint_confirm is not None
+            ) and recipient_fingerprint_confirm != membership_hash:
+                raise BlastError("audience_changed", 409, **audience_summary(blast, audience, now=now))
             if any(_confirmed(confirm, channel) != count for channel, count in counts.items()):
                 raise BlastError("count_changed", 409, **audience_summary(blast, audience, now=now))
             people = {row[0] for rows in recipients.values() for row in rows}
@@ -514,7 +553,7 @@ def queue_blast(blast_id, *, confirm: dict, idempotency_key: str, actor, now=Non
             if limits:
                 raise BlastError("daily_limit", 409, limits=limits)
             BlastDelivery.objects.bulk_create(_snapshot(blast, recipients), batch_size=1000)
-            blast.segment_definition = audience_definition(blast, now=now) or {}
+            blast.segment_definition = audience.definition or {}
             blast.status = Blast.Status.QUEUED
             blast.queued_at = now
             blast.recipient_count = len(people)

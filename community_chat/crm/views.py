@@ -9,7 +9,7 @@ the flag says, and then 404 ``crm_disabled`` to admins while
 
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import IntegrityError
-from django.db.models import Count
+from django.db.models import Count, F, Q
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -43,12 +43,14 @@ from crm.models import (
     Segment,
     SenderMailbox,
 )
+from crm.segment_trees import definition_etag, definition_hash
 from crm.segments import (
     SegmentError,
     catalog,
     definition_q,
     evaluate,
     quick_segment_definition,
+    segment_contacts,
     validate_definition,
 )
 
@@ -387,56 +389,107 @@ class ImportCancelView(CrmView):
 class SegmentsView(CrmView):
     def get(self, request, segment_id=None):
         if segment_id is not None:
-            return Response(wire.segment_dto(get_object_or_404(Segment, pk=segment_id)))
-        segments = Segment.objects.order_by("name", "pk")
+            segment = get_object_or_404(Segment, pk=segment_id)
+            return Response(wire.segment_dto(segment), headers={"ETag": definition_etag(segment)})
+        search = str(request.query_params.get("q", "")).strip()
+        ordering = request.query_params.get("ordering", "name")
+        if len(search) > 300 or ordering not in ("name", "-updated_at", "-last_count"):
+            raise CrmError("invalid_filter")
+        segments = Segment.objects.all()
+        if search:
+            segments = segments.filter(Q(name__icontains=search) | Q(description__icontains=search))
+        order = F("last_count").desc(nulls_last=True) if ordering == "-last_count" else ordering
+        segments = segments.order_by(order, "pk")
         return Response(
-            paginated(request, segments, lambda page: [wire.segment_dto(item) for item in page])
+            paginated(request, segments, lambda page: [wire.segment_dto(item) for item in page], with_count=True)
         )
 
     def post(self, request):
         data = validated(wire.SegmentInput, request)
-        segment = save_segment(None, data, actor=request.user, now=timezone.now())
-        return Response(wire.segment_dto(segment), status=201)
+        segment = save_segment(
+            None, data, actor=request.user, now=timezone.now(),
+            idempotency_key=request.headers.get("Idempotency-Key"),
+        )
+        return Response(wire.segment_dto(segment), status=201, headers={"ETag": definition_etag(segment)})
 
     def patch(self, request, segment_id):
         segment = get_object_or_404(Segment, pk=segment_id)
         data = validated(wire.SegmentInput, request, partial=True)
-        segment = save_segment(segment, data, actor=request.user, now=timezone.now())
-        return Response(wire.segment_dto(segment))
+        segment = save_segment(
+            segment, data, actor=request.user, now=timezone.now(),
+            if_match=request.headers.get("If-Match"),
+        )
+        return Response(wire.segment_dto(segment), headers={"ETag": definition_etag(segment)})
 
     def delete(self, request, segment_id):
-        delete_segment(get_object_or_404(Segment, pk=segment_id), actor=request.user)
+        delete_segment(
+            get_object_or_404(Segment, pk=segment_id), actor=request.user,
+            if_match=request.headers.get("If-Match"),
+        )
         return Response(status=204)
 
 
 class SegmentPreviewView(CrmView):
     def post(self, request):
+        from crm.audience_profile_rules import activity_coverage_metadata, ensure_activity_coverage
+
         now = timezone.now()
         data = validated(wire.SegmentPreviewInput, request)
+        definition = validate_definition(data["definition"])
+        activity_as_of = ensure_activity_coverage(definition, now)
+        fingerprint = definition_hash(definition)
+        if data.get("definition_hash") and data["definition_hash"] != fingerprint:
+            raise CrmError("definition_changed", 409)
         event = None
         if data["event_id"] is not None:
             event = CrmEvent.objects.filter(pk=data["event_id"]).first()
             if event is None:
                 raise CrmError("event_not_found", 404)
-        audience, excluded = evaluate(data["definition"], data["purpose"], event, now=now)
+        audience, excluded = evaluate(definition, data["purpose"], event, now=now)
         sample = queries.sort_contacts(queries.with_marketing_eligible(audience, now), "name")
+        matched = segment_contacts(definition, now=now).annotate(is_banned=queries.banned())
+        reachable = Q(is_banned=False, email_status=Contact.EmailStatus.ACTIVE)
+        marketing_filter = reachable & queries.marketing_consent_q(now)
+        counts = matched.aggregate(
+            matched=Count("pk"), reachable=Count("pk", filter=reachable),
+            marketing=Count("pk", filter=marketing_filter),
+        )
+        matched_count, marketing_count = counts["matched"], counts["marketing"]
+        marketing = matched.filter(marketing_filter)
+        legacy_count = (counts["reachable"] if data["purpose"] is None else marketing_count
+                        if data["purpose"] == "marketing" else audience.count())
+        offset, limit = data["offset"], data["limit"]
+        sample_population = marketing if data["sample_scope"] == "marketing_eligible" else matched
+        sample_count = marketing_count if data["sample_scope"] == "marketing_eligible" else matched_count
+        matched_rows = queries.sort_contacts(queries.with_marketing_eligible(sample_population, now), "name")
         return Response(
             {
-                "count": audience.count(),
+                "count": legacy_count,
                 "sample": contact_rows(sample[:PREVIEW_SAMPLE_SIZE]),
                 "excluded": excluded,
+                "matched_count": matched_count,
+                "email_reachable_count": counts["reachable"],
+                "marketing_eligible_count": marketing_count,
+                "matched_sample": contact_rows(matched_rows[offset : offset + limit]),
+                "matched_sample_scope": data["sample_scope"],
+                "next_offset": offset + limit if offset + limit < sample_count else None,
+                "definition_hash": fingerprint,
+                "evaluated_at": wire.iso(now),
+                "activity_coverage": activity_coverage_metadata(activity_as_of, now),
             }
         )
 
 
 class SegmentCatalogView(CrmView):
     def get(self, request):
+        from crm.audience_profile_rules import profile_catalog
+
         return Response(
-            catalog(
+            {**catalog(
                 tags=queries.tag_counts(),
                 attributes=queries.attribute_key_counts(),
                 questions=queries.registration_question_counts(),
-            )
+            ), **profile_catalog(Contact.objects.all(), now=timezone.now())}
         )
 
 
@@ -543,6 +596,8 @@ class BlastSendView(CrmView):
             confirm=data["confirm"],
             idempotency_key=data["idempotency_key"],
             actor=request.user,
+            definition_hash_confirm=data.get("definition_hash"),
+            recipient_fingerprint_confirm=data.get("recipient_fingerprint"),
         )
         return Response(blast_detail(blast.pk), status=202)
 

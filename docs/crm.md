@@ -360,6 +360,106 @@ access rules are in `crm/queries.py`, `crm/segments.py` and `crm/access.py`.
 - **Answers:** registration-answer rules check the first 30 answers of each registration.
 - **`last_count`:** the email audience with no purpose, recounted whenever the definition changes.
 
+### Audience builder and definition version 2
+
+The Admin audience builder uses the existing CRM routes and `Segment.definition`
+JSON column. It requires the existing MLAI admin/verified-installation gate.
+`CRM_SEGMENT_BUILDER_V2_ENABLED` defaults to true; setting it false disables new
+v2 segment creation and edits while preserving reads, previews, evaluation and
+queued campaigns. It does not enable sending or change any provider cap.
+
+The unversioned v1 `{match, rules, exclude}` representation remains accepted.
+New definitions use `{version: 2, include: node, exclude: node | null}`. Nodes are:
+
+- `{kind: "all_contacts"}`: explicitly match all contacts.
+- `{kind: "rule", rule: ...}`: an existing or typed audience leaf.
+- `{kind: "group", match: "all" | "any", children: [...]}`: nonempty nested AND/OR.
+- `{kind: "saved_segment_snapshot", source_segment_id, source_definition_hash,
+  source_name, captured_at, definition}`: a complete embedded v2 definition.
+
+The top-level exclusion is subtracted after evaluating the inclusion tree.
+Exclusions inside a snapshot apply only within that snapshot, including when
+it is one branch of an OR group. A copied segment pins its rules, while matching
+contacts continue to change as their facts change. It does not follow a live
+segment reference. New copies are checked against their source on save;
+unchanged copies already persisted in the edited segment remain valid after
+source edits/deletion. Refreshing a copy requires explicitly replacing it with
+the current source definition. Copying preserves the entire group and exclusion
+structure rather than flattening rules.
+
+The shared validation budget is 50 leaves, 100 structural nodes, six nested
+levels, ten snapshots and 64 KiB of serialized JSON, including every embedded
+copy. Lists retain the existing 50-item limit. Empty v2 groups are invalid;
+legacy empty-rule definitions retain their prior match-everyone meaning.
+Errors carry a JSON pointer. All predicates compile to allowlisted Django ORM
+expressions; no SQL or arbitrary lookup paths are accepted.
+
+Typed leaves are `location_affinity`, `audience_facet` and `activity`.
+`location_affinity` represents connections to cities, separately from the
+`reported_city` facet. The protected `audience_profile_v1` attributes namespace
+holds normalized facts and provenance; generic attribute rules cannot query
+that object as text. Career and stage are distinct facets, gender/age require
+self-report evidence, and absent/withheld/conflicted/unmapped facts are distinct
+states. Ordinary negative value matching requires known facts. Negative or
+excluded activity fails closed when complete source/identity coverage for the
+requested interval is unavailable. Absence-dependent windows use a common,
+explicit source observation cutoff no more than 48 hours old; the preview's
+`activity_coverage` reports that cutoff and lag. Newer positive observations
+still prevent a contact being treated as inactive. Positive dated observations remain usable
+without interpreting a source outage as inactivity. `engagement_stars` also
+accepts `is_set` and `is_not_set`, without a value; unrated is never one star.
+
+The catalogue adds `builder_enabled`, `supported_definition_versions`,
+`capabilities`, structural `limits`, typed `facets` and `activity_sources`.
+Facet availability and counts come from actual protected profiles. An unmapped
+field is not advertised as populated merely because an imported column has a
+similar name. The profile correction and source-mapping paths preserve ordinary
+attributes and cannot change consent or deliverability fields.
+
+Segment list requests support `q` (name/description search) and `ordering`
+(`name`, `-updated_at`, `-last_count`) with bounded existing pagination.
+Every segment DTO includes `definition_version`, `definition_hash` and `etag`;
+single-record reads and saves also return the HTTP `ETag` header. New clients
+send that exact token in `If-Match` for edits/deletes. Comparison and mutation
+occur under a row lock; a stale edit returns 409 `segment_changed` with the latest
+record. V2 edits without a token return 428 `segment_precondition_required`.
+Legacy clients may still edit v1 records but cannot overwrite v2 as v1.
+
+Creation accepts an `Idempotency-Key` of 1–64 characters. The actor/key pair
+determines a segment UUID, and the existing creation audit stores a digest of
+the input. Repeating the same request returns the segment; reusing that key for
+different content returns 409 `idempotency_key_reused`. Concurrent inserts rely
+on the existing primary-key constraint, not a process-local cache. No raw
+idempotency key or contact data is stored in the audit digest receipt.
+A retry of a subsequently deleted segment returns 409 `segment_deleted` and
+cannot recreate it. Disabling v2 authoring still permits a replay that only
+returns an already-created segment.
+
+Preview keeps legacy `count`, `sample` and `excluded` meanings: eligible email
+recipients for the requested purpose. Additive fields are `matched_count`,
+`email_reachable_count`, `marketing_eligible_count`, `matched_sample`,
+`matched_sample_scope`, `next_offset`, `definition_hash` and `evaluated_at`.
+Matching someone does not grant permission to email them. The request accepts
+`offset`, `limit` (1–50), `sort: "name"`, and `sample_scope` (`matches` or
+`marketing_eligible`). An optional prior `definition_hash` prevents paging a
+different expression. Counts are live, uncached observations; saved `last_count`
+remains a timestamped no-purpose email count rather than a current total.
+
+Campaign audience previews add `definition_hash`, `definition_version` and a
+`recipient_fingerprint` over ordered contact IDs per selected channel. V2 send
+requests must confirm both hashes in addition to existing channel counts.
+Changes to either rules or membership return 409 `audience_changed`, including
+when the numerical counts are unchanged. Queueing uses one resolved definition
+for both recipient materialization and the immutable saved definition. Existing
+suppression, consent, ban, event, per-channel, provider-limit and dispatch-time
+checks remain authoritative.
+
+This implementation adds no migration. Database-free regression coverage is in
+`crm.tests.test_segment_trees_unit` alongside the existing segment/API/blast
+suites. PostgreSQL execution plans, database-backed API/queue tests and any
+subsequent expression-index migration require the repository's separately
+approved database validation scope before rollout.
+
 **Audit**
 
 - **Writes:** every write leaves a `CrmAuditEvent`. Contact create and edit, segment create, update and delete, and blast draft create and edit, are `edit` rows that name the changed fields, never their values. Opt-outs are `opt_out`; uploads are `import`. Queueing, test sends and cancels are `send` rows with the counts per channel, never addresses.

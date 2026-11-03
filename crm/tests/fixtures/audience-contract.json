@@ -1,0 +1,226 @@
+{
+  "contract_version": 1,
+  "valid": [
+    {
+      "name": "explicit all contacts",
+      "definition": {
+        "version": 2,
+        "include": {
+          "kind": "all_contacts"
+        },
+        "exclude": null
+      }
+    },
+    {
+      "name": "legacy empty any remains everyone",
+      "definition": {
+        "match": "any",
+        "rules": [],
+        "exclude": []
+      }
+    },
+    {
+      "name": "nested union and local exclusions",
+      "definition": {
+        "version": 2,
+        "include": {
+          "kind": "group",
+          "match": "all",
+          "children": [
+            {
+              "kind": "group",
+              "match": "any",
+              "children": [
+                {
+                  "kind": "rule",
+                  "rule": {
+                    "type": "tag",
+                    "op": "has_any",
+                    "values": [
+                      "founder"
+                    ]
+                  }
+                },
+                {
+                  "kind": "rule",
+                  "rule": {
+                    "type": "tag",
+                    "op": "has_any",
+                    "values": [
+                      "researcher"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "kind": "rule",
+              "rule": {
+                "type": "tag",
+                "op": "has_any",
+                "values": [
+                  "member"
+                ]
+              }
+            }
+          ]
+        },
+        "exclude": {
+          "kind": "rule",
+          "rule": {
+            "type": "tag",
+            "op": "has_any",
+            "values": [
+              "speaker"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "saved copy preserves its own exclusions",
+      "definition": {
+        "version": 2,
+        "include": {
+          "kind": "saved_segment_snapshot",
+          "source_segment_id": "5e900000-0000-4000-8000-000000000001",
+          "source_definition_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source_name": "Example members",
+          "captured_at": "2026-11-03T00:00:00Z",
+          "definition": {
+            "version": 2,
+            "include": {
+              "kind": "rule",
+              "rule": {
+                "type": "tag",
+                "op": "has_any",
+                "values": [
+                  "member"
+                ]
+              }
+            },
+            "exclude": {
+              "kind": "rule",
+              "rule": {
+                "type": "tag",
+                "op": "has_any",
+                "values": [
+                  "speaker"
+                ]
+              }
+            }
+          }
+        },
+        "exclude": null
+      }
+    },
+    {
+      "name": "typed supplied demographics",
+      "definition": {
+        "version": 2,
+        "include": {
+          "kind": "rule",
+          "rule": {
+            "type": "audience_facet",
+            "facet": "gender",
+            "op": "has_status",
+            "status": "withheld"
+          }
+        },
+        "exclude": null
+      }
+    },
+    {
+      "name": "unrated is explicit",
+      "definition": {
+        "version": 2,
+        "include": {
+          "kind": "rule",
+          "rule": {
+            "type": "engagement_stars",
+            "op": "is_not_set"
+          }
+        },
+        "exclude": null
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown version",
+      "definition": {
+        "version": 99,
+        "include": {
+          "kind": "all_contacts"
+        },
+        "exclude": null
+      }
+    },
+    {
+      "name": "empty group",
+      "definition": {
+        "version": 2,
+        "include": {
+          "kind": "group",
+          "match": "all",
+          "children": []
+        },
+        "exclude": null
+      }
+    },
+    {
+      "name": "unknown node",
+      "definition": {
+        "version": 2,
+        "include": {
+          "kind": "query",
+          "sql": "unavailable"
+        },
+        "exclude": null
+      }
+    },
+    {
+      "name": "unknown leaf",
+      "definition": {
+        "version": 2,
+        "include": {
+          "kind": "rule",
+          "rule": {
+            "type": "unknown_rule"
+          }
+        },
+        "exclude": null
+      }
+    },
+    {
+      "name": "invalid stars",
+      "definition": {
+        "version": 2,
+        "include": {
+          "kind": "rule",
+          "rule": {
+            "type": "engagement_stars",
+            "op": "gte",
+            "value": 6
+          }
+        },
+        "exclude": null
+      }
+    },
+    {
+      "name": "missing city",
+      "definition": {
+        "version": 2,
+        "include": {
+          "kind": "rule",
+          "rule": {
+            "type": "location_affinity",
+            "op": "has_any",
+            "city_ids": []
+          }
+        },
+        "exclude": null
+      }
+    }
+  ]
+}
