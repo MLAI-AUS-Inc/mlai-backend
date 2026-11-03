@@ -80,7 +80,7 @@ class PortableRunControlTests(SimpleTestCase):
 
     def control(self, run, response):
         context = SimpleNamespace(organization=SimpleNamespace(domain=run.domain))
-        request = SimpleNamespace(data={}, user=SimpleNamespace(pk=7))
+        request = SimpleNamespace(headers={}, data={}, user=SimpleNamespace(pk=7))
         with patch.object(views, "_resolve_context_or_response", return_value=(context, None)), \
                 patch.object(views, "get_object_or_404", return_value=run), \
                 patch.object(views, "_run_belongs_to_context", return_value=True), \
