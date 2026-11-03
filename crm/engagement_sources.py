@@ -133,7 +133,7 @@ def _luma(contacts, seeded, seed_cutoffs, since, now, counts):
         detail = audit.get("detail") or {}
         coverage["last_attempt"] = _iso(audit.get("created_at"))
         coverage["status"] = _freshness(audit.get("created_at"), now, expected=True, detail="")["status"]
-        if any(detail.get(key) for key in ("failed_events", "events_left", "rate_limited")):
+        if any(detail.get(key) for key in ("failed_events", "events_left", "rate_limited", "source_set_changed", "source_failed")):
             coverage.update(status="stale", latest_pass_incomplete=True)
         else:
             coverage["last_success"] = _iso(audit.get("created_at"))

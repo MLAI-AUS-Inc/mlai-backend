@@ -77,6 +77,26 @@ class LumaGuestSyncTests(TestCase):
         self.assertEqual(self.luma.guest_calls, [])
         self.assertEqual(Contact.objects.count(), 0)
 
+    def test_combined_source_preserves_preferences_and_excludes_removed_calendar(self):
+        from crm.source_accounts import CombinedLumaSource
+        from crm.luma_sync import sync_recent_luma_guests
+        contact = Contact.objects.create(email="ada@example.com", source=Contact.Source.MANUAL,
+            email_status=Contact.EmailStatus.UNSUBSCRIBED, attributes={"manual_hold": True})
+        fields = ["marketing_consent", "marketing_consent_at", "marketing_consent_source", "email_status",
+            "sms_status", "sms_status_changed_at", "whatsapp_opt_in", "whatsapp_opt_in_at", "attributes"]
+        before = {field: getattr(contact, field) for field in fields}
+        source = FakeLuma(events=[luma_event("evt-current")], guests={"evt-current": [
+            luma_guest("ada@example.com", "gst-a", phone_number="0412 345 678", registration_answers=[
+                {"label": "Mail", "answer": "Yes"}, {"label": "WhatsApp", "answer": "Yes"}])]})
+        combined = CombinedLumaSource({"current": source})
+        with override_settings(CRM_LUMA_CONSENT_QUESTION_LABELS=["Mail"], CRM_LUMA_WHATSAPP_QUESTION_LABELS=["WhatsApp"]):
+            summary = sync_recent_luma_guests(combined, now=NOW, recent_days=30, limit=10)
+        self.assertEqual(summary["events_synced"], 1)
+        self.assertEqual(source.guest_calls, [("evt-current", None)])
+        contact.refresh_from_db()
+        self.assertEqual({field: getattr(contact, field) for field in fields}, before)
+        self.assertEqual(ContactConsentEvent.objects.count(), 0)
+
     def test_access_downgrade_preserves_registrations_and_contact_preferences(self):
         self.luma.guests["evt-1"] = [luma_guest("ada@example.com", "gst-1")]
         sync_event_guests(self.luma, self.event, now=NOW)

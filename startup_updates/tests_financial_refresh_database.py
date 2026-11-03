@@ -89,6 +89,36 @@ class FinancialRefreshDatabaseTests(TestCase):
         self.assertFalse(MonthlyUpdateDraft.objects.exists())
         self.assertFalse(MonthlyEvidenceSnapshot.objects.exists())
 
+    def test_refresh_uses_report_choice_and_existing_job_keeps_its_account(self):
+        from integrations.services.source_accounts import select_report_account
+        sibling = ExternalServiceConnection.objects.create(user=self.user, organization=self.organization,
+            provider="xero", access_token="synthetic-sibling", external_account_id="tenant-sibling",
+            scopes=["accounting.reports.read"])
+        select_report_account(self.user, self.organization, "xero", self.xero.pk)
+        original = self.start()
+        self.assertEqual(original.run_request["connections"]["xero"]["id"], self.xero.pk)
+        select_report_account(self.user, self.organization, "xero", sibling.pk)
+        replay = self.start()
+        self.assertEqual(replay.pk, original.pk)
+        self.assertEqual(replay.run_request["connections"]["xero"]["id"], self.xero.pk)
+        new = self.start(requestId=str(uuid4()))
+        self.assertNotEqual(new.pk, original.pk)
+        self.assertEqual(new.run_request["connections"]["xero"]["id"], sibling.pk)
+        fetched = self.complete(original)
+        self.assertEqual({call.args[2].pk for call in fetched.call_args_list if call.args[0] == "xero"}, {self.xero.pk})
+
+    def test_disconnected_report_choice_does_not_fall_back_to_another_tenant(self):
+        from integrations.services.source_accounts import select_report_account
+        select_report_account(self.user, self.organization, "xero", self.xero.pk)
+        ExternalServiceConnection.objects.create(user=self.user, organization=self.organization,
+            provider="xero", access_token="synthetic-sibling", external_account_id="tenant-sibling")
+        ExternalServiceConnection.objects.filter(pk=self.xero.pk).update(status="disconnected")
+        with patch("startup_updates.financial_refresh.fetch_stage") as fetch:
+            run = self.start()
+        self.assertIsNone(run.run_request["connections"]["xero"])
+        self.assertEqual(run.result["sources"]["xero"]["status"], "reconnect_required")
+        fetch.assert_not_called()
+
     def test_idempotency_and_two_clicks_coalesce_without_mutating_pins(self):
         run = self.start()
         original = copy.deepcopy(run.run_request)

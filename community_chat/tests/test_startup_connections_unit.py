@@ -61,18 +61,28 @@ class StartupConnectionBridgeTests(SimpleTestCase):
 
     def test_disconnect_is_user_company_provider_scoped_and_keeps_defaults(self):
         qs = MagicMock()
-        qs.exclude.return_value.values_list.return_value = [13, 14]
+        qs.exclude.return_value = qs
+        qs.values_list.return_value = [13, 14]
+        qs.filter.return_value.exists.return_value = True
         with patch.object(connections.ExternalServiceConnection.objects, "filter", return_value=qs) as lookup, \
              patch.object(connections, "disconnect_external_connection") as disconnect, \
              patch.object(connections, "set_source_preference") as preference:
             response = self.call(connections.DisconnectView, "delete", {"companyId": COMPANY}, "slack")
-        self.assertEqual(response.status_code, 200)
-        lookup.assert_called_once_with(user=self.user, organization=self.org, provider="slack")
-        self.assertEqual([call.args for call in disconnect.call_args_list], [(self.user, 13), (self.user, 14)])
+            self.assertEqual(response.status_code, 400)
+            disconnect.assert_not_called()
+            lookup.assert_called_once_with(user=self.user, organization=self.org, provider="slack")
+            response = self.call(connections.DisconnectView, "delete", {"companyId": COMPANY, "connectionId": 13}, "slack")
+            self.assertEqual(response.status_code, 200)
+            qs.filter.assert_called_once_with(pk=13)
+        disconnect.assert_called_once_with(self.user, 13)
         preference.assert_not_called()
-        with patch.object(connections, "disconnect_gmail_for_user", return_value={"status": "disconnected"}) as gmail:
-            self.call(connections.DisconnectView, "delete", {}, "gmail")
-        gmail.assert_called_once_with(self.user, organization=self.org, delete_derived_data=False)
+        qs.values_list.return_value = [21]
+        with patch.object(connections.GoogleConnection.objects, "filter", return_value=qs) as lookup, \
+             patch.object(connections, "disconnect_gmail_for_user", return_value={"status": "disconnected"}) as gmail:
+            response = self.call(connections.DisconnectView, "delete", {}, "gmail")
+            self.assertEqual(response.status_code, 200)
+        lookup.assert_called_once_with(user=self.user, organization=self.org)
+        gmail.assert_called_once_with(self.user, organization=self.org, connection_id=21, delete_derived_data=False)
 
     def test_api_key_connect_confirms_only_fresh_provider_status(self):
         for provider in ("luma", "humanitix"):
@@ -82,10 +92,12 @@ class StartupConnectionBridgeTests(SimpleTestCase):
                     stack.enter_context(patch.object(connectors, "_company_for_scope", return_value=self.company))
                     connect = stack.enter_context(patch.object(connectors, "connect_" + provider + "_connection"))
                     stack.enter_context(patch.object(connectors, "serialize_source_status", return_value={"sources": [{"key": provider, "status": status_value}]}))
-                    response = self.call(connections.ConnectView, "post", {"companyId": COMPANY, "apiKey": "synthetic-test-key"}, provider)
+                    label = {"accountLabel": "Sydney team"} if provider == "humanitix" else {}
+                    response = self.call(connections.ConnectView, "post", {"companyId": COMPANY, "apiKey": "synthetic-test-key", **label}, provider)
                     self.assertEqual(response.status_code, 200)
                     self.assertEqual(response.data["connected"], status_value == "connected")
-                    connect.assert_called_once_with(self.user, "synthetic-test-key", company=self.company)
+                    connect.assert_called_once_with(self.user, "synthetic-test-key", company=self.company,
+                        **({"account_label": "Sydney team"} if provider == "humanitix" else {}))
                     self.assertNotIn("synthetic-test-key", str(response.data))
         with patch.object(connectors, "connect_luma_connection") as connect:
             response = self.call(connections.ConnectView, "post", {"companyId": COMPANY}, "luma")

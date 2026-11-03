@@ -301,20 +301,23 @@ class TokenOwnershipTests(SimpleTestCase):
         from django.utils import timezone as django_timezone
         locked = Mock(access_token='old', token_expires_at=django_timezone.now() - timedelta(hours=1))
         with (patch('integrations.services.external_connectors.transaction.atomic') as atomic,
+              patch('integrations.services.external_connectors.get_user_model') as users,
               patch('integrations.services.external_connectors.ExternalServiceConnection.objects') as manager,
               patch('integrations.services.external_connectors._refresh_xero_connection_unlocked',
                     side_effect=ConnectorOAuthError('synthetic-reconnect'))):
             manager.select_for_update.return_value.get.return_value = locked
             with self.assertRaises(ConnectorOAuthError):
-                _refresh_xero_connection(Mock(pk=1))
+                _refresh_xero_connection(Mock(pk=1, user_id=7))
             atomic.return_value.__exit__.assert_called_once_with(None, None, None)
+            users.return_value.objects.select_for_update.return_value.get.assert_called_once_with(pk=7)
 
     def test_concurrent_refresh_rechecks_locked_credentials(self):
         from .services.external_connectors import _refresh_xero_connection
         from django.utils import timezone as django_timezone
-        stale = Mock(pk=1)
+        stale = Mock(pk=1, user_id=7)
         locked = Mock(access_token='synthetic-fresh', token_expires_at=django_timezone.now() + timedelta(hours=1))
         with (patch('integrations.services.external_connectors.transaction.atomic'),
+              patch('integrations.services.external_connectors.get_user_model') as users,
               patch('integrations.services.external_connectors.ExternalServiceConnection.objects') as manager,
               patch('integrations.services.external_connectors._refresh_xero_connection_unlocked') as rotate):
             manager.select_for_update.return_value.get.return_value = locked
@@ -322,6 +325,7 @@ class TokenOwnershipTests(SimpleTestCase):
             rotate.assert_not_called()
             manager.select_for_update.assert_called_once()
             stale.refresh_from_db.assert_called_once()
+            users.return_value.objects.select_for_update.return_value.get.assert_called_once_with(pk=7)
 
 
 class MailboxTests(SimpleTestCase):

@@ -318,7 +318,7 @@ class LumaConnectEndpointTests(TestCase):
     def test_connect_stores_encrypted_key(self, mock_service_cls, mock_resolve):
         org = Organization.objects.create(name="Acme", domain="acme.com")
         mock_resolve.return_value = org
-        mock_service_cls.return_value = SimpleNamespace(get_recent_ended_events=lambda **kwargs: [])
+        mock_service_cls.return_value = SimpleNamespace(get_calendar=lambda: {"id":"cal-a", "name":"Test calendar"})
 
         response = self.api_client.post(self.connect_url, {"apiKey": "luma-secret"}, format="json")
 
@@ -339,7 +339,7 @@ class LumaConnectEndpointTests(TestCase):
         def boom(**kwargs):
             raise LumaAPIError("rejected", status_code=401)
 
-        mock_service_cls.return_value = SimpleNamespace(get_recent_ended_events=boom)
+        mock_service_cls.return_value = SimpleNamespace(get_calendar=boom)
 
         response = self.api_client.post(self.connect_url, {"apiKey": "bad-key"}, format="json")
 
@@ -382,7 +382,7 @@ class LumaConnectEndpointTests(TestCase):
     @patch("integrations.services.external_connectors.LumaAttendeeReportService")
     def test_disconnect_clears_token(self, mock_service_cls, mock_resolve):
         mock_resolve.return_value = Organization.objects.create(name="Acme", domain="acme.com")
-        mock_service_cls.return_value = SimpleNamespace(get_recent_ended_events=lambda **kwargs: [])
+        mock_service_cls.return_value = SimpleNamespace(get_calendar=lambda: {"id":"cal-a", "name":"Test calendar"})
         self.api_client.post(self.connect_url, {"apiKey": "luma-secret"}, format="json")
         connection = ExternalServiceConnection.objects.get(user=self.user, provider=ExternalServiceProvider.LUMA)
 

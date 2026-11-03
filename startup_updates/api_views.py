@@ -1,3 +1,4 @@
+from integrations.services.source_accounts import google_connection_for_binding
 
 from integrations.services.slack_source_privacy import slack_source_queryset
 import time
@@ -906,9 +907,7 @@ def _get_org_and_binding_for_run(run: ContentFactoryRun):
     if "gmail" not in (run.run_request or {}).get("input_sources", ["gmail"]):
         google_connection = None
     elif google_connection_id is None:
-        google_connection = binding.google_connection or google_connection_for_org(
-            binding.user, binding.organization
-        )
+        google_connection = google_connection_for_binding(binding)
         if google_connection is not None:
             pin_startup_update_run_connection(run, google_connection.id)
     else:
@@ -1094,9 +1093,7 @@ class StartupUpdateRunView(APIView):
             target_month = parse_startup_update_target_month(raw_target_month)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        google_connection = binding.google_connection or google_connection_for_org(
-            binding.user, binding.organization
-        )
+        google_connection = google_connection_for_binding(binding)
         # Preserve the complete selection. The durable preflight reports every
         # failed permission/read together; admission must not silently remove
         # Gmail or stop after inspecting only that source.
@@ -1888,16 +1885,8 @@ def _active_slack_connection_for_run(
     binding: UserStartupBinding,
     organization: Organization,
 ) -> Optional[ExternalServiceConnection]:
-    return (
-        ExternalServiceConnection.objects.filter(
-            user_id=binding.user_id,
-            organization=organization,
-            provider=ExternalServiceProvider.SLACK,
-        )
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+    return latest_external_connection_for_startup(user=binding.user,
+        organization=organization, provider=ExternalServiceProvider.SLACK)
 
 
 def _resolve_run_slack_connection(
@@ -2752,15 +2741,8 @@ class StartupUpdateLinearBackfillView(APIView):
         _update_run_step(run, step_key="linear_backfill")
 
         project_ids = _run_linear_project_ids(run)
-        connection = (
-            binding.user.external_service_connections.filter(
-                provider=ExternalServiceProvider.LINEAR,
-                organization=organization,
-            )
-            .exclude(status="disconnected")
-            .order_by("-updated_at", "-id")
-            .first()
-        )
+        from integrations.services.source_accounts import connection_for_run
+        connection = connection_for_run(run, binding.user, organization, "linear")
         if connection is None:
             return Response({"error": "Linear is not connected."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -3313,7 +3295,8 @@ class StartupUpdateNotionBackfillView(APIView):
             return cancelled_response
         _update_run_step(run, step_key="notion_backfill")
 
-        connection = _latest_notion_connection(binding.user, organization)
+        from integrations.services.source_accounts import connection_for_run
+        connection = connection_for_run(run, binding.user, organization, "notion")
         pin = (run.run_request or {}).get("notion_connection_id")
         if pin and (connection is None or str(connection.pk) != str(pin)):
             return Response({"error": "source_authority_changed", "detail": "Notion changed. Recheck the connection before continuing."}, status=409)
@@ -3490,7 +3473,8 @@ class StartupUpdateNotionClassificationBatchView(APIView):
         if cancelled_response is not None:
             return cancelled_response
         _update_run_step(run, step_key="notion_relevance_classification")
-        connection = _latest_notion_connection(binding.user, organization)
+        from integrations.services.source_accounts import connection_for_run
+        connection = connection_for_run(run, binding.user, organization, "notion")
         pin = (run.run_request or {}).get("notion_connection_id")
         if pin and (connection is None or str(connection.pk) != str(pin)):
             return Response({"error": "source_authority_changed", "detail": "Notion changed. Recheck the connection before continuing."}, status=409)
@@ -3522,7 +3506,8 @@ class StartupUpdateNotionClassificationResultsView(APIView):
         if cancelled_response is not None:
             return cancelled_response
         _update_run_step(run, step_key="notion_relevance_classification")
-        connection = _latest_notion_connection(binding.user, organization)
+        from integrations.services.source_accounts import connection_for_run
+        connection = connection_for_run(run, binding.user, organization, "notion")
         pin = (run.run_request or {}).get("notion_connection_id")
         if pin and (connection is None or str(connection.pk) != str(pin)):
             return Response({"error": "source_authority_changed", "detail": "Notion changed. Recheck the connection before continuing."}, status=409)
@@ -3564,7 +3549,8 @@ class StartupUpdateNotionExtractionBatchView(APIView):
         if cancelled_response is not None:
             return cancelled_response
         _update_run_step(run, step_key="notion_event_extraction")
-        connection = _latest_notion_connection(binding.user, organization)
+        from integrations.services.source_accounts import connection_for_run
+        connection = connection_for_run(run, binding.user, organization, "notion")
         pin = (run.run_request or {}).get("notion_connection_id")
         if pin and (connection is None or str(connection.pk) != str(pin)):
             return Response({"error": "source_authority_changed", "detail": "Notion changed. Recheck the connection before continuing."}, status=409)
@@ -3617,7 +3603,8 @@ class StartupUpdateNotionExtractionResultsView(APIView):
         if cancelled_response is not None:
             return cancelled_response
         _update_run_step(run, step_key="notion_event_extraction")
-        connection = _latest_notion_connection(binding.user, organization)
+        from integrations.services.source_accounts import connection_for_run
+        connection = connection_for_run(run, binding.user, organization, "notion")
         pin = (run.run_request or {}).get("notion_connection_id")
         if pin and (connection is None or str(connection.pk) != str(pin)):
             return Response({"error": "source_authority_changed", "detail": "Notion changed. Recheck the connection before continuing."}, status=409)
@@ -4638,11 +4625,23 @@ class StartupUpdateSourceEvidenceRefreshView(APIView):
         return Response(receipt)
 
 
+def _run_accounts_scoped(function):
+    @wraps(function)
+    def scoped(self, request, run_id, *args, **kwargs):
+        from integrations.services.source_accounts import report_account_scope
+        run = _get_run_or_404(run_id)
+        organization, binding, _google, _profile = _get_org_and_binding_for_run(run)
+        with report_account_scope(binding.user, organization, (run.run_request or {}).get("source_connection_pins")):
+            return function(self, request, run_id, *args, **kwargs)
+    return scoped
+
+
 class StartupUpdateSourcePreflightView(APIView):
     """Check every selected source and checkpoint bounded discovery before collection."""
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @_run_accounts_scoped
     def post(self, request, run_id):
         from startup_updates.preflight import require_source_preflight, SourcesNotReady, apply_xero_cooldown, source_failure_check
         from startup_updates.activity_scope import discover_resource_page
@@ -4676,7 +4675,7 @@ class StartupUpdateSourcePreflightView(APIView):
             try:
                 checks = require_source_preflight(user=binding.user, organization=organization,
                     input_sources=saved.get("input_sources"), manual_document_ids=saved.get("manual_document_ids"),
-                    manual_summary=saved.get("manual_summary", ""))
+                    manual_summary=saved.get("manual_summary", ""), connection_pins=saved.get("source_connection_pins"))
             except SourcesNotReady as exc:
                 checks = exc.detail["sourceChecks"]
                 return failed_checks(checks)

@@ -178,17 +178,16 @@ class OAuthHandoffTests(SimpleTestCase):
     def test_google_callback_without_cookie_persists_tokens_and_returns_to_native_app(self):
         request = self.request({"state": self.state("gmail"), "code": "synthetic"}, authenticated=False)
         with patch.object(views, "_resolve_google_oauth_user", return_value=None), patch("django.contrib.auth.get_user_model") as model, \
-                patch("organizations.models.Organization.objects") as orgs, patch.object(views.GoogleConnection, "objects") as connections_manager, \
+                patch("organizations.models.Organization.objects") as orgs, patch("integrations.services.source_accounts.store_google_account") as store, \
                 patch.object(views.requests, "post") as post, patch.object(views.requests, "get") as get:
             model.return_value.objects.filter.return_value.first.return_value = self.user
             orgs.filter.return_value.first.return_value = self.organization
-            connections_manager.filter.return_value.first.return_value = None
             post.return_value.json.return_value = {"access_token": "synthetic", "refresh_token": "synthetic-refresh", "scope": "openid https://www.googleapis.com/auth/webmasters.readonly"}
-            get.return_value.json.return_value = {"email": "founder@example.test"}
+            get.return_value.json.return_value = {"sub": "synthetic-subject", "email_verified": True, "email": "founder@example.test"}
             response = views.google_callback(request)
         self.assertEqual(response["Location"], NATIVE)
-        self.assertEqual(connections_manager.update_or_create.call_args.kwargs["organization"], self.organization)
-        self.assertEqual(connections_manager.update_or_create.call_args.kwargs["defaults"]["refresh_token"], "synthetic-refresh")
+        store.assert_called_once_with(user=self.user, organization=self.organization,
+            userinfo=get.return_value.json.return_value, token_data=post.return_value.json.return_value)
 
     def test_logged_in_browser_cannot_bypass_expired_or_replayed_google_state(self):
         with patch("django.core.signing.time.time", return_value=time.time() - 10000):

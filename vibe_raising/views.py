@@ -51,6 +51,8 @@ from startup_updates.metric_catalog import (
     startup_update_metric_label,
 )
 from integrations.services.external_connectors import (
+    _ACTIVE_ORG,
+    _scope_org,
     ConnectorOAuthError,
     ConnectorReconnectRequired,
     ConnectorTemporarilyUnavailable,
@@ -240,10 +242,10 @@ def _connector_oauth_guarded(callback):
     return wrapped
 
 
-def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *, organization=None, automatic_scope=False) -> dict[str, list[str]]:
+def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *, organization=_ACTIVE_ORG, automatic_scope=False) -> dict[str, list[str]]:
     warnings: dict[str, list[str]] = {}
     selected = set(input_sources or [])
-    organization = organization or active_organization_for_user(user)
+    organization = _scope_org(user, organization)
     provider_labels = {
         ExternalServiceProvider.XERO: "Xero",
         ExternalServiceProvider.LINEAR: "Linear",
@@ -256,9 +258,9 @@ def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *
             user=user,
             provider=provider,
         ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        if organization is not None:
-            connection_qs = connection_qs.filter(organization=organization)
-        connection = connection_qs.order_by("-updated_at", "-id").first()
+        from integrations.services.source_accounts import report_connection
+        connection_qs = connection_qs.filter(organization=organization)
+        connection = report_connection(connection_qs, user=user, organization=organization, provider=provider)
         if not connection:
             warnings[provider] = [
                 f"{label} was selected but no active {label} connection is available."
@@ -307,6 +309,7 @@ def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *
                 [provider],
                 financial_only=True,
                 organization=organization,
+                connection_ids=[connection.pk],
             )
         except Exception as exc:
             logger.exception(

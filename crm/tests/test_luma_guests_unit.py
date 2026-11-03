@@ -167,15 +167,29 @@ class PacedSessionTests(SimpleTestCase):
 
 
 class RunnerGateTests(SimpleTestCase):
+    def setUp(self):
+        selected = patch("crm.source_accounts.selected_luma_sources", return_value=[])
+        self.selected_sources = selected.start()
+        self.addCleanup(selected.stop)
+        audit = patch("crm.luma_sync.CrmAuditEvent.objects.create")
+        self.audit = audit.start()
+        self.addCleanup(audit.stop)
+
     @override_settings(CRM_LUMA_SYNC_ENABLED=False)
     def test_disabled_runner_does_nothing(self):
         with patch("crm.luma_sync.cache") as cache:
             self.assertEqual(run_luma_guest_sync_scheduler(), {"status": "skipped", "reason": "disabled"})
         cache.add.assert_not_called()
+        self.selected_sources.assert_not_called()
+        self.audit.assert_not_called()
 
     @override_settings(CRM_LUMA_SYNC_ENABLED=True, LUMA_API_KEY="")
-    def test_missing_key_is_skipped_not_failed(self):
-        self.assertEqual(run_luma_guest_sync_scheduler()["reason"], "luma_not_configured")
+    def test_missing_all_sources_is_deferred_not_failed(self):
+        result = run_luma_guest_sync_scheduler()
+        self.assertEqual(result, {"status": "deferred", "reason": "luma_not_configured"})
+        self.assertEqual(self.audit.call_args.kwargs["detail"], {
+            "source_failed": True, "reason": "not_configured",
+        })
 
     @override_settings(CRM_LUMA_SYNC_ENABLED=True, LUMA_API_KEY="key")
     def test_throttle_skips_until_the_interval_passes(self):
@@ -192,6 +206,10 @@ class RunnerGateTests(SimpleTestCase):
             self.assertEqual(run_luma_guest_sync_scheduler()["status"], "deferred")
             sync.side_effect = LumaAPIError("no", status_code=401)
             self.assertEqual(run_luma_guest_sync_scheduler()["status"], "failed")
+        self.assertEqual([call.kwargs["detail"] for call in self.audit.call_args_list], [
+            {"source_failed": True, "status_code": 503},
+            {"source_failed": True, "status_code": 401},
+        ])
 
     @override_settings(CRM_LUMA_SYNC_ENABLED=True, LUMA_API_KEY="key")
     def test_failed_events_report_partial(self):

@@ -107,7 +107,7 @@ adds no model changes or migrations.
 The source catalog contains `gmail`, `stripe`, `humanitix`, `xero`, `bank_feed`, `notion`, `google_drive`, `slack`, `linear`, `google_analytics`, and `luma`. Existing fields are preserved; each source adds `connectMode` (`oauth` or `api_key`), `canConnect`, `canDisconnect`, and `usableForUpdates`. Chat discovers accessible Analytics properties automatically when a draft starts. The separate `connect/google/` handoff requests website/Search Console consent; it is not a Valley input. GitHub remains a separate publishing connection.
 
 - `POST connect/<provider>/` returns `authorizationUrl` for OAuth. The browser redeems the one-use ticket and creates its own OAuth session, avoiding native API-cookie/browser-cookie mismatches. Luma/Humanitix instead accept `apiKey` through their existing scoped validators. The server chooses the return URL: `/my-startup/connections?company_id=<owned-id>&connected=<provider>` on the configured Chat origin. Native clients refresh when the founder returns to the app.
-- `DELETE sources/<provider>/` requires the explicit company and disconnects only that company's accounts.
+- `DELETE sources/<provider>/` requires the explicit company and disconnects only the owned `connectionId`. Omitting the ID is supported only when exactly one account is connected.
 - `DELETE updates/<id>/` takes `companyId`, `revisionId`, and `revisionHash`. A changed revision or active generation returns 409. Deletion removes its community publication, revisions, approval receipts, and unreferenced snapshots. Shared evidence and connected accounts remain.
 - `generate/` requires explicit `inputSources`. An empty selection with notes/documents becomes manual-only; an empty selection without evidence returns 400 instead of silently enabling Gmail. Existing independent-update identity and persisted step-progress contracts are unchanged.
 - Draft saves accept `inputSources`, including an explicit empty list. Private memo selection metadata is separate from frozen evidence; changing toggles does not claim new data was fetched or rewrite past provenance.
@@ -417,3 +417,37 @@ calendar-boundary, retry and Volunteer-cap regressions. Database-backed wallet
 and concurrency tests have been updated but not run: `AGENTS.md` requires separate
 approval before a runner constructs a database from migration state. No migration
 was created or applied, and this document does not claim deployment.
+
+## Multiple accounts (November 2026)
+
+`GET sources/` retains its selected-account summary and adds `accounts[]`
+(`connectionId`, `accountLabel`, `status`, `lastSyncedAt`,
+`selectedForReports`, `crmEnabled`), `reportAccountId` and
+`reportAccountMissing`. Tokens and provider metadata are never returned.
+
+- `POST sources/<provider>/` with `{reportAccountId: <integer>}` chooses an
+  account owned by the caller in this company for future reports. Adding an
+  account pins the previous default first. Refresh/sync timestamps cannot change
+  the choice. A disconnected explicit choice is unavailable, never silently
+  replaced by another account. Existing run pins are retained.
+- `DELETE sources/<provider>/` accepts `connectionId`. Omitting it is allowed
+  only when exactly one account exists; multi-account requests must name one.
+  The company/user/provider boundaries are checked before disconnecting.
+- For MLAI admins on verified installations, Luma sources additionally expose
+  `canSelectCrmAccounts`. `POST` with `{connectionId, crmEnabled: true|false}`
+  selects an owned calendar for the community CRM independently of reports.
+  Connecting any founder account by itself never adds it to the CRM.
+
+Luma identities come from its authenticated calendar endpoint. Calendar keys
+are not complete personal host-account feeds. Humanitix has no account identity
+endpoint; separate validated keys are separate connections and reconnecting the
+identical key retains its row. A rotated Humanitix key creates a new connection;
+choose it for reports and disconnect the old one explicitly. GitHub retains its
+existing installation/repository selector; Search Console retains website
+selection. Google Drive remains unavailable as a Pulse input.
+
+The exact approved schema change is `integrations.0051_google_connection_accounts`.
+It adds a nullable verified Google subject and replaces the one-mailbox constraint
+with per-account uniqueness. Existing IDs/tokens remain intact; no data backfill
+or external calls occur in the migration. The local approval and exact test
+inventory are in `plans/multiple-source-accounts/`.

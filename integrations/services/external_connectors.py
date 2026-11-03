@@ -756,7 +756,20 @@ def company_for_user_from_request(user, request):
 def _scope_org(user, organization):
     """Map the _ACTIVE_ORG sentinel to the user's active organization."""
     if organization is _ACTIVE_ORG:
-        return active_organization_for_user(user)
+        active = active_organization_for_user(user)
+        if active is not None:
+            return active
+        # Connections can predate the startup picker. Retain that legacy path
+        # only when every owned connection agrees on one organization. Never
+        # use a sibling startup when an explicit scope was supplied.
+        ids = set(ExternalServiceConnection.objects.filter(user=user)
+            .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+            .values_list("organization_id", flat=True).distinct())
+        ids.update(GoogleConnection.objects.filter(user=user)
+            .values_list("organization_id", flat=True).distinct())
+        if len(ids) == 1 and None not in ids:
+            return Organization.objects.filter(pk=ids.pop()).first()
+        return None
     return organization
 
 
@@ -769,14 +782,12 @@ def google_connection_for_org(user, organization, *, adopt_unassigned=False) -> 
     """
     if organization is None:
         return None
-    connection = (
-        GoogleConnection.objects.filter(user=user, organization=organization)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+    from .source_accounts import report_account_id, report_connection
+    connection = report_connection(GoogleConnection.objects.filter(user=user, organization=organization),
+        user=user, organization=organization, provider="gmail")
     if connection is not None:
         return connection
-    if adopt_unassigned:
+    if adopt_unassigned and report_account_id(user, organization, "gmail") is None:
         orphan = (
             GoogleConnection.objects.filter(user=user, organization__isnull=True)
             .order_by("-updated_at", "-id")
@@ -801,15 +812,16 @@ def active_google_connection(user) -> Optional[GoogleConnection]:
     queryset = GoogleConnection.objects.filter(user=user)
     organization = active_organization_for_user(user)
     if organization is not None:
-        connection = (
-            queryset.filter(organization=organization).order_by("-updated_at", "-id").first()
-        )
+        from .source_accounts import report_account_id
+        connection = google_connection_for_org(user, organization)
+        if report_account_id(user, organization, "gmail") is not None:
+            return connection
         if connection is not None:
             return connection
         return (
             queryset.filter(organization__isnull=True).order_by("-updated_at", "-id").first()
         )
-    return queryset.order_by("-updated_at", "-id").first()
+    return queryset.filter(organization__isnull=True).order_by("-updated_at", "-id").first()
 
 
 def _state_store(request) -> dict[str, dict[str, Any]]:
@@ -1398,6 +1410,7 @@ def _fetch_google_userinfo(access_token: str) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+@transaction.atomic
 def _upsert_connection(
     *,
     user,
@@ -1413,19 +1426,21 @@ def _upsert_connection(
     status: str = ExternalServiceConnectionStatus.CONNECTED,
     provider_metadata: Optional[dict[str, Any]] = None,
 ) -> ExternalServiceConnection:
-    # Scope the lookup to (user, organization, provider) so connecting a provider
-    # for one startup never matches — and overwrites — a sibling startup's
-    # connection. Previously this filtered on (user, provider) only and
-    # reassigned .organization in place, which silently moved a connection
-    # between startups.
+    # OAuth callbacks for different accounts must never borrow each other's
+    # tokens or replace their identity. Serialize same-user reconnects, also
+    # covering legacy NULL-organization rows not protected by SQL uniqueness.
+    external_account_id = str(external_account_id or "").strip()
+    if not external_account_id:
+        raise ConnectorConfigurationError("The provider did not return an account identity. Try connecting again.")
+    user.__class__.objects.select_for_update().get(pk=user.pk)
+    from .source_accounts import preserve_report_account
+    preserve_report_account(user, organization, provider,
+        ExternalServiceConnection.objects.filter(user=user, organization=organization, provider=provider).exclude(status="disconnected"))
     queryset = ExternalServiceConnection.objects.filter(
-        user=user, provider=provider, organization=organization
+        user=user, provider=provider, organization=organization,
+        external_account_id=external_account_id,
     )
-    connection = None
-    if external_account_id:
-        connection = queryset.filter(external_account_id=external_account_id).first()
-    if connection is None:
-        connection = queryset.first()
+    connection = queryset.order_by("id").first()
     if connection is None:
         connection = ExternalServiceConnection(
             user=user, provider=provider, organization=organization
@@ -1440,7 +1455,8 @@ def _upsert_connection(
     connection.external_account_id = external_account_id or connection.external_account_id or ""
     connection.account_label = account_label or connection.account_label or ""
     connection.status = status
-    connection.provider_metadata = provider_metadata or {}
+    # A token reconnect is not a request to discard this account's selections.
+    connection.provider_metadata = {**(connection.provider_metadata or {}), **(provider_metadata or {})}
     connection.last_error = ""
     connection.save()
     return connection
@@ -1459,8 +1475,7 @@ def connect_luma_connection(user, api_key: str, company=None) -> ExternalService
 
     service = LumaAttendeeReportService(api_key=api_key)
     try:
-        # Cheapest authenticated call that exercises the key.
-        service.get_recent_ended_events(count=1)
+        calendar = service.get_calendar()
     except LumaConfigurationError as exc:
         raise ConnectorConfigurationError(str(exc)) from exc
     except LumaAPIError as exc:
@@ -1473,7 +1488,9 @@ def connect_luma_connection(user, api_key: str, company=None) -> ExternalService
         ) from exc
 
     organization = resolve_connector_organization(user, company=company)
-    external_account_id = str(getattr(user, "email", "") or user.id)
+    external_account_id = calendar["id"].strip()
+    from .source_accounts import adopt_api_key_identity
+    adopt_api_key_identity(user, organization, "luma", api_key, external_account_id)
     return _upsert_connection(
         user=user,
         provider=ExternalServiceProvider.LUMA,
@@ -1484,12 +1501,12 @@ def connect_luma_connection(user, api_key: str, company=None) -> ExternalService
         token_expires_at=None,
         scopes=[],
         external_account_id=external_account_id,
-        account_label="Luma",
-        provider_metadata={},
+        account_label=str(calendar.get("name") or "Luma calendar")[:255],
+        provider_metadata={"calendar_id": external_account_id, "identity_kind": "calendar"},
     )
 
 
-def connect_humanitix_connection(user, api_key: str, company=None) -> ExternalServiceConnection:
+def connect_humanitix_connection(user, api_key: str, company=None, *, account_label="") -> ExternalServiceConnection:
     """Validate and store a founder-supplied Humanitix public API key."""
     api_key = str(api_key or "").strip()
     if not api_key:
@@ -1509,7 +1526,10 @@ def connect_humanitix_connection(user, api_key: str, company=None) -> ExternalSe
         raise ConnectorConfigurationError(str(exc)) from exc
 
     organization = resolve_connector_organization(user, company=company)
-    external_account_id = str(getattr(user, "email", "") or user.id)
+    # Humanitix exposes events, orders and tickets, not an account identity.
+    # Match the exact validated credential; never use the MLAI user's email.
+    from .source_accounts import api_key_connection_identity
+    external_account_id = api_key_connection_identity(user, organization, "humanitix", api_key)
     return _upsert_connection(
         user=user,
         provider=ExternalServiceProvider.HUMANITIX,
@@ -1520,8 +1540,8 @@ def connect_humanitix_connection(user, api_key: str, company=None) -> ExternalSe
         token_expires_at=None,
         scopes=["events:read", "orders:read", "tickets:read"],
         external_account_id=external_account_id,
-        account_label="Humanitix",
-        provider_metadata={"api_version": "v1"},
+        account_label=account_label or "Humanitix " + external_account_id[-8:],
+        provider_metadata={"api_version": "v1", "identity_kind": "credential"},
     )
 
 
@@ -1543,25 +1563,31 @@ def _store_stripe_connection(user, organization: Optional[Organization], token_d
     )
 
 
+@transaction.atomic
 def _store_xero_connection(user, organization: Optional[Organization], token_data: dict[str, Any]) -> ExternalServiceConnection:
+    """Keep every authorised tenant separate, sharing only its OAuth grant."""
+    import uuid
     access_token = str(token_data.get("access_token") or "")
     tenants = _fetch_xero_connections(access_token) if access_token else []
-    primary_tenant = tenants[0] if tenants else {}
-    tenant_id = str(primary_tenant.get("tenantId") or primary_tenant.get("tenant_id") or "").strip()
-    tenant_name = str(primary_tenant.get("tenantName") or primary_tenant.get("tenant_name") or "").strip()
-    return _upsert_connection(
-        user=user,
-        provider=ExternalServiceProvider.XERO,
-        organization=organization,
-        access_token=access_token,
-        refresh_token=str(token_data.get("refresh_token") or ""),
-        token_type=str(token_data.get("token_type") or "Bearer"),
-        token_expires_at=_expires_at(token_data),
-        scopes=_as_scope_list(token_data.get("scope")) or _xero_oauth_scope_list(),
-        external_account_id=tenant_id,
-        account_label=tenant_name or tenant_id or "Xero tenant",
-        provider_metadata={"tenants": tenants},
-    )
+    if not tenants:
+        raise ConnectorConfigurationError("Xero did not return an authorised organisation.")
+    grant_id = str(uuid.uuid4())
+    rows = []
+    for tenant in tenants:
+        tenant_id = str(tenant.get("tenantId") or tenant.get("tenant_id") or "").strip()
+        if not tenant_id:
+            raise ConnectorConfigurationError("Xero did not return an organisation identity.")
+        rows.append(_upsert_connection(user=user, provider=ExternalServiceProvider.XERO,
+            organization=organization, access_token=access_token,
+            refresh_token=str(token_data.get("refresh_token") or ""),
+            token_type=str(token_data.get("token_type") or "Bearer"), token_expires_at=_expires_at(token_data),
+            scopes=_as_scope_list(token_data.get("scope")) or _xero_oauth_scope_list(),
+            external_account_id=tenant_id,
+            account_label=str(tenant.get("tenantName") or tenant.get("tenant_name") or tenant_id),
+            provider_metadata={"tenants": tenants, "oauth_grant_id": grant_id}))
+    from .source_accounts import report_account_id
+    selected = report_account_id(user, organization, "xero")
+    return next((row for row in rows if row.pk == selected), rows[0])
 
 
 def _store_notion_connection(user, organization: Optional[Organization], token_data: dict[str, Any]) -> ExternalServiceConnection:
@@ -1587,6 +1613,8 @@ def _store_google_drive_connection(user, organization: Optional[Organization], t
     userinfo = _fetch_google_userinfo(access_token) if access_token else {}
     email = str(userinfo.get("email") or "").strip()
     subject = str(userinfo.get("sub") or "").strip()
+    from .source_accounts import adopt_google_external_identity
+    adopt_google_external_identity(user, organization, "google_drive", userinfo)
     return _upsert_connection(
         user=user,
         provider=ExternalServiceProvider.GOOGLE_DRIVE,
@@ -1596,7 +1624,7 @@ def _store_google_drive_connection(user, organization: Optional[Organization], t
         token_type=str(token_data.get("token_type") or "Bearer"),
         token_expires_at=_expires_at(token_data),
         scopes=_as_scope_list(token_data.get("scope")) or _as_scope_list(getattr(settings, "GOOGLE_DRIVE_OAUTH_SCOPES", [])),
-        external_account_id=email or subject,
+        external_account_id=subject,
         account_label=email or "Google Drive",
         provider_metadata={"userinfo": userinfo},
     )
@@ -1607,6 +1635,8 @@ def _store_google_analytics_connection(user, organization: Optional[Organization
     userinfo = _fetch_google_userinfo(access_token) if access_token else {}
     email = str(userinfo.get("email") or "").strip()
     subject = str(userinfo.get("sub") or "").strip()
+    from .source_accounts import adopt_google_external_identity
+    adopt_google_external_identity(user, organization, "google_analytics", userinfo)
     return _upsert_connection(
         user=user,
         provider=ExternalServiceProvider.GOOGLE_ANALYTICS,
@@ -1616,7 +1646,7 @@ def _store_google_analytics_connection(user, organization: Optional[Organization
         token_type=str(token_data.get("token_type") or "Bearer"),
         token_expires_at=_expires_at(token_data),
         scopes=_as_scope_list(token_data.get("scope")) or _as_scope_list(getattr(settings, "GOOGLE_ANALYTICS_OAUTH_SCOPES", [])),
-        external_account_id=email or subject,
+        external_account_id=subject,
         account_label=email or "Google Analytics",
         provider_metadata={"userinfo": userinfo},
     )
@@ -1788,6 +1818,9 @@ def _store_slack_connection(
                     )
                     connection = None
             if not identity_conflict:
+                from .source_accounts import preserve_report_account
+                preserve_report_account(locked_user, organization, "slack", ExternalServiceConnection.objects.filter(
+                    user=locked_user, organization=organization, provider="slack").exclude(status="disconnected"))
                 if connection is None:
                     connection = ExternalServiceConnection(
                         user=locked_user,
@@ -2535,6 +2568,9 @@ def _refresh_xero_connection(connection: ExternalServiceConnection) -> str:
     # the private Studio collector, so concurrent jobs cannot reuse an old one.
     error = None
     with transaction.atomic():
+        # Sibling tenants authorised together share a rotating refresh token.
+        # Serialize at the user boundary before locking any tenant row.
+        get_user_model().objects.select_for_update().get(pk=connection.user_id)
         locked = ExternalServiceConnection.objects.select_for_update().get(pk=connection.pk)
         try:
             if (locked.access_token and (locked.token_expires_at is None
@@ -2585,6 +2621,7 @@ def _refresh_xero_connection_unlocked(connection: ExternalServiceConnection) -> 
         connection.save(update_fields=["status", "last_error", "updated_at"])
         raise ConnectorOAuthError(connection.last_error)
 
+    previous_refresh_token = connection.refresh_token
     connection.access_token = access_token
     connection.refresh_token = refresh_token
     connection.token_type = str(token_data.get("token_type") or "Bearer")
@@ -2604,6 +2641,19 @@ def _refresh_xero_connection_unlocked(connection: ExternalServiceConnection) -> 
             "updated_at",
         ]
     )
+    # Copy rotation only to this user's exact same grant. Different accounts'
+    # credentials and all account-specific selections stay untouched.
+    grant_id = (connection.provider_metadata or {}).get("oauth_grant_id")
+    if grant_id:
+        siblings = ExternalServiceConnection.objects.select_for_update().filter(
+            user=connection.user, provider="xero", provider_metadata__oauth_grant_id=grant_id,
+        ).exclude(pk=connection.pk).exclude(status="disconnected")
+        for sibling in siblings:
+            if sibling.refresh_token != previous_refresh_token:
+                continue
+            for field in ("access_token", "refresh_token", "token_type", "token_expires_at", "scopes"):
+                setattr(sibling, field, getattr(connection, field))
+            sibling.save(update_fields=["access_token", "refresh_token", "token_type", "token_expires_at", "scopes", "updated_at"])
     return access_token
 
 
@@ -2974,6 +3024,7 @@ def _publish_xero_report_metrics_for_sync(connection: ExternalServiceConnection,
             summary = publish_xero_metric_observations(
                 organization=connection.organization,
                 run=None,
+                connection_id=connection.pk,
                 start_date=start_date,
                 end_date=end_date,
             )
@@ -3095,13 +3146,13 @@ def sync_xero_connection(connection: ExternalServiceConnection) -> dict[str, Any
 
 
 def _latest_xero_connection(user, organization=_ACTIVE_ORG) -> Optional[ExternalServiceConnection]:
+    from .source_accounts import report_connection
     organization = _scope_org(user, organization)
     queryset = ExternalServiceConnection.objects.filter(
         user=user, provider=ExternalServiceProvider.XERO
     ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-    if organization is not None:
-        queryset = queryset.filter(organization=organization)
-    return queryset.order_by("-updated_at", "-id").first()
+    queryset = queryset.filter(organization=organization)
+    return report_connection(queryset, user=user, organization=organization, provider='xero')
 
 
 def _xero_record_source_id(record: ExternalFinancialRecord) -> str:
@@ -3657,13 +3708,13 @@ query LinearProjectDetail($id: String!, $issueFirst: Int!, $issueAfter: String, 
 
 
 def _latest_linear_connection(user, organization=_ACTIVE_ORG) -> Optional[ExternalServiceConnection]:
+    from .source_accounts import report_connection
     organization = _scope_org(user, organization)
     queryset = ExternalServiceConnection.objects.filter(
         user=user, provider=ExternalServiceProvider.LINEAR
     ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-    if organization is not None:
-        queryset = queryset.filter(organization=organization)
-    return queryset.order_by("-updated_at", "-id").first()
+    queryset = queryset.filter(organization=organization)
+    return report_connection(queryset, user=user, organization=organization, provider='linear')
 
 
 def _linear_retry_after_seconds(response) -> int:
@@ -4711,13 +4762,13 @@ def serialize_linear_preview(user, *, limit: int = 5, organization=_ACTIVE_ORG) 
 
 
 def _latest_slack_connection(user, organization=_ACTIVE_ORG) -> Optional[ExternalServiceConnection]:
+    from .source_accounts import report_connection
     organization = _scope_org(user, organization)
     queryset = ExternalServiceConnection.objects.filter(
         user=user, provider=ExternalServiceProvider.SLACK
     ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-    if organization is not None:
-        queryset = queryset.filter(organization=organization)
-    return queryset.order_by("-updated_at", "-id").first()
+    queryset = queryset.filter(organization=organization)
+    return report_connection(queryset, user=user, organization=organization, provider='slack')
 
 
 @dataclass(frozen=True)
@@ -5928,7 +5979,11 @@ def _serialize_google_source(user, organization=_ACTIVE_ORG) -> dict[str, Any]:
         status_value = "unavailable"
         warning = "Google OAuth is not configured."
 
+    from .source_accounts import serialize_accounts
+    org = _scope_org(user, organization)
+    accounts = GoogleConnection.objects.filter(user=user, organization=org)
     return {
+        **serialize_accounts(user, org, "gmail", accounts, connection),
         "key": "gmail",
         "provider": "gmail",
         "label": CONNECTOR_DEFINITIONS["gmail"].label,
@@ -5956,13 +6011,13 @@ GOOGLE_ANALYTICS_ADMIN_ACCOUNT_SUMMARIES_URL = "https://analyticsadmin.googleapi
 
 
 def _latest_google_analytics_connection(user, organization=_ACTIVE_ORG) -> Optional[ExternalServiceConnection]:
+    from .source_accounts import report_connection
     organization = _scope_org(user, organization)
     queryset = ExternalServiceConnection.objects.filter(
         user=user, provider=ExternalServiceProvider.GOOGLE_ANALYTICS
     ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-    if organization is not None:
-        queryset = queryset.filter(organization=organization)
-    return queryset.order_by("-updated_at", "-id").first()
+    queryset = queryset.filter(organization=organization)
+    return report_connection(queryset, user=user, organization=organization, provider='google_analytics')
 
 
 def _normalize_ga_property_id(raw: str) -> str:
@@ -6104,13 +6159,13 @@ def update_google_analytics_property_selections(user, property_ids: Iterable[str
 
 
 def _latest_luma_connection(user, organization=_ACTIVE_ORG) -> Optional[ExternalServiceConnection]:
+    from .source_accounts import report_connection
     organization = _scope_org(user, organization)
     queryset = ExternalServiceConnection.objects.filter(
         user=user, provider=ExternalServiceProvider.LUMA
     ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-    if organization is not None:
-        queryset = queryset.filter(organization=organization)
-    return queryset.order_by("-updated_at", "-id").first()
+    queryset = queryset.filter(organization=organization)
+    return report_connection(queryset, user=user, organization=organization, provider='luma')
 
 
 def _serialize_luma_event_selection(selection: LumaEventSelection) -> dict[str, Any]:
@@ -6266,13 +6321,13 @@ def update_luma_selections(user, event_ids: Iterable[str], metric_keys: Iterable
 
 def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) -> dict[str, Any]:
     definition = CONNECTOR_DEFINITIONS[provider]
+    from .source_accounts import report_connection
     organization = _scope_org(user, organization)
     queryset = ExternalServiceConnection.objects.filter(
         user=user, provider=provider
     ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-    if organization is not None:
-        queryset = queryset.filter(organization=organization)
-    connection = queryset.order_by("-updated_at", "-id").first()
+    queryset = queryset.filter(organization=organization)
+    connection = report_connection(queryset, user=user, organization=organization, provider=provider)
     configuration_error = _provider_configuration_error(provider)
     configured = configuration_error is None
     if connection:
@@ -6310,7 +6365,9 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
             warning = warning or "Select a Google Analytics property before using Google Analytics in a monthly update."
     selected_event_count = 0
 
+    from .source_accounts import serialize_accounts
     payload = {
+        **serialize_accounts(user, organization, provider, queryset, connection),
         "key": provider,
         "provider": provider,
         "label": definition.label,
@@ -6408,6 +6465,7 @@ def mark_sources_sync_requested(
     *,
     financial_only: bool = False,
     organization=_ACTIVE_ORG,
+    connection_ids=None,
 ) -> dict[str, Any]:
     provider_filter = []
     if providers:
@@ -6430,6 +6488,8 @@ def mark_sources_sync_requested(
     if provider_filter:
         queryset = queryset.filter(provider__in=provider_filter)
 
+    if connection_ids is not None:
+        queryset = queryset.filter(pk__in=connection_ids)
     now = timezone.now()
     updated = []
     for connection in queryset:

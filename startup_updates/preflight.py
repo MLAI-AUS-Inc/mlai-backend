@@ -105,14 +105,10 @@ def probe_source(provider, *, user, organization):
             raise PermissionError()
         list_message_page(connection, query="", max_results=1)
         return {"connectionId": connection.pk}
-    connection = (
-        ExternalServiceConnection.objects.filter(
-            user=user, organization=organization, provider=provider
-        )
-        .exclude(status="disconnected")
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+    from integrations.services.source_accounts import report_connection
+    connection = report_connection(ExternalServiceConnection.objects.filter(
+        user=user, organization=organization, provider=provider,
+    ).exclude(status="disconnected"), user=user, organization=organization, provider=provider)
     if connection is None:
         raise PermissionError()
     if provider == "slack":
@@ -246,7 +242,7 @@ def check_sources(sources, probe):
 
 
 def require_source_preflight(
-    *, user, organization, input_sources, manual_document_ids=None, manual_summary=""
+    *, user, organization, input_sources, manual_document_ids=None, manual_summary="", connection_pins=None
 ):
     """Check every selected source before full collection or generation."""
     sources = selected_sources(
@@ -279,7 +275,9 @@ def require_source_preflight(
                 if not documents and not str(manual_summary or "").strip():
                     raise ManualInputNotReady()
                 return {}
-            return probe_source(provider, user=user, organization=organization)
+            from integrations.services.source_accounts import report_account_scope
+            with report_account_scope(user, organization, connection_pins):
+                return probe_source(provider, user=user, organization=organization)
         finally:
             # These short-lived executor threads are outside Django's request
             # teardown. Close even a healthy persistent connection explicitly.

@@ -36,6 +36,7 @@ class LinearFixture:
             token_type="Bearer", token_expires_at=timezone.now() - timedelta(days=1),
             updated_at=timezone.now() - timedelta(days=2), scopes=[],
             status="connected", last_error="", last_synced_at=None,
+            provider_metadata={},
             account_label="Example", external_account_id="workspace", save=MagicMock(),
         )
 
@@ -181,12 +182,15 @@ class LinearStatusTests(LinearFixture, SimpleTestCase):
             connectors.ExternalServiceConnection, "objects",
         ) as rows, patch.object(connectors.LinearProjectSelection, "objects"), patch.object(
             connectors, "_provider_configuration_error", return_value=None,
-        ):
+        ), patch("integrations.services.source_accounts.report_account_id", return_value=None):
             rows.filter.return_value.exclude.return_value.filter.return_value.order_by.return_value.first.return_value = self.connection
+            rows.filter.return_value.exclude.return_value.filter.return_value.order_by.return_value.__iter__.return_value = [self.connection]
             source = connectors._serialize_external_source(self.user, "linear", self.organization)
         self.assertEqual(source["status"], "needs_reauth")
         self.assertFalse(source["selected"])
         self.assertEqual(source["warning"], connectors.LINEAR_RECONNECT_MESSAGE)
+        self.assertEqual(source["reportAccountId"], self.connection.pk)
+        self.assertEqual([row["connectionId"] for row in source["accounts"]], [self.connection.pk])
         capability = source_capabilities(source)
         self.assertFalse(capability["usableForUpdates"])
         self.assertTrue(capability["canConnect"])

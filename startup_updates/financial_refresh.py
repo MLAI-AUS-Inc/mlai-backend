@@ -125,6 +125,7 @@ def _connections(request, *, lock=False):
 
 def start_refresh(*, company, user, data):
     """Create one persisted scoped job; do not create or edit a Pulse revision."""
+    from integrations.services.source_accounts import report_connection
     if company.organization_id is None:
         raise ValidationError("Add a startup domain and connect Xero before refreshing financials.")
     profile, _ = StartupProfile.objects.get_or_create(organization_id=company.organization_id)
@@ -145,8 +146,9 @@ def start_refresh(*, company, user, data):
             request["connections"] = {}
             sources = {}
             for provider in request["inputSources"]:
-                connection = ExternalServiceConnection.objects.filter(organization_id=company.organization_id,
-                    user=user, provider=provider).exclude(status="disconnected").order_by("-updated_at", "-pk").first()
+                queryset = ExternalServiceConnection.objects.filter(organization_id=company.organization_id,
+                    user=user, provider=provider).exclude(status="disconnected")
+                connection = report_connection(queryset, user=user, organization=company.organization, provider=provider)
                 pin = connection_identity(connection) if connection and connection.access_token else None
                 request["connections"][provider] = pin
                 sources[provider] = {"provider": provider, "status": "pending" if pin else "reconnect_required"}

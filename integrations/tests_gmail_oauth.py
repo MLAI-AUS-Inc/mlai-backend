@@ -166,7 +166,7 @@ class GoogleOAuthViewTests(TestCase):
             ),
         ), patch(
             "integrations.views.requests.get",
-            return_value=_json_response({"email": "founder@gmail.com"}),
+            return_value=_json_response({"email": "founder@gmail.com", "sub": "google-sub-a", "email_verified": True}),
         ):
             with self.captureOnCommitCallbacks(execute=True):
                 response = self.client.get(
@@ -203,7 +203,7 @@ class GoogleOAuthViewTests(TestCase):
             ),
         ), patch(
             "integrations.views.requests.get",
-            return_value=_json_response({"email": "founder@gmail.com"}),
+            return_value=_json_response({"email": "founder@gmail.com", "sub": "google-sub-a", "email_verified": True}),
         ):
             response = self.client.get(
                 reverse("google_callback"),
@@ -233,7 +233,7 @@ class GoogleOAuthViewTests(TestCase):
             ),
         ), patch(
             "integrations.views.requests.get",
-            return_value=_json_response({"email": "founder@gmail.com"}),
+            return_value=_json_response({"email": "founder@gmail.com", "sub": "google-sub-a", "email_verified": True}),
         ):
             response = self.client.get(
                 reverse("google_callback"),
@@ -257,7 +257,7 @@ class GoogleOAuthViewTests(TestCase):
             ),
         ), patch(
             "integrations.views.requests.get",
-            return_value=_json_response({"email": "founder@gmail.com"}),
+            return_value=_json_response({"email": "founder@gmail.com", "sub": "google-sub-a", "email_verified": True}),
         ):
             response = self.client.get(
                 reverse("google_callback"),
@@ -288,7 +288,7 @@ class GoogleOAuthViewTests(TestCase):
             ),
         ), patch(
             "integrations.views.requests.get",
-            return_value=_json_response({"email": "founder@gmail.com"}),
+            return_value=_json_response({"email": "founder@gmail.com", "sub": "google-sub-a", "email_verified": True}),
         ):
             response = self.client.get(
                 reverse("google_callback"),
@@ -318,7 +318,7 @@ class GoogleOAuthViewTests(TestCase):
             ),
         ) as mock_post, patch(
             "integrations.views.requests.get",
-            return_value=_json_response({"email": "founder@gmail.com"}),
+            return_value=_json_response({"email": "founder@gmail.com", "sub": "google-sub-a", "email_verified": True}),
         ):
             response = self.client.get(
                 reverse("google_callback"),
@@ -352,7 +352,7 @@ class GoogleOAuthViewTests(TestCase):
             ),
         ), patch(
             "integrations.views.requests.get",
-            return_value=_json_response({"email": "founder@gmail.com"}),
+            return_value=_json_response({"email": "founder@gmail.com", "sub": "google-sub-a", "email_verified": True}),
         ):
             with self.captureOnCommitCallbacks(execute=False) as callbacks:
                 response = self.client.get(
@@ -406,7 +406,7 @@ class GoogleOAuthViewTests(TestCase):
             ),
         ), patch(
             "integrations.views.requests.get",
-            return_value=_json_response({"email": "founder@gmail.com"}),
+            return_value=_json_response({"email": "founder@gmail.com", "sub": "google-sub-a", "email_verified": True}),
         ):
             callback_response = self.client.get(
                 reverse("google_callback"),
@@ -444,7 +444,7 @@ class GoogleOAuthViewTests(TestCase):
             ),
         ), patch(
             "integrations.views.requests.get",
-            return_value=_json_response({"email": "founder@gmail.com"}),
+            return_value=_json_response({"email": "founder@gmail.com", "sub": "google-sub-a", "email_verified": True}),
         ):
             response = self.client.get(
                 reverse("google_callback"),
@@ -459,6 +459,7 @@ class GoogleOAuthViewTests(TestCase):
             user=self.user,
             google_email="founder@gmail.com",
             refresh_token="stored-refresh-token",
+            provider_account_id="google-sub-a",
             scope="https://www.googleapis.com/auth/gmail.readonly",
         )
         self._login_and_seed_oauth_state()
@@ -473,7 +474,7 @@ class GoogleOAuthViewTests(TestCase):
             ),
         ), patch(
             "integrations.views.requests.get",
-            return_value=_json_response({"email": "founder+updated@gmail.com"}),
+            return_value=_json_response({"email": "founder+updated@gmail.com", "sub": "google-sub-a", "email_verified": True}),
         ):
             response = self.client.get(
                 reverse("google_callback"),
@@ -495,7 +496,9 @@ class GoogleOAuthViewTests(TestCase):
         with patch(
             "integrations.views.requests.post",
             return_value=_json_response({"access_token": "access-token"}),
-        ):
+        ), patch("integrations.views.requests.get", return_value=_json_response({
+            "email": "first@example.invalid", "sub": "first", "email_verified": True,
+        })):
             response = self.client.get(
                 reverse("google_callback"),
                 {"state": "google-state", "code": "oauth-code"},
