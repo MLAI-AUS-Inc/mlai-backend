@@ -191,3 +191,19 @@ urlpatterns = [
         name="token_usage_leaderboard",
     ),
 ]
+
+# P2 (IF-P2-25): the staff console routes, next to admin/access/. Each answers
+# 404 until the staff console package ships its views.
+from content_factory.lazy_views import lazy_view  # noqa: E402
+
+_admin_access = next(index for index, pattern in enumerate(urlpatterns) if str(pattern.pattern) == "admin/access/")
+urlpatterns[_admin_access + 1:_admin_access + 1] = [
+    path(route, lazy_view("community_chat.staff_console_views", view)) for route, view in (
+        ("admin/startups/", "StartupListView"),
+        ("admin/startups/funnel/", "FounderFunnelView"),
+        ("admin/startups/<int:organization_id>/", "StartupDetailView"),
+        ("admin/startups/<int:organization_id>/actions/", "StartupActionView"),
+        ("admin/alerts/", "AlertListView"),
+        ("admin/alerts/<str:alert_id>/ack/", "AlertAckView"),
+    )
+]

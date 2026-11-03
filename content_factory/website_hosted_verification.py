@@ -5,6 +5,24 @@ from . import website_goal as goals
 from .website_contract import WebsiteAuthorityError
 from .website_connections import contract_for, authority_guard, require_unlocked_remote_call
 
+OWNED_OBSERVATION_KEY = 'hosted_verification_observation_v1'
+
+
+def _requester_principal(op, context):
+    """Retain the actual current requester, never the billing or site owner."""
+    from django.contrib.auth import get_user_model
+    from core.actor_ids import preferred_actor_id_for_user
+    from .run_ownership import RunOwnershipConflict, user_principal
+    requester = op.payload.get('requested_by_user_id')
+    profile = getattr(context, 'profile', None)
+    if (type(requester) is bool or not requester
+            or str(getattr(profile, 'user_id', '')) != str(requester)):
+        raise RunOwnershipConflict('The original verification requester changed.')
+    user = profile.user
+    if not get_user_model().objects.filter(pk=user.pk, is_active=True).exists():
+        raise RunOwnershipConflict('The original verification requester is unavailable.')
+    return user_principal(user.pk, preferred_actor_id_for_user(user))
+
 
 def enabled(connection):
     """Hosted attestation requires the independent rollout and goal enrollment."""
@@ -31,7 +49,13 @@ def remote_request(method,path,*,data=None):
 def request_for(op,context,config,target,source):
     """Use original setup lineage and server target identity, never owner-supplied commands."""
     from .website_operations import reserve_workflow_operation
+    from .run_ownership import R3_BACKEND_REQUEST_KEYS, WIRE_REQUEST_KEY, RunOwnershipConflict, admission_enabled
     from workflow_runs.models import ContentFactoryRun
+    if admission_enabled():
+        try:
+            _requester_principal(op, context)
+        except RunOwnershipConflict:
+            raise WebsiteAuthorityError('operation_key_conflict', 'The original verification requester changed.') from None
     connection=config.website_connection
     source_run=goals.mapping(op.receipt).get("setup_run_id")
     from . import website_sealed_workflow as sealed
@@ -62,7 +86,7 @@ def request_for(op,context,config,target,source):
             if existing is not None and existing.payload.get("remote_request"):
                 original = existing.payload["remote_request"]
                 expected = {key: value for key, value in payload.items() if key != "goal_budget"}
-                actual = {key: value for key, value in original.items() if key not in {"goal_budget", "run_id", "operation_id", "operation_attempt", "deletion_epoch"}}
+                actual = {key: value for key, value in original.items() if key not in {"goal_budget", "run_id", "operation_id", "operation_attempt", "deletion_epoch", *R3_BACKEND_REQUEST_KEYS}}
                 if (actual != expected or existing.payload.get("sealed_inputs") != {"candidate": candidate, "snapshot": snapshot}
                         or existing.generation != current.generation or existing.state in {"cancelled", "denied", "deleted"}
                         or existing.payload.get("workflow") != "hosted_native_verification"):
@@ -77,6 +101,13 @@ def request_for(op,context,config,target,source):
     payload["run_id"]=str(child.pk)
     with authority_guard(payload,action="read") as current:
         child.refresh_from_db()
+        saved_request = goals.mapping(child.payload.get('remote_request'))
+        if WIRE_REQUEST_KEY in saved_request:
+            excluded = {'goal_budget', *R3_BACKEND_REQUEST_KEYS}
+            if goals.digest({key: value for key, value in payload.items() if key not in excluded}) != goals.digest(
+                    {key: value for key, value in saved_request.items() if key not in excluded}):
+                raise WebsiteAuthorityError('operation_key_conflict', 'The original verification request changed.')
+            payload = dict(saved_request)
         binding = dict(payload)
         if candidate is not None:
             target.refresh_from_db()
@@ -90,8 +121,25 @@ def request_for(op,context,config,target,source):
             child.payload = {**child.payload, "sealed_inputs": pending, "remote_request": dict(payload)}
         child.payload={**child.payload,"run_id":payload["run_id"],"source_run_id":source_run,"binding":binding}
         child.save(update_fields=["payload","updated_at"])
-        run,_=ContentFactoryRun.objects.get_or_create(run_id=payload["run_id"],defaults={"organization":context.organization,
+        run,created=ContentFactoryRun.objects.get_or_create(run_id=payload["run_id"],defaults={"organization":context.organization,
             "domain":context.organization.domain,"github_repo":connection.github_repo,"workflow":"hosted_native_verification","status":"queued","run_request":dict(payload)})
+        from .run_ownership import owner_receipt, reserve_admitted_run, seal_new_run_admission
+        try:
+            if run.organization_id != context.organization.pk:
+                raise RunOwnershipConflict('The named verifier belongs to another startup.')
+            if (created and admission_enabled()) or owner_receipt(run) is not None:
+                principal = _requester_principal(op, context)
+                if created:
+                    seal_new_run_admission(run, created=created, principal=principal)
+                else:
+                    reserve_admitted_run(organization=context.organization, principal=principal,
+                        workflow='hosted_native_verification', payload=payload, reserved_run_id=run.run_id)
+            if owner_receipt(run) is not None:
+                payload = dict(run.run_request)
+                child.payload = {**child.payload, 'remote_request': dict(payload)}
+                child.save(update_fields=['payload', 'updated_at'])
+        except RunOwnershipConflict:
+            raise WebsiteAuthorityError('operation_key_conflict', 'The saved verification admission changed.') from None
     goal=op.receipt["goal"]
     op.receipt["hosted_verification_run_id"]=run.run_id
     from .website_goal_runner import retain_child_references
@@ -128,8 +176,33 @@ def advance(op,context,config,target,source):
         child.receipt={**child.receipt,"status":state,"repository_modified":False}
         child.state=state if state in {"completed","failed","cancelled","denied"} else "running"
         child.save(update_fields=["state","receipt","updated_at"])
-        ContentFactoryRun.objects.filter(run_id=payload["run_id"],organization=context.organization).update(status=state,
-            result={"verification":outcome.get("verification"),"usage":outcome.get("usage"),"generation":outcome.get("generation"),"state_version":outcome.get("state_version")},updated_at=timezone.now())
+        observed = {"verification":outcome.get("verification"),"usage":outcome.get("usage"),
+            "generation":outcome.get("generation"),"state_version":outcome.get("state_version")}
+        from .run_ownership import (R3_BACKEND_RESULT_KEYS, RunOwnershipConflict, WIRE_REQUEST_KEY,
+                                   require_admission_identity, require_event_execution)
+        runs = ContentFactoryRun.objects.filter(run_id=payload["run_id"],organization=context.organization)
+        if WIRE_REQUEST_KEY in payload:
+            run = runs.select_for_update().get()
+            try:
+                receipt = require_admission_identity(run, payload)
+                require_event_execution(run, payload, current=True)
+            except RunOwnershipConflict:
+                raise WebsiteAuthorityError('operation_key_conflict', 'The saved verification admission changed.') from None
+            if receipt['authority'].get('event_protocol') == 1:
+                from .website_contract import sanitized_evidence
+                def count(value):
+                    return value if type(value) is int and 0 <= value <= 10**12 else None
+                observation = {'schema_version': 1, 'status': state,
+                    **{key: count(outcome.get(key)) for key in ('generation', 'state_version')},
+                    **{key+'_digest': goals.digest(sanitized_evidence(outcome[key])) if isinstance(outcome.get(key), dict) else None
+                       for key in ('verification', 'usage')}}
+                runs.update(result={**goals.mapping(run.result), OWNED_OBSERVATION_KEY: observation})
+            else:
+                runs.update(status=state, result={**observed,
+                    **{key: value for key, value in goals.mapping(run.result).items() if key in R3_BACKEND_RESULT_KEYS}},
+                    updated_at=timezone.now())
+        else:
+            runs.update(status=state, result=observed, updated_at=timezone.now())
     if state=="failed":raise WebsiteAuthorityError("NATIVE_VERIFICATION_FAILED","The hosted build or article render needs repair.",retryable=False)
     if state in {"cancelled","denied"}:raise WebsiteAuthorityError("website_operation_cancelled","Hosted verification was cancelled.")
     if state!="completed":return {"status":"pending"}

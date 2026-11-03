@@ -216,7 +216,7 @@ jobs:
 
     - name: Run no-database editorial contract checks
       run: |
-        python -m unittest \
+        python scripts/test_without_database.py \
           content_factory.tests_customer_profile_flow_unit \
           content_factory.tests_editorial_catalog_unit \
           content_factory.tests_editorial_catalog_api_unit \
@@ -231,7 +231,7 @@ jobs:
       run: python scripts/test_without_database.py content_factory.tests_setup_example_action_unit
 
     - name: Check Articles failure taxonomy without database access
-      run: python scripts/test_without_database.py content_factory.tests_failure_contract_unit
+      run: python scripts/test_without_database.py content_factory.tests_failure_contract_unit content_factory.tests_run_command_conflicts_unit content_factory.tests_run_terminal_transport_unit content_factory.tests_run_writer_retirement_unit
 
     - name: Check generated run-status module without database access
       run: |
@@ -358,6 +358,9 @@ jobs:
 
     - name: Check My startup account contracts without database access
       run: python scripts/test_without_database.py founder_tools.my_startup.tests
+
+    - name: Verify founder display and native return boundaries without database access
+      run: python scripts/test_without_database.py content_factory.tests_founder_display_copy community_chat.tests.test_startup_return
 
     - name: Run GitHub callback reason tests
       run: python manage.py test content_factory.tests_new_journey_binding integrations.tests_github_callback_reasons --noinput --verbosity 2
@@ -768,6 +771,38 @@ jobs:
     - name: Verify CRM blasts, senders and listmonk feedback on PostgreSQL
       run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database --verbosity 2
 
+    - name: Verify Founder recovery policy and authority on PostgreSQL
+      run: |
+        python manage.py test \
+          content_factory.tests_p2_registry_alerts \
+          content_factory.tests_p2_registry_contract \
+          content_factory.tests_p2_registry_foundation \
+          content_factory.tests_p2_registry_runtime \
+          content_factory.tests_p2_registry_website_status \
+          content_factory.tests.test_p2_authority_connections \
+          content_factory.tests.test_p2_authority_events \
+          content_factory.tests.test_p2_authority_lineage \
+          content_factory.tests.test_p2_authority_repin \
+          content_factory.tests.test_p2_hosted_registration \
+          content_factory.tests.test_p2_publish_reviewed \
+          content_factory.tests_p2_merge_worker \
+          content_factory.tests_p2_policy \
+          content_factory.tests_p2_policy_review \
+          content_factory.tests_p2_notify \
+          content_factory.tests_founder_funnel_journey \
+          content_factory.tests_founder_funnel_review \
+          content_factory.tests_founder_funnel_report \
+          content_factory.tests_founder_website_checks \
+          content_factory.tests_free_baseline_reservations \
+          content_factory.tests_p3_website_check_boundaries \
+          content_factory.tests_p3_dispatch_identity_boundary \
+          content_factory.tests_hosted_publish_authority \
+          content_factory.tests_p3_improvements \
+          roo.tests_startup_checkout_return \
+          content_factory.tests_p2_runs \
+          content_factory.tests_p2_staff \
+          founder_tools.tests_startup_team --noinput --verbosity 2
+
     - name: Verify PostgreSQL search infrastructure
       run: |
         python manage.py check_org_memory_search --require-vector
@@ -936,6 +971,84 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install --require-hashes -r requirements.lock
+
+    - name: Verify reviewed Run lifecycle writer contexts
+      run: python scripts/check_run_writer_retirement.py
+
+    - name: Verify admitted Run ownership and retired legacy writers on PostgreSQL
+      run: |
+        python manage.py test \
+          content_factory.tests_run_ownership \
+          content_factory.tests_run_backend_facts \
+          content_factory.tests_run_fact_guards \
+          content_factory.tests_run_fact_framework \
+          content_factory.tests_run_dispatch_admission \
+          content_factory.tests_run_event_authority \
+          content_factory.tests_run_event_authority_unit \
+          content_factory.tests_run_execution_control \
+          content_factory.tests_run_execution_control_api \
+          content_factory.tests_run_nightly_authority \
+          content_factory.tests_run_control_transport_unit \
+          content_factory.tests_run_owned_cancellation \
+          content_factory.tests_run_reconciliation \
+          content_factory.tests_run_reconciliation_unit \
+          content_factory.tests_run_dispatch_settlement \
+          content_factory.tests_run_dispatch_settlement_unit \
+          content_factory.tests_run_billing_lineage_owned \
+          content_factory.tests_run_article_charge \
+          content_factory.tests_run_refund_boundary \
+          content_factory.tests_run_publish_approval \
+          content_factory.tests_run_current_review \
+          content_factory.tests_founder_review_commands \
+          content_factory.tests_run_closed_execution_authority \
+          content_factory.tests_run_terminal_settlement \
+          content_factory.tests_run_topic_benefit \
+          content_factory.tests_run_topic_producer \
+          content_factory.tests_run_topic_delivery_unit \
+          content_factory.tests_first_article_commands \
+          content_factory.tests_paid_article_http_replay \
+          content_factory.tests_first_article_switch_commands \
+          content_factory.tests_founder_run_commands \
+          content_factory.tests_catalog_commands \
+          content_factory.tests_catalog_brief_commands \
+          content_factory.tests_founder_library_commands \
+          content_factory.tests_library_schema_http \
+          content_factory.tests_run_cancellation_tuple \
+          content_factory.tests_run_review_metadata_clocks \
+          content_factory.tests_founder_article_contract \
+          content_factory.tests_founder_article_controls \
+          content_factory.tests_founder_article_preferences \
+          content_factory.tests_founder_portable_review_wire \
+          content_factory.tests_founder_article_review_contract \
+          content_factory.tests_founder_receipt_concurrency \
+          content_factory.tests_run_artifact_observations_unit \
+          content_factory.tests_run_verified_delivery \
+          content_factory.tests_run_retired_writers \
+          content_factory.tests_run_standalone_setup_boundary \
+          content_factory.tests_r3_standalone_setup_boundary \
+          content_factory.tests_run_provider_boundaries \
+          content_factory.tests_run_publish_observations \
+          content_factory.tests_run_user_stop \
+          content_factory.tests_run_staff_support \
+          content_factory.tests_run_legacy_source \
+          content_factory.tests_run_legacy_binding_fence \
+          content_factory.tests_run_legacy_scan_child \
+          content_factory.tests_run_goal_authority \
+          content_factory.tests_run_policy_retirement \
+          content_factory.tests_r3_admission_budget \
+          content_factory.tests_r3_child_admission \
+          content_factory.tests_r3_confirmed_article_facts \
+          content_factory.tests_r3_event_callback \
+          content_factory.tests_r3_named_admission \
+          content_factory.tests_r3_source_operation_control \
+          content_factory.tests_r3_user_resume \
+          content_factory.tests_r3_revision_child_admission \
+          content_factory.tests_r3_publish_child_admission \
+          content_factory.tests_r3_legacy_publication_roundtrip \
+          content_factory.tests_website_connections.WebsiteReviewRegressionTests.test_reconnect_requires_reviewed_binding \
+          content_factory.tests_website_connections.WebsiteReviewRegressionTests.test_reconnecting_a_connected_website_keeps_its_setup_and_running_work \
+          content_factory.tests_website_connections.WebsiteReviewRegressionTests.test_reconnecting_a_paused_website_still_starts_a_new_generation \
+          --noinput --verbosity 2
 
     # Exercise the article chain before the expensive graph-rewind regressions,
     # so a controller/billing failure has a short, separately named CI result.
@@ -1156,6 +1269,8 @@ jobs:
         AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M: ${{ vars.AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M || '' }}
         AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M: ${{ vars.AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M || '' }}
         ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE: ${{ vars.ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE || '' }}
+        CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE: ${{ vars.CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE || '' }}
+        CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE: ${{ vars.CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE || '' }}
         ARTICLES_WORKSHOP_WINDOWS: ${{ vars.ARTICLES_WORKSHOP_WINDOWS || '' }}
         CONTENT_FACTORY_PORTABLE_PREVIEW_REARM: ${{ vars.CONTENT_FACTORY_PORTABLE_PREVIEW_REARM || '' }}
         HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW: ${{ vars.HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW || '' }}

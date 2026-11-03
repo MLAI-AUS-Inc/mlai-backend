@@ -54,6 +54,7 @@ from .account_cookies import (
 )
 from .account_sessions import (
     InvalidAccountSession,
+    InvalidBrowserAccountBinding,
     issue_account_session,
     revoke_account_session,
     rotate_account_session,
@@ -908,10 +909,16 @@ class AccountSessionRefreshView(APIView):
             credentials = rotate_account_session(
                 raw_token,
                 required_origin=required_origin,
+                required_public_key=(
+                    request.headers.get("X-MLAI-Public-Key") if not explicit_token else None
+                ),
             )
-        except InvalidAccountSession:
+        except InvalidAccountSession as exc:
             response = Response(
-                {"error": "invalid_session"},
+                {"error": (
+                    "account_identity_mismatch"
+                    if isinstance(exc, InvalidBrowserAccountBinding) else "invalid_session"
+                )},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
             # A late request may carry a token another tab already rotated.
@@ -945,7 +952,18 @@ class AccountSessionLogoutView(APIView):
                 str(request.headers.get("Origin") or "").strip().rstrip("/")
             )
         try:
-            revoke_account_session(raw_token, required_origin=required_origin)
+            revoke_account_session(
+                raw_token, required_origin=required_origin,
+                required_public_key=(
+                    request.headers.get("X-MLAI-Public-Key") if not explicit_token else None
+                ),
+            )
+        except InvalidBrowserAccountBinding:
+            response = Response(
+                {"error": "account_identity_mismatch"}, status=status.HTTP_401_UNAUTHORIZED
+            )
+            response["Cache-Control"] = "no-store"
+            return response
         except InvalidAccountSession:
             response = Response(
                 {"error": "invalid_session"},

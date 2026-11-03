@@ -124,6 +124,11 @@ class BudgetTests(SimpleTestCase):
 
 @override_settings(ARTICLES_WEBSITE_STRATEGY_ENABLED=True, ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=True)
 class RunnerPolicyTests(SimpleTestCase):
+    def setUp(self):
+        from unittest.mock import patch
+        from workflow_runs.models import ContentFactoryRun
+        self.enterContext(patch.object(ContentFactoryRun.objects, "filter", return_value=[]))
+
     def test_failure_replay_does_not_advance_pin_twice_and_repair_keeps_its_rung(self):
         from . import website_goal_runner as runner
         op = fixtures.GoalRunnerRegressions().operation()

@@ -34,6 +34,11 @@ def research_request_key(organization_id, user_id, nonce, brief):
 
 def refund_empty_or_failed_research(run):
     """Refund the recorded payer once, including when the browser has closed."""
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        # Typed failure/cancelled/completed events are never no-effect proof.
+        # Exact original dispatch settlement is owned by reconciliation.
+        return
     request = run.run_request if isinstance(run.run_request, dict) else {}
     result = run.result if isinstance(run.result, dict) else {}
     if not request.get("island_research_brief") or request.get("dispatch_pending_resolution"):

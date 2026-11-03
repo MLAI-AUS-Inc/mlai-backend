@@ -13,6 +13,7 @@
               "ARTICLE_ORCHESTRATION_ENQUEUE_FAILED",
               "ARTICLE_REPAIR_SCAN_ENQUEUE_FAILED",
               "CONFIG_SERVICE_UNAVAILABLE",
+              "CONNECTION_BINDING_CHANGED",
               "CONNECTION_SERVICE_TRANSIENT",
               "CONTENT_FACTORY_BACKEND_UNAVAILABLE",
               "CONTENT_FACTORY_UNAVAILABLE",
@@ -30,6 +31,7 @@
               "ROO_POINTS_UNAVAILABLE",
               "RUN_STALLED_WORKER_LOST",
               "SCAN_ENQUEUE_FAILED",
+              "SCAN_QUEUE_NOT_STARTED",
               "SCAN_RESUME_ENQUEUE_FAILED",
               "SETUP_ENQUEUE_FAILED",
               "SETUP_MERGE_VERIFICATION_ENQUEUE_FAILED",
@@ -90,6 +92,8 @@
         "properties": {
           "code": {
             "enum": [
+              "DEPLOYMENT_NOT_DETECTED",
+              "HOSTED_PROXY_UNVERIFIED",
               "article_request_in_progress",
               "ci_proof_unavailable",
               "cleanup_deployment_not_ready",
@@ -99,6 +103,7 @@
               "github_probe_in_progress",
               "live_route_unavailable",
               "preview_pending",
+              "pull_request_daily_cap",
               "restart_pending",
               "scan_required",
               "scan_stale",
@@ -265,7 +270,9 @@
               "ARTICLE_SETUP_STRATEGY_UNAVAILABLE",
               "ARTICLE_STATIC_EXISTING_SOURCE_CHANGED",
               "ARTICLE_STATIC_MATERIALIZER_FAILED",
+              "ARTICLE_STATIC_SOURCE_READ_INCOMPLETE",
               "ARTICLE_STATIC_WITNESS_UNAVAILABLE",
+              "CONNECTION_REPOSITORY_CHANGED",
               "CONTENT_REVIEW_BUDGET_EXHAUSTED",
               "DENSITY_REPAIR_EXHAUSTED",
               "DIRECTORY_BUILD_BASELINE_FAILED",
@@ -308,7 +315,8 @@
               "publishing_adapter_required",
               "rendered_target_path_collides_with_file",
               "restoration_reconciliation_required",
-              "setup_attempt_cap_reached"
+              "setup_attempt_cap_reached",
+              "source_repin_limit_reached"
             ]
           }
         },
@@ -335,11 +343,10 @@
         "properties": {
           "code": {
             "enum": [
-              "ARTICLE_SURFACE_HINT_REVIEW_REQUIRED",
               "ARTICLE_SYSTEM_ACTION_REQUIRED",
               "ARTICLE_SYSTEM_SETUP_REQUIRED",
               "AUTH_REQUIRED",
-              "CI_EVIDENCE_READ_ONLY",
+              "BRANCH_PROTECTION_APPROVAL_REQUIRED",
               "COMPANY_CONTEXT_INCOMPLETE",
               "CONNECTION_READ_ONLY",
               "CONNECTION_REVIEW_REQUIRED",
@@ -352,16 +359,11 @@
               "GITHUB_WRITE_ACCESS_REQUIRED",
               "INSUFFICIENT_ROO_POINTS",
               "INVALID_CREDENTIALS",
-              "MISSING_CONFIG",
-              "NO_KEYWORDS",
               "PORTABLE_REVIEW_PROTECTED",
-              "PUBLISH_TARGET_ACTION_REQUIRED",
               "SCAFFOLD_APPROVAL_REQUIRED",
-              "SETUP_EXAMPLE_CLEANUP_REQUIRED",
-              "VALIDATION_ERROR",
+              "SITE_TEST_CHANGE_REQUIRED",
               "WEBSITE_CONNECTION_REQUIRED",
               "article_founder_review_required",
-              "articles_page_choice_required",
               "cleanup_proposal_changed",
               "cleanup_proposal_required",
               "cleanup_restoration_marker_required",
@@ -385,7 +387,6 @@
               "published_content_review_required",
               "repository_required",
               "restoration_approval_required",
-              "reviewed_contract_required",
               "roo_points_required",
               "unresolved_comments",
               "website_connection_required",
@@ -427,7 +428,6 @@
               "ARTICLE_DIRECTORY_AGENT_PROVIDER_PAYLOAD_INVALID",
               "ARTICLE_PLAN_SCHEMA_MISMATCH",
               "ARTICLE_RESUME_HANDLER_UNAVAILABLE",
-              "ARTICLE_STATIC_VERIFICATION_FAILED",
               "ARTIFACT_INTEGRITY_FAILED",
               "BLOCKED_VERIFICATION",
               "CATALOG_MISSING_REQUIRED_COMPONENTS",
@@ -479,11 +479,9 @@
               "PREREQUISITE_MISSING",
               "PREVIEW_WRITE_CREDENTIAL_UNAVAILABLE",
               "PREVIEW_WRITE_SCOPE_REQUIRED",
-              "PROFILE_DRAFT_UNAVAILABLE",
               "PUBLIC_EVIDENCE_UNAVAILABLE",
               "PUBLISH_PRECONDITION",
               "REPOSITORY_BRANCH_UNAVAILABLE",
-              "REPOSITORY_SCAN_FAILED",
               "REPOSITORY_TARGET_INVALID",
               "REPO_NOT_FOUND",
               "RESCAN_REQUIRED",
@@ -499,21 +497,22 @@
               "RUN_REQUEST_UNREADABLE",
               "RUN_WORKFLOW_MISMATCH",
               "SAFETY_GUIDANCE_UNVERIFIED",
-              "SCAFFOLD_PREP_FAILED",
               "SCAN_CANCELLED",
               "SCAN_DENIED",
+              "SELF_HEAL_ATTEMPTS_EXHAUSTED",
+              "SELF_HEAL_DEADLINE_REACHED",
               "SETUP_BRANCH_REPAIR_FAILED",
               "SETUP_BRANCH_VERIFICATION_REQUIRED",
               "SETUP_MERGE_VERIFICATION_ORPHANED",
               "SETUP_MERGE_VERIFICATION_PREPARE_FAILED",
               "SETUP_SCAN_CONTEXT_MISSING",
               "SOURCE_CAPTURE_INVALID",
-              "SOURCE_CHANGED",
               "SOURCE_PIN_REQUIRED",
               "STALE_PREVIEW_DEPLOYMENT",
               "STARTUP_AUTOFILL_FAILED",
               "SYNC_FAILED",
               "TEMPLATE_PROVIDER_FAILED",
+              "TERMINAL_CODE_MISSING",
               "UNCLASSIFIED",
               "UNREGISTERED_FAILURE_CODE",
               "WEBSITE_BASELINE_FAILED",
@@ -684,6 +683,7 @@
               "setup_branch_repair_failed",
               "setup_merge_identity_changed",
               "setup_merge_observation_required",
+              "source_repin_refused",
               "stale_platform_preview_callback",
               "unknown",
               "upload_failed",
@@ -708,7 +708,6 @@
               "website_repository_changed",
               "website_run_changed",
               "website_scope_mismatch",
-              "website_source_changed",
               "website_source_recheck_required",
               "website_source_required",
               "website_source_run_required",
@@ -744,6 +743,455 @@
         "properties": {
           "code": {
             "enum": [
+              "SETUP_EXAMPLE_CLEANUP_REQUIRED"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "action": {
+                "type": "object"
+              },
+              "failure_class": {
+                "const": "needs_user"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "repairable"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "ARTICLE_SURFACE_HINT_REVIEW_REQUIRED",
+              "CI_EVIDENCE_READ_ONLY",
+              "MISSING_CONFIG",
+              "NO_KEYWORDS",
+              "PUBLISH_TARGET_ACTION_REQUIRED",
+              "articles_page_choice_required"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "action": {
+                "type": "object"
+              },
+              "failure_class": {
+                "const": "needs_user"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "strategy"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "VALIDATION_ERROR",
+              "reviewed_contract_required"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "action": {
+                "type": "object"
+              },
+              "failure_class": {
+                "const": "needs_user"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "unsupported"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "PROFILE_DRAFT_UNAVAILABLE"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "unsupported"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "transient"
+              },
+              "retryable": {
+                "const": true
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "ARTICLE_STATIC_VERIFICATION_FAILED",
+              "HOSTED_PREVIEW_UNAVAILABLE",
+              "SOURCE_CHANGED",
+              "render_dependency_contract_violation",
+              "website_source_changed"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "unsupported"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "repairable"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "INVALID_NEXT_APP_ROUTE_PATH",
+              "NEXT_APP_ROOT_LAYOUT_MISSING",
+              "NEXT_ROUTE_ROOT_NOT_DETECTED",
+              "REPOSITORY_SCAN_FAILED",
+              "SCAFFOLD_PREP_FAILED"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "unsupported"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "strategy"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "BRANCH_PROTECTION_APPROVAL_REQUIRED",
+              "SITE_TEST_CHANGE_REQUIRED",
+              "manual_merge_required"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "properties": {
+              "id": {
+                "enum": [
+                  "approve_on_github",
+                  "merge_pr"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "CONNECTION_READ_ONLY",
+              "CONNECTION_REVIEW_REQUIRED",
+              "INVALID_CREDENTIALS",
+              "WEBSITE_CONNECTION_REQUIRED",
+              "github_revocation_review_required",
+              "publish_write_access_required"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "properties": {
+              "id": {
+                "enum": [
+                  "approve_setup",
+                  "authorize_github",
+                  "review_github_app_permissions",
+                  "review_github_permissions",
+                  "review_setup"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "COMPANY_CONTEXT_INCOMPLETE"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "properties": {
+              "id": {
+                "enum": [
+                  "approve_setup",
+                  "describe_customer",
+                  "review_setup"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "PORTABLE_REVIEW_PROTECTED"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "properties": {
+              "id": {
+                "enum": [
+                  "approve_setup",
+                  "review_draft",
+                  "review_setup"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "ARTICLE_SURFACE_HINT_REVIEW_REQUIRED",
+              "ARTICLE_SYSTEM_ACTION_REQUIRED",
+              "ARTICLE_SYSTEM_SETUP_REQUIRED",
+              "CI_EVIDENCE_READ_ONLY",
+              "CONTENT_FACTORY_ARTICLES_ACTIVATION_REQUIRED",
+              "MISSING_CONFIG",
+              "NO_KEYWORDS",
+              "PUBLISH_TARGET_ACTION_REQUIRED",
+              "SCAFFOLD_APPROVAL_REQUIRED",
+              "VALIDATION_ERROR",
+              "cleanup_proposal_changed",
+              "cleanup_proposal_required",
+              "cleanup_restoration_marker_required",
+              "cleanup_review_changed",
+              "code_review_ready",
+              "published_content_review_required",
+              "restoration_approval_required",
+              "reviewed_contract_required",
+              "website_owner_review_required",
+              "website_source_review_required"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "properties": {
+              "id": {
+                "enum": [
+                  "approve_setup",
+                  "review_setup"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
               "AUTH_REQUIRED",
               "GITHUB_ACCESS_REQUIRED",
               "GITHUB_APP_WRITE_ACCESS_REQUIRED",
@@ -753,8 +1201,10 @@
               "GITHUB_WRITE_ACCESS_REQUIRED",
               "github_access_required",
               "github_authorization_required",
+              "github_ci_evidence_permission_required",
               "github_reconnect_required",
               "github_verification_required",
+              "github_workflow_permission_required",
               "legacy_reconnect_required",
               "missing_or_expired_credentials",
               "platform_preview_target_repo_not_accessible",
@@ -773,7 +1223,11 @@
           "action": {
             "properties": {
               "id": {
-                "const": "authorize_github"
+                "enum": [
+                  "authorize_github",
+                  "review_github_app_permissions",
+                  "review_github_permissions"
+                ]
               }
             }
           }
@@ -836,31 +1290,6 @@
         "properties": {
           "code": {
             "enum": [
-              "manual_merge_required"
-            ]
-          }
-        },
-        "required": [
-          "code"
-        ]
-      },
-      "then": {
-        "properties": {
-          "action": {
-            "properties": {
-              "id": {
-                "const": "merge_pr"
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "code": {
-            "enum": [
               "SETUP_EXAMPLE_CLEANUP_REQUIRED"
             ]
           }
@@ -909,84 +1338,6 @@
           }
         }
       }
-    },
-    {
-      "if": {
-        "properties": {
-          "code": {
-            "enum": [
-              "github_ci_evidence_permission_required",
-              "github_workflow_permission_required"
-            ]
-          }
-        },
-        "required": [
-          "code"
-        ]
-      },
-      "then": {
-        "properties": {
-          "action": {
-            "properties": {
-              "id": {
-                "const": "review_github_permissions"
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "code": {
-            "enum": [
-              "ARTICLE_SURFACE_HINT_REVIEW_REQUIRED",
-              "ARTICLE_SYSTEM_ACTION_REQUIRED",
-              "ARTICLE_SYSTEM_SETUP_REQUIRED",
-              "CI_EVIDENCE_READ_ONLY",
-              "COMPANY_CONTEXT_INCOMPLETE",
-              "CONNECTION_READ_ONLY",
-              "CONNECTION_REVIEW_REQUIRED",
-              "CONTENT_FACTORY_ARTICLES_ACTIVATION_REQUIRED",
-              "INVALID_CREDENTIALS",
-              "MISSING_CONFIG",
-              "NO_KEYWORDS",
-              "PORTABLE_REVIEW_PROTECTED",
-              "PUBLISH_TARGET_ACTION_REQUIRED",
-              "SCAFFOLD_APPROVAL_REQUIRED",
-              "VALIDATION_ERROR",
-              "WEBSITE_CONNECTION_REQUIRED",
-              "cleanup_proposal_changed",
-              "cleanup_proposal_required",
-              "cleanup_restoration_marker_required",
-              "cleanup_review_changed",
-              "code_review_ready",
-              "github_revocation_review_required",
-              "publish_write_access_required",
-              "published_content_review_required",
-              "restoration_approval_required",
-              "reviewed_contract_required",
-              "website_owner_review_required",
-              "website_source_review_required"
-            ]
-          }
-        },
-        "required": [
-          "code"
-        ]
-      },
-      "then": {
-        "properties": {
-          "action": {
-            "properties": {
-              "id": {
-                "const": "review_setup"
-              }
-            }
-          }
-        }
-      }
     }
   ],
   "properties": {
@@ -1000,11 +1351,16 @@
           "properties": {
             "id": {
               "enum": [
+                "agree_terms",
+                "approve_join_request",
+                "approve_on_github",
+                "approve_setup",
                 "authorize_github",
                 "buy_points",
                 "choose_articles_page",
                 "configure_website",
                 "deploy_site",
+                "describe_customer",
                 "merge_pr",
                 "provide_credentials",
                 "remove_setup_example",
@@ -1086,6 +1442,7 @@
         "ARTICLE_STATIC_MATERIALIZER_FAILED",
         "ARTICLE_STATIC_PUBLICATION_OUTPUT_MISMATCH",
         "ARTICLE_STATIC_SETUP_EXAMPLE_PUBLIC",
+        "ARTICLE_STATIC_SOURCE_READ_INCOMPLETE",
         "ARTICLE_STATIC_VERIFICATION_FAILED",
         "ARTICLE_STATIC_WITNESS_UNAVAILABLE",
         "ARTICLE_SURFACE_HINT_REVIEW_REQUIRED",
@@ -1094,6 +1451,7 @@
         "ARTIFACT_INTEGRITY_FAILED",
         "AUTH_REQUIRED",
         "BLOCKED_VERIFICATION",
+        "BRANCH_PROTECTION_APPROVAL_REQUIRED",
         "CATALOG_MISSING_REQUIRED_COMPONENTS",
         "CI_EVIDENCE_PROOF_UNAVAILABLE",
         "CI_EVIDENCE_READ_ONLY",
@@ -1101,11 +1459,13 @@
         "COMPANY_CONTEXT_INCOMPLETE",
         "CONFIG_SERVICE_UNAVAILABLE",
         "CONNECTION_AUTHORIZATION_FAILED",
+        "CONNECTION_BINDING_CHANGED",
         "CONNECTION_GENERATION_MISMATCH",
         "CONNECTION_IDENTITY_INCOMPLETE",
         "CONNECTION_MUTATION_LEDGER_UNAVAILABLE",
         "CONNECTION_READ_ONLY",
         "CONNECTION_REBIND_SCOPE_MISMATCH",
+        "CONNECTION_REPOSITORY_CHANGED",
         "CONNECTION_REPOSITORY_MISMATCH",
         "CONNECTION_REVIEW_REQUIRED",
         "CONNECTION_SERVICE_PAYLOAD_INVALID",
@@ -1127,6 +1487,7 @@
         "DEEP_RESEARCH_NOT_COMPLETED",
         "DELIVERY_REVIEW_DRIFT",
         "DENSITY_REPAIR_EXHAUSTED",
+        "DEPLOYMENT_NOT_DETECTED",
         "DIRECTORY_APP_SHELL_MISSING",
         "DIRECTORY_ARTIFACT_STORE_UNAVAILABLE",
         "DIRECTORY_BROWSER_CAPTURE_TRANSIENT",
@@ -1173,7 +1534,9 @@
         "HOSTED_PREVIEW_PROVIDER_TRANSIENT",
         "HOSTED_PREVIEW_ROUTE_MISSING",
         "HOSTED_PREVIEW_START_FAILED",
+        "HOSTED_PREVIEW_UNAVAILABLE",
         "HOSTED_PREVIEW_UNSUPPORTED_RUNTIME",
+        "HOSTED_PROXY_UNVERIFIED",
         "HOSTED_RUNTIME_ADAPTER_REQUIRED",
         "IMAGE_ASSET_UNAVAILABLE",
         "IMAGE_DESCRIPTION_CONFLICT",
@@ -1184,13 +1547,16 @@
         "INSUFFICIENT_SOURCE_SUPPORT",
         "INTERNAL_ERROR",
         "INVALID_CREDENTIALS",
+        "INVALID_NEXT_APP_ROUTE_PATH",
         "INVALID_PERMISSION_PROFILE",
         "INVALID_SCAFFOLD_PLAN",
         "ISLAND_RESEARCH_FAILED",
         "LOCAL_PREVIEW_PROOF_INVALID",
         "MISSING_CONFIG",
         "NATIVE_VERIFICATION_FAILED",
+        "NEXT_APP_ROOT_LAYOUT_MISSING",
         "NEXT_APP_ROUTE_FILE_CONFLICT",
+        "NEXT_ROUTE_ROOT_NOT_DETECTED",
         "NO_KEYWORDS",
         "NO_OPPORTUNITIES",
         "ONBOARDING_MODEL_BUDGET_EXHAUSTED",
@@ -1240,10 +1606,13 @@
         "SCAN_CANCELLED",
         "SCAN_DENIED",
         "SCAN_ENQUEUE_FAILED",
+        "SCAN_QUEUE_NOT_STARTED",
         "SCAN_RESUME_ENQUEUE_FAILED",
         "SEED_DETAIL_APP_SHELL_MISSING",
         "SEED_DETAIL_ROUTE_NOT_RENDERED",
         "SEED_DETAIL_RUNTIME_ERRORS",
+        "SELF_HEAL_ATTEMPTS_EXHAUSTED",
+        "SELF_HEAL_DEADLINE_REACHED",
         "SETUP_ARTICLE_SYSTEM_MANUAL",
         "SETUP_BRANCH_REPAIR_FAILED",
         "SETUP_BRANCH_VERIFICATION_REQUIRED",
@@ -1258,6 +1627,7 @@
         "SETUP_ROUTE_TRUNCATED",
         "SETUP_SCAN_CONTEXT_MISSING",
         "SETUP_STEP_STALLED",
+        "SITE_TEST_CHANGE_REQUIRED",
         "SOURCE_CAPTURE_INVALID",
         "SOURCE_CAPTURE_UNAVAILABLE",
         "SOURCE_CHANGED",
@@ -1269,6 +1639,7 @@
         "TEMPLATE_PROVIDER_FAILED",
         "TEMPLATE_SEED_INVALID",
         "TEMPLATE_VALIDATION_FAILED",
+        "TERMINAL_CODE_MISSING",
         "UNCLASSIFIED",
         "UNREGISTERED_FAILURE_CODE",
         "VALIDATION_ERROR",
@@ -1520,7 +1891,9 @@
         "publish_write_access_required",
         "published_content_review_required",
         "publishing_adapter_required",
+        "pull_request_daily_cap",
         "rate_limited",
+        "render_dependency_contract_violation",
         "rendered_repo_mutation_materialization_failed",
         "rendered_target_path_collides_with_file",
         "repo_baseline_build_failure",
@@ -1560,6 +1933,8 @@
         "setup_pr_unmerged",
         "setup_preview_verification_required",
         "setup_verification_required",
+        "source_repin_limit_reached",
+        "source_repin_refused",
         "source_reverification_unavailable",
         "stale_platform_preview_callback",
         "structured_data_render_repair",

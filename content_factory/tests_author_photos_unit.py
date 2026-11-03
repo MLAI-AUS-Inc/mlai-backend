@@ -236,3 +236,40 @@ class PreviewViewTests(SimpleTestCase):
         for slash in ("", "/"):
             match = resolve("/api/v1/my-startup/vibe-marketing/authors/photo-preview" + slash)
             self.assertIs(match.func.view_class, facade.AuthorPhotoPreviewView)
+
+
+class UploadedPhotoTests(SimpleTestCase):
+    def test_upload_is_reencoded_under_company_prefix_without_remote_fetch(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        uploaded = SimpleUploadedFile("untrusted/path.png", image_bytes("PNG", "RGBA"), content_type="image/png")
+        with patch("core.firebase_utils.upload_file_to_storage", return_value=STORED) as storage, patch.object(photos, "fetch_photo") as fetch:
+            self.assertEqual(photos.upload_photo(uploaded, company_id="company"), STORED)
+        fetch.assert_not_called()
+        self.assertTrue(storage.call_args.args[1].startswith("author-photos/company/"))
+        self.assertNotIn("untrusted", storage.call_args.args[1])
+        derivative = Image.open(storage.call_args.args[0])
+        self.assertLessEqual(max(derivative.size), photos.STORED_PHOTO_SIZE)
+
+    def test_upload_rejects_oversized_non_image_and_animated_files_without_storage(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        oversized = Obj(size=photos.MAX_PHOTO_BYTES + 1, read=Mock())
+        invalid = SimpleUploadedFile("fake.jpg", b"not an image", content_type="image/jpeg")
+        with patch("core.firebase_utils.upload_file_to_storage") as storage:
+            for uploaded in (oversized, invalid):
+                with self.assertRaises(photos.AuthorPhotoError):
+                    photos.upload_photo(uploaded, company_id="company")
+        oversized.read.assert_not_called()
+        storage.assert_not_called()
+
+    def test_multipart_view_uses_authorized_company_and_refuses_before_storage(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        uploaded = SimpleUploadedFile("photo.png", image_bytes("PNG"), content_type="image/png")
+        request = Obj(data={"companyId": "company"}, query_params={}, FILES={"photo": uploaded}, user=Obj(id=7))
+        with patch.object(views, "_resolve_profile_company_or_response", return_value=(Obj(), Obj(pk="company"), None)), patch.object(photos, "upload_photo", return_value=STORED) as store:
+            result = views.VibeMarketingAuthorPhotoPreviewView().post(request)
+        self.assertEqual(result.data, {"photoUrl": STORED})
+        store.assert_called_once_with(uploaded, company_id="company")
+        refusal = Response({"detail": "Not found."}, status=404)
+        with patch.object(views, "_resolve_profile_company_or_response", return_value=(None, None, refusal)), patch.object(photos, "upload_photo") as store:
+            self.assertIs(views.VibeMarketingAuthorPhotoPreviewView().post(request), refusal)
+        store.assert_not_called()

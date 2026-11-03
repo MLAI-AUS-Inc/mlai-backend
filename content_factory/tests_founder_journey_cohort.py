@@ -206,7 +206,7 @@ class PayloadTests(TestCase):
     def test_public_payload_shapes(self):
         new = make_new_journey_org()
         self.assertEqual(cohorts.public_payload(new.organization, user=new.owner), {
-            "version": 1, "cohort": "new_journey", "optInAvailable": False, "staffView": False,
+            "version": 1, "contractVersion": 2, "cohort": "new_journey", "optInAvailable": False, "staffView": False,
             "copyReadyBeforeVerification": True})
         legacy = make_named_legacy_org("vyavos")
         self.assertEqual(cohorts.public_payload(legacy.organization, user=legacy.owner), {
@@ -234,7 +234,7 @@ class PayloadTests(TestCase):
         third = VibeRaisingCompany.objects.create(profile=new.owner.vibe_raising_profile, organization=launch_only,
                                                   name="Launch", domain=launch_only.domain)
         payload = cohorts.account_payload(new.owner)
-        self.assertEqual(payload, {"version": 1, "newStartupCohort": "new_journey",
+        self.assertEqual(payload, {"version": 1, "contractVersion": 2, "newStartupCohort": "new_journey",
             "companies": {str(new.company.pk): "new_journey", str(third.pk): "new_journey"}})
         self.assertNotIn(str(second.pk), payload["companies"])
         self.assertTrue(cohorts.user_has_legacy_org(new.owner))
@@ -242,6 +242,9 @@ class PayloadTests(TestCase):
         self.assertFalse(cohorts.user_has_legacy_org(loner.owner))
         nobody = User.objects.create_user(email="nobody@synthetic.example.test")
         self.assertEqual(cohorts.account_payload(nobody)["companies"], {})
+        self.assertNotIn("contractVersion", cohorts.account_payload(nobody))
+        legacy_only = make_named_legacy_org("la_vie")
+        self.assertNotIn("contractVersion", cohorts.account_payload(legacy_only.owner))
         self.assertFalse(cohorts.user_has_legacy_org(nobody))
 
 

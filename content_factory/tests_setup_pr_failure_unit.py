@@ -22,7 +22,7 @@ class SetupPrFailureTests(SimpleTestCase):
             "setupRunId": run.run_id, "status": "preview_ready", "routePath": "/stories"}}, save=Mock())
         original = deepcopy(run.run_request)
         context = SimpleNamespace(organization=SimpleNamespace(domain=run.domain))
-        request = SimpleNamespace(data={}, user=SimpleNamespace(pk=7))
+        request = SimpleNamespace(data={}, headers={}, user=SimpleNamespace(pk=7))
         failure = {"status": "setup_pr_create_failed", "approval_state": "approved",
                    "message": "This operation is terminal. Start a new reviewed attempt."}
         with patch.object(views, "_resolve_context_or_response", return_value=(context, None)), \

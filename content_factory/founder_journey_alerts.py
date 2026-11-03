@@ -22,14 +22,24 @@ Without a valid channel every alert still writes one structured
 ``founder_journey_alert`` warning and its receipt becomes ``unconfigured``.
 Alert text carries ids, the workflow, the error code and a staff admin link,
 never a founder's email, name or article text.
+
+P2 (IF-P2-19, IF-P2-23) adds the reasons in ``P2_REASON_LABELS``, a staff
+acknowledgement (``acknowledge_founder_journey_alert``), the acknowledgement due
+time ``details["ack_due_at"]`` (one Melbourne business day after queueing) and a
+seam through which be-staff's ``staff_alert_rules.enrich_alert_details`` adds ids
+to a receipt's details. Details still hold ids only; the staff console resolves
+names, emails and links at read time.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+import importlib
 import logging
 import re
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from types import SimpleNamespace
 from uuid import NAMESPACE_URL, uuid5
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import transaction
@@ -64,6 +74,36 @@ REASON_LABELS = {
     "first_article_attempts_exhausted": "A founder used every free first-article attempt",
     "free_cap_spike": "Free first-article reservations spiked",
 }
+# IF-P2-23: the P2 reasons, each queued by the package the contract names.
+P2_REASON_LABELS = {
+    "our_team_item": "A startup has an item no automatic path can finish",
+    "unregistered_failure_code": "A run reported a failure code the registry does not know",
+    "codeless_terminal": "A run stopped without a failure code",
+    "setup_attempts_spike": "A startup had more than 6 setup attempts today",
+    "queue_age": "A queued run has waited more than 10 minutes",
+    "provider_error_rate": "Provider errors passed 20% of active runs",
+    "throttle_spike": "Founders hit more than 5 rate limits in an hour",
+    "refresh_failure_spike": "Sign-in refresh failures passed 3 times the weekly baseline",
+    "github_callback_failures": "GitHub callback failures spiked",
+    "free_budget_exhausted": "A free article ran out of model budget",
+    "claim_findings_delivered": "A draft was delivered with claims to check",
+    "repair_loop_exhausted": "A preview repair loop ran out of attempts",
+    "pull_request_cap": "A startup reached 3 MLAI pull requests today",
+    "ladder_exhausted": "Every blog route failed for a startup's website",
+    "self_heal_capped": "Self-healing stopped retrying an item",
+    "source_change_repeated": "A run's website source changed a third time",
+    "deploy_not_detected": "A merged article was not deployed within 30 minutes",
+    "merge_rejected_twice": "GitHub rejected an MLAI merge twice",
+    "join_request_unanswered": "A team join request has waited 72 hours",
+}
+P2_ALERT_REASONS = frozenset(P2_REASON_LABELS)
+ALERT_REASONS = ALERT_REASONS | P2_ALERT_REASONS
+REASON_LABELS = {**REASON_LABELS, **P2_REASON_LABELS}
+ACK_TIMEZONE = ZoneInfo("Australia/Melbourne")
+ENRICH_MODULE = "content_factory.staff_alert_rules"
+ENRICH_FUNCTION = "enrich_alert_details"
+MAX_LAST_TRANSITIONS = 3
+TRANSITION_FIELDS = ("at", "from", "to")
 TERMINAL_STATUSES = frozenset({"failed", "cancelled", "denied", "stopped"})
 YOUR_TURN_STATUSES = frozenset({"awaiting_approval", "approval_required", "awaiting_confirmation", "awaiting_delivery_mode"})
 # IF-20 owner actions. Every other cancellation_reason, 'unspecified' included, alerts.
@@ -92,9 +132,13 @@ class FounderJourneyAlertConfigError(ValueError):
     """ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE is not an ISO date."""
 
 
-def founder_journey_alert_id(*, organization_id, alert_reason, run_id=None, company_id=None, claimant_user_id=None) -> str:
+def founder_journey_alert_id(*, organization_id, alert_reason, run_id=None, company_id=None, claimant_user_id=None, slot=None) -> str:
     """Return the stable alert id for one (org, slot, reason); it is also the Slack client_msg_id."""
-    if run_id:
+    if slot is not None:
+        if alert_reason not in P2_ALERT_REASONS or not isinstance(slot, str) or not SAFE_TOKEN.fullmatch(slot):
+            raise ValueError("An alert slot must be a safe token for a P2 reason.")
+        slot = f"p2-slot-{slot}"
+    elif run_id:
         slot = str(run_id)
     elif company_id:
         slot = str(company_id)
@@ -105,7 +149,7 @@ def founder_journey_alert_id(*, organization_id, alert_reason, run_id=None, comp
     return str(uuid5(NAMESPACE_URL, f"mlai:founder-journey:{organization_id}:{slot}:{alert_reason}"))
 
 
-def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=None, run=None, details: dict | None = None) -> str:
+def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=None, run=None, details: dict | None = None, slot=None) -> str:
     """Record one pending founder-journey alert idempotently and return its alert id.
 
     The sweep delivers it. The receipt is stored in the org's content config
@@ -113,7 +157,9 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
     this outside any transaction that is about to roll back, or the receipt
     rolls back with it.
     For ``domain_claim_disputed`` pass ``details={"claimant_user_id": user.pk}``
-    so each claimant gets their own alert.
+    so each claimant gets their own alert. P2 owners may pass a stable
+    ``slot`` (for example ``day-2026-11-02`` in Melbourne time) for recurring
+    org-level alerts; leave it absent to retain the original lifetime dedupe.
     """
     if alert_reason not in ALERT_REASONS:
         raise ValueError(f"Unknown founder-journey alert_reason: {alert_reason!r}")
@@ -123,16 +169,18 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
     alert_id = founder_journey_alert_id(
         organization_id=organization.pk, alert_reason=alert_reason,
         run_id=getattr(run, "run_id", None), company_id=company_id,
-        claimant_user_id=safe_details.get("claimant_user_id"),
+        claimant_user_id=safe_details.get("claimant_user_id"), slot=slot,
     )
+    queued_at = timezone.now()
     receipt = {
         "alert_id": alert_id, "alert_reason": alert_reason, "state": "pending", "attempts": 0, "sent_at": None,
-        "queued_at": timezone.now().isoformat(),
+        "queued_at": queued_at.isoformat(),
         "company_id": str(company_id) if company_id else None,
         "run_id": str(run.run_id) if run is not None else None,
         "run_pk": run.pk if run is not None else None,
         "details": safe_details,
     }
+    receipt["details"] = _p2_details(receipt, organization=organization, run=run, queued_at=queued_at)
     if run is not None:
         mirrored = _receipts_in(ContentFactoryRun.objects.filter(pk=run.pk).values_list("result", flat=True).first())
         mirrored = mirrored.get(alert_reason)
@@ -143,6 +191,182 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
     if run is not None:
         _mirror_run_receipt(run, alert_reason, stored)
     return alert_id
+
+
+def queue_founder_journey_alerts_batch(items, *, now=None) -> dict:
+    """Reserve the same incident receipts in bounded SQL, preserving callback writes.
+
+    Only reservation is batched. Delivery still reads the authoritative config
+    index and uses its existing claims, redaction and provider identities.
+    Config locks are released before acquiring run locks, as in the single-item
+    path, and run results are re-read under those locks before any mirror write.
+    """
+    from .models import OrganizationContentConfig
+    queued_at = now or timezone.now()
+    prepared, sources = [], {}
+    for item in items:
+        organization, reason = item["organization"], item["alert_reason"]
+        run = item.get("run")
+        if reason not in ALERT_REASONS or organization is None or getattr(organization, "pk", None) is None:
+            raise ValueError("An incident batch needs saved organizations and registered alert reasons.")
+        if run is not None and run.organization_id != organization.pk:
+            raise ValueError("An incident run must belong to its organization.")
+        details = _safe_details(item.get("details"))
+        company = item.get("company_id")
+        identifier = founder_journey_alert_id(organization_id=organization.pk, alert_reason=reason,
+            run_id=getattr(run, "run_id", None), company_id=company,
+            claimant_user_id=details.get("claimant_user_id"), slot=item.get("slot"))
+        receipt = {"alert_id": identifier, "alert_reason": reason, "state": "pending", "attempts": 0,
+            "sent_at": None, "queued_at": queued_at.isoformat(), "company_id": str(company) if company else None,
+            "run_id": str(run.run_id) if run is not None else None, "run_pk": run.pk if run is not None else None,
+            "details": details}
+        receipt["details"] = _p2_details(receipt, organization=organization, run=run, queued_at=queued_at)
+        prepared.append((organization.pk, run, reason, identifier, receipt))
+        if run is not None:
+            sources[run.pk] = run
+    if not prepared:
+        return {"ids": [], "created": 0}
+    # A settled mirror whose config entry was lost is adopted, never re-sent.
+    mirrors = dict(ContentFactoryRun.objects.filter(pk__in=sources).values_list("pk", "result")) if sources else {}
+    organizations = {item[0] for item in prepared}
+    stored, created = [], 0
+    with transaction.atomic():
+        rows = {row.organization_id: row for row in OrganizationContentConfig.objects.select_for_update()
+                .filter(organization_id__in=organizations).order_by("pk")}
+        missing = organizations - rows.keys()
+        if missing:
+            OrganizationContentConfig.objects.bulk_create(
+                [OrganizationContentConfig(organization_id=identifier) for identifier in sorted(missing)], ignore_conflicts=True)
+            rows.update({row.organization_id: row for row in OrganizationContentConfig.objects.select_for_update()
+                         .filter(organization_id__in=missing).order_by("pk")})
+        changed = {}
+        for organization_id, run, reason, identifier, candidate in prepared:
+            row = rows[organization_id]
+            strategy = dict(row.pillar_strategy) if isinstance(row.pillar_strategy, dict) else {}
+            receipts = dict(_receipts_in(strategy))
+            receipt = receipts.get(identifier)
+            if not isinstance(receipt, dict):
+                mirrored = _receipts_in(mirrors.get(run.pk)).get(reason) if run is not None else None
+                receipt = {**candidate, **mirrored} if isinstance(mirrored, dict) and mirrored.get("alert_id") == identifier else candidate
+                receipts[identifier] = receipt
+                row.pillar_strategy = {**strategy, RECEIPTS_KEY: receipts}
+                changed[row.pk] = row
+                created += 1
+            stored.append((run, reason, identifier, receipt))
+        if changed:
+            OrganizationContentConfig.objects.bulk_update(list(changed.values()), ["pillar_strategy"], batch_size=200)
+    # Keep a concurrent CF result/status update. Only result.ops_alerts changes.
+    if sources:
+        with transaction.atomic():
+            current = {row.pk: row for row in ContentFactoryRun.objects.select_for_update()
+                       .filter(pk__in=sources).order_by("pk")}
+            changed = {}
+            for run, reason, _identifier, receipt in stored:
+                if run is None or run.pk not in current:
+                    continue
+                row = current[run.pk]
+                result = dict(row.result) if isinstance(row.result, dict) else {}
+                receipts = dict(_receipts_in(result))
+                if receipts.get(reason) != receipt:
+                    receipts[reason] = receipt
+                    row.result = {**result, RECEIPTS_KEY: receipts}
+                    changed[row.pk] = row
+                original = run.result if isinstance(run.result, dict) else {}
+                run.result = {**original, RECEIPTS_KEY: {**_receipts_in(original), reason: receipt}}
+            if changed:
+                ContentFactoryRun.objects.bulk_update(list(changed.values()), ["result"], batch_size=200)
+    return {"ids": [item[2] for item in stored], "created": created}
+
+
+# --- P2: acknowledgement, due time and enrichment (IF-P2-19) -----------------
+
+@lru_cache(maxsize=None)
+def _optional(module: str, name: str):
+    """The provider function ``module.name``, or None while that package is missing (IF-P2-24)."""
+    try:
+        return getattr(importlib.import_module(module), name)
+    except (ImportError, AttributeError):
+        return None
+
+
+def ack_due_at(queued_at: datetime) -> datetime:
+    """One business day after ``queued_at`` in ``Australia/Melbourne`` (Monday to Friday).
+
+    The same wall-clock time on the next day, moved past Saturday and Sunday,
+    so Friday 16:00 is due Monday 16:00. Returned in UTC.
+    """
+    if timezone.is_naive(queued_at):
+        queued_at = timezone.make_aware(queued_at, dt_timezone.utc)
+    local = queued_at.astimezone(ACK_TIMEZONE)
+    day = local.date() + timedelta(days=1)
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    due = datetime.combine(day, local.timetz().replace(tzinfo=None), tzinfo=ACK_TIMEZONE)
+    return due.astimezone(dt_timezone.utc)
+
+
+def _ack_due_applies(alert_reason) -> bool:
+    """New P2 reasons always carry a due time; existing ones only once staff can act on it."""
+    return (alert_reason in P2_ALERT_REASONS
+            or bool(getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False))
+            or bool(getattr(settings, "ARTICLES_STAFF_ALERT_RULES_ENABLED", False)))
+
+
+def _enriched(receipt, *, organization, run) -> dict:
+    """be-staff's extra ids for a receipt, through the IF-P2-24 seam; {} when missing, off or broken."""
+    if not getattr(settings, "ARTICLES_STAFF_ALERT_RULES_ENABLED", False):
+        return {}
+    enrich = _optional(ENRICH_MODULE, ENRICH_FUNCTION)
+    if enrich is None:
+        return {}
+    try:
+        extra = enrich(dict(receipt), organization=organization, run=run)
+    except Exception:  # noqa: BLE001 - enrichment must never stop an alert being recorded
+        logger.warning("founder_journey_alert_enrich_failed alert_reason=%s org_id=%s",
+                       receipt.get("alert_reason"), getattr(organization, "pk", None), exc_info=True)
+        return {}
+    return extra if isinstance(extra, dict) else {}
+
+
+def _p2_details(receipt, *, organization, run, queued_at) -> dict:
+    """The receipt's details with the enrichment and ``ack_due_at`` added, ids only."""
+    details = dict(receipt.get("details") or {})
+    extra = _enriched(receipt, organization=organization, run=run)
+    if extra:
+        details = _safe_details({**details, **extra})
+    if _ack_due_applies(receipt.get("alert_reason")):
+        details["ack_due_at"] = ack_due_at(queued_at).isoformat()
+    return details
+
+
+def acknowledge_founder_journey_alert(organization, alert_id, *, by_user) -> dict | None:
+    """Record a staff acknowledgement on one alert once, and return the stored receipt.
+
+    Sets ``acknowledged_at`` and ``acknowledged_by_user_id`` under the config row
+    lock with a queryset update, so ``updated_at`` never moves. A second call
+    changes nothing and returns the receipt as it is. Returns None when the org
+    has no such alert. A run-scoped receipt is mirrored onto its run afterwards.
+    """
+    from .models import OrganizationContentConfig
+    if organization is None or getattr(organization, "pk", None) is None or not alert_id:
+        return None
+    user_id = getattr(by_user, "pk", None)
+    with transaction.atomic():
+        row = OrganizationContentConfig.objects.select_for_update().filter(organization=organization).first()
+        if row is None:
+            return None
+        strategy = dict(row.pillar_strategy) if isinstance(row.pillar_strategy, dict) else {}
+        receipts = dict(_receipts_in(strategy))
+        receipt = receipts.get(str(alert_id))
+        if not isinstance(receipt, dict):
+            return None
+        if receipt.get("acknowledged_at"):
+            return dict(receipt)
+        receipt = {**receipt, "acknowledged_at": timezone.now().isoformat(), "acknowledged_by_user_id": user_id}
+        receipts[str(alert_id)] = receipt
+        OrganizationContentConfig.objects.filter(pk=row.pk).update(pillar_strategy={**strategy, RECEIPTS_KEY: receipts})
+    _mirror_settled(receipt)
+    return dict(receipt)
 
 
 def run_founder_journey_alert_sweep(now=None, limit=None) -> dict:
@@ -182,10 +406,13 @@ def organizations_with_delivered_drafts(organization_ids, *, using="default") ->
     if not ids:
         return set()
     written = WrittenArticle.objects.using(using).filter(organization_id__in=ids).values_list("organization_id", flat=True)
-    drafted = (ContentFactoryRun.objects.using(using)
-               .filter(organization_id__in=ids, workflow__in=ARTICLE_WORKFLOWS, status__in=DELIVERED_DRAFT_STATUSES)
-               .values_list("organization_id", flat=True))
-    return set(written) | set(drafted)
+    from .run_reconciliation import authoritative_run
+    from .run_verified_delivery import has_verified_delivery
+    drafted = ContentFactoryRun.objects.using(using).filter(organization_id__in=ids,
+        workflow__in=ARTICLE_WORKFLOWS).only("organization_id", "run_id", "workflow", "domain", "github_repo", "status", "result")
+    return set(written) | {run.organization_id for run in drafted
+        if has_verified_delivery(run) if authoritative_run(run)} | {run.organization_id
+        for run in drafted if not authoritative_run(run) and run.status in DELIVERED_DRAFT_STATUSES}
 
 
 # --- Detection ---------------------------------------------------------------
@@ -404,7 +631,11 @@ def _mirror_run_receipt(run, alert_reason, receipt):
 
 
 def _safe_details(details) -> dict:
-    """Keep only scalar, non-personal details; anything resembling text or identity is dropped."""
+    """Keep only scalar, non-personal details; anything resembling text or identity is dropped.
+
+    Two P2 shapes are also kept: a ``*_at`` timestamp (stored as UTC ISO) and
+    ``last_transitions``, at most 3 ``{"at", "from", "to"}`` entries of safe tokens.
+    """
     safe = {}
     for key, value in (details if isinstance(details, dict) else {}).items():
         key = str(key)
@@ -414,7 +645,28 @@ def _safe_details(details) -> dict:
             safe[key] = value
         elif isinstance(value, str) and SAFE_TOKEN.fullmatch(value) and "@" not in value:
             safe[key] = value
+        elif key.endswith("_at") and (moment := _timestamp(value)) is not None:
+            safe[key] = moment.astimezone(dt_timezone.utc).isoformat()
+        elif key == "last_transitions" and isinstance(value, list):
+            safe[key] = _safe_transitions(value)
     return safe
+
+
+def _safe_transitions(items) -> list[dict]:
+    transitions = []
+    for item in items[-MAX_LAST_TRANSITIONS:]:
+        if not isinstance(item, dict):
+            continue
+        entry = {}
+        for field in TRANSITION_FIELDS:
+            value = item.get(field)
+            if field == "at":
+                moment = _timestamp(value)
+                entry[field] = moment.astimezone(dt_timezone.utc).isoformat() if moment else None
+            else:
+                entry[field] = value if isinstance(value, str) and SAFE_TOKEN.fullmatch(value) and "@" not in value else None
+        transitions.append(entry)
+    return transitions
 
 
 # --- Delivery ----------------------------------------------------------------
@@ -584,6 +836,8 @@ def alert_text(receipt, context) -> str:
         if context["step_attempts"] is not None:
             parts.append(f"Step attempts {context['step_attempts']}.")
     details = receipt.get("details") if isinstance(receipt.get("details"), dict) else {}
+    # The P2 due time and transitions are for the staff console, not the Slack line.
+    details = {key: value for key, value in details.items() if key not in ("ack_due_at", "last_transitions")}
     if details:
         parts.append("Details " + ", ".join(f"{key}={_safe(value)}" for key, value in sorted(details.items())) + ".")
     parts.append(f"Alert delivery attempt {receipt.get('attempts') or 0} of {MAX_DELIVERY_ATTEMPTS}.")

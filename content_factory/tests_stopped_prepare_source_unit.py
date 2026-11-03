@@ -185,6 +185,8 @@ class SourceWakeTests(SimpleTestCase):
             return rows
 
         def setup_runs(**lookups):
+            if "result__run_owner_v1__authority__event_protocol" in lookups:
+                return []
             current = (lookups.get("run_id") == "merged-setup" and lookups.get("workflow") == "article_system_setup"
                 and lookups.get("organization_id") == 7 and lookups.get("run_request__connection_generation") == 3
                 and lookups.get("run_request__website_connection_id") == str(self.website.pk))

@@ -78,14 +78,14 @@ def email_payload(channel,notice):
     return {"from":sender,"to":[channel.route_id],"subject":notice["subject"],"text":notice["text"]+"\n\n"+notice["link"]}
 
 
-def post_email(payload,notice_id):
+def post_email(payload,notice_id,*,exact_key=False):
     """Resend alone provides the verified deduplication contract needed by this outbox."""
     api_key=str(getattr(settings,"RESEND_API_KEY","") or "")
     if not api_key:raise NotificationTransportError("email_unconfigured",retryable=False)
     require_unlocked_remote_call()
     try:
         response=post_webhook("https://api.resend.com/emails",native_crypto.canonical_json(payload).encode(),
-            {"Authorization":"Bearer "+api_key,"Idempotency-Key":"articles-goal/"+notice_id},timeout=10,max_response_bytes=16384)
+            {"Authorization":"Bearer "+api_key,"Idempotency-Key":notice_id if exact_key else "articles-goal/"+notice_id},timeout=10,max_response_bytes=16384)
         value=json.loads(response.body)
     except (CallbackEndpointError,ValueError) as exc:raise NotificationTransportError("email_response_unavailable") from exc
     if response.status in {408,429} or response.status>=500 or response.status==409 and isinstance(value,dict) and value.get("name")=="concurrent_idempotent_requests":

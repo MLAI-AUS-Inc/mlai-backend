@@ -72,6 +72,11 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                     run = ContentFactoryRun.objects.filter(run_id=run_id).first()
                     if run is None or not _run_belongs_to_context(run, context):
                         return Response({"detail": "Run not found."}, status=404)
+                    from .run_reconciliation import authoritative_run
+                    if original_portable_run(run) and run_action == "approve" and authoritative_run(run):
+                        # Owned approval records exact parent review consent;
+                        # publication still requires a separately admitted child.
+                        return invoke()
                     if original_portable_run(run) and run_action not in {"approve", "publish-pr", "promote-bundle", "merge-publish-pr", "retry-preview-quality"}:
                         if connection_contract(request.data):
                             raise WebsiteAuthorityError("website_connection_changed", "A portable draft cannot acquire repository authority.")
@@ -84,6 +89,13 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                     expected = connection_contract(request.data)
                     if expected and any(connection_contract(payload).get(key) != value for key, value in expected.items()):
                         raise WebsiteAuthorityError("website_connection_changed", "This run belongs to a previous website connection.")
+                    from .run_ownership import owner_receipt, admission_enabled
+                    if run_action in {"promote-bundle", "publish-pr"} and (owner_receipt(run) is not None or admission_enabled()):
+                        # This is a new child execution. The canonical controller
+                        # checks actual publisher, retained review source and fresh
+                        # destination before any placeholder or provider request.
+                        with owner_operation_scope(payload):
+                            return invoke()
                 else:
                     requested_repo = str(request.data.get("github_repo") or request.data.get("githubRepo") or config.github_repo or "").strip()
                     from .vibe_marketing_views import _github_repo_company_conflict_response
@@ -194,7 +206,7 @@ class WebsiteConnectionActionView(APIView):
                 operation = verify_cleanup_deployment(config, data=request.data)
             elif action in {"custom-contract", "ci-attestation"}:
                 from .website_support import owner_support_operation
-                operation = owner_support_operation(context, config, action=action, data=dict(request.data))
+                operation = owner_support_operation(context, config, action=action, data=dict(request.data), user=request.user)
             elif action == "cancel-operation":
                 from .website_operations import cancel_operation
                 operation = cancel_operation(config, data=request.data, idempotency_key=key)
@@ -372,7 +384,12 @@ class WebsiteConnectionAuthorizeView(APIView):
     def get(self, request):
         try:
             action = str(request.query_params.get("action") or "read")
+            if action not in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation", "cancel_receipt"}:
+                from .website_connections import require_run_not_stopped
+                require_run_not_stopped(dict(request.query_params.items()))
             with authority_guard(dict(request.query_params.items()), action="read" if action == "ci_attestation" else action) as connection:
+                if action not in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation", "cancel_receipt"}:
+                    require_run_not_stopped(dict(request.query_params.items()), lock=True)
                 if action == "ci_attestation":
                     from .website_verification import ci_attestation_for
                     return Response(ci_attestation_for(connection, dict(request.query_params.items()), query=True))

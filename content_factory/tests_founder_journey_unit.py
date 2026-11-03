@@ -505,7 +505,7 @@ class ExtraCaseTests(JourneyFixture, TestCase):
                                        "githubReturn": {"reason": "installed", "at": at.isoformat()}}
         self.built.config.pillar_strategy = strategy
         self.built.config.save(update_fields=["pillar_strategy", "updated_at"])
-        self.assertEqual(self.journey()["githubReturn"], {"reason": "installed", "at": at.isoformat()})
+        self.assertEqual(self.journey()["githubReturn"], {"reason": "connected", "at": at.isoformat()})
         self.assertIsNone(self.journey(now=timezone.now() + timedelta(minutes=11))["githubReturn"])
 
     def test_platform_and_blog_url_come_from_the_site_profile(self):
@@ -561,7 +561,7 @@ class ExtraCaseTests(JourneyFixture, TestCase):
         self.assertEqual((body["headline"], body["body"], body["action"]["label"]),
                          ("Our terms were just updated", "Please tick to agree again.", "Review the terms"))
 
-    def test_the_body_never_carries_a_registry_key(self):
+    def test_only_the_closed_v2_failure_can_carry_a_registered_code(self):
         make_run(self.org, status="failed", result={"failure_class": "permanent", "failure_fingerprint": "fp"})
         body = self.journey()
         scanned = {"code", "error_code", "errorCode", "blocking_code", "blockingCode", "reasonCode", "reason_code",
@@ -575,7 +575,11 @@ class ExtraCaseTests(JourneyFixture, TestCase):
             elif isinstance(value, list):
                 for item in value:
                     yield from keys(item)
-        self.assertFalse(scanned & set(keys(body)))
+        self.assertEqual(body["failure"]["code"], "UNREGISTERED_FAILURE_CODE")
+        self.assertEqual(body["article"]["failure"], body["failure"])
+        without_failure = {**body, "failure": None,
+            "article": {**body["article"], "failure": None}}
+        self.assertFalse(scanned & set(keys(without_failure)))
 
 
 class EmailClauseTests(JourneyFixture, TestCase):

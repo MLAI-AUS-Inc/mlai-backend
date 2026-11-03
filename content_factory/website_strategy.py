@@ -75,7 +75,7 @@ def ensure_pin(goal, journey, *, source, now):
     return set_pin(goal, index, source=source, fingerprint=fingerprint, now=now, reason="source_changed" if previous else "inventory_selected")
 
 
-def advance(goal, *, source, now, reason):
+def advance(goal, *, source, now, reason, organization=None):
     """One fresh causal strategy outcome moves one rung, up to hosted fallback."""
     pin = goal.get("strategy_pin")
     if not valid_pin(pin) or pin["binding"] != binding(goal, source):
@@ -83,7 +83,17 @@ def advance(goal, *, source, now, reason):
     index = RUNGS.index(pin["rung"])
     if index == len(RUNGS) - 1:
         return goal
-    return set_pin(goal, index + 1, source=source, fingerprint=pin["fingerprint_digest"], now=now, reason=reason)
+    next_index = index + 1
+    if organization is not None:
+        from .failure_policy_engine import policy_mode
+        if policy_mode(organization) == 'policy':
+            try:
+                from .hosted_auto_register import hosted_rung_ready
+            except ImportError:
+                hosted_rung_ready = None
+            if hosted_rung_ready and hosted_rung_ready(organization):
+                next_index = len(RUNGS) - 1
+    return set_pin(goal, next_index, source=source, fingerprint=pin["fingerprint_digest"], now=now, reason=reason)
 
 
 def request_pin(goal):

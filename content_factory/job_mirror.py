@@ -189,6 +189,9 @@ def mirror_job_to_run(job, fields=None) -> bool:
                 "pk", "run_id", "delivery_phase"))
             if run is None:
                 return False
+            from .run_ownership import owns_backend_facts
+            if owns_backend_facts(run):
+                return False
             job = type(job).objects.filter(pk=job.pk).first()
             if job is None or job.job_id != expected_job_id:
                 # A concurrent dispatch-token rename owns the new mapping and
@@ -235,6 +238,9 @@ def mirror_saved_job(sender, instance, raw=False, update_fields=None, **kwargs):
 def fill_new_run_from_job(sender, instance, created=False, raw=False, **kwargs):
     """Fill a newly created run from a Job written before it (dual write)."""
     if raw or not created or not dual_write_enabled():
+        return
+    from .run_ownership import owns_backend_facts
+    if owns_backend_facts(instance):
         return
     from .models import ContentFactoryJob
     job = ContentFactoryJob.objects.filter(job_id=instance.run_id).first()

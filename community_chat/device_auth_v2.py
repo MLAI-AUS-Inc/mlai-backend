@@ -90,6 +90,8 @@ def pending_request(request_id) -> Optional[CommunityChatDeviceAuthRequest]:
 def probe_payload(request_id=None) -> dict:
     """The anonymous probe: ``flow``, plus ``requestedAt`` for a pending request."""
     payload = {"flow": anonymous_flow()}
+    if getattr(settings, 'COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED', False):
+        payload['passwordAuthEnabled'] = True
     if not enabled() or request_id in (None, ""):
         return payload
     auth_request = pending_request(request_id)

@@ -229,7 +229,9 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
         payload = {**self.binding, "status": "cancelled", "publish_targets": []}
         request = SimpleNamespace(method="PUT", data=payload)
         with patch("content_factory.service_views._apply_cancellation_receipt", return_value=Response({"status": "cancelled"})) as receipt, \
-                patch.object(authority, "authority_guard") as grant:
+                patch.object(authority, "authority_guard") as grant, \
+                patch("workflow_runs.models.ContentFactoryRun.objects.filter") as saved_runs:
+            saved_runs.return_value.first.return_value = self.run
             response = wrapped(None, request, run_id=self.run.run_id)
         self.assertEqual(response.status_code, 200)
         receipt.assert_called_once_with(self.run.run_id, {**payload, "run_id": self.run.run_id})

@@ -55,3 +55,17 @@ urlpatterns = [path(route + suffix, view.as_view()) for route, view in ROUTES fo
 urlpatterns += [path(f"vibe-marketing/runs/<str:run_id>/{action}{suffix}",
     views.ArticleRunActionView.as_view(), {"action": action})
     for action in ("approve", "publish-pr", "resume", "restart", "deny") for suffix in ("", "/")]
+
+# P2 (IF-P2-25): routes whose views ship in later P2 packages; each answers 404 until then.
+from content_factory.lazy_views import lazy_view  # noqa: E402
+
+urlpatterns += [path("runs/<str:run_id>/publish-reviewed/",
+    lazy_view("content_factory.publish_reviewed_draft_views", "PublishReviewedDraftView"))]
+urlpatterns += [path(route, lazy_view("founder_tools.startup_team_views", view)) for route, view in (
+    ("team/", "TeamView"),
+    ("team/requests/", "JoinRequestView"),
+    ("team/requests/<uuid:request_id>/decision/", "JoinRequestDecisionView"),
+    ("team/members/<uuid:member_id>/", "TeamMemberView"),
+    ("team/invite-link/", "InviteLinkView"),
+    ("team/join/", "InviteJoinView"),
+)]

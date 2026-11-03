@@ -74,6 +74,9 @@ class CompletedArticleSourceWakeTests(SimpleTestCase):
 
 class ArticleCancellationSettlementTests(SimpleTestCase):
     def setUp(self):
+        from workflow_runs.models import ContentFactoryRun
+        lookup = self.enterContext(patch.object(ContentFactoryRun.objects, "filter"))
+        lookup.return_value.first.return_value = None
         from hashlib import sha256
         from .website_failure_contract import canonical_bytes
         self.run = SimpleNamespace(pk=12, run_id="paid-article", organization_id=7, domain="fixture.test",

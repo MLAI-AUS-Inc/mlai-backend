@@ -39,7 +39,8 @@ class FounderJourneyView(MyStartupAccess, APIView):
         if not journeys.api_enabled():
             return _not_found()
         company = self.company
-        payload = journeys.project_founder_journey(company.organization, user=request.user, company=company)
+        payload = journeys.project_founder_journey(company.organization, user=request.user, company=company,
+            run_id=request.query_params.get("runId"))
         etag = payload["etag"]
         if journeys.matches_if_none_match(request.headers.get("If-None-Match"), etag):
             response = HttpResponseNotModified()
@@ -99,7 +100,8 @@ class FirstArticleStartView(_FirstArticleAccess):
         if not self._applies():
             return _not_found()
         try:
-            status, body = first_articles.start_first_article(self._context(), request.user, request.data)
+            status, body = first_articles.start_first_article(self._context(), request.user, request.data,
+                idempotency_key=request.headers.get('Idempotency-Key'))
         except first_articles.FirstArticleRefusal as refusal:
             return self._refused(refusal)
         return Response(body, status=status)
@@ -112,7 +114,8 @@ class FirstArticleSwitchTopicView(_FirstArticleAccess):
         if not self._applies():
             return _not_found()
         try:
-            status, body = first_articles.switch_topic(self._context(), request.user, request.data)
+            status, body = first_articles.switch_topic(self._context(), request.user, request.data,
+                idempotency_key=request.headers.get('Idempotency-Key'))
         except first_articles.FirstArticleRefusal as refusal:
             return self._refused(refusal)
         return Response(body, status=status)

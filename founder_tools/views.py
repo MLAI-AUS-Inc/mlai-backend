@@ -94,6 +94,31 @@ class FounderToolsProfileView(APIView):
         return self._upsert(request)
 
     def _upsert(self, request):
+        from django.conf import settings
+        from . import idempotency
+        key = request.headers.get("Idempotency-Key")
+        if not getattr(settings, "MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED", False) or not key:
+            return self._save_profile(request)
+        if not idempotency.valid_key(key):
+            return Response({"detail": "Couldn't save just now. Try again.", "reason": "invalid_idempotency_key"}, status=400)
+        scope, digest = ("profile_save", request.user.pk), idempotency.request_sha256(request.data)
+        decision, replay = idempotency.begin(scope, key, digest)
+        if decision == idempotency.REPLAY:
+            response = Response(replay["body"], status=replay["status"])
+            response[idempotency.REPLAY_HEADER] = "true"
+            return response
+        if decision != idempotency.NEW:
+            return Response({"detail": "Couldn't save just now. Trying again.",
+                             "reason": idempotency.CONFLICT_REASON}, status=409)
+        try:
+            response = self._save_profile(request)
+            idempotency.finish(scope, key, digest, status=response.status_code, body=dict(response.data))
+            return response
+        except Exception:
+            idempotency.abandon(scope, key, digest)
+            raise
+
+    def _save_profile(self, request):
         serializer = FounderProfileUpsertSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         profile = get_or_create_founder_profile(request.user)

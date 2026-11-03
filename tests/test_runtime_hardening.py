@@ -71,7 +71,7 @@ class RuntimeHardeningConfigTests(SimpleTestCase):
         self.assertIn("${GUNICORN_WORKERS:-3}", start_script)
         self.assertIn("${GUNICORN_TIMEOUT:-90}", start_script)
         self.assertIn('upsert_env_value GUNICORN_WORKERS "4"', deploy)
-        self.assertIn('upsert_env_value GUNICORN_TIMEOUT "90"', deploy)
+        self.assertIn('upsert_env_value GUNICORN_TIMEOUT "\\$gunicorn_timeout"', deploy)
         self.assertIn("${GUNICORN_GRACEFUL_TIMEOUT:-30}", start_script)
         self.assertIn("${GUNICORN_MAX_REQUESTS:-300}", start_script)
         self.assertIn('RUN_MIGRATIONS_ON_START: "0"', compose)

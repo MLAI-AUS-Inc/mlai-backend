@@ -13,12 +13,19 @@ LABELS = {"authorize_github":"Approve GitHub access", "review_github_permissions
 
 def notice_for(op, *, now):
     """Project one fixed owner action or proof-backed completion, without provider text."""
+    from .p2_foundation import policy_v2_applies
+    from .registry_policy import canonical_action_id, wire_action_id
     goal = goals.mapping(op.receipt).get("goal")
     scope = goals.scope_for(op.connection,op.payload.get("company_id"))
     if not goals.valid_goal(goal,scope) or op.generation != op.connection.generation or op.connection.state != "connected":return None
     source = goal.get("current_source_sha")
     if op.state == "needs_user":
         raw = goals.mapping(op.receipt.get("user_action"));action = raw.get("id")
+        if policy_v2_applies(getattr(op.connection, "organization", None)):
+            # Labels use the old semantic aliases, while the public action id
+            # follows the registry's negotiated wire view below.
+            aliases = {"approve_setup":"review_setup", "approve_on_github":"merge_pr"}
+            action = aliases.get(canonical_action_id(action), action)
         if not isinstance(action,str) or action not in OWNER_ACTIONS | {"review_draft"}:return None
         context = {"action":action,"run_id":safe_identifier(raw.get("run_id")),"pr_number":raw.get("pr_number") if type(raw.get("pr_number")) is int and raw["pr_number"] > 0 else None}
         state,text = "needs_you",LABELS[action] + " to continue your articles setup."
@@ -51,6 +58,8 @@ def notice_for(op, *, now):
     authority = {name:value for name,value in scope.items() if name != "configuration_revision"}
     identity = {"goal_id":goal["goal_id"],"scope":authority,"state":state,**context}
     if state == "done":identity["source"] = source
-    return {"version":1,"id":goals.digest(identity),"goal_id":goal["goal_id"],"state":state,"action":context.get("action"),
+    action = context.get("action")
+    if policy_v2_applies(getattr(op.connection, "organization", None)):action = wire_action_id(action)
+    return {"version":1,"id":goals.digest(identity),"goal_id":goal["goal_id"],"state":state,"action":action,
         "subject":"Your articles need your action" if state == "needs_you" else "Your articles are live",
         "text":text,"link":link}

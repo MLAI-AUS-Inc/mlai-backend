@@ -296,6 +296,42 @@ class ContentFactoryJobAdmin(admin.ModelAdmin):
     ordering = ('-created_at',)
     readonly_fields = ('created_at', 'updated_at')
 
+    def _assert_legacy(self, obj):
+        from django.core.exceptions import PermissionDenied
+        from .run_backend_facts import fact_run_for_job
+        saved = ContentFactoryJob.objects.only("job_id").filter(pk=obj.pk).first() if obj.pk else None
+        if fact_run_for_job(obj) is not None or (saved is not None and fact_run_for_job(saved) is not None):
+            raise PermissionDenied("Admitted execution facts require their authorized Run controller.")
+
+    def has_change_permission(self, request, obj=None):
+        if obj is not None:
+            from .run_backend_facts import fact_run_for_job
+            if fact_run_for_job(obj) is not None:
+                return False
+        return super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None:
+            from .run_backend_facts import fact_run_for_job
+            if fact_run_for_job(obj) is not None:
+                return False
+        return super().has_delete_permission(request, obj)
+
+    def save_model(self, request, obj, form, change):
+        self._assert_legacy(obj)
+        return super().save_model(request, obj, form, change)
+
+    def delete_model(self, request, obj):
+        self._assert_legacy(obj)
+        return super().delete_model(request, obj)
+
+    def delete_queryset(self, request, queryset):
+        from django.db import transaction
+        with transaction.atomic():
+            for obj in queryset:
+                self._assert_legacy(obj)
+            return super().delete_queryset(request, queryset)
+
 
 class KeywordVelocityInline(admin.TabularInline):
     """Inline for velocity snapshots on keyword detail."""

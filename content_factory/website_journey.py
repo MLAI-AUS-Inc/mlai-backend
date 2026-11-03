@@ -423,6 +423,11 @@ def journey_for_context(context, config, *, capabilities=None, owner_view=False)
                 "prUrl": result.get("pr_url") or setup.get("pr_url") or None, "status": setup.get("status"),
                 "blockedReason": result.get("merge_blocked_reason") or None,
                 "savedSetup": (pending.get("setup_run_id") or pending.get("setupRunId")) == run.run_id}
-    return project_journey(company_id=context.company.pk, domain=context.organization.domain, website=website,
+    journey = project_journey(company_id=context.company.pk, domain=context.organization.domain, website=website,
         capabilities=capabilities, discovery=discovery, target=target, operation=operation, epoch=epoch, proof=proof, source_runs=source_runs, ci_source_runs=ci_source_runs, permissions=grants,
         setup_pull_request=setup_pull_request, source_check=source_check)
+    from .founder_journey_cohort import is_new_journey
+    if is_new_journey(context.organization, config):
+        from .founder_display_copy import plain_founder_journey
+        return plain_founder_journey(journey)
+    return journey

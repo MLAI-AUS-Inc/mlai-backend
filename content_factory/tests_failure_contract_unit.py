@@ -448,6 +448,11 @@ def emit():
         lock = {"schema_version": 1, "source_repository": SOURCE_REPOSITORY, "source_revision": "a" * 40, "files": files}
         (root / "contracts/failure-codes.lock.json").write_text(json.dumps(lock))
         (root / "contracts/failure-emitter-scopes.json").write_text(json.dumps({"dynamic_adapters": [], "nonfailure_sites": []}))
+        # P2: the checker also verifies the vendored pre-P2 overlay against its fixture.
+        from scripts.check_failure_contract import OVERLAY_PATH, PRE_P2_FIXTURE_PATH
+        for name in (OVERLAY_PATH, PRE_P2_FIXTURE_PATH):
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_bytes((ROOT / name).read_bytes())
         return root, lock
 
     def test_unknown_literal_and_unbounded_dynamic_fail_with_safe_locations(self):

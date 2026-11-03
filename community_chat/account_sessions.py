@@ -18,6 +18,10 @@ class InvalidAccountSession(ValueError):
     pass
 
 
+class InvalidBrowserAccountBinding(InvalidAccountSession):
+    """A cookie belongs to a different identity than the browser's local key."""
+
+
 @dataclass(frozen=True)
 class AccountSessionCredentials:
     session: CommunityChatAccountSession
@@ -98,7 +102,7 @@ def _validate_device_owner(session):
         raise InvalidAccountSession("invalid_session")
 
 
-def authenticate_access_token(raw_token):
+def authenticate_access_token(raw_token, *, required_public_key=None):
     if not str(raw_token).startswith(ACCESS_TOKEN_PREFIX):
         raise InvalidAccountSession("invalid_session")
     now = timezone.now()
@@ -109,13 +113,32 @@ def authenticate_access_token(raw_token):
     )
     if not _valid_session(session, now) or session.access_expires_at <= now:
         raise InvalidAccountSession("invalid_session")
+    validate_browser_account_binding(session, required_public_key)
     _validate_device_owner(session)
     CommunityChatAccountSession.objects.filter(id=session.id).update(last_used_at=now)
     session.last_used_at = now
     return session
 
 
-def rotate_account_session(raw_refresh_token, *, required_origin=None):
+def validate_browser_account_binding(session, expected_public_key):
+    """Reject an opted-in browser's foreign cookie before account effects.
+
+    The header is a local-identity binding, not an additional credential.
+    Missing headers retain compatibility with older clients; explicit empty or
+    malformed values fail closed. Native bearer authentication does not use it.
+    """
+    if expected_public_key is None:
+        return
+    if (
+        not isinstance(expected_public_key, str)
+        or len(expected_public_key) != 64
+        or any(char not in "0123456789abcdef" for char in expected_public_key)
+        or not secrets.compare_digest(session.public_key, expected_public_key)
+    ):
+        raise InvalidBrowserAccountBinding("account_identity_mismatch")
+
+
+def rotate_account_session(raw_refresh_token, *, required_origin=None, required_public_key=None):
     if not str(raw_refresh_token).startswith(REFRESH_TOKEN_PREFIX):
         raise InvalidAccountSession("invalid_session")
     now = timezone.now()
@@ -131,6 +154,7 @@ def rotate_account_session(raw_refresh_token, *, required_origin=None):
         )
         if not _valid_session(session, now):
             raise InvalidAccountSession("invalid_session")
+        validate_browser_account_binding(session, required_public_key)
         _validate_device_owner(session)
         if required_origin is not None and not secrets.compare_digest(
             session.origin,
@@ -161,7 +185,7 @@ def rotate_account_session(raw_refresh_token, *, required_origin=None):
     return AccountSessionCredentials(session, access_token, refresh_token)
 
 
-def revoke_account_session(raw_refresh_token, *, required_origin=None):
+def revoke_account_session(raw_refresh_token, *, required_origin=None, required_public_key=None):
     if not str(raw_refresh_token).startswith(REFRESH_TOKEN_PREFIX):
         raise InvalidAccountSession("invalid_session")
     now = timezone.now()
@@ -174,6 +198,7 @@ def revoke_account_session(raw_refresh_token, *, required_origin=None):
         )
         if not _valid_session(session, now):
             raise InvalidAccountSession("invalid_session")
+        validate_browser_account_binding(session, required_public_key)
         if required_origin is not None and not secrets.compare_digest(
             session.origin,
             required_origin,

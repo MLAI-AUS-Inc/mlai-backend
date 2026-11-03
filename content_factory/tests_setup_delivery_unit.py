@@ -918,7 +918,11 @@ class WorkflowOrderFormattingTests(SimpleTestCase):
     def test_higher_absent_or_invalid_metadata_clears_stale_order_in_actual_public_rows(self):
         from .workflow_order import KEY
         from .vibe_marketing_views import _serialize_run
+        from organizations.models import Organization
         case = self.chain()
+        # Model the scoped relation already loaded by the API queryset; this
+        # unsaved receiver fixture must not lazy-load a database row.
+        case.run.organization = Organization(pk=case.run.organization_id, domain=case.run.domain)
         self.assertEqual(case.post(self.value()).data["disposition"], "applied")
         self.assertEqual(case.run.step_order, self.ORDER)
         current = [step for step in self.ORDER if step != "draft_section:one"]

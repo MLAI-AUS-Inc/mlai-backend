@@ -581,7 +581,7 @@ def _audience_known(organization, config, facts) -> bool:
     return audience_for(organization, config, facts) is not None
 
 
-def project_founder_journey(organization, *, user, company, now=None) -> dict:
+def project_founder_journey(organization, *, user, company, now=None, run_id=None) -> dict:
     """The IF-P1-03 journey body for this company, with its ``etag``.
 
     A legacy organisation (``is_new_journey`` false) returns the legacy body
@@ -589,7 +589,13 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
     """
     company_id = str(getattr(company, "pk", "") or "")
     if organization is None or not cohorts.is_new_journey(organization):
-        return legacy_payload(company_id)
+        from .p2_foundation import p2_applies
+        if organization is None or not p2_applies(organization):
+            payload = legacy_payload(company_id)
+            if getattr(user, "is_staff", False) and getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False):
+                payload["staffConsole"] = True
+                return _with_etag(payload)
+            return payload
     config = cohorts._config_for(organization) or cohorts._EmptyConfig
     now = now or timezone.now()
     from .activation import first_article_capability
@@ -602,11 +608,56 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
     connection = _connection(organization)
     setup_run = _setup_run(organization)
     site = _site_profile(config)
-    run = latest_article_run(organization)
+    if run_id is not None:
+        import re
+        from django.http import Http404
+        from workflow_runs.models import ContentFactoryRun
+        from .run_state import ARTICLE_WORKFLOWS
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}", run_id):
+            raise Http404
+        run = ContentFactoryRun.objects.filter(organization_id=organization.pk, run_id=run_id,
+            workflow__in=ARTICLE_WORKFLOWS | set(SETUP_WORKFLOWS)).first()
+        if run is None or is_hidden_run(run):
+            raise Http404
+        setup_run = run if run.workflow in SETUP_WORKFLOWS else None
+    else:
+        run = latest_article_run(organization)
     decision = None
     facts = {"etaSeconds": None, "queuePosition": None, "switchTopicAvailable": False}
 
-    if terms_out_of_date(user):
+    from . import founder_journey_p2 as p2
+    from .p2_foundation import policy_v2_applies, p2_applies
+    p2_active = p2_applies(organization)
+    from .run_reconciliation import authoritative_run
+    from .founder_draft_views import is_delivered_article
+    if (run is not None and run.status in {"failed", "blocked", "cancelled", "denied"}
+            and authoritative_run(run) and is_delivered_article(run)):
+        # A later execution stop cannot revoke the independently earned body.
+        # This affects presentation only; the article DTO retains typed status.
+        live = _live_article(organization, run)
+        if live is not None and _https_or_none(live.live_url):
+            decision = _decide("done", "done", "done_live", next_kind="view_article", run_id=run.run_id,
+                url=_https_or_none(live.live_url))
+        elif copied_or_posted(config, run.run_id):
+            decision = _decide("done", "done", "done_copy_ready", next_kind="view_draft", run_id=run.run_id)
+        else:
+            decision = _decide("review", "your_turn", "review", action="review_draft", run_id=run.run_id)
+    if decision is None and policy_v2_applies(organization):
+        queue = writing_facts(run, now=now) if run is not None and run.status == "queued" else None
+        decision = p2.run_decision(organization, run, config=config, user=user, now=now, queue=queue)
+        if decision is None:
+            decision = p2.run_decision(organization, setup_run, config=config, user=user, now=now)
+        if decision is None and getattr(connection, "state", None) == "revoked":
+            decision = p2.line("ask_authorize_github_revoked")
+        if decision is not None and queue:
+            facts["queuePosition"], facts["etaSeconds"] = queue["queuePosition"], queue["etaSeconds"]
+        if decision is None and getattr(settings, "MY_STARTUP_TEAM_ENABLED", False):
+            role = p2.optional("founder_tools.startup_team", "viewer_role", user, organization)
+            pending = p2.optional("founder_tools.startup_team", "pending_request_count", organization, default=0)
+            if role == "owner" and pending:
+                decision = p2.line("ask_approve_join_request")
+
+    if decision is None and terms_out_of_date(user):
         decision = _decide("first_article", "your_turn", "agree_terms", action="agree_terms")
 
     if decision is None and run is not None and failure_class(run) == "needs_user" \
@@ -665,7 +716,8 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
 
     if decision is None and run is not None and run.status in DELIVERED_STATUSES:
         mode = delivery_mode(run)
-        approved = str(getattr(run, "approval_state", "") or "") == "approved"
+        from .founder_journey_contract import effective_approval_state
+        approved = effective_approval_state(run) == "approved"
         if mode == "content_only":
             # A copied or posted draft is done (rule 9), after setup and publishing.
             if not copied_or_posted(config, run.run_id):
@@ -688,10 +740,30 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
         decision = _first_article_decision(organization=organization, company=company, config=config, user=user,
                                            first_article=first_article)
 
+    if policy_v2_applies(organization) and not decision.get("copyId"):
+        ask = _mapping(decision.get("action")).get("id")
+        if ask in FOUNDER_ASKS:
+            if ask == "buy_points":
+                decision["copyId"] = "ask_buy_points"
+            else:
+                updated = p2.line("ask_" + ask, run=run if decision.get("runId") == getattr(run, "run_id", None) else setup_run)
+                updated["runId"] = decision.get("runId")
+                if updated.get("action") and decision.get("action"):
+                    updated["action"]["url"] = decision["action"].get("url")
+                decision = updated
+        elif decision["state"] == "working":
+            copy_id = "working_website_update" if decision["stage"] == "publishing" else "working_slow" if decision.get("holdingReason") == "slow" else "working"
+            decision = p2.line(copy_id, run=run, notify=p2.emailable(organization, user))
+
+    if run_id is not None:
+        if decision.get("runId") not in {None, run_id}:
+            decision = _decide("writing", "working", "still_working", next_kind="view_progress", run_id=run_id)
+        else:
+            decision["runId"] = run_id
     payload = {
         "version": VERSION, "companyId": company_id, "cohort": cohorts.NEW_JOURNEY,
         "stage": decision["stage"], "state": decision["state"], "headline": decision["headline"],
-        "body": decision["body"], "holdingReason": decision["holdingReason"], "action": decision["action"],
+        "body": decision["body"], "holdingReason": decision.get("holdingReason"), "action": decision["action"],
         "next": decision["next"], "runId": decision["runId"], "etaSeconds": facts["etaSeconds"],
         "queuePosition": facts["queuePosition"], "draftReadyNotifications": notify,
         "switchTopicAvailable": facts["switchTopicAvailable"], "githubReturn": _github_return(marker, now),
@@ -707,10 +779,49 @@ def project_founder_journey(organization, *, user, company, now=None) -> dict:
         "pollAfterMs": _poll_after(decision),
         "supportCode": decision["supportCode"],
     }
+    if p2_active:
+        payload["emailable"] = p2.emailable(organization, user)
+        if decision.get("copyId"):
+            payload["copyId"] = decision["copyId"]
+            payload.pop("holdingReason", None)
+        if run is not None:
+            count = p2.claims_count(run)
+            if count:
+                payload["claims"] = {"count": count}
+            outcome = p2.optional("content_factory.no_delivery_refunds", "points_outcome", run)
+            if outcome is not None:
+                payload["pointsOutcome"] = outcome
+            offer = p2.optional("content_factory.publish_reviewed_draft", "publish_offer", run)
+            if offer:
+                payload["publishOffer"] = offer
+        current = run if run is not None and run.run_id == payload.get("runId") else setup_run
+        if decision.get("copyId") in {"ask_approve_on_github_site_test", "done_copy_ready_ladder_exhausted"}:
+            payload["developerNote"] = p2.developer_note(organization, current)
+        if payload.get("action") and payload["action"]["id"] == "review_draft":
+            payload["action"]["url"] = p2.destination(organization, company_id, run_id=payload.get("runId"), ask="review_draft")
+        if getattr(settings, "MY_STARTUP_TEAM_ENABLED", False):
+            role = p2.optional("founder_tools.startup_team", "viewer_role", user, organization)
+            if role == "member":
+                payload["viewerRole"] = "member"
+            elif role == "owner":
+                count = p2.optional("founder_tools.startup_team", "pending_request_count", organization)
+                if type(count) is int:
+                    payload["team"] = {"pendingRequests": count}
+            bound = getattr(config, "website_connection", None)
+            if bound and bound.organization_id == organization.pk and bound.state == "connected":
+                name = str(getattr(bound.authorized_by, "first_name", "") or "").strip().split()
+                if name and "@" not in name[0]:
+                    payload["website"]["connectedBy"] = {"firstName": name[0][:100]}
+    if getattr(user, "is_staff", False) and getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False):
+        payload["staffConsole"] = True
     action_id = (payload["action"] or {}).get("id")
     logger.info("founder_journey_projection org=%s stage=%s state=%s action=%s", organization.pk,
                 payload["stage"], payload["state"], action_id or "")
-    return _with_etag(payload)
+    from .founder_journey_contract import enrich_journey
+    payload = enrich_journey(payload, organization=organization, company=company, config=config,
+        user=user, run=run, connection=connection, setup_run=setup_run)
+    from .founder_journey_contract import validate_journey
+    return validate_journey(_with_etag(payload))
 
 
 def switch_topic_admissible(organization, *, user, company, run, config=None, now=None) -> bool:
@@ -846,7 +957,8 @@ def _live_article(organization, run=None):
 
 def _publishing_or_done(*, organization, config, marker, run, connection):
     """Rules 8 and 9: publishing while the site updates, then done."""
-    if run is not None and run.status in DELIVERED_STATUSES and str(getattr(run, "approval_state", "") or "") == "approved" \
+    from .founder_journey_contract import effective_approval_state
+    if run is not None and run.status in DELIVERED_STATUSES and effective_approval_state(run) == "approved" \
             and delivery_mode(run) != "content_only":
         live = _live_article(organization, run)
         if live is None:

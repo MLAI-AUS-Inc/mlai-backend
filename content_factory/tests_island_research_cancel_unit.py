@@ -19,7 +19,7 @@ def research_run():
 class IslandResearchCancelTests(SimpleTestCase):
     def control(self, run, remote, *, owned=True, locked=None):
         context = SimpleNamespace(organization=SimpleNamespace(domain=run.domain))
-        request = SimpleNamespace(data={"companyId": "company-one"}, user=SimpleNamespace(pk=7))
+        request = SimpleNamespace(headers={}, data={"companyId": "company-one"}, user=SimpleNamespace(pk=7))
         with patch.object(views, "_resolve_context_or_response", return_value=(context, None)), \
                 patch.object(views, "get_object_or_404", return_value=run), \
                 patch.object(views, "_run_belongs_to_context", return_value=owned), \

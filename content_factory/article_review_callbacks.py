@@ -108,13 +108,14 @@ def reconcile_setup_review_outcomes(data, child):
             result["component_feedback_latest_batch"] = {**current, **batch,
                 "status": "accepted" if current.get("status") == "accepted" else "completed"}
         source.result = result
-        source.save(update_fields=["result", "updated_at"])
+        from .website_run_authority import event_owned
+        source.save(update_fields=["result"] if event_owned(source) else ["result", "updated_at"])
         fresh_child = ContentFactoryRun.objects.select_for_update().get(pk=child.pk)
         child_result = dict(fresh_child.result or {})
         child_result["source_setup_run_id"] = source.run_id
         child_result["source_run_id"] = source.run_id
         child_result["component_feedback_latest_batch"] = batch
         fresh_child.result = child_result
-        fresh_child.save(update_fields=["result", "updated_at"])
+        fresh_child.save(update_fields=["result"] if event_owned(fresh_child) else ["result", "updated_at"])
         child.result = child_result
     return True

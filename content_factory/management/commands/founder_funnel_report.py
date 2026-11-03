@@ -72,6 +72,7 @@ class Command(BaseCommand):
         parser.add_argument("--until", default="", help="Window end: ISO date (inclusive) or datetime. Defaults to now.")
         parser.add_argument("--database", default=DEFAULT_DB_ALIAS, help="Database alias to read.")
         parser.add_argument("--json", action="store_true", help="Print one JSON object instead of a table.")
+        parser.add_argument("--journey", action="store_true", help="Include the timed P3 journey conversion stages.")
 
     def handle(self, *args, **options):
         since = parse_window_bound(options["since"], end=False)
@@ -84,6 +85,9 @@ class Command(BaseCommand):
                 with connections[using].cursor() as cursor:
                     cursor.execute("SET TRANSACTION READ ONLY")
             report = founder_funnel(since=since, until=until, using=using)
+            if options['journey']:
+                from content_factory.founder_funnel import journey_funnel
+                report['journey'] = journey_funnel(since=since, until=until, using=using)
             transaction.set_rollback(True, using=using)
         if options["json"]:
             self.stdout.write(json.dumps(report, sort_keys=True))
@@ -97,3 +101,10 @@ class Command(BaseCommand):
         island = report["island_refresh_platform_wide"]
         self.stdout.write("Platform-wide island_refresh in the same window (all organisations, reported separately)")
         self.stdout.write(f"  failed {island['failed']}, denied {island['denied']}, total {island['failed_or_denied']}")
+        if 'journey' in report:
+            self.stdout.write('Journey conversions (users / users with source timestamps)')
+            for stage, value in report['journey']['stages'].items():
+                self.stdout.write(f"  {stage:<38} {value['users']} / {value['timedUsers']}")
+            timing = report['journey']['timeToFirstDraft']
+            self.stdout.write(f"Time to first draft: p50 {timing['p50Seconds']}s, p90 {timing['p90Seconds']}s; "
+                              f"{timing['sampleSize']} timed, {timing['unknownTimingUsers']} unknown")

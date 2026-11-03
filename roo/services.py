@@ -120,13 +120,21 @@ class PointsPurchaseService:
     def frontend_checkout_page_url(purchase: PointsPurchase) -> str:
         if (purchase.purchase_from or {}).get("surface") == "my-startup":
             frontend_base_url = getattr(settings, "COMMUNITY_CHAT_FRONTEND_URL", "https://chat.mlai.au").rstrip("/")
-            return f"{frontend_base_url}/my-startup/credits/{purchase.id}"
+            from urllib.parse import urlencode
+            from .startup_checkout_return import purchase_return_fields
+            query = purchase_return_fields(purchase)
+            suffix = "?" + urlencode(query) if query else ""
+            return f"{frontend_base_url}/my-startup/credits/{purchase.id}{suffix}"
         frontend_base_url = getattr(settings, 'DEFAULT_FRONTEND_URL', 'https://mlai.au').rstrip('/')
         return f"{frontend_base_url}/roo/topup/{purchase.id}"
 
     @staticmethod
     def stripe_return_url(purchase: PointsPurchase, outcome: str) -> str:
-        return f"{PointsPurchaseService.frontend_checkout_page_url(purchase)}?checkout={outcome}"
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+        parsed = urlsplit(PointsPurchaseService.frontend_checkout_page_url(purchase))
+        query = dict(parse_qsl(parsed.query))
+        query["checkout"] = outcome
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
 
     @staticmethod
     @transaction.atomic

@@ -249,7 +249,8 @@ def advance(operation_id, *, now=None):
                 raise ValueError("Publication observation acknowledgement mismatch")
             run.result = {**mapping(run.result), "publication_evidence_v1": proof, "reconciliation_required": True,
                 "publication_observation_intent_id": intent["intent_id"]}
-            run.save(update_fields=["result", "updated_at"])
+            from .website_run_authority import event_owned
+            run.save(update_fields=["result"] if event_owned(run) else ["result", "updated_at"])
             op.state, op.next_attempt_at = "completed", None
             op.receipt = {"status": "article_effect_observed", "observation": observation}
             op.save(update_fields=["state", "next_attempt_at", "receipt", "updated_at"])
