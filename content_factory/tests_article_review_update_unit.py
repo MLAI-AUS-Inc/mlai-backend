@@ -72,6 +72,11 @@ class ArticleReviewUpdateTests(SimpleTestCase):
                 self.remote = result
             if target == "_revision_authorization":
                 self.authorization = result
+        # These synthetic legacy storage tests have no receipt database.
+        # The real HTTP/PG suite covers retained-key authority separately.
+        retained = patch("content_factory.founder_review_commands._retains_identity", return_value=False)
+        retained.start()
+        self.addCleanup(retained.stop)
         for context in (
             patch.object(review.views.VibeMarketingComponentComment, "objects", self.storage),
             patch.object(review.transaction, "atomic", nullcontext),

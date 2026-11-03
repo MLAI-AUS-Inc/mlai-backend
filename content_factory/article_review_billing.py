@@ -38,7 +38,8 @@ def reserve_image_charge(*, user, context, run, payload):
     if Ledger.objects.filter(user=user, idempotency_key=f"{key}:refund").exists():
         return None, Response({"code": "roo_points_billing_refunded", "detail": "That image request was refunded. Start a new image request."}, status=409)
     from workflow_runs.models import ContentFactoryRun
-    with transaction.atomic():
+    from .founder_review_commands import image_debit_guard
+    with transaction.atomic(), image_debit_guard(run):
         saved = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
         result = dict(saved.result or {})
         receipts = dict(result.get("article_image_billing") or {})

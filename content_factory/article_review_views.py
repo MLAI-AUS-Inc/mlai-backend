@@ -69,6 +69,10 @@ def remote_review(run, *, payload=None, child_operation=False):
                         return snapshot
                     if not snapshot.get("previewPending") or not snapshot.get("refreshError"):
                         return snapshot
+                    from .founder_review_commands import refresh_resume_required
+                    resume_required = refresh_resume_required(run)
+                    if resume_required is not None:
+                        return resume_required
                     from .website_operations import advance_workflow_attempt
                     attempt = advance_workflow_attempt(run)
                     payload = {**payload, **attempt, "expectedRevision": snapshot["revision"]}
@@ -81,6 +85,14 @@ def remote_review(run, *, payload=None, child_operation=False):
     if not config["enabled"]:
         return Response({"detail": "Article editing is temporarily unavailable."}, status=503)
     url = f"{config['base_url']}/api/runs/{quote(run.run_id, safe='')}/article-review"
+    if payload is not None:
+        from .founder_review_commands import require_current_effect, ReviewCommandRefusal
+        try:
+            require_current_effect(run)
+        except ReviewCommandRefusal:
+            # No external request was made, so an image allocation can be
+            # settled through the existing definite-rejection path.
+            return Response({"detail": "The current article permission or execution changed."}, status=409)
     try:
         response = views.http_client.request(
             "GET" if payload is None else "POST", url,
@@ -501,6 +513,12 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
         context, run, error = self._resolve_run(request, run_id)
         if error is not None:
             return error
+        from .founder_review_commands import execute
+        return execute(request=request, context=context, run=run,
+            invoke=lambda: self._post_review(request, context, run),
+            readback=lambda: self.get(request, run_id))
+
+    def _post_review(self, request, context, run):
         if run.workflow not in {*views.ARTICLE_WORKFLOWS, "article_system_setup"}:
             return Response({"detail": "This run does not have an article preview."}, status=400)
         setup_revision = (run.workflow == "article_system_setup"

@@ -175,6 +175,11 @@ class CompatibilityGuardTests(SimpleTestCase):
 
 class CompatibilityDispatchReplayTests(SimpleTestCase):
     def setUp(self):
+        # This suite uses synthetic legacy storage; real retained-key authority
+        # is covered by the actual HTTP/PG command suite.
+        retained = patch("content_factory.founder_review_commands._retains_identity", return_value=False)
+        retained.start()
+        self.addCleanup(retained.stop)
         from .tests_article_review_update_unit import Comments
         from . import article_review_callbacks as callbacks
         self.callbacks=callbacks

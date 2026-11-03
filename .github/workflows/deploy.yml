@@ -999,6 +999,7 @@ jobs:
           content_factory.tests_run_refund_boundary \
           content_factory.tests_run_publish_approval \
           content_factory.tests_run_current_review \
+          content_factory.tests_founder_review_commands \
           content_factory.tests_run_closed_execution_authority \
           content_factory.tests_run_terminal_settlement \
           content_factory.tests_run_topic_benefit \

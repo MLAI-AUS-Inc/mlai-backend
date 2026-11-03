@@ -19411,7 +19411,6 @@ class VibeMarketingRunCommentsMixin:
         return context, run, None
 
 @method_decorator(observe_comment_dispatch, name="dispatch")
-@method_decorator(transaction.atomic, name="dispatch")
 class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
     allows_setup_review_updates = True
     def get(self, request, run_id):
@@ -19422,6 +19421,17 @@ class VibeMarketingRunCommentsView(VibeMarketingRunCommentsMixin, APIView):
 
     def post(self, request, run_id):
         _context, run, error_response = self._resolve_run(request, run_id)
+        if error_response is not None:
+            return error_response
+        from .founder_review_commands import execute_comment
+        return execute_comment(request=request, context=_context, run=run,
+            invoke=lambda: self._post_comment(request, _context, run))
+
+    @transaction.atomic
+    def _post_comment(self, request, _context, run):
+        # Retain the existing local comment row-lock/approval boundary. The v2
+        # revision read occurred before this transaction, outside SQL locks.
+        _context, run, error_response = self._resolve_run(request, run.run_id)
         if error_response is not None:
             return error_response
         payload = _comment_payload_from_request(request.data or {})

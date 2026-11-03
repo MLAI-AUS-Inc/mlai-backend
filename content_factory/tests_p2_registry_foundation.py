@@ -269,7 +269,7 @@ class RunMergePolicyTests(TestCase):
 class PrivateStrategyKeyTests(TestCase):
     """IF-P2-28: private bookkeeping never leaves the backend or requests a refresh."""
 
-    KEYS = ("self_heal", "startup_team", "founder_notices", "founder_funnel", "first_article_commands", "paid_article_commands", "founder_run_commands_v1", "editorial_catalog_commands_v1", "founder_library_commands_v1")
+    KEYS = ('self_heal', 'startup_team', 'founder_notices', 'founder_funnel', 'first_article_commands', 'paid_article_commands', 'founder_run_commands_v1', 'editorial_catalog_commands_v1', 'founder_library_commands_v1', 'founder_review_commands_v1')
 
     def _strategy(self):
         return {"pillars": [{"slug": "p"}], "ops_alerts": {"a": {"state": "sent"}},
