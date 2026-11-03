@@ -310,10 +310,30 @@ def finish(context, claim):
         config.save(update_fields=['pillar_strategy', 'updated_at'])
 
 
+def _retained_header(context, header):
+    """A known v2 header cannot escape its body proof via the legacy path."""
+    if type(header) is not str or not header:
+        return False
+    from .models import OrganizationContentConfig
+    from .dispatch_models import ContentFactoryDispatchOutbox
+    strategy = OrganizationContentConfig.objects.filter(organization=context.organization).values_list(
+        'pillar_strategy', flat=True).first()
+    if isinstance(strategy, dict) and KEY in strategy:
+        commands = strategy[KEY]
+        if not isinstance(commands, dict) or hashlib.sha256(header.encode()).hexdigest() in commands:
+            return True
+    return ContentFactoryDispatchOutbox.objects.filter(client_request_id=header,
+        payload__has_key=OUTBOX_KEY).exists()
+
+
 def execute(*, context, user, data, header, start):
     """Only explicit keyed v2 HTTP commands gain this durable replay contract."""
     from .founder_journey_cohort import is_new_journey
     if not isinstance(data, dict) or not (data.get('client_request_id') or data.get('clientRequestId')):
+        if _retained_header(context, header):
+            exc = PaidArticleCommandRefusal()
+            return Response({'code': 'operation_conflict', 'reason': exc.reason,
+                'detail': str(exc), 'retryable': False}, status=exc.status)
         return start()
     allow_new = is_new_journey(context.organization)
     if not allow_new:

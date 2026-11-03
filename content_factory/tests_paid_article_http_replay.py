@@ -535,6 +535,75 @@ class PaidArticleHttpReplayTests(CardFixture, TransactionTestCase):
         self.config.refresh_from_db()
         self.assertEqual(self.config.pillar_strategy, strategy_before)
 
+        missing_key = deepcopy(self.body)
+        missing_key.pop('client_request_id')
+        for enabled in (True, False):
+            with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=enabled), patch.object(
+                    views, 'start_article_generation', side_effect=AssertionError('No known-header legacy fallthrough')):
+                response = self.post(body=missing_key)
+            self.assertEqual(response.status_code, 409, getattr(response, 'data', response.content))
+            self.assertEqual(self.financial_dispatch_state(), before)
+            self.config.refresh_from_db()
+            self.assertEqual(self.config.pillar_strategy, strategy_before)
+
+    def test_retained_header_cannot_drop_or_change_original_body_key_on_or_off(self):
+        self.start()
+        self.client.raise_request_exception = False
+        before = self.financial_dispatch_state()
+        self.config.refresh_from_db()
+        strategy_before = deepcopy(self.config.pillar_strategy)
+        for enabled in (True, False):
+            for mode in ('missing', 'empty', 'changed'):
+                with self.subTest(enabled=enabled, mode=mode):
+                    body = deepcopy(self.body)
+                    body.pop('client_request_id')
+                    if mode != 'missing':
+                        body['client_request_id'] = '' if mode == 'empty' else str(uuid4())
+                    with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=enabled):
+                        response = self.post(body=body)
+                    self.assertEqual(response.status_code, 409, getattr(response, 'data', response.content))
+                    self.assertEqual(self.financial_dispatch_state(), before)
+        self.config.refresh_from_db()
+        self.assertEqual(self.config.pillar_strategy, strategy_before)
+
+    def test_unseen_header_without_body_key_keeps_legacy_delegation_with_an_enrolled_namespace(self):
+        from rest_framework.response import Response
+        self.start()
+        body = deepcopy(self.body)
+        body.pop('client_request_id')
+        before = self.financial_dispatch_state()
+        for enabled in (True, False):
+            with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=enabled), patch.object(
+                    views, 'start_article_generation', return_value=Response({'legacy': True}, status=202)) as legacy:
+                response = self.client.post(self.url, body, format='json',
+                    HTTP_IDEMPOTENCY_KEY='genuinely-unseen-header-only-legacy')
+            self.assertEqual((response.status_code, response.json()), (202, {'legacy': True}))
+            legacy.assert_called_once()
+            self.assertEqual(self.financial_dispatch_state(), before)
+
+    def test_protected_outbox_or_malformed_namespace_keeps_known_header_out_of_legacy(self):
+        self.start()
+        self.config.refresh_from_db()
+        original = deepcopy(self.config.pillar_strategy)
+        body = deepcopy(self.body)
+        body.pop('client_request_id')
+        for malformed in (False, True):
+            strategy = deepcopy(original)
+            if malformed:
+                strategy[commands.KEY] = ['unverifiable retained command state']
+            else:
+                strategy.pop(commands.KEY)
+            self.config.pillar_strategy = strategy
+            self.config.save(update_fields=['pillar_strategy'])
+            before = self.financial_dispatch_state()
+            with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False), patch.object(
+                    views, 'start_article_generation', side_effect=AssertionError('Retained marker forbids legacy')):
+                response = self.post(body=body)
+            self.assertEqual(response.status_code, 409, response.data)
+            self.assertEqual(self.financial_dispatch_state(), before)
+            self.config.refresh_from_db()
+            self.assertEqual(self.config.pillar_strategy, strategy)
+
     def test_frozen_or_malformed_current_roster_cannot_replay_a_paid_command(self):
         self.start()
         for roster in [{'version': 1, 'owner_user_id': self.owner.pk, 'frozen': True}, ['invalid']]:

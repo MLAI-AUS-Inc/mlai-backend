@@ -6128,8 +6128,8 @@
     {
       "path": "content_factory/paid_article_commands.py",
       "function": "execute",
-      "function_sha256": "a7086aefbc3d367640f3f78c88b4983cd9e0de39ba38b3c722127f07715236b3",
-      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority. Once the protected namespace exists, disabling new admissions refuses unseen or no-outbox keys instead of entering the legacy dispatcher; exact retained outbox replay still revalidates current authority.",
+      "function_sha256": "499f3921cf4d62a9cfd1296ef48ddf37ad36ea2928d08946c55114977576dbd5",
+      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority. Once the protected namespace exists, disabling new admissions refuses unseen or no-outbox keys instead of entering the legacy dispatcher; exact retained outbox replay still revalidates current authority. A retained v2 header remains bound to its original raw body even when the body caller key is removed, emptied or changed. Only protected local receipt membership, malformed retained namespace or a backend-only outbox marker refuses legacy fallthrough; genuinely unseen no-key/v1 header-only paths keep their legacy delegation. These reads grant no new authority or effects.",
       "test_refs": [
         "content_factory/tests_paid_article_http_replay.py"
       ]
@@ -6633,6 +6633,15 @@
       "test_refs": [
         "content_factory/tests_catalog_commands.py",
         "content_factory/tests_catalog_brief_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/paid_article_commands.py",
+      "function": "_retained_header",
+      "function_sha256": "89e15918468514e96c715b85c88ca2afe1053d2b439937c44a36d8d95b439f4c",
+      "reason": "A retained v2 header remains bound to its original raw body even when the body caller key is removed, emptied or changed. Only protected local receipt membership, malformed retained namespace or a backend-only outbox marker refuses legacy fallthrough; genuinely unseen no-key/v1 header-only paths keep their legacy delegation. These reads grant no new authority or effects.",
+      "test_refs": [
+        "content_factory/tests_paid_article_http_replay.py"
       ]
     }
   ],
