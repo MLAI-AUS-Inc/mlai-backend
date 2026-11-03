@@ -38,8 +38,8 @@ Research delivery retains its separate organization/audience authority.
 Database-free regressions exercise the actual charge producer, outbox consumer,
 provider admission, schema3 promotion and parent allocation. Disposable
 PostgreSQL CI additionally covers persisted configuration changes, bounded
-unknown delivery, exact-key recovery and one-spend delivery. No database tests,
-provider actions or financial repairs are run locally.
+unknown delivery, exact-key recovery and one-spend delivery. Approved disposable PostgreSQL tests exercise these paths with isolated provider transports.
+They perform no production provider actions or financial repairs.
 
 ## Keyed first-article topic switches
 
@@ -68,7 +68,7 @@ cannot be cancelled or closed by a saved switch for its predecessor.
 `content_factory.tests_first_article_switch_commands` exercises this HTTP contract
 against disposable PostgreSQL using synthetic provider responses, including
 concurrent requests, unavailable cache, lost acknowledgements and owned closure.
-# Keyed article controls
+## Keyed article controls
 
 An `Idempotency-Key` on an owned article's approve, deny or single-run cancel
 binds the full request body, action, current principal, company and original
@@ -107,3 +107,40 @@ receipt bindings remain enforceable when the cohort is disabled, so the same
 header cannot escape through the legacy path with a changed body.
 
 Once the library command namespace is enrolled, disabling the new-journey flag retains the keyed boundary: original accepted commands can project current authorized state, while unseen topic, restore, discard and author-only commands are refused before effects. Unrelated general settings and never-enrolled legacy callers keep their existing validation.
+
+## Paid HTTP commands and direct review
+
+For server-admitted version-two founders, a generic article POST with the caller's
+`client_request_id` and matching `Idempotency-Key` binds its complete original body,
+company and actual requester before debit or dispatch. Only a newly allocated
+outbox may receive the backend-only HTTP proof. Historical outboxes without that
+proof are never adopted. Replays return the original Run/outbox before mutable
+coverage, quote or author checks, while fresh current permission still applies.
+A refunded, closed, malformed or uncertain original obligation cannot dispatch again.
+
+Paid portable member admission additionally requires current article-write and
+startup-point-spend grants, original exact-true cost confirmation, a positive paid
+quote and the active founder/company payer's consent at activation and debit.
+This grants no setup, repository, credential, publication or free-first authority.
+When the paid namespace is already enrolled and the cohort is disabled, keyed
+requests cannot fall through to legacy by removing the body key or supplying an
+unseen header. Retained commands remain bound to the original body; supported
+unmarked/headerless legacy calls retain their behavior.
+
+Direct review mutations and comment creation bind their operation ID/header,
+original body, current revision, company and actual active requester in private
+`founder_review_commands_v1` receipts. Accepted retries read the current canonical
+review or original comment without another provider mutation. Comment creation
+and its receipt commit atomically. Unknown external acknowledgements remain held
+without clock expiry; a failed connected preview requires explicit current-ticket
+resume before another refresh. Image requests retain the existing charge and
+settlement controller. These HTTP receipts never grant lifecycle or refund authority.
+
+Catalogue edits, approval and first-audience selection bind current owner consent
+and original expected revision under SQL locks. Brief suggestions commit a claim
+before unlocked HTTP; unknown responses never permit another model call for the
+same key. Accepted responses are bounded and validated against the still-current
+catalogue and owner after HTTP. The finite response-body reader has its own
+15-second deadline; the existing model-generation/first-byte timeout remains separate.
+Catalogue bookkeeping is private `editorial_catalog_commands_v1` state and is never
+sent to a worker or accepted as CF execution authority.
