@@ -136,8 +136,8 @@ def _known_frontend_origins() -> Set[str]:
 
 
 def _normalize_google_next(next_url: Optional[str]) -> Optional[str]:
-    from integrations.services.chat_oauth_return import native_chat_connection_return_url
-    native_return = native_chat_connection_return_url(next_url)
+    from integrations.services.chat_oauth_return import native_chat_connection_return_url, native_chat_startup_return_url
+    native_return = native_chat_connection_return_url(next_url) or native_chat_startup_return_url(next_url)
     if native_return:
         return native_return
     if not next_url:
@@ -535,7 +535,8 @@ def github_callback(request):
     # missing or non-chat state, a valid legacy Chat state), which keeps
     # today's responses below byte for byte.
     from integrations.services import github_callback_reasons
-    flow = github_callback_reasons.begin_callback(request)
+    from content_factory.staff_alert_rules import begin_github_callback
+    flow = begin_github_callback(github_callback_reasons, request)
     if flow is not None and flow.response is not None:
         return flow.response
 

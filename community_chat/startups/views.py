@@ -24,6 +24,7 @@ from .presentation import update_payload
 from .publication import approved_updates
 from .lifecycle import delete_update, source_capabilities, validate_generation_sources
 from .source_preferences import source_preferences
+from vibe_raising.financial_refresh_views import FinancialRefreshView, FinancialRefreshStatusView
 
 
 def enabled():
@@ -70,17 +71,30 @@ class BootstrapView(ChatStartupAccess, APIView):
 
     def get(self, request):
         profile = get_or_create_founder_profile(request.user)
+        capabilities = {"manual": True, "generation": True, "community": True, "public": True,
+                        "delete": True, "draftReadyPush": False}
+        if getattr(settings, 'MY_STARTUP_TEAM_ENABLED', False):
+            from founder_tools.startup_team import member_companies
+            capabilities['hasStartupWorkspace'] = bool(profile.companies.exists() or member_companies(request.user))
         return Response({
             "enabled": True, "accountId": str(request.user.community_chat_profile_id),
             "relayUrl": settings.COMMUNITY_CHAT_RELAY_URL,
             "profile": FounderProfileSerializer(profile).data,
-            "capabilities": {"manual": True, "generation": True, "community": True, "public": True,
-                "delete": True, "draftReadyPush": False},
+            "capabilities": capabilities,
         })
 
 
 class CompaniesView(ChatStartupAccess, FounderToolsCompanyView):
     requires_company = False
+
+
+class RefreshFinancialsView(ChatStartupAccess, FinancialRefreshView):
+    """Use the same owner-scoped refresh through revocable Chat authentication."""
+
+
+class RefreshFinancialsStatusView(ChatStartupAccess, FinancialRefreshStatusView):
+    """Keep financial polling in Chat's dedicated poll throttle bucket."""
+    startup_read_bucket = "poll"
 
 
 class ActiveCompanyView(ChatStartupAccess, FounderToolsActiveCompanyView):

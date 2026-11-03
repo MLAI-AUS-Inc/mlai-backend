@@ -38,5 +38,109 @@ Research delivery retains its separate organization/audience authority.
 Database-free regressions exercise the actual charge producer, outbox consumer,
 provider admission, schema3 promotion and parent allocation. Disposable
 PostgreSQL CI additionally covers persisted configuration changes, bounded
-unknown delivery, exact-key recovery and one-spend delivery. No database tests,
-provider actions or financial repairs are run locally.
+unknown delivery, exact-key recovery and one-spend delivery. Approved disposable PostgreSQL tests exercise these paths with isolated provider transports.
+They perform no production provider actions or financial repairs.
+
+## Keyed first-article topic switches
+
+For the admitted founder journey, `POST /api/v1/my-startup/first-article/switch-topic/`
+with `Idempotency-Key` retains the authenticated owner, company, complete original
+body, original run identity and prepared replacement before requesting a stop.
+The key is a normal client UUID; both a custom topic and the catalogue shape
+`{runId, topicId, customTopic: null}` use this contract. A changed body conflicts.
+
+Replaying the same command recovers its exact replacement run or retained outbox,
+including after a lost acknowledgement, process restart or completed execution.
+The latest journey run is never a substitute acknowledgement. An active duplicate
+returns `409 in_progress`; an unconfirmed original stop returns `503 switch_pending`.
+Neither response admits another replacement or a paid fallback.
+
+An owned original requires the existing terminal controller's exact closure,
+fully drained journal and original grant release. Legacy originals require a
+validated, bound no-effect cancellation receipt. Current owner consent and free
+eligibility are rechecked before replacement admission, including in the actual
+debit/outbox transaction. Existing no-key and non-admitted behavior is unchanged.
+The command uses existing configuration receipts and requires no schema change.
+The original execution binding is also checked by the cancellation transport
+and under the terminal controller's claim lock. A concurrently granted execution
+cannot be cancelled or closed by a saved switch for its predecessor.
+
+`content_factory.tests_first_article_switch_commands` exercises this HTTP contract
+against disposable PostgreSQL using synthetic provider responses, including
+concurrent requests, unavailable cache, lost acknowledgements and owned closure.
+## Keyed article controls
+
+An `Idempotency-Key` on an owned article's approve, deny or single-run cancel
+binds the full request body, action, current principal, company and original
+Run/execution identity before prior approval consent can return a noop. Accepted
+commands retain only private metadata in `founder_run_commands_v1`; replay
+serializes the same Run with current permission checks instead of caching a
+large response or submitting another Content Factory control.
+
+Immediately before transport, the backend rechecks the active account, current
+startup rights and exact outgoing admission/ticket. It persists `dispatching`
+before HTTP. An unknown response never expires into permission to resend. A
+known command acknowledgement does not establish execution status, stopped
+effects, grant release or refund; those remain with the existing typed event
+and settlement controllers. Changed bodies/actions/tickets conflict. Keyed group
+deletion captures every original member and recorded PR URL before work, checks
+each target again before transport and replays only the retained group outcome.
+A new sibling cannot silently join an existing delete. Unkeyed and legacy
+controls, resume and other actions retain their existing behavior.
+
+New-journey keyed topic feedback/restore, written-article discard, and the
+first-author settings save use private `founder_library_commands_v1` receipts.
+Feedback changes and accepted receipts share one SQL transaction; replay reads
+the original feedback row without reactivating a subsequently restored topic.
+Discard captures the original article and lineage, retains uncertainty before
+remote cancellation, and commits local deletion/keyword changes with its receipt.
+A known remote refusal does not become execution or refund authority. Unknown
+remote cancellation preserves the local article and cannot be resent by replay.
+Current publication status and permission are rechecked before deletion.
+
+Author saves retain the exact company/authors/default-author body before photo
+storage and atomically commit the accepted receipt with existing settings writes.
+Replays read current settings without rewriting old names or copying photos
+again. An unknown storage result stays held. These receipts contain minimal
+identity/outcome metadata, not complete cached bootstrap responses. Existing
+receipt bindings remain enforceable when the cohort is disabled, so the same
+header cannot escape through the legacy path with a changed body.
+
+Once the library command namespace is enrolled, disabling the new-journey flag retains the keyed boundary: original accepted commands can project current authorized state, while unseen topic, restore, discard and author-only commands are refused before effects. Unrelated general settings and never-enrolled legacy callers keep their existing validation.
+
+## Paid HTTP commands and direct review
+
+For server-admitted version-two founders, a generic article POST with the caller's
+`client_request_id` and matching `Idempotency-Key` binds its complete original body,
+company and actual requester before debit or dispatch. Only a newly allocated
+outbox may receive the backend-only HTTP proof. Historical outboxes without that
+proof are never adopted. Replays return the original Run/outbox before mutable
+coverage, quote or author checks, while fresh current permission still applies.
+A refunded, closed, malformed or uncertain original obligation cannot dispatch again.
+
+Paid portable member admission additionally requires current article-write and
+startup-point-spend grants, original exact-true cost confirmation, a positive paid
+quote and the active founder/company payer's consent at activation and debit.
+This grants no setup, repository, credential, publication or free-first authority.
+When the paid namespace is already enrolled and the cohort is disabled, keyed
+requests cannot fall through to legacy by removing the body key or supplying an
+unseen header. Retained commands remain bound to the original body; supported
+unmarked/headerless legacy calls retain their behavior.
+
+Direct review mutations and comment creation bind their operation ID/header,
+original body, current revision, company and actual active requester in private
+`founder_review_commands_v1` receipts. Accepted retries read the current canonical
+review or original comment without another provider mutation. Comment creation
+and its receipt commit atomically. Unknown external acknowledgements remain held
+without clock expiry; a failed connected preview requires explicit current-ticket
+resume before another refresh. Image requests retain the existing charge and
+settlement controller. These HTTP receipts never grant lifecycle or refund authority.
+
+Catalogue edits, approval and first-audience selection bind current owner consent
+and original expected revision under SQL locks. Brief suggestions commit a claim
+before unlocked HTTP; unknown responses never permit another model call for the
+same key. Accepted responses are bounded and validated against the still-current
+catalogue and owner after HTTP. The finite response-body reader has its own
+15-second deadline; the existing model-generation/first-byte timeout remains separate.
+Catalogue bookkeeping is private `editorial_catalog_commands_v1` state and is never
+sent to a worker or accepted as CF execution authority.

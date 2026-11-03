@@ -92,7 +92,12 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         if run and (run.organization_id != connection.organization_id or run.status in {"cancelled", "denied"}):
             raise WebsiteAuthorityError("website_operation_cancelled", "This operation was cancelled or belongs to another company.")
-        saved = (run.run_request or {}) if run else {}
+        from .run_ownership import owner_receipt
+        if run and owner_receipt(run) is not None:
+            from .run_execution_control import current_execution_request
+            saved = current_execution_request(run)
+        else:
+            saved = (run.run_request or {}) if run else {}
         for key in OPERATION_FIELDS:
             if key in saved and key in payload and str(saved[key]) != str(payload[key]):
                 raise WebsiteAuthorityError("website_operation_changed", "The operation identity changed.")
@@ -304,7 +309,8 @@ def bind_operation_run(operation, run):
                 "receipt": {"status": "late_dispatch_cancel_requested", "remote_cleanup_pending": True, "repository_modified": None}})
             # A completed callback may have won before we acquired consent
             # locks. Read its current history under lock before cancelling.
-            if current.status in {"completed", "denied", "cancelled"}:
+            from .run_reconciliation import authoritative_run
+            if authoritative_run(current) or current.status in {"completed", "denied", "cancelled"}:
                 run.status, run.resume_available, run.error, run.result = current.status, current.resume_available, current.error, current.result
             else:
                 current.status, current.resume_available, current.error = "cancelled", False, "Website authority changed during dispatch."
@@ -405,8 +411,21 @@ def cancel_operation(config, *, data, idempotency_key):
             from .website_first_article_refunds import reserve_refund
             reserve_refund(op)
         from django.db.models import Q
-        run_ids = list(ContentFactoryRun.objects.filter(organization=connection.organization).filter(
-            Q(run_request__operation_id=str(op.pk)) | Q(run_request__first_article_goal_operation_id=str(op.pk))).values_list("run_id", flat=True))
+        candidates = ContentFactoryRun.objects.filter(organization=connection.organization).filter(
+            Q(run_request__operation_id=str(op.pk)) | Q(run_request__first_article_goal_operation_id=str(op.pk))
+            | Q(result__run_owner_execution_v1__current_scope__operation_id=str(op.pk)))
+        from .run_reconciliation import authoritative_run
+        from .run_execution_control import current_execution_request
+        run_ids = []
+        for candidate in candidates:
+            if authoritative_run(candidate):
+                try:
+                    current = current_execution_request(candidate)
+                except (ValueError, TypeError, KeyError):
+                    current = None
+                if current is not None and str(op.pk) not in {current.get("operation_id"), current.get("first_article_goal_operation_id")}:
+                    continue
+            run_ids.append(candidate.run_id)
         child_operations = []
         if op.action == "prepare":
             child_id = op.receipt.get("child_run_id") or op.payload.get("run_id")
@@ -422,9 +441,11 @@ def cancel_operation(config, *, data, idempotency_key):
             connection.operations.filter(pk__in=child_operations).exclude(state__in=["completed", "failed", "denied", "deleted"]).update(
                 state="cancelled", next_attempt_at=None, updated_at=timezone.now())
         from .website_cancellation_retirement import bindings_for
-        cancel_bindings = bindings_for(ContentFactoryRun.objects.select_for_update().filter(
+        cancel_runs = list(ContentFactoryRun.objects.select_for_update().filter(
             run_id__in=run_ids, organization=connection.organization).order_by("pk"))
-        ContentFactoryRun.objects.filter(run_id__in=run_ids, organization=connection.organization).update(status="cancelled", resume_available=False, error="Website operation cancelled.", updated_at=timezone.now())
+        cancel_bindings = bindings_for(cancel_runs)
+        ContentFactoryRun.objects.filter(pk__in=[run.pk for run in cancel_runs if not authoritative_run(run)]).update(
+            status="cancelled", resume_available=False, error="Website operation cancelled.", updated_at=timezone.now())
         followup, _ = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=f"{connection.pk}:cancel:{idempotency_key}", defaults={
             "connection": connection, "generation": connection.generation, "action": "cancel-operation", "payload": {"cancel_run_ids": run_ids,
                 "stop_preview_run_ids": run_ids, "cancelled_operation_id": str(op.pk), "cancelled_action": op.action,
@@ -436,7 +457,8 @@ def cancel_operation(config, *, data, idempotency_key):
 
 def observe_workflow_status(run, payload=None):
     """Acknowledge an accepted worker observation for the current attempt only."""
-    request = run.run_request or {}
+    from .website_run_authority import event_owned, execution_request
+    request = execution_request(run)
     identifier = request.get("operation_id")
     if not identifier:
         return
@@ -448,7 +470,7 @@ def observe_workflow_status(run, payload=None):
             or op.state in {"cancelled", "deleted", "denied"}):
         return
     state = str(run.status)
-    if op.payload.get("resume_pending") and state in {"failed", "blocked"}:
+    if not event_owned(run) and op.payload.get("resume_pending") and state in {"failed", "blocked"}:
         from .run_state import execution_version
         incoming = payload if isinstance(payload, dict) else {}
         incoming_request = incoming.get("run_request") if isinstance(incoming.get("run_request"), dict) else {}
@@ -460,7 +482,7 @@ def observe_workflow_status(run, payload=None):
     state = workflow_operation_state(run)
     if op.state == "completed" and state != op.state:
         return
-    if op.state in {"failed", "blocked"} and state != op.state and state not in {"cancelled", "denied"}:
+    if not event_owned(run) and op.state in {"failed", "blocked"} and state != op.state and state not in {"cancelled", "denied"}:
         return
     op.state = state
     op.payload = {**op.payload, "resume_pending": False}
@@ -471,11 +493,21 @@ def observe_workflow_status(run, payload=None):
         wake_prepare_after_commit(op.connection_id)
 
 
-def advance_workflow_attempt(run):
-    """Fence a resumed worker attempt before dispatch, retaining charge identity."""
+def advance_workflow_attempt(run, *, preserve_run_clock=False):
+    """Fence a resumed attempt; policy commands keep the original activity clock."""
     from .website_connections import authority_guard, scoped_run_contract, contract_for, extend_owner_operation_contract
     binding = scoped_run_contract(run)
+    from .run_ownership import owner_receipt
+    owned = (owner_receipt(run) or {}).get("authority", {}).get("event_protocol") == 1
+    original_run = run
     with authority_guard(binding, action="read") as website:
+        if owned:
+            from workflow_runs.models import ContentFactoryRun
+            from .run_ownership import current_execution_ticket, RunOwnershipConflict
+            expected_ticket = current_execution_ticket(run)
+            run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+            if current_execution_ticket(run) != expected_ticket:
+                raise RunOwnershipConflict("The authorized execution changed before resume.")
         identifier = binding.get("operation_id")
         if not identifier:
             # Older saved runs have consent identity but predate the operation
@@ -501,7 +533,7 @@ def advance_workflow_attempt(run):
             raise WebsiteAuthorityError("website_operation_cancelled", "This operation cannot be resumed.")
         previous_attempt = int(op.payload.get("attempt", 1))
         # Retransmission of an ambiguous resume uses the same reserved attempt.
-        request_attempt = int((run.run_request or {}).get("operation_attempt", 1))
+        request_attempt = int(binding.get("operation_attempt", 1))
         if not (op.payload.get("resume_pending") and op.state in {"pending", "running"} and request_attempt == previous_attempt):
             from .run_state import execution_version
             op.payload = {**op.payload, "attempt": previous_attempt + 1, "resume_pending": True,
@@ -509,12 +541,23 @@ def advance_workflow_attempt(run):
         op.state = "running"
         op.save(update_fields=["payload", "state", "updated_at"])
         fields = {"operation_id": str(op.pk), "operation_attempt": op.payload["attempt"], "deletion_epoch": deletion_epoch(website)}
+        if owned:
+            from .run_execution_control import append_execution_ticket, require_current_principal
+            from .run_ownership import current_execution_ticket, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, wire_identity
+            require_current_principal(run)
+            scope = {**current_execution_ticket(run)["scope"], **fields}
+            key = evidence_digest({"reason": "operation_resume", "run_pk": run.pk,
+                                   "operation_id": str(op.pk), "attempt": fields["operation_attempt"]})
+            ticket = append_execution_ticket(run, control_key=key, reason="operation_resume", scope=scope)
+            original_run.result = run.result
+            extend_owner_operation_contract(fields)
+            return {**fields, WIRE_REQUEST_KEY: wire_identity(owner_receipt(run)), WIRE_EXECUTION_KEY: ticket}
         # The consent guard verified the saved scope. Advancing an execution
         # must not add absent target/root fields or change its original payment.
         run.run_request = {**(run.run_request or {}), **fields}
         from .setup_delivery_enrollment import enroll_setup_delivery
         if enroll_setup_delivery(op, run.run_request, website, getattr(run, "workflow", "")):
             op.save(update_fields=["payload", "updated_at"])
-        run.save(update_fields=["run_request", "updated_at"])
+        run.save(update_fields=["run_request"] if preserve_run_clock else ["run_request", "updated_at"])
         extend_owner_operation_contract(fields)
         return fields

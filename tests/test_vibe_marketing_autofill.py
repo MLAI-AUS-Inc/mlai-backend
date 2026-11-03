@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from io import BytesIO
 from types import SimpleNamespace
@@ -2847,6 +2848,13 @@ class VibeMarketingAutofillTests(TestCase):
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_content_only_preview_unavailable_restart_omits_implicit_delivery_mode(self):
+        self._assert_content_only_preview_unavailable_restart(p2=False)
+
+    @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
+    def test_p2_preview_unavailable_restart_freezes_policy_before_reserving_one_child(self):
+        self._assert_content_only_preview_unavailable_restart(p2=True)
+
+    def _assert_content_only_preview_unavailable_restart(self, *, p2):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})
         self.company.organization = organization
         self.company.save(update_fields=["organization", "updated_at"])
@@ -2892,23 +2900,70 @@ class VibeMarketingAutofillTests(TestCase):
             delta=-6, reference_id="paid-" + run.run_id)
         run.run_request["roo_points_ledger_id"] = str(charge.pk)
         run.save(update_fields=["organization", "run_request"])
-        self._connected_website_fixture(verified=True, run=run)
-        captured = {}
+        config = self._connected_website_fixture(verified=True, run=run)
+        captured, reservations = {}, []
+        original_request = deepcopy(run.run_request)
+        from content_factory import p2_foundation, website_operations
+        from content_factory.website_contract import WebsiteAuthorityError
+        real_reserve = website_operations.reserve_workflow_operation
+
+        def observe_reservation(website, *, workflow, payload):
+            before = deepcopy(payload)
+            operation = real_reserve(website, workflow=workflow, payload=payload)
+            reservations.append((before, operation.pk, operation.payload["request_digest"]))
+            return operation
 
         def fake_post(url, json=None, headers=None, timeout=None):
             captured.update(json or {})
             return _Response(status_code=202, payload={"run_id": "article-exact-preview-restart-1", "status": "queued"})
 
-        with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
+        with override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED=False,
+                ARTICLES_SELF_HEAL_LEGACY_ORGANIZATIONS=str(organization.pk) if p2 else "",
+                ARTICLES_FAILURE_POLICY_V2_ENABLED=p2, ARTICLES_MERGE_WORKER_ENABLED=p2,
+                MY_STARTUP_TEAM_ENABLED=False), patch(
+                "content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post) as post, patch.object(
+                website_operations, "reserve_workflow_operation", side_effect=observe_reservation), patch.object(
+                p2_foundation, "stamp_run_request", wraps=p2_foundation.stamp_run_request) as stamps:
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{run.run_id}/restart/", {}, format="json")
 
         self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["runId"], "article-exact-preview-restart-1")
+        post.assert_called_once()
+        expected_stamp = {"version": 1, "cohort": "p2" if p2 else "legacy",
+                          "failure_policy": "v2" if p2 else "pre_p2"}
+        self.assertEqual(captured["self_heal_policy_v1"], expected_stamp)
+        self.assertEqual(len(reservations), 2)
+        self.assertEqual({identifier for _, identifier, _ in reservations}, {reservations[0][1]})
+        self.assertEqual({digest for _, _, digest in reservations}, {reservations[0][2]})
+        for before, _, _ in reservations:
+            self.assertEqual(before["self_heal_policy_v1"], expected_stamp)
+        for call in stamps.call_args_list:
+            self.assertEqual(call.kwargs["requester_user_id"], self.user.pk)
+        if p2:
+            self.assertEqual(captured["merge_policy"], "backend_worker")
+        else:
+            self.assertNotIn("merge_policy", captured)
+        child = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(child.run_request["restart_source_run_id"], run.run_id)
+        self.assertEqual(child.run_request["roo_points_ledger_id"], str(charge.pk))
+        self.assertEqual(child.run_request["roo_points_billing_status"], "reused")
+        self.assertEqual(ContentFactoryRun.objects.filter(organization=organization).count(), 2)
+        self.assertEqual(Ledger.objects.filter(user=self.user, kind="SPEND", source="CONTENT_FACTORY").count(), 1)
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 20)
+        original_operation_payload = reservations[0][0]
+        with self.assertRaises(WebsiteAuthorityError) as conflict:
+            real_reserve(config.website_connection, workflow="article_generation", payload={
+                **original_operation_payload,
+                "self_heal_policy_v1": {**expected_stamp, "failure_policy": "pre_p2" if p2 else "v2"},
+            })
+        self.assertEqual(conflict.exception.code, "operation_key_conflict")
         self.assertNotIn("delivery_mode", captured)
         self.assertFalse(captured["delivery_mode_confirmed"])
         self.assertFalse(captured["delivery_mode_explicit"])
         run.refresh_from_db()
         self.assertEqual(run.result["restart_child_run_id"], "article-exact-preview-restart-1")
+        self.assertEqual(run.run_request, original_request)
 
     def test_nonrestartable_article_draft_returns_clear_error(self):
         organization, _created = Organization.objects.get_or_create(domain="acme.com", defaults={"name": "Acme"})

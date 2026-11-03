@@ -207,9 +207,23 @@ def preview_photo(url: str) -> str:
 
 def copy_photo(url: str, *, company_id: Any) -> str:
     """Store a re-encoded copy of the photo under the company's prefix and return its URL."""
-    from core.firebase_utils import upload_file_to_storage
-
     data, content_type = encode_photo(fetch_photo(url), STORED_PHOTO_SIZE)
+    return _store_photo(data, content_type, company_id=company_id)
+
+
+def upload_photo(uploaded, *, company_id: Any) -> str:
+    """Store a bounded, decoded still photo under its authorized company prefix."""
+    if getattr(uploaded, "size", 0) > MAX_PHOTO_BYTES:
+        raise AuthorPhotoError("author_photo_too_large", "Choose a photo no larger than 10 MB.")
+    raw = uploaded.read(MAX_PHOTO_BYTES + 1)
+    if len(raw) > MAX_PHOTO_BYTES:
+        raise AuthorPhotoError("author_photo_too_large", "Choose a photo no larger than 10 MB.")
+    data, content_type = encode_photo(raw, STORED_PHOTO_SIZE)
+    return _store_photo(data, content_type, company_id=company_id)
+
+
+def _store_photo(data: bytes, content_type: str, *, company_id: Any) -> str:
+    from core.firebase_utils import upload_file_to_storage
     extension = "png" if content_type == "image/png" else "jpg"
     destination = f"{STORAGE_PREFIX}/{company_id}/{uuid4().hex}.{extension}"
     try:

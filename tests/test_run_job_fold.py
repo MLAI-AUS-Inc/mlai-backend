@@ -382,6 +382,7 @@ class JobUpdateCallSiteGuardTest(SimpleTestCase):
         ("integrations/services/article_generation.py", "_refund_content_factory_request"),
         ("content_factory/dispatch_binding.py", "_rebind_billing_job"),
     }
+    RUN_OUTPUT_SITES = {("content_factory/run_backend_facts.py", "_project")}
     SIGNAL_SKIPPING = {"update", "bulk_update", "bulk_create", "_update"}
     SKIP_PARTS = {".git", "node_modules", "venv", ".venv", "site-packages", "__pycache__", "migrations", "tests"}
 
@@ -442,19 +443,27 @@ class JobUpdateCallSiteGuardTest(SimpleTestCase):
                 continue
             yield relative.as_posix(), path
 
-    def test_every_job_queryset_write_mirrors(self):
+    def test_every_job_queryset_write_has_an_explicit_owner(self):
         found = {}
         for relative, path in self._source_files():
             for site_path, function, line in self.job_write_sites(path.read_text(), relative):
                 found.setdefault((site_path, function), []).append(line)
-        self.assertEqual(set(found), self.MIRRORED_SITES,
-                         "A ContentFactoryJob queryset write skips post_save: call "
-                         "content_factory.job_mirror.mirror_jobs_to_runs after it and list it here.")
+        self.assertFalse(set(found) - self.MIRRORED_SITES - self.RUN_OUTPUT_SITES,
+                         "A Job queryset write needs its explicit legacy mirror or canonical Run output owner.")
+        self.assertTrue(self.RUN_OUTPUT_SITES <= set(found))
         for relative, function in self.MIRRORED_SITES:
             tree = ast.parse((ROOT / relative).read_text())
             node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == function)
             calls = {getattr(n.func, "id", getattr(n.func, "attr", "")) for n in ast.walk(node) if isinstance(n, ast.Call)}
             self.assertTrue(calls & {"mirror_jobs_to_runs", "mirror_job_to_run"}, (relative, function))
+            self.assertTrue((relative, function) in found or "update_job_facts" in calls,
+                            "A migrated legacy adapter must route its patch through the typed owner API.")
+        for relative, function in self.RUN_OUTPUT_SITES:
+            tree = ast.parse((ROOT / relative).read_text())
+            node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == function)
+            calls = {getattr(n.func, "id", getattr(n.func, "attr", "")) for n in ast.walk(node) if isinstance(n, ast.Call)}
+            self.assertIn("backend_fact_projection", calls)
+            self.assertFalse(calls & {"mirror_jobs_to_runs", "mirror_job_to_run"})
 
     def test_guard_catches_new_write_shapes(self):
         source = '''
@@ -605,6 +614,52 @@ class BackfillTest(TestCase):
         self.assertEqual(report.counts["create_skipped_live"], 1)
         self.assertEqual(report.create_statuses, {"completed": 1})
         self.assertFalse(ContentFactoryRun.objects.filter(run_id="legacy-live-job").exists())
+
+    def test_create_never_revives_blocked_awaiting_or_unrecognized_history(self):
+        phases = (
+            "blocked", "auth_required", "blocked_verification", "precondition_failed",
+            "preview_failed", "needs_user", "fallback_ready", "setup_pr_create_failed",
+            "queued", "running", "researching", "generating", "processing", "in_progress",
+            "awaiting_confirmation", "awaiting_delivery_mode", "awaiting_approval", "approval_required",
+            "", "unknown", "setup_pr_created", "pr_created", "merged", "merged_verifying",
+        )
+        with override_settings(ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED=False):
+            jobs = [_job(f"legacy-ineligible-{index}", status=phase, request_meta={}, client_request_id=None)
+                    for index, phase in enumerate(phases)]
+        before = list(ContentFactoryJob.objects.filter(pk__in=[job.pk for job in jobs]).values())
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                report = backfill_run_job_fields(apply=apply, create=True)
+                self.assertEqual(report.counts["create_skipped_live"], len(phases))
+                self.assertEqual(report.create_statuses, {"completed": 1})
+                self.assertFalse(ContentFactoryRun.objects.filter(run_id__in=[job.job_id for job in jobs]).exists())
+                self.assertEqual(list(ContentFactoryJob.objects.filter(pk__in=[job.pk for job in jobs]).values()), before)
+
+    def test_create_preserves_explicit_finished_job_phases(self):
+        phases = {"completed": "completed", "pr_opened": "completed", "needs_review": "completed",
+                  "confirmed": "completed", "cancelled": "cancelled", "error": "failed",
+                  "failed": "failed", "denied": "denied", " COMPLETED ": "completed"}
+        with override_settings(ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED=False):
+            jobs = [_job(f"legacy-finished-{index}", status=phase, request_meta={}, client_request_id=None)
+                    for index, phase in enumerate(phases)]
+        report = backfill_run_job_fields(apply=True, create=True)
+        self.assertEqual(report.counts["runs_created"], len(jobs) + 1)
+        for job, expected in zip(jobs, phases.values()):
+            with self.subTest(phase=job.status):
+                run = ContentFactoryRun.objects.get(run_id=job.job_id)
+                self.assertEqual(run.status, expected)
+                self.assertEqual(run.delivery_phase, job.status)
+                self.assertEqual(job_field_mismatches(job, job_view(run)), [])
+
+    def test_blocked_existing_run_still_receives_job_facts_without_lifecycle_change(self):
+        with override_settings(ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED=False):
+            run = _run("blocked-existing", status="blocked")
+            job = _job(run.run_id, status="auth_required")
+        before = (run.status, run.updated_at)
+        backfill_run_job_fields(apply=True)
+        run.refresh_from_db()
+        self.assertEqual((run.status, run.updated_at), before)
+        self.assertEqual(job_field_mismatches(job, job_view(run)), [])
 
     def test_undo_restores_the_previous_state(self):
         before = list(ContentFactoryRun.objects.order_by("pk").values())

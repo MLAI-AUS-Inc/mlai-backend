@@ -5,6 +5,7 @@ non-archived islands, so the same keywords could otherwise be born again as a
 new island the next day; ``suppressed_by_removed_island`` stops that. Adding the
 theme again through research or a custom island clears the mark.
 """
+from .website_run_authority import event_owned
 from django.db import transaction
 from django.utils import timezone
 
@@ -59,7 +60,7 @@ def release_from_selections(organization, slug):
         )
         state.pop("pending", None)
         run.result = {**run.result, STATE_KEY: state}
-        run.save(update_fields=["result", "updated_at"])
+        run.save(update_fields=["result"] if event_owned(run) else ["result", "updated_at"])
 
 
 def removed_island_centroids(islands):

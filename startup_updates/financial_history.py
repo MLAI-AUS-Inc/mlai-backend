@@ -166,17 +166,25 @@ def build_snapshot(payload, month, *, captured_at):
         "cutoff": coverage.isoformat(), "capturedAt": captured_at, "currency": currency, "points": points}
 
 
-def history_for_revision(draft, memo, current, snapshot, *, captured_at):
+def history_for_revision(draft, memo, current, snapshot, *, captured_at, financial_history_snapshot=None):
     """Ignore numerical memo payloads; retain snapshots until an explicit refresh."""
     prior = (current.structured_memo if current else {}).get("financial_history")
     requested = memo.pop("_financial_history_selection", None)
     memo.pop("financial_history", None)
+    if requested is None and financial_history_snapshot is not None:
+        raise FinancialHistoryError("Choose how to include the refreshed financial chart before saving.")
     if requested is None:
         return copy.deepcopy(prior)
     selection = validate_selection(requested)
     frozen = copy.deepcopy(prior.get("snapshot")) if isinstance(prior, dict) else None
     source = copy.deepcopy(prior.get("_source")) if isinstance(prior, dict) else None
-    if selection["enabled"] and (selection["refresh"] or not frozen or frozen.get("reportingMonth") != draft.month.isoformat()):
+    if financial_history_snapshot is not None:
+        # A provider refresh has separate evidence from the written update.
+        # Use its original capture timestamp so save matches the exact preview.
+        captured = financial_history_snapshot.payload.get("financial_refresh", {}).get("capturedAt", captured_at)
+        frozen = build_snapshot(financial_history_snapshot.payload, draft.month, captured_at=captured)
+        source = {"snapshotId": financial_history_snapshot.pk, "snapshotHash": financial_history_snapshot.content_hash}
+    elif selection["enabled"] and (selection["refresh"] or not frozen or frozen.get("reportingMonth") != draft.month.isoformat()):
         frozen = build_snapshot(snapshot.payload, draft.month, captured_at=captured_at)
         source = {"snapshotId": snapshot.pk, "snapshotHash": snapshot.content_hash}
     result = {"enabled": selection["enabled"], "shareAmounts": selection["shareAmounts"], "snapshot": frozen}
@@ -260,6 +268,13 @@ def history_selection(history):
     if not isinstance(history, dict) or type(history.get("enabled")) is not bool or type(history.get("shareAmounts")) is not bool:
         return None
     return {"enabled": history["enabled"], "shareAmounts": history["shareAmounts"] if history["enabled"] else False}
+
+
+def history_owner_preview(history, *, share_amounts=True):
+    """Project retained chart data for its owner, independently of disclosure."""
+    if not isinstance(history, dict):
+        return None
+    return history_payload({**history, "enabled": True, "shareAmounts": share_amounts})
 
 
 def history_payload(history):

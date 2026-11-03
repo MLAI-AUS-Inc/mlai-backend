@@ -158,6 +158,42 @@ class LumaAttendeeReportService:
             },
         )
 
+    def list_crm_events(self) -> List[Dict[str, Any]]:
+        """Read all approved calendar listings, including view-only and external events.
+
+        Unlike the managed-only reconciliation catalogue, CRM visibility does
+        not imply permission to read guests. Exhaust pagination before callers
+        write anything; malformed or incomplete pages must not look complete.
+        """
+        if not self.api_key:
+            raise LumaConfigurationError("LUMA_API_KEY is not configured on mlai-backend.")
+        events: List[Dict[str, Any]] = []
+        cursor = None
+        seen_cursors = set()
+        for _ in range(100):
+            params: Dict[str, Any] = {
+                "pagination_limit": 100,
+                "sort_column": "start_at",
+                "sort_direction": "desc",
+                "status": "approved",
+                "access": ["manage", "view"],
+                "platforms": ["luma", "external"],
+            }
+            if cursor:
+                params["pagination_cursor"] = cursor
+            page = self._get("/v1/calendars/events/list", params=params)
+            entries = page.get("entries")
+            if not isinstance(entries, list) or any(not isinstance(row, dict) for row in entries):
+                raise LumaAPIError("Luma returned an invalid calendar page.")
+            events.extend(entries)
+            if not page.get("has_more"):
+                return events
+            cursor = str(page.get("next_cursor") or "").strip()
+            if not cursor or cursor in seen_cursors:
+                raise LumaAPIError("Luma returned incomplete calendar pagination.")
+            seen_cursors.add(cursor)
+        raise LumaAPIError("Luma calendar pagination exceeded the request budget.")
+
     def list_upcoming_events(
         self,
         *,

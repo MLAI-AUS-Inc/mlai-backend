@@ -2355,6 +2355,14 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
     if isinstance(diagnostics, dict):
         result["diagnostics"] = diagnostics
 
+    if getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False):
+        if not data.get("error_code") and not failure.get("code"):
+            result.pop("error_code", None)
+            result.pop("failure", None)
+        guarded = {"run_id": run_id, "status": run_status, "result": result}
+        _guard_p2_terminal_snapshot(guarded)
+        result = guarded["result"]
+
     step_order = list((existing_run.step_order if existing_run else None) or [])
     if step_key and step_key not in step_order:
         step_order.append(step_key)
@@ -2397,6 +2405,7 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
                 "artifacts": data.get("failure_artifacts") or [],
             },
         )
+    _settle_p2_run(run)
     return run
 
 
@@ -3745,6 +3754,12 @@ class ContentFactoryCallbackView(APIView):
     parser_classes = DELIVERY_PARSERS
 
     def post(self, request):
+        if isinstance(request.data, dict) and request.data.get("event") == "run_events_v2":
+            return self._post_admitted_events(request.data)
+        from .run_owned_observations import maybe_receive_owned_observation
+        observation = maybe_receive_owned_observation(request.data, expected_kind="setup_callback")
+        if observation is not None:
+            return observation
         from .setup_delivery_receiver import is_setup_delivery, receive_setup_delivery
         if not isinstance(request.data, dict) or is_setup_delivery(request.data):
             return receive_setup_delivery(request.data, expected_kind="setup_callback")
@@ -3755,6 +3770,42 @@ class ContentFactoryCallbackView(APIView):
             # checks the run's saved binding instead of the config-write fence.
             return receive_run_events(request.data)
         return self._post_legacy(request)
+
+    def _post_admitted_events(self, data):
+        """Validate the complete batch before binding its existing admission."""
+        from .run_event_authority import (
+            RunEventInvalid, receive_authoritative_run_events, validate_authoritative_envelope,
+        )
+        from .run_ownership import (
+            RunOwnershipConflict, admitted_run_for_key, bind_admitted_run,
+            current_execution_ticket, require_event_execution, require_event_identity,
+        )
+        try:
+            batch = validate_authoritative_envelope(data)
+        except RunEventInvalid:
+            return Response({"error": "run_event_invalid", "retryable": False}, status=400)
+        try:
+            with transaction.atomic():
+                run = admitted_run_for_key(batch.admission["dispatch_key"], lock=True)
+                if run is None:
+                    return Response({"error": "run_admission_unavailable", "retryable": True}, status=409)
+                require_event_identity(run, data)
+                require_event_execution(run, data, generation=batch.execution["generation"])
+                current = current_execution_ticket(run)
+                if batch.execution["execution_id"] == current["execution_id"]:
+                    bind_admitted_run(run, batch.run_id)
+                elif run.run_id != batch.run_id:
+                    # A retained old ticket may append history only to its
+                    # already bound canonical Run; it cannot claim an alias.
+                    raise RunOwnershipConflict("A retained execution cannot bind a worker identity.")
+                response = receive_authoritative_run_events(data)
+                if not 200 <= response.status_code < 300:
+                    # A digest/ledger conflict must also roll back the earlier
+                    # callback-first binding and provisional transport release.
+                    transaction.set_rollback(True)
+                return response
+        except RunOwnershipConflict:
+            return Response({"error": "run_admission_mismatch", "retryable": False}, status=409)
 
     @guarded_service_write("config_write", only_repository=True, portable=True)
     def _post_legacy(self, request):
@@ -3861,6 +3912,16 @@ class ContentFactoryCallbackView(APIView):
         # Order before *any* handler can mutate state, refund or notify. Use the
         # existing run JSON and row lock; no schema migration is required.
         run_id = str(data.get("run_id") or job_id)
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(ContentFactoryRun.objects.filter(run_id=run_id).first()):
+            return Response({"error": "owned_callback_requires_observation_boundary", "retryable": True}, status=409)
+        from .run_ownership import RunOwnershipConflict, prepare_owned_callback
+        try:
+            owned = prepare_owned_callback(data, run_id)
+        except RunOwnershipConflict:
+            return Response({"error": "run_admission_mismatch", "retryable": True}, status=409)
+        if authoritative_run(owned):
+            return Response({"error": "owned_callback_requires_observation_boundary", "retryable": True}, status=409)
         bind_dispatch_token_run(client_request_id=data.get("client_request_id"), remote_run_id=run_id)
         try:
             version = execution_version(data)
@@ -3961,6 +4022,7 @@ class ContentFactoryCallbackView(APIView):
             )
 
     def _update_content_factory_job(self, *, job_id, domain, slack_user_id, status_value, error_message=None):
+        from content_factory.run_backend_facts import save_job_facts, update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
 
         defaults = {
@@ -3985,7 +4047,7 @@ class ContentFactoryCallbackView(APIView):
         last_error = None
         for attempt in range(max_attempts):
             try:
-                job, _ = ContentFactoryJob.objects.update_or_create(
+                job, _ = update_or_create_job_facts(
                     job_id=job_id,
                     defaults=defaults,
                 )
@@ -3994,7 +4056,7 @@ class ContentFactoryCallbackView(APIView):
                     if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
                         request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
                         job.request_meta = request_meta
-                        job.save(update_fields=['request_meta', 'updated_at'])
+                        save_job_facts(job, update_fields=['request_meta', 'updated_at'])
                 if notification_context:
                     request_meta = dict(job.request_meta or {})
                     request_meta["notification_context"] = notification_context
@@ -4015,7 +4077,7 @@ class ContentFactoryCallbackView(APIView):
                                 }
                             )
                     job.request_meta = request_meta
-                    job.save(update_fields=['request_meta', 'updated_at'])
+                    save_job_facts(job, update_fields=['request_meta', 'updated_at'])
                 return job
             except OperationalError as exc:
                 last_error = exc
@@ -4084,6 +4146,7 @@ class ContentFactoryCallbackView(APIView):
         return dedupe_key in marker_list
 
     def _record_callback_marker(self, *, job, bucket, event_name, dedupe_key, extra_request_meta=None):
+        from content_factory.run_backend_facts import save_job_facts
         request_meta = dict(job.request_meta or {})
         bucket_payload = dict(request_meta.get(bucket) or {})
         marker_list = [str(item) for item in (bucket_payload.get(event_name) or []) if str(item).strip()]
@@ -4094,9 +4157,10 @@ class ContentFactoryCallbackView(APIView):
         if extra_request_meta:
             request_meta.update(extra_request_meta)
         job.request_meta = request_meta
-        job.save(update_fields=['request_meta', 'updated_at'])
+        save_job_facts(job, update_fields=['request_meta', 'updated_at'])
 
     def _store_publish_callback_state(self, *, job, data, publish_stage, status_value):
+        from content_factory.run_backend_facts import save_job_facts
         request_meta = dict(job.request_meta or {})
         request_meta['publish_stage'] = publish_stage
         for field in (
@@ -4171,7 +4235,7 @@ class ContentFactoryCallbackView(APIView):
             job.request_meta = request_meta
             update_fields.append('request_meta')
         if len(update_fields) > 1:
-            job.save(update_fields=update_fields)
+            save_job_facts(job, update_fields=update_fields)
 
     def _enrich_review_preview_payload(self, data):
         payload = dict(data or {})
@@ -4445,6 +4509,7 @@ class ContentFactoryCallbackView(APIView):
         return payload
 
     def _handle_progress_callback(self, data, *, event_name, status_value, stage_titles, response_message):
+        from content_factory.run_backend_facts import save_job_facts
         job_id = data.get('job_id')
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
@@ -4461,14 +4526,13 @@ class ContentFactoryCallbackView(APIView):
         except (TypeError, ValueError):
             milestone_count = 0
 
-        job = self._update_content_factory_job(
-            job_id=job_id,
-            domain=domain,
-            slack_user_id=slack_user_id,
-            status_value=status_value,
-        )
-
-        posted_progress_ids = list(job.posted_progress_ids or [])
+        # Decide whether this observation is new before writing Job facts. The
+        # execution dispatcher holds the existing Run lock around this handler.
+        # Updating first would let an ignored replay reopen a cancelled Job,
+        # replace its owner and refresh its timestamps (including the mirror).
+        from content_factory.models import ContentFactoryJob
+        job = ContentFactoryJob.objects.filter(job_id=job_id).first()
+        posted_progress_ids = list(job.posted_progress_ids or []) if job else []
         if progress_id in posted_progress_ids:
             logger.info("Ignoring duplicate %s callback for %s (%s)", event_name, job_id, progress_id)
             return Response(
@@ -4481,7 +4545,7 @@ class ContentFactoryCallbackView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        if milestone_index and milestone_index <= int(job.last_progress_milestone_index or 0):
+        if job and milestone_index and milestone_index <= int(job.last_progress_milestone_index or 0):
             logger.info(
                 "Ignoring stale %s callback for %s (%s <= %s)",
                 event_name,
@@ -4498,6 +4562,13 @@ class ContentFactoryCallbackView(APIView):
                 },
                 status=status.HTTP_200_OK,
             )
+
+        job = self._update_content_factory_job(
+            job_id=job_id,
+            domain=domain,
+            slack_user_id=slack_user_id,
+            status_value=status_value,
+        )
 
         channel_id, _root_message_ts, thread_ts = self._resolve_job_thread_context(job=job, data=data)
         if not channel_id or not thread_ts:
@@ -4555,7 +4626,7 @@ class ContentFactoryCallbackView(APIView):
         job.posted_progress_ids = posted_progress_ids + [progress_id]
         if milestone_index:
             job.last_progress_milestone_index = milestone_index
-        job.save(
+        save_job_facts(job,
             update_fields=[
                 'posted_progress_ids',
                 'last_progress_milestone_index',
@@ -4615,6 +4686,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_delivery_mode_required(self, data):
+        from content_factory.run_backend_facts import save_job_facts
         from integrations.services.notification_adapters import (
             normalize_notification_context,
             send_delivery_mode_required,
@@ -4637,7 +4709,7 @@ class ContentFactoryCallbackView(APIView):
             request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
         if request_meta != (job.request_meta or {}):
             job.request_meta = request_meta
-            job.save(update_fields=['request_meta', 'updated_at'])
+            save_job_facts(job, update_fields=['request_meta', 'updated_at'])
         if normalize_notification_context(data.get("notification_context")):
             send_delivery_mode_required(data)
 
@@ -4773,6 +4845,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_generation_pr_opened(self, data):
+        from content_factory.run_backend_facts import save_job_facts
         data = self._enrich_review_preview_payload(data)
         job_id = data.get('job_id')
         domain = data.get('domain', '')
@@ -4842,7 +4915,7 @@ class ContentFactoryCallbackView(APIView):
             request_meta['artifact_links'] = data.get('artifact_links')
         if request_meta != (job.request_meta or {}):
             job.request_meta = request_meta
-            job.save(update_fields=['request_meta', 'updated_at'])
+            save_job_facts(job, update_fields=['request_meta', 'updated_at'])
 
         upsert_live_progress_card(
             job,
@@ -4946,6 +5019,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_preview_ready(self, data):
+        from content_factory.run_backend_facts import save_job_facts
         from integrations.services.article_generation import ArticleGenerationError, publish_article
 
         data = self._enrich_review_preview_payload(data)
@@ -5051,7 +5125,7 @@ class ContentFactoryCallbackView(APIView):
                 job.request_meta = request_meta
                 update_fields.append('request_meta')
             if len(update_fields) > 1:
-                job.save(update_fields=update_fields)
+                save_job_facts(job, update_fields=update_fields)
             logger.info("Ignoring duplicate preview_ready auto-approve for %s (%s)", job_id, dedupe_key)
             return Response(
                 {
@@ -5073,6 +5147,7 @@ class ContentFactoryCallbackView(APIView):
         }, status=status.HTTP_200_OK)
 
     def _handle_content_ready(self, data):
+        from content_factory.run_backend_facts import save_job_facts
         from integrations.services.notification_adapters import (
             normalize_notification_context,
             send_content_ready,
@@ -5100,7 +5175,7 @@ class ContentFactoryCallbackView(APIView):
             request_meta['source_publish_pr_url'] = data.get('publish_pr_url')
         if request_meta != (job.request_meta or {}):
             job.request_meta = request_meta
-            job.save(update_fields=['request_meta', 'updated_at'])
+            save_job_facts(job, update_fields=['request_meta', 'updated_at'])
 
         logger.info("Content-only article complete for job %s (%s)", job_id, domain)
 
@@ -5281,6 +5356,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
     def _handle_article_review_ready(self, data):
+        from content_factory.run_backend_facts import save_job_facts
         from integrations.services.notification_adapters import send_review_ready
 
         # Keep the pre-enrichment payload for channel fan-out: this event only
@@ -5313,7 +5389,7 @@ class ContentFactoryCallbackView(APIView):
                 request_meta[field] = data.get(field)
         if request_meta != (job.request_meta or {}):
             job.request_meta = request_meta
-            job.save(update_fields=['request_meta', 'updated_at'])
+            save_job_facts(job, update_fields=['request_meta', 'updated_at'])
 
         # Automation-driven runs notify their channels with the review link.
         # send_review_ready resolves the run by context, or falls back to the
@@ -5336,6 +5412,7 @@ class ContentFactoryCallbackView(APIView):
         Handle 'auth_required' event: notify user to re-authenticate.
         Attempts automatic token refresh first.
         """
+        from content_factory.run_backend_facts import save_job_facts, update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.github import refresh_github_token
         from integrations.services.article_generation import trigger_article_generation, confirm_topic
@@ -5358,7 +5435,7 @@ class ContentFactoryCallbackView(APIView):
         )
 
         # Update job status
-        job, created = ContentFactoryJob.objects.update_or_create(
+        job, created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -5378,7 +5455,7 @@ class ContentFactoryCallbackView(APIView):
             if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
                 request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
                 job.request_meta = request_meta
-                job.save(update_fields=['request_meta', 'updated_at'])
+                save_job_facts(job, update_fields=['request_meta', 'updated_at'])
 
         # 1. Attempt Automatic Token Refresh
         refreshed = False
@@ -5602,6 +5679,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_scan_complete(self, data):
         """Handle scan_complete event from content-factory."""
+        from content_factory.run_backend_facts import save_job_facts
         import json as _json
         from content_factory.models import ContentFactoryJob, OrganizationContentConfig
         from organizations.models import Organization
@@ -5666,7 +5744,7 @@ class ContentFactoryCallbackView(APIView):
             )
             job.status = 'awaiting_confirmation' if approval_required else 'completed'
             job.request_meta = request_meta
-            job.save(update_fields=['status', 'request_meta', 'updated_at'])
+            save_job_facts(job, update_fields=['status', 'request_meta', 'updated_at'])
 
         _sync_scan_callback_to_run(data=data, approval_required=approval_required)
 
@@ -6084,6 +6162,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_generation_failed(self, data):
         """Handle generation_failed event from content-factory."""
+        from content_factory.run_backend_facts import update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.article_generation import (
             maybe_auto_refund_terminal_failure,
@@ -6114,7 +6193,7 @@ class ContentFactoryCallbackView(APIView):
         auto_refunded = bool(data.get('auto_refunded'))
 
         # Update job record
-        job, created = ContentFactoryJob.objects.update_or_create(
+        job, created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -6149,7 +6228,14 @@ class ContentFactoryCallbackView(APIView):
             failed=True,
         )
 
-        if workflow in {'auto_discovery', 'direct_generate', 'confirmed_topic'} and not auto_refunded:
+        if getattr(settings, "ARTICLES_REGISTRY_REFUNDS_ENABLED", False):
+            from .no_delivery_refunds import refund_decision, apply_refund_decision
+            local_run = ContentFactoryRun.objects.filter(run_id=run_id, domain__iexact=domain).first()
+            if local_run is not None:
+                points = apply_refund_decision(local_run, refund_decision(local_run))
+                auto_refunded = points.get("state") == "refunded"
+                refund_points = points.get("points", 0) if auto_refunded else 0
+        elif workflow in {'auto_discovery', 'direct_generate', 'confirmed_topic'} and not auto_refunded:
             auto_refunded, refund_points = maybe_auto_refund_terminal_failure(
                 job,
                 error_code=error_code,
@@ -6304,6 +6390,7 @@ class ContentFactoryCallbackView(APIView):
         - article_review_preview_not_available: the run cannot produce a
           preview in its current state (e.g. content-only delivery).
         """
+        from content_factory.run_backend_facts import update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
 
         job_id = data.get('job_id')
@@ -6332,7 +6419,7 @@ class ContentFactoryCallbackView(APIView):
             summary_text = error_message or 'Hosted article review preview failed.'
             stored_error = f"[{error_code}] {summary_text}" if error_code else summary_text
 
-        job, _created = ContentFactoryJob.objects.update_or_create(
+        job, _created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -6404,6 +6491,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_generation_blocked(self, data):
         """Handle generation_blocked event from content-factory."""
+        from content_factory.run_backend_facts import update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.article_generation import sync_blocked_job_state
 
@@ -6419,7 +6507,7 @@ class ContentFactoryCallbackView(APIView):
         fallback_policy = data.get('fallback_policy') or ''
         retry_after_seconds = data.get('retry_after_seconds')
 
-        job, _created = ContentFactoryJob.objects.update_or_create(
+        job, _created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -6453,6 +6541,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_scaffold_complete(self, data):
         """Handle scaffold_complete event from content-factory."""
+        from content_factory.run_backend_facts import save_job_facts
         from content_factory.models import ContentFactoryJob, OrganizationContentConfig
         from organizations.models import Organization
         from integrations.services.slack import SlackService
@@ -6487,7 +6576,8 @@ class ContentFactoryCallbackView(APIView):
             else:
                 job.status = 'completed'
                 job.pr_url = pr_url
-            job.save()
+            save_job_facts(job, update_fields=["status", "error_message" if error else "pr_url", "updated_at"],
+                           legacy_full_save=True)
 
         parent_job = ContentFactoryJob.objects.filter(job_id=parent_run_id).first() if parent_run_id else None
 
@@ -6750,6 +6840,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_topic_selection(self, data):
         """Handle topic_selection event from content-factory."""
+        from content_factory.run_backend_facts import save_job_facts, update_or_create_job_facts
         from content_factory.models import ContentFactoryJob, ScheduledDiscoveryDispatch
         from organizations.models import Organization
         from integrations.services.article_generation import (
@@ -6785,7 +6876,7 @@ class ContentFactoryCallbackView(APIView):
         options = options[:4]
         
         # Get or create job tracking record
-        job, created = ContentFactoryJob.objects.update_or_create(
+        job, created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -6802,11 +6893,11 @@ class ContentFactoryCallbackView(APIView):
             if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
                 request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
                 job.request_meta = request_meta
-                job.save(update_fields=['request_meta', 'updated_at'])
+                save_job_facts(job, update_fields=['request_meta', 'updated_at'])
         job.last_progress_milestone_key = 'awaiting_confirmation'
         job.last_progress_updated_at = timezone.now()
         job.still_working_pinged_at = None
-        job.save(update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
+        save_job_facts(job, update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
         notification_context = normalize_notification_context(data.get("notification_context"))
         if notification_context:
             request_meta = dict(job.request_meta or {})
@@ -6825,7 +6916,7 @@ class ContentFactoryCallbackView(APIView):
                         }
                     )
             job.request_meta = request_meta
-            job.save(update_fields=["request_meta", "updated_at"])
+            save_job_facts(job, update_fields=["request_meta", "updated_at"])
         dispatch = ScheduledDiscoveryDispatch.objects.filter(content_factory_job_id=job_id).first()
         scheduled_daily_job = is_scheduled_daily_job(job) or bool(dispatch)
         if scheduled_daily_job:
@@ -6840,7 +6931,7 @@ class ContentFactoryCallbackView(APIView):
             if update_fields:
                 job.request_meta = request_meta
                 update_fields.append("updated_at")
-                job.save(update_fields=update_fields)
+                save_job_facts(job, update_fields=update_fields)
 
         logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
 
@@ -6853,7 +6944,7 @@ class ContentFactoryCallbackView(APIView):
         options = options[:4]
 
         # Get or create job tracking record
-        job, created = ContentFactoryJob.objects.update_or_create(
+        job, created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -6870,11 +6961,11 @@ class ContentFactoryCallbackView(APIView):
             if request_meta.get('requested_by_slack_user_id') != requested_by_slack_user_id:
                 request_meta['requested_by_slack_user_id'] = requested_by_slack_user_id
                 job.request_meta = request_meta
-                job.save(update_fields=['request_meta', 'updated_at'])
+                save_job_facts(job, update_fields=['request_meta', 'updated_at'])
         job.last_progress_milestone_key = 'awaiting_confirmation'
         job.last_progress_updated_at = timezone.now()
         job.still_working_pinged_at = None
-        job.save(update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
+        save_job_facts(job, update_fields=['last_progress_milestone_key', 'last_progress_updated_at', 'still_working_pinged_at', 'updated_at'])
         notification_context = normalize_notification_context(data.get("notification_context"))
         if notification_context:
             request_meta = dict(job.request_meta or {})
@@ -6893,7 +6984,7 @@ class ContentFactoryCallbackView(APIView):
                         }
                     )
             job.request_meta = request_meta
-            job.save(update_fields=["request_meta", "updated_at"])
+            save_job_facts(job, update_fields=["request_meta", "updated_at"])
         dispatch = ScheduledDiscoveryDispatch.objects.filter(content_factory_job_id=job_id).first()
         scheduled_daily_job = is_scheduled_daily_job(job) or bool(dispatch)
         if scheduled_daily_job:
@@ -6908,7 +6999,7 @@ class ContentFactoryCallbackView(APIView):
             if update_fields:
                 job.request_meta = request_meta
                 update_fields.append("updated_at")
-                job.save(update_fields=update_fields)
+                save_job_facts(job, update_fields=update_fields)
 
         logger.info(f"Topic selection recorded for job {job_id}: {len(options)} options found")
 
@@ -6918,7 +7009,7 @@ class ContentFactoryCallbackView(APIView):
                 error_message='Research completed without usable topic options.', refundable=True)
             job.status = 'error'
             job.error_message = 'Research completed without usable topic options.'
-            job.save(update_fields=['status', 'error_message', 'updated_at'])
+            save_job_facts(job, update_fields=['status', 'error_message', 'updated_at'])
             if notification_context:
                 automation_run = resolve_automation_run(notification_context)
                 if automation_run and normalize_domain(automation_run.automation.organization.domain) == normalize_domain(domain):
@@ -7069,7 +7160,7 @@ class ContentFactoryCallbackView(APIView):
                     mark_scheduled_dispatch_failed(job_id=job_id, error_message=error_message)
                     job.status = 'error'
                     job.error_message = error_message
-                    job.save(update_fields=['status', 'error_message', 'updated_at'])
+                    save_job_facts(job, update_fields=['status', 'error_message', 'updated_at'])
                     return Response(
                         {
                             'status': 'processed_with_error',
@@ -7091,7 +7182,7 @@ class ContentFactoryCallbackView(APIView):
                     mark_scheduled_dispatch_failed(job_id=job_id, error_message=error_message)
                     job.status = 'error'
                     job.error_message = error_message
-                    job.save(update_fields=['status', 'error_message', 'updated_at'])
+                    save_job_facts(job, update_fields=['status', 'error_message', 'updated_at'])
                     return Response(
                         {
                             'status': 'processed_with_error',
@@ -7104,7 +7195,7 @@ class ContentFactoryCallbackView(APIView):
                 job.slack_channel_id = channel_id
                 job.slack_root_message_ts = message_ts
                 job.slack_thread_ts = message_ts
-                job.save(
+                save_job_facts(job,
                     update_fields=[
                         'slack_channel_id',
                         'slack_root_message_ts',
@@ -7147,6 +7238,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_article_complete(self, data):
         """Handle article_complete event from content-factory."""
+        from content_factory.run_backend_facts import update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.notification_adapters import (
             normalize_notification_context,
@@ -7162,7 +7254,7 @@ class ContentFactoryCallbackView(APIView):
         slack_user_id = data.get('slack_user_id', '')
 
         # Update or create job record
-        job, created = ContentFactoryJob.objects.update_or_create(
+        job, created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -7224,6 +7316,7 @@ class ContentFactoryCallbackView(APIView):
 
     def _handle_error(self, data):
         """Handle error event from content-factory."""
+        from content_factory.run_backend_facts import update_or_create_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.notification_adapters import (
             normalize_notification_context,
@@ -7237,7 +7330,7 @@ class ContentFactoryCallbackView(APIView):
         slack_user_id = data.get('slack_user_id', '')
 
         # Update or create job record
-        job, created = ContentFactoryJob.objects.update_or_create(
+        job, created = update_or_create_job_facts(
             job_id=job_id,
             defaults={
                 'domain': domain,
@@ -8644,7 +8737,8 @@ def _set_content_factory_run_meta(run: ContentFactoryRun, meta: dict) -> None:
     run.result = payload
 
 
-def _serialize_content_factory_run(run: ContentFactoryRun) -> dict:
+def _serialize_content_factory_run(run: ContentFactoryRun, *, include_admission=False) -> dict:
+    from .run_ownership import public_run_value
     from .setup_status_projection import terminal_setup_projection
     run = terminal_setup_projection(run)
     steps = {}
@@ -8697,8 +8791,8 @@ def _serialize_content_factory_run(run: ContentFactoryRun) -> dict:
         "approval_state": run.approval_state,
         "resume_available": run.resume_available,
         "error": run.error or None,
-        "result": run.result or {},
-        "run_request": run.run_request or {},
+        "result": public_run_value(run.result or {}),
+        "run_request": (run.run_request or {}) if include_admission else public_run_value(run.run_request or {}),
         "step_states": steps,
         **{key: run.result[key] for key in RELIABILITY_FIELDS if key in (run.result or {})},
         "created_at": run.created_at.isoformat(),
@@ -8776,13 +8870,18 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
     Approval and billing receipts remain authoritative even when reflected back.
     """
 
+    from django.conf import settings
     from content_factory.article_publication_evidence import SETTLEMENT_RESULT_KEYS
+    from .p2_foundation import P2_BACKEND_RESULT_KEYS
+    from .run_ownership import R3_BACKEND_RESULT_KEYS
     existing = existing_result if isinstance(existing_result, dict) else {}
     incoming = incoming_result if isinstance(incoming_result, dict) else {}
     backend_merge_keys = {"publish_merge_intent", "merge_response", "merge_status", "merged_at", "article_review_updates", "delivery_v1",
-        "article_cancellation_v1", *SETTLEMENT_RESULT_KEYS,
+        "article_cancellation_v1", *SETTLEMENT_RESULT_KEYS, *P2_BACKEND_RESULT_KEYS, *R3_BACKEND_RESULT_KEYS,
         # R7 backend records (snapshot drift counter, run event log).
         "snapshot_drift_v1", "run_events_v1"}
+    if getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False):
+        backend_merge_keys.update({"cancellation_reason", "cancelled_by"})
     # Backend-authored receipts a worker snapshot never replaces: a non-empty local
     # value always wins (founder-journey alert receipts, cancellation reason/actor).
     local_wins_keys = {"ops_alerts", "cancellation_reason", "cancelled_by"}
@@ -8836,7 +8935,7 @@ def _merge_django_owned_run_result(existing_result, incoming_result):
     return merged
 
 
-def _merge_django_owned_run_request(existing_request, incoming_request, *, drift=None):
+def _merge_django_owned_run_request(existing_request, incoming_request, *, drift=None, backend_result=None):
     """Retain backend billing and approval history across worker snapshots.
 
     Mirrors cannot replace a recorded charge or introduce new authorisation.
@@ -8849,9 +8948,39 @@ def _merge_django_owned_run_request(existing_request, incoming_request, *, drift
     from .article_publication_evidence import SCOPE_FIELDS
     from .website_failure_contract import canonical_bytes
     from .snapshot_meaning import refuses
+    from .p2_foundation import P2_BACKEND_REQUEST_KEYS
+    from .run_ownership import R3_BACKEND_REQUEST_KEYS
     immutable = set(SCOPE_FIELDS) | {"strategy_goal_id", "goal_budget", "delivery_mode", "requested_delivery_mode", "delivery_mode_confirmed"}
     existing = existing_request if isinstance(existing_request, dict) else {}
     incoming = incoming_request if isinstance(incoming_request, dict) else {}
+    incoming = {key: value for key, value in incoming.items() if key not in P2_BACKEND_REQUEST_KEYS | R3_BACKEND_REQUEST_KEYS}
+    existing = deepcopy(existing)
+    saved_result = backend_result if isinstance(backend_result, dict) else {}
+    publish_approval = saved_result.get("article_approval_v1")
+    publish_owned = set()
+    if isinstance(publish_approval, dict) and publish_approval.get("source") == "publish_reviewed":
+        publish_owned = {"approved_body", "approved_body_sha256", "body_format", "approval", "new_run_id", "run_id",
+            "source_run_id", "source_revision", "hosted_site_id", "original_billing_source_run_id"}
+        for field in publish_owned:
+            if field in existing and field in incoming and incoming[field] != existing[field]:
+                conflict = EditorialRunConflict("Worker snapshots cannot change the approved publish body or destination")
+                conflict.guard_field = field
+                raise conflict
+        incoming = {key: value for key, value in incoming.items() if key not in publish_owned}
+    receipt = (backend_result if isinstance(backend_result, dict) else {}).get("re_pin_v1")
+    if receipt and "expected_source_sha" in existing:
+        try:
+            from .source_repin import validated_history
+        except ImportError:
+            validated_history = lambda value: None
+        history = validated_history(receipt)
+        if history:
+            allowed = {item[field] for item in history["history"] for field in ("from_sha", "to_sha")}
+            proposed = incoming.get("expected_source_sha", existing["expected_source_sha"])
+            if proposed not in allowed or existing["expected_source_sha"] not in allowed:
+                raise EditorialRunConflict("Worker snapshots cannot leave the approved source chain")
+            existing["expected_source_sha"] = history["last_to_sha"]
+            incoming["expected_source_sha"] = history["last_to_sha"]
     merged = {key: deepcopy(value) for key, value in incoming.items()
               if (not existing or key not in immutable or key in existing)
               and (key not in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"} or key in existing)}
@@ -8872,7 +9001,7 @@ def _merge_django_owned_run_request(existing_request, incoming_request, *, drift
                 raise conflict
             merged[key] = deepcopy(value)
             continue
-        if key in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"}:
+        if key in {"setup_delivery_v1","article_delivery_v1","workflow_order_v1"} | P2_BACKEND_REQUEST_KEYS | R3_BACKEND_REQUEST_KEYS | publish_owned:
             merged[key] = deepcopy(value)
             continue
         if not (key.startswith("roo_points_") or key in {"article_publish_approval_receipt", "article_publish_approval_revoked", "website_access_lost", "first_article_goal_operation_id", "first_article_goal_id"}):
@@ -8986,7 +9115,9 @@ def _content_factory_run_snapshot_unchanged(run: ContentFactoryRun, *, data: dic
 
 
 def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: dict):
+    from django.conf import settings
     data = sanitize_json_for_postgres(data if isinstance(data, dict) else {})
+    data["run_id"] = run_id
     step_states = sanitize_json_for_postgres(step_states if isinstance(step_states, dict) else {})
     with transaction.atomic():
         locked_runs = (
@@ -8994,6 +9125,9 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             .prefetch_related("steps", "steps__attempt_history")
         )
         existing_run = locked_runs.filter(run_id=run_id).first()
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(existing_run):
+            return existing_run, False
         created = False
         if existing_run is None:
             # A missing-row lock does not reserve a run id. Validate before
@@ -9021,6 +9155,7 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             if isinstance(data.get("result"), dict) and "_pulse_execution" in (existing_run.result or {}):
                 data["result"]["_pulse_execution"] = existing_run.result["_pulse_execution"]
         original_request = existing_run.run_request if isinstance(existing_run.run_request, dict) else {}
+        previous_pr_url = (existing_run.result if isinstance(existing_run.result, dict) else {}).get("pr_url")
         from .portable_drafts import portable_run_update_allowed
         from .website_contract import connection_contract
         if original_request.get("delivery_mode") == "content_only" and not connection_contract(original_request):
@@ -9045,7 +9180,7 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
             data,
             drift=drift,
         )
-        data["run_request"] = _merge_django_owned_run_request(original_request, data.get("run_request"), drift=drift)
+        data["run_request"] = _merge_django_owned_run_request(original_request, data.get("run_request"), drift=drift, backend_result=existing_run.result)
         if existing_run and stale_execution_event(existing_run.result, data, saved_status=existing_run.status):
             existing_run._content_factory_sync_unchanged = True
             return existing_run, False
@@ -9080,10 +9215,15 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
         data["result"] = merge_reliability_fields(data.get("result"), data)
         if drift:
             data["result"] = record_drift(data.get("result"), drift, run_id=run_id)
+        if getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False):
+            _guard_p2_terminal_snapshot(data)
         if not created and _content_factory_run_snapshot_unchanged(existing_run, data=data, step_states=step_states):
             existing_run._content_factory_sync_unchanged = True
             from .island_research import refund_empty_or_failed_research
             refund_empty_or_failed_research(existing_run)
+            if (getattr(settings, "ARTICLES_REGISTRY_REFUNDS_ENABLED", False)
+                    or getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False)):
+                _settle_p2_run(existing_run)
             return existing_run, False
 
         defaults = _run_fields(data)
@@ -9133,7 +9273,41 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
 
     from .island_research import refund_empty_or_failed_research
     refund_empty_or_failed_research(run)
+    if (getattr(settings, "ARTICLES_SELF_HEAL_POLICY_ENABLED", False)
+            or getattr(settings, "ARTICLES_SELF_HEAL_REPORT_ENABLED", False)):
+        _record_p2_pull_request(run, previous_pr_url)
+    if (getattr(settings, "ARTICLES_REGISTRY_REFUNDS_ENABLED", False)
+            or getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False)):
+        _settle_p2_run(run)
     return run, created
+
+
+def _settle_p2_run(run):
+    from .article_publication_evidence import registry_refund_outcome
+    if _mapping(run.result).get("error_code") == "TERMINAL_CODE_MISSING" and run.organization_id:
+        from .founder_journey_alerts import queue_founder_journey_alert
+        queue_founder_journey_alert(organization=run.organization, alert_reason="codeless_terminal", run=run)
+    registry_refund_outcome(run)
+
+
+def _guard_p2_terminal_snapshot(data):
+    from . import registry_policy
+    if not getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False):
+        return
+    if data.get("status") not in {"failed", "blocked", "stopped", "denied", "cancelled"}:
+        return
+    result = dict(data.get("result") or {})
+    if (data.get("status") == "cancelled"
+            and result.get("cancellation_reason") in {"owner_cancelled", "draft_deleted", "article_discarded"}):
+        return
+    cause = _mapping(result.get("failure")).get("code") or result.get("error_code")
+    if registry_policy.is_registered(cause):
+        return
+    from .website_failure_contract import classify_failure
+    result["error_code"] = "TERMINAL_CODE_MISSING"
+    result["failure"] = classify_failure("TERMINAL_CODE_MISSING", "failure")
+    data["result"] = result
+    logger.warning("terminal_code_missing run=%s status=%s", data.get("run_id"), data.get("status"))
 
 
 class ContentFactoryRunView(APIView):
@@ -9152,12 +9326,21 @@ class ContentFactoryRunView(APIView):
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         if not run:
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(_serialize_content_factory_run(run), status=status.HTTP_200_OK)
+        return Response(_serialize_content_factory_run(run, include_admission=True), status=status.HTTP_200_OK)
 
     def put(self, request, run_id: str):
+        from .run_owned_observations import maybe_receive_owned_observation
+        observation = maybe_receive_owned_observation(request.data, run_id=run_id, expected_kind="run_snapshot")
+        if observation is not None:
+            return observation
         from .setup_delivery_receiver import is_setup_delivery, receive_setup_delivery
         if not isinstance(request.data, dict) or is_setup_delivery(request.data):
             return receive_setup_delivery(request.data, expected_kind="run_snapshot", path_run_id=run_id)
+        from .run_ownership import RunOwnershipConflict, prepare_owned_callback
+        try:
+            prepare_owned_callback(request.data, run_id)
+        except RunOwnershipConflict:
+            return Response({"error": "run_admission_mismatch", "retryable": True}, status=409)
         return self._put_legacy(request, run_id=run_id)
 
     @guarded_service_write("config_write", only_repository=True, portable=True, cancellation_receipts=True, observation_fallback=True)
@@ -9175,6 +9358,9 @@ def _apply_cancellation_receipt(run_id, payload):
     from .run_observations import _observations
     from .snapshot_meaning import final_refusal
     from .website_operations import observe_workflow_status
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(ContentFactoryRun.objects.filter(run_id=run_id).first()):
+        return Response({"error": "owned_cancellation_requires_typed_events", "retryable": True, "run_id": run_id}, status=409)
     with transaction.atomic():
         run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first()
         if run is None:
@@ -9215,7 +9401,45 @@ def _apply_cancellation_receipt(run_id, payload):
         return Response(response, status=200)
 
 
+def _attach_p2_editorial_conflict(run, data, *, ack=False):
+    if (not getattr(settings, "ARTICLES_DISPATCH_RELIABILITY_ENABLED", False) or run is None
+            or run.status not in DURABLE_ACTIVE_RUN_STATUSES or not run.organization_id
+            or _normalize_content_factory_domain(data.get("domain")) != _normalize_content_factory_domain(run.domain)):
+        return None
+    from core.models import User
+    from founder_tools.services import user_may_use_organization
+    requester_id = _mapping(run.run_request).get("roo_points_requested_by_user_id")
+    user = User.objects.filter(pk=requester_id).first() if requester_id else None
+    allowed = user is not None and user_may_use_organization(user, run.organization)
+    if not allowed and user is not None:
+        try:
+            from founder_tools.startup_team import member_may_use_run
+        except ImportError:
+            member_may_use_run = None
+        if member_may_use_run is not None:
+            allowed = bool(member_may_use_run(user, run))
+    if not allowed:
+        return None
+    payload = _serialize_content_factory_run_ack(run) if ack else _serialize_content_factory_run(run)
+    return Response({**payload, "sync_status": "attached_existing"}, status=status.HTTP_200_OK)
+
+
+def _record_p2_pull_request(run, previous_url):
+    current = _mapping(run.result).get("pr_url")
+    if not current or current == previous_url or not run.organization_id:
+        return
+    try:
+        from .failure_policy_engine import record_pull_request
+    except ImportError:
+        return
+    record_pull_request(run.organization, pr_url=current, run=run)
+
+
 def _apply_run_snapshot(run_id, payload, *, ack=False):
+    from .run_owned_observations import maybe_receive_owned_observation
+    observation = maybe_receive_owned_observation(payload, run_id=run_id, expected_kind="run_snapshot")
+    if observation is not None:
+        return observation
     from .snapshot_meaning import final_refusal
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     payload = sanitize_json_for_postgres(dict(payload))
@@ -9294,6 +9518,11 @@ def _apply_run_snapshot(run_id, payload, *, ack=False):
             logger.warning("content_factory_editorial_run_conflict run_id=%s workflow=%s guard=%s field=%s",
                 run_id, str(data.get("workflow") or "")[:80], str(exc)[:200],
                 str(getattr(exc, "guard_field", "") or "-")[:80])
+            from django.conf import settings
+            if getattr(settings, "ARTICLES_DISPATCH_RELIABILITY_ENABLED", False):
+                attached = _attach_p2_editorial_conflict(existing_run, data, ack=ack)
+                if attached is not None:
+                    return attached
             return Response(
                 {"error": "editorial_run_conflict", "code": "editorial_run_conflict", "detail": str(exc), "run_id": run_id,
                  **final_refusal()},
@@ -9345,6 +9574,11 @@ class ContentFactoryRunValleyJobView(APIView):
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         if not run:
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(run):
+            return Response({"code": "owned_execution_requires_typed_observation",
+                "detail": "Read the current typed execution history for this run."}, status=409)
 
         serializer = ContentFactoryRunValleyJobSerializer(data=request.data or {})
         serializer.is_valid(raise_exception=True)
@@ -9495,8 +9729,16 @@ class ContentFactoryRunControlView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
-    @guarded_service_write("publish", remote_actions={"promote-bundle", "publish-pr"})
     def post(self, request, run_id: str, action: str):
+        from .run_reconciliation import authoritative_run
+        run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        if authoritative_run(run):
+            return Response({"code": "owned_run_requires_user_control", "retryable": False,
+                "detail": "Use the current account's run controls or the scoped execution-ticket endpoint."}, status=409)
+        return self._post_legacy_control(request, run_id=run_id, action=action)
+
+    @guarded_service_write("publish", remote_actions={"promote-bundle", "publish-pr"})
+    def _post_legacy_control(self, request, run_id: str, action: str):
         from integrations.services.article_generation import ArticleGenerationError, publish_article_as_pr
         from content_factory.models import ContentFactoryJob
 

@@ -1,0 +1,16 @@
+{
+  "nonfailure_sites": [
+    {
+      "path": "integrations/services/article_generation.py",
+      "function": "_charge_deferred_discovery_job_if_needed.require_source",
+      "field": "code",
+      "expression": "'content_factory_billing_key_conflict'",
+      "site_sha256": "22ff83660d09fae13fcbdb5047bce39cd727c598112709dfb25f92cb91e628d4",
+      "adapter": "nonfailure_category",
+      "owner": "backend.r3_topic_benefits",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "A fresh original research admission, principal or stop intent changed before confirmation. This existing billing command conflict refuses a new ARTICLE debit and worker dispatch; it is not an emitted worker failure or terminal lifecycle classification.",
+      "test": "content_factory.tests_run_topic_benefit.TopicBenefitTests.test_stop_after_actual_portable_activation_is_rechecked_before_article_debit_or_dispatch"
+    }
+  ]
+}

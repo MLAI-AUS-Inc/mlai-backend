@@ -9,7 +9,7 @@ from django.test import TestCase, override_settings
 
 from core.models import AccountBan, User
 from crm.contact_import import apply_import, read_csv
-from crm.luma_sync import run_luma_guest_sync_scheduler, sync_event_catalog, sync_event_guests
+from crm.luma_sync import events_due_for_guest_sync, run_luma_guest_sync_scheduler, sync_event_catalog, sync_event_guests
 from crm.models import (
     Contact,
     ContactConsentEvent,
@@ -28,7 +28,7 @@ class FakeLuma:
         self.guests = guests or {}
         self.guest_calls = []
 
-    def list_all_events(self):
+    def list_crm_events(self):
         return self.events
 
     def list_guests(self, *, event_id, approval_status="approved"):
@@ -64,11 +64,32 @@ def luma_guest(email, guest_id, **extra):
 
 class LumaGuestSyncTests(TestCase):
     def setUp(self):
-        self.luma = FakeLuma(events=[luma_event(), luma_event("evt-ext", platform="external")])
-        [self.event] = sync_event_catalog(self.luma)
+        self.luma = FakeLuma(events=[luma_event(), luma_event("evt-ext", platform="external"), luma_event("evt-view", access="view")])
+        sync_event_catalog(self.luma)
+        self.event = CrmEvent.objects.get(luma_event_id="evt-1")
 
-    def test_catalog_keeps_only_managed_events(self):
-        self.assertEqual(list(CrmEvent.objects.values_list("luma_event_id", flat=True)), ["evt-1"])
+    def test_catalog_keeps_all_listings_and_only_managed_events_are_due(self):
+        self.assertCountEqual(CrmEvent.objects.values_list("luma_event_id", flat=True), ["evt-1", "evt-ext", "evt-view"])
+        sync_event_catalog(self.luma)
+        self.assertEqual(CrmEvent.objects.count(), 3)
+        due = events_due_for_guest_sync(now=NOW, recent_days=30, limit=10)
+        self.assertEqual([event.luma_event_id for event in due], ["evt-1"])
+        self.assertEqual(self.luma.guest_calls, [])
+        self.assertEqual(Contact.objects.count(), 0)
+
+    def test_access_downgrade_preserves_registrations_and_contact_preferences(self):
+        self.luma.guests["evt-1"] = [luma_guest("ada@example.com", "gst-1")]
+        sync_event_guests(self.luma, self.event, now=NOW)
+        contact = Contact.objects.get(email="ada@example.com")
+        contact.email_status = Contact.EmailStatus.UNSUBSCRIBED
+        contact.save()
+        before = list(Contact.objects.values())
+        registrations = list(EventRegistration.objects.values())
+        self.luma.events[0]["access"] = "view"
+        sync_event_catalog(self.luma)
+        self.assertEqual(list(Contact.objects.values()), before)
+        self.assertEqual(list(EventRegistration.objects.values()), registrations)
+        self.assertEqual(events_due_for_guest_sync(now=NOW, recent_days=30, limit=10), [])
 
     def test_guests_become_contacts_and_registrations(self):
         member = User.objects.create_user("grace@example.com")
@@ -182,9 +203,9 @@ class SlowLuma(FakeLuma):
     def clock(self):
         return self.seconds
 
-    def list_all_events(self):
+    def list_crm_events(self):
         self.catalog_calls += 1
-        return super().list_all_events()
+        return super().list_crm_events()
 
     def list_guests(self, **kwargs):
         self.seconds += 40

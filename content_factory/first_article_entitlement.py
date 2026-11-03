@@ -363,6 +363,10 @@ def _matching_attempt(rows: _Rows, request):
 
 
 def _delivered(run) -> bool:
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import has_verified_delivery
+        return has_verified_delivery(run)
     from .article_publication_evidence import useful_delivery
     return getattr(run, "status", None) == "completed" or useful_delivery(run)
 
@@ -397,6 +401,9 @@ def _release_blocked(organization_id, attempt, *, run=None, client_request_id=""
         same = (run is not None and other.pk == getattr(run, "pk", None)) or (client_request_id
             and str(_mapping(other.run_request).get("client_request_id") or "").strip() == client_request_id)
         if not same and str(other.status or "") not in STOPPED_STATUSES:
+            from .run_dispatch_settlement import dispatch_closed_without_effects
+            if dispatch_closed_without_effects(other):
+                continue
             return True
     return False
 
@@ -447,7 +454,7 @@ def _established(organization, config, *, count_website: bool) -> bool:
     runs = ContentFactoryRun.objects.filter(organization=organization, workflow__in=ARTICLE_WORKFLOWS)
     if runs.filter(run_request__roo_points_billing_status__in=["charged", "reused"]).exists():
         return True
-    if any(not entitled_request(request) for request in runs.filter(status="completed").values_list("run_request", flat=True)[:50]):
+    if any(not entitled_request(run.run_request) and _delivered(run) for run in runs.filter(status="completed")[:50]):
         return True
     from .job_view import job_runs, read_job_flag
 
@@ -600,6 +607,9 @@ def reserve_entitlement(*, organization, user, client_request_id, data, config):
 
 def consume_entitlement(*, organization, run) -> bool:
     """Consume the attempt covering this run's lineage; idempotent and never after a release."""
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run) and not _delivered(run):
+        return False
     organization_id = _organization_id(organization, run)
     request = _mapping(getattr(run, "run_request", None))
     if organization_id is None or not entitled_request(request):

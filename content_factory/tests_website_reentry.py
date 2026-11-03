@@ -214,7 +214,7 @@ class WebsiteWorkerReentryTests(WebsiteDatabaseFixture, TransactionTestCase):
             patch('content_factory.vibe_marketing_views._run_belongs_to_context', return_value=True),
             patch('content_factory.vibe_marketing_views._serialize_run', side_effect=lambda run, **kwargs: {'status': run.status}),
         ):
-            response = VibeMarketingRunControlView().post(SimpleNamespace(data=self.binding, user=SimpleNamespace(pk=1)), run.run_id, 'resume')
+            response = VibeMarketingRunControlView().post(SimpleNamespace(data=self.binding, headers={}, user=SimpleNamespace(pk=1)), run.run_id, 'resume')
         self.assertEqual(response.status_code, 200)
         run.refresh_from_db()
         self.assertEqual(run.status, 'queued')

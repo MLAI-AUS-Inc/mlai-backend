@@ -29,6 +29,8 @@ subsystem-specific contracts and runbooks.
 ## Content Factory
 
 - [Job to Run cutover](run-job-cutover.md) — parity, copied identity, historical coverage and rollback
+- [Topic discovery reconciliation](discovery-reconciliation.md) — bounded cohort preview, saved scope and activation boundary
+- [Nightly island refresh reconciliation](nightly-refresh-reconciliation.md) — new scheduler contract, bounded preview and separate rollout
 
 - [19 October backend consolidation audit](articles-backend-rollup-audit-2026-10-19.md) — retained reliability fixes, deferred prototypes, exact component heads and release boundaries
 
@@ -186,6 +188,7 @@ identified as current by a maintained architecture document.
 
 - [Chat startup updates](community-chat-startup-updates.md): founder setup, draft, review, approval and community API.
 - [Pulse generation reliability](pulse-generation-reliability.md): source preflight, exact worker receipts, fenced recovery, bounded collection and local acceptance checks.
+- [Pulse financial refresh](pulse-financial-refresh.md): independent provider refresh, immutable chart previews, scoped saves and preserved writing/publication.
 - [Shared update benefits](shared-update-benefits.md): sharing requirements, grandfathered discounts, points and rollout dependencies.
 
 - [Website connection lifecycle and repository consent](website-connections.md) — schema, API, revocation, reviewed cleanup, and local verification.

@@ -69,6 +69,11 @@ def article_review_identity(run):
 
 def article_review_identity_is_complete(run):
     """Require the exact hosted render and current quality for this attempt."""
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_review_quality import current_review_verified
+        if not current_review_verified(run):
+            return False
     identity = article_review_identity(run)
     if not identity["run_id"] or not identity["preview_url"]:
         return False
@@ -123,15 +128,58 @@ def article_review_identity_matches_approved_run(run, expected_identity):
 
 def article_publish_approval_receipt_matches(run):
     """A later promote retry may use only the same run and hosted review."""
-    if str(getattr(run, "approval_state", "") or "").strip() != "approved":
+    from .run_ownership import user_stop_intent
+    if user_stop_intent(run):
+        return False
+    from .run_reconciliation import authoritative_run
+    if not authoritative_run(run) and str(getattr(run, "approval_state", "") or "").strip() != "approved":
         return False
     if _quality_status(run) not in ACCEPTED_QUALITY_STATUSES:
         return False
-    request = _mapping(getattr(run, "run_request", None))
-    receipt = _mapping(request.get(RECEIPT_KEY))
+    receipt = article_publish_approval_receipt(run)
     if receipt.get("action") != "approve" or not receipt.get("actor_id") or not receipt.get("approved_at"):
         return False
     identity = article_review_identity(run)
     if not article_review_identity_is_complete(run):
         return False
     return all(receipt.get(key) == value for key, value in identity.items())
+
+
+def article_publish_approval_state(run):
+    """Read backend command consent without changing original admission bytes."""
+    from .run_ownership import (ARTICLE_PUBLISH_APPROVAL_RESULT_KEY, current_execution_ticket,
+                               owner_receipt, wire_identity)
+    from .website_contract import evidence_digest
+    owner = owner_receipt(run)
+    if owner is None:
+        return _mapping(getattr(run, "run_request", None))
+    state = _mapping(_mapping(getattr(run, "result", None)).get(ARTICLE_PUBLISH_APPROVAL_RESULT_KEY))
+    try:
+        if (state.get("schema_version") != 1
+                or state.get("admission_digest") != evidence_digest(wire_identity(owner))
+                or state.get("execution") != current_execution_ticket(run)):
+            return {}
+        if RECEIPT_KEY in state:
+            from .run_review_quality import current_review_verified
+            export = _mapping(_mapping(getattr(run, "result", None)).get("articleExport"))
+            import hashlib
+            body = str(export.get("markdown") or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+            if (not current_review_verified(run) or state.get("review_revision") != export.get("revision")
+                    or state.get("article_sha256") != hashlib.sha256(body.encode()).hexdigest()
+                    or re.fullmatch(r"[a-f0-9]{64}", str(state.get("accepted_control_sha256") or "")) is None):
+                return {}
+    except (TypeError, ValueError):
+        return {}
+    return state
+
+
+def article_publish_approval_receipt(run):
+    return _mapping(article_publish_approval_state(run).get(RECEIPT_KEY))
+
+
+def effective_approval_state(run):
+    """Expose validated backend parent consent without changing CF lifecycle."""
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run) and article_publish_approval_receipt_matches(run):
+        return "approved"
+    return getattr(run, "approval_state", "")

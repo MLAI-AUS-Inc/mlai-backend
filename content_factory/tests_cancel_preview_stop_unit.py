@@ -30,7 +30,7 @@ class CancelPreviewStopDeadlineTests(SimpleTestCase):
     def _operation(self, *, age, cancel_run_ids=(), **payload):
         return SimpleNamespace(pk=uuid.uuid4(), generation=3, action="cancel-operation", state="pending", attempts=48,
             next_attempt_at=None, created_at=self.now - age, updated_at=self.now, connection_id=uuid.uuid4(),
-            connection=SimpleNamespace(pk=uuid.uuid4()), save=Mock(),
+            connection=SimpleNamespace(pk=uuid.uuid4(), organization_id=7), save=Mock(),
             payload={"cancel_run_ids": list(cancel_run_ids), "stop_preview_run_ids": [RUN], "purge_run_ids": [RUN],
                 "cancelled_action": "prepare", "cancelled_operation_id": str(uuid.uuid4()), "previous_generation": 3,
                 "disable_auto_merge_prs": [], "cancelled_child_operation_ids": [], **payload},
@@ -43,6 +43,7 @@ class CancelPreviewStopDeadlineTests(SimpleTestCase):
         from . import website_reconciliation as reconciliation
         from . import website_support as support
         from . import website_tokens
+        from workflow_runs.models import ContentFactoryRun
         rows = Mock()
         rows.exists.return_value = False
         rows.filter.return_value = rows
@@ -51,6 +52,14 @@ class CancelPreviewStopDeadlineTests(SimpleTestCase):
         manager = Mock()
         manager.filter.return_value = rows
         manager.select_for_update.return_value.select_related.return_value.filter.return_value.first.return_value = op
+        # These historical preview fixtures have no admitted Run. Keep the
+        # production owner lookup active while replacing only persistence.
+        run_rows = Mock()
+        run_rows.first.return_value = None
+        # Retirement cases supply a saved legacy Run in an outer persistence
+        # fake; preserve that selection rather than shadowing it here.
+        run_lookup = (nullcontext() if isinstance(ContentFactoryRun.objects.filter, Mock) else
+                      patch.object(ContentFactoryRun.objects, "filter", return_value=run_rows))
 
         def post(url, **kwargs):
             if url.endswith("/preview/stop"):
@@ -59,6 +68,7 @@ class CancelPreviewStopDeadlineTests(SimpleTestCase):
 
         with patch.object(reconciliation.transaction, "atomic", side_effect=lambda: nullcontext()), \
                 patch.object(reconciliation.WebsiteConnectionOperation, "objects", manager), \
+                run_lookup, \
                 patch.object(reconciliation, "monitor_cleanup_pull_requests"), \
                 patch.object(reconciliation, "disable_pending_native_auto_merge", return_value=[]), \
                 patch.object(support, "reconcile_support_verifications"), \

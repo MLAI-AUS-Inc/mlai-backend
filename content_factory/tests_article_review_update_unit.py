@@ -72,6 +72,11 @@ class ArticleReviewUpdateTests(SimpleTestCase):
                 self.remote = result
             if target == "_revision_authorization":
                 self.authorization = result
+        # These synthetic legacy storage tests have no receipt database.
+        # The real HTTP/PG suite covers retained-key authority separately.
+        retained = patch("content_factory.founder_review_commands._retains_identity", return_value=False)
+        retained.start()
+        self.addCleanup(retained.stop)
         for context in (
             patch.object(review.views.VibeMarketingComponentComment, "objects", self.storage),
             patch.object(review.transaction, "atomic", nullcontext),
@@ -270,7 +275,7 @@ class ArticleReviewUpdateTests(SimpleTestCase):
 
     def test_setup_get_returns_fields_and_private_cache(self):
         with patch.object(review.views, "_component_feedback_from_run", return_value={"comments": []}):
-            response = self.view.get(SimpleNamespace(), self.run.run_id)
+            response = self.view.get(SimpleNamespace(user=SimpleNamespace(pk=9)), self.run.run_id)
         self.assertEqual(response.data["revision"], "after")
         self.assertEqual(response.data["fields"], [])
         self.assertEqual(response["Cache-Control"], "private, no-store")

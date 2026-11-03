@@ -22,6 +22,7 @@ from crm.engagement import (
     engagement_rating,
     marketing_review_hold,
 )
+from crm.luma_guests import event_guest_data_status
 from crm.models import Blast, BlastDelivery, Channel, Contact, ContactImport, CrmAuditEvent
 from crm.phones import normalize_contact_phone
 from crm.queries import CONTACT_SORTS, EVENT_SCOPES, GUEST_STATUSES, INFERRED_CONSENT_DAYS
@@ -671,6 +672,7 @@ def event_summary(event, stats: dict, last_blast=None) -> dict:
             else None
         ),
         "guests_synced_at": iso(event.guests_synced_at),
+        "guest_data_status": event_guest_data_status(event),
     }
 
 

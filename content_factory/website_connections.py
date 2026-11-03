@@ -1,4 +1,6 @@
 """Website lifecycle authority shared by browser, service and scheduler paths."""
+from .website_contract import RunCommandConflict
+
 
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -322,13 +324,9 @@ def check_source_identity(connection, payload, *, required=False):
 
 def read_repository_native_target(connection):
     """Read immutable identity and the provider's current default branch."""
-    from integrations import http_client
-    from integrations.services.github_app import create_installation_access_token
     try:
-        credential = create_installation_access_token(installation_id=connection.installation_id,
-            repository=connection.github_repo, repository_id=connection.repository_id, permission_mode="read")
-        response = http_client.get(f"https://api.github.com/repos/{connection.github_repo}",
-            headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
+        from integrations.services.github_connections import read_bound_repository
+        response = read_bound_repository(connection, f"https://api.github.com/repos/{connection.github_repo}")
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
@@ -368,12 +366,10 @@ def verify_repository_head(connection, expected_sha):
     """Recheck GitHub's selected branch before promoting publication readiness."""
     from urllib.parse import quote
     from .website_contract import SHA_PATTERN
-    from integrations import http_client
-    from integrations.services.github_app import create_installation_access_token
     try:
-        credential = create_installation_access_token(installation_id=connection.installation_id, repository=connection.github_repo, repository_id=connection.repository_id, permission_mode="read")
-        response = http_client.get(f"https://api.github.com/repos/{connection.github_repo}/commits/{quote(connection.branch, safe='')}",
-            headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
+        from integrations.services.github_connections import read_bound_repository
+        response = read_bound_repository(connection,
+            f"https://api.github.com/repos/{connection.github_repo}/commits/{quote(connection.branch, safe='')}")
         response.raise_for_status()
         payload = response.json()
         from .website_github_failure import taxonomy_active
@@ -388,8 +384,39 @@ def verify_repository_head(connection, expected_sha):
     return current_sha
 
 
+def require_run_not_stopped(payload, *, lock=False):
+    """Recheck saved user denial before a current run can authorize effects."""
+    from workflow_runs.models import ContentFactoryRun
+    from .run_ownership import WIRE_REQUEST_KEY, admitted_run_for_key, user_stop_intent
+    wire = payload.get(WIRE_REQUEST_KEY)
+    run = admitted_run_for_key(wire.get("dispatch_key"), lock=lock) if isinstance(wire, dict) else None
+    query = ContentFactoryRun.objects.select_for_update() if lock else ContentFactoryRun.objects
+    identifier = payload.get("run_id") or payload.get("job_id")
+    if run is None and identifier:
+        run = query.filter(run_id=identifier).first()
+    if run is None and payload.get("operation_id"):
+        try:
+            op = WebsiteConnectionOperation.objects.filter(pk=payload["operation_id"]).first()
+        except (TypeError, ValueError):
+            op = None
+        identifier = (op.payload or {}).get("run_id") if op else None
+        if identifier:
+            run = query.filter(run_id=identifier).first()
+    if run is not None:
+        from .run_terminal_settlement import terminal_execution_closed
+        try:
+            closed = terminal_execution_closed(run)
+        except ValueError as exc:
+            raise RunCommandConflict("run_execution_closed", "Review a new paid request before continuing this execution.") from exc
+        if closed:
+            raise RunCommandConflict("run_execution_closed", "Review a new paid request before continuing this execution.")
+        if user_stop_intent(run):
+            raise RunCommandConflict("run_stop_requested", "This run was denied. Review a new run before changing the website.")
+
+
 @contextmanager
-def authority_guard(data, *, action="read", domain="", github_repo="", require_selected=True):
+def authority_guard(data, *, action="read", domain="", github_repo="", require_selected=True,
+                    require_current_head=False):
     """Verify provider evidence outside locks, then conditionally fence persistence.
 
     The second phase repeats consent and operation checks. A concurrent revoke,
@@ -400,6 +427,8 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
     from .website_rollout import require_repository_write_policy
     from .website_contract import SHA_PATTERN
     payload = _payload_with_context(data)
+    if action in {"setup", "publish", "merge", "config_write", "preview"}:
+        require_run_not_stopped(payload)
     inventory = payload.get("repository_inventory") if isinstance(payload.get("repository_inventory"), dict) else {}
     if inventory:
         for key in ("source_sha", "repo_head_sha"):
@@ -449,16 +478,22 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         retains_publication_proof = action == "config_write" and bool(expected) and candidate.targets.filter(
             generation=candidate.generation, source_sha=expected, verified_at__isnull=False,
             capabilities__publishingReady=True).exists()
-        needs_head = needs_head or target_promotion or retains_publication_proof
+        needs_head = needs_head or target_promotion or retains_publication_proof or require_current_head
+        # A reviewed child may pin an independently verified working branch.
+        # This never replaces the selected default branch consent/observation.
+        from .run_review_source import review_source_preflight, reviewed_source_scope
+        reviewed_source = review_source_preflight(payload, candidate) if not cleanup else None
         if needs_native or needs_head:
             require_unlocked_remote_call()
         if needs_native:
             verify_repository_native_target(candidate)
-        if needs_head:
+        if needs_head and reviewed_source is None:
             verify_repository_head(candidate, expected or candidate.verified_sha)
         with transaction.atomic():
             Organization.objects.select_for_update().get(pk=candidate.organization_id)
             connection = WebsiteConnection.objects.select_for_update().select_related("organization").get(pk=candidate.pk)
+            if action in {"setup", "publish", "merge", "config_write", "preview"}:
+                require_run_not_stopped(payload, lock=True)
             current = (connection.generation, connection.configuration_version, connection.state, connection.installation_id, connection.authorized_by_id, observed_source_sha(connection))
             if current != snapshot:
                 from .website_github_failure import taxonomy_active
@@ -498,9 +533,10 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
             native_token = _verified_native_targets.set(_verified_native_targets.get() | {(str(connection.pk), connection.generation)} if needs_native else _verified_native_targets.get())
             depth_token = _authority_depth.set(_authority_depth.get() + 1)
             try:
-                if needs_head and observed and expected != observed:
-                    check_source_identity(connection, payload)
-                yield connection
+                with reviewed_source_scope(payload, connection, reviewed_source):
+                    if needs_head and reviewed_source is None and observed and expected != observed:
+                        check_source_identity(connection, payload)
+                    yield connection
             finally:
                 _authority_depth.reset(depth_token)
                 _verified_heads.reset(heads_token)
@@ -509,7 +545,13 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
 
 def scoped_run_contract(run):
     """Never retrofit old run consent from today's selected connection."""
-    payload = _payload_with_context(getattr(run, "run_request", None) or {})
+    from .run_ownership import owner_receipt
+    if owner_receipt(run) is not None:
+        from .run_execution_control import current_execution_request
+        saved = current_execution_request(run)
+    else:
+        saved = getattr(run, "run_request", None) or {}
+    payload = _payload_with_context(saved)
     payload.setdefault("domain", getattr(run, "domain", ""))
     payload.setdefault("github_repo", getattr(run, "github_repo", ""))
     return payload
@@ -535,6 +577,22 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
             payload = dict(data.items())
             if kwargs.get("run_id"):
                 payload["run_id"] = kwargs["run_id"]
+            if action == "config_write" and request.method != "GET":
+                from workflow_runs.models import ContentFactoryRun
+                from .run_reconciliation import authoritative_run
+                from .run_ownership import WIRE_REQUEST_KEY, admitted_run_for_key
+                saved_request = payload.get("run_request") if isinstance(payload.get("run_request"), dict) else {}
+                wire = payload.get(WIRE_REQUEST_KEY, saved_request.get(WIRE_REQUEST_KEY))
+                key = wire.get("dispatch_key") if isinstance(wire, dict) else payload.get("client_request_id", saved_request.get("client_request_id"))
+                candidate = admitted_run_for_key(key)
+                identifier = str(payload.get("run_id") or payload.get("job_id") or "")
+                if candidate is None and identifier:
+                    candidate = ContentFactoryRun.objects.filter(run_id=identifier).first()
+                if authoritative_run(candidate):
+                    # Callbacks/snapshots enter their typed observation adapter
+                    # before this decorator. Any other old worker write remains
+                    # held before method effects, claims, notifications or money.
+                    return Response({"code": "owned_execution_requires_typed_observation", "retryable": False}, status=409)
             # A status-only cancellation receipt never requests repository
             # authority, including after reconnect or for an unbound draft.
             if (cancellation_receipts and request.method == "PUT" and payload.get("status") == "cancelled"
@@ -597,7 +655,8 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         wake_prepare_after_commit(connection.pk)
                         if run_id:
                             run = ContentFactoryRun.objects.filter(run_id=run_id).first()
-                            if run:
+                            from .run_reconciliation import authoritative_run
+                            if run and not authoritative_run(run):
                                 updated_request = {**(run.run_request or {}), **connection_contract(payload),
                                     **{key: payload[key] for key in ("operation_id", "operation_attempt", "deletion_epoch") if key in payload}}
                                 if updated_request != run.run_request:
@@ -719,7 +778,7 @@ def invalidate_repository_config(config, *, archive_templates=True):
     WebsiteDesignSnapshot.objects.filter(organization=config.organization, is_active=True).update(is_active=False, status="superseded")
 
 
-def verify_repository_access(*, user, repo):
+def verify_repository_access(*, user, repo, organization=None):
     """Verify exact selected-repo access and immutable identity before binding."""
     from integrations import http_client
     from integrations.services.github_installations import installation_for_repo
@@ -728,8 +787,14 @@ def verify_repository_access(*, user, repo):
     if inst is None:
         raise WebsiteAuthorityError("github_authorization_required", "Authorize the GitHub App for this repository first.")
     try:
-        credential = create_installation_access_token(installation_id=inst.installation_id, repository=repo, permission_mode="read")
-        response = http_client.get(f"https://api.github.com/repos/{repo}", headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
+        if organization is not None:
+            from types import SimpleNamespace
+            from integrations.services.github_connections import read_bound_repository
+            response = read_bound_repository(SimpleNamespace(installation_id=inst.installation_id,
+                github_repo=repo, repository_id=None, organization=organization), f"https://api.github.com/repos/{repo}")
+        else:
+            credential = create_installation_access_token(installation_id=inst.installation_id, repository=repo, permission_mode="read")
+            response = http_client.get(f"https://api.github.com/repos/{repo}", headers={"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
         response.raise_for_status()
         metadata = response.json()
         from .website_github_failure import taxonomy_active
@@ -768,8 +833,14 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
     if branch and (len(branch) > 255 or branch.startswith(("-", "/")) or branch.endswith(("/", ".", ".lock")) or any(piece in branch for piece in ("..", "@{", "\\", " ", "~", "^", ":", "?", "*", "[")) or any(ord(char) < 32 for char in branch)):
         raise WebsiteAuthorityError("invalid_repository_branch", "Use a valid branch name for the selected repository.", status=400)
     from .website_failure_scope import failure_scope
+    from django.conf import settings
+    from .p2_foundation import p2_applies
     with failure_scope(config.organization_id):
-        metadata = verify_repository_access(user=user, repo=repo)
+        if (getattr(settings, "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
+                and p2_applies(config.organization)):
+            metadata = verify_repository_access(user=user, repo=repo, organization=config.organization)
+        else:
+            metadata = verify_repository_access(user=user, repo=repo)
     if new_journey and branch and branch.removeprefix("refs/heads/") == metadata["branch"]:
         # D-09: naming the repository's default branch is the same as leaving it empty.
         branch = ""
@@ -797,7 +868,13 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
                 current.save(update_fields=["installation_id", "authorized_by", "updated_at"])
             return current
         if same and current.state != "connected" and not reconnect:
-            raise WebsiteAuthorityError("website_reconnect_required", "Explicitly reconnect this website before continuing.")
+            from django.conf import settings
+            from .p2_foundation import p2_applies
+            if (getattr(settings, "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
+                    and p2_applies(config.organization)):
+                reconnect = True
+            else:
+                raise WebsiteAuthorityError("website_reconnect_required", "Explicitly reconnect this website before continuing.")
         if current:
             archive_repository_templates(config, current)
         elif any(getattr(config, key) for key in ("article_template", "design_guide", "resource_prompt")):
@@ -914,11 +991,29 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
             ResearchAutomation.objects.filter(organization=connection.organization, status="active").update(status="paused", updated_at=timezone.now())
         from workflow_runs.models import ContentFactoryRun
         scoped_runs = ContentFactoryRun.objects.filter(organization=connection.organization, workflow__in=REPOSITORY_WORKFLOWS).filter(
-            Q(run_request__website_connection_id=str(connection.pk)) | Q(github_repo__iexact=connection.github_repo, run_request__website_connection_id__isnull=True))
-        runs = list(scoped_runs.exclude(status__in=["completed", "failed", "cancelled", "denied"]).values_list("run_id", flat=True))
+            Q(run_request__website_connection_id=str(connection.pk))
+            | Q(result__run_owner_execution_v1__current_scope__website_connection_id=str(connection.pk))
+            | Q(github_repo__iexact=connection.github_repo, run_request__website_connection_id__isnull=True))
+        from .run_reconciliation import authoritative_run
+        from .run_execution_control import current_execution_request
+        scoped_run_rows = []
+        for run in scoped_runs:
+            if authoritative_run(run):
+                try:
+                    current = current_execution_request(run)
+                except (ValueError, TypeError, KeyError):
+                    # Revocation must still commit; an unreadable command
+                    # identity remains held for explicit reconciliation.
+                    current = None
+                if current is not None and (current.get("website_connection_id") != str(connection.pk)
+                        or current.get("connection_generation") != old_generation):
+                    continue
+            scoped_run_rows.append(run)
+        active_runs = [run for run in scoped_run_rows if run.status not in {"completed", "failed", "cancelled", "denied"}]
+        runs = [run.run_id for run in active_runs]
         # A terminal run can still own a hosted preview. Stop its runtime without
         # changing completed article history or claiming that a PR was undone.
-        stop_preview_runs = list(scoped_runs.values_list("run_id", flat=True))
+        stop_preview_runs = [run.run_id for run in scoped_run_rows]
         pending_auto_merge_prs = []
         for saved in ContentFactoryRun.objects.filter(organization=connection.organization, github_repo__iexact=connection.github_repo).values_list("result", flat=True):
             if not isinstance(saved, dict):
@@ -930,9 +1025,13 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
                     pending_auto_merge_prs.append(str(url))
         # Keep the records and remote outcome evidence; this is a durable consent
         # cancellation, not a claim that an already-issued remote write vanished.
-        ContentFactoryRun.objects.filter(run_id__in=runs).update(status="cancelled", error="Website connection changed.", resume_available=False, updated_at=timezone.now())
+        from .website_cancellation_retirement import bindings_for
+        cancel_bindings = bindings_for(scoped_run_rows)
+        ContentFactoryRun.objects.filter(pk__in=[run.pk for run in active_runs if not authoritative_run(run)]).update(
+            status="cancelled", error="Website connection changed.", resume_available=False, updated_at=timezone.now())
         return WebsiteConnectionOperation.objects.create(connection=connection, generation=connection.generation, idempotency_key=key,
             action=action, state="pending", payload={"cancel_run_ids": runs, "stop_preview_run_ids": stop_preview_runs, "previous_generation": old_generation, "disable_auto_merge_prs": sorted(set(pending_auto_merge_prs)), "attempt": 1, "deletion_epoch": watermark,
+                "cancel_run_bindings": cancel_bindings,
                 "preserve_published_articles": True},
             receipt={"authority_revoked": action != "reconnect", "repository_modified": False,
                 "retained": ["published_articles", "website_files", "company_details", "editorial_policy", "history"],
@@ -991,7 +1090,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
                 if operation.action=="goal-refund":
                     continue
                 operation.payload = {key: operation.payload[key] for key in
-                    ("previous_generation", "cancel_run_ids", "stop_preview_run_ids", "disable_auto_merge_prs") if key in operation.payload}
+                    ("previous_generation", "cancel_run_ids", "stop_preview_run_ids", "disable_auto_merge_prs", "cancel_run_bindings") if key in operation.payload}
                 operation.payload["purge_after_reconciliation"] = True
                 operation.receipt = {"authority_revoked": True, "website_database_evidence_erased": True,
                     "database_erasure_scope": ["scan_snapshots", "template_revisions", "publication_targets", "mutation_receipts"],
@@ -1238,6 +1337,16 @@ def setup_kit_check_failed(run):
         for item in (result, setup))
 
 
+def _current_run_scope_filter(connection):
+    """Query projection for current scope; effect guards still verify the ticket."""
+    from django.db.models import Q
+    current = Q(result__run_owner_execution_v1__current_scope__website_connection_id=str(connection.pk),
+                result__run_owner_execution_v1__current_scope__connection_generation=connection.generation)
+    initial = (Q(result__run_owner_execution_v1__current_scope__isnull=True)
+        & Q(run_request__website_connection_id=str(connection.pk), run_request__connection_generation=connection.generation))
+    return current | initial
+
+
 def open_setup_pr_run(connection, *, source_sha):
     """The current generation's newest open setup pull request, if built on source_sha.
 
@@ -1247,12 +1356,12 @@ def open_setup_pr_run(connection, *, source_sha):
     from workflow_runs.models import ContentFactoryRun
     if not source_sha:
         return None
-    rows = ContentFactoryRun.objects.filter(organization_id=connection.organization_id, workflow="article_system_setup",
-        status="completed", approval_state="approved", run_request__website_connection_id=str(connection.pk),
-        run_request__connection_generation=connection.generation).order_by("-updated_at")[:10]
+    rows = ContentFactoryRun.objects.filter(_current_run_scope_filter(connection),
+        organization_id=connection.organization_id, workflow="article_system_setup",
+        status="completed", approval_state="approved").order_by("-updated_at")[:10]
     run = next((row for row in rows if setup_pr_open(row)
         and str(row.github_repo or "").casefold() == str(connection.github_repo or "").casefold()), None)
-    if run is None or str((run.run_request or {}).get("expected_source_sha") or "") != source_sha:
+    if run is None or str(scoped_run_contract(run).get("expected_source_sha") or "") != source_sha:
         return None
     return run
 
@@ -1268,7 +1377,7 @@ def setup_settled_at(run, source_sha):
         return source_sha in {result.get("merge_sha"), response.get("sha")}
     return bool(result.get("adopted") is True and not (result.get("pr_number") or result.get("pr_url")
         or setup.get("pr_number") or setup.get("pr_url"))
-        and str((run.run_request or {}).get("expected_source_sha") or "") == source_sha)
+        and str(scoped_run_contract(run).get("expected_source_sha") or "") == source_sha)
 
 
 def setup_installed_kit(run):
@@ -1289,9 +1398,9 @@ def settled_setup_run(connection, *, source_sha):
     from workflow_runs.models import ContentFactoryRun
     if not source_sha:
         return None
-    rows = ContentFactoryRun.objects.filter(organization_id=connection.organization_id, workflow="article_system_setup",
-        status="completed", run_request__website_connection_id=str(connection.pk),
-        run_request__connection_generation=connection.generation).order_by("-updated_at")[:10]
+    rows = ContentFactoryRun.objects.filter(_current_run_scope_filter(connection),
+        organization_id=connection.organization_id, workflow="article_system_setup",
+        status="completed").order_by("-updated_at")[:10]
     return next((row for row in rows if setup_settled_at(row, source_sha) and setup_installed_kit(row)
         and str(row.github_repo or "").casefold() == str(connection.github_repo or "").casefold()), None)
 
@@ -1429,7 +1538,7 @@ def record_publish_merge_intent(run, pull, pr_number, *, action="merge", source_
     """Save the approved PR identity before GitHub can emit its merge webhook."""
     from workflow_runs.models import ContentFactoryRun
     binding = scoped_run_contract(run)
-    if source_sha is not None and source_sha!=(run.run_request or {}).get("expected_source_sha"):
+    if source_sha is not None and source_sha != binding.get("expected_source_sha"):
         raise WebsiteAuthorityError("publish_commit_unverified","The original publication source changed.")
     head, base = pull.get("head") or {}, pull.get("base") or {}
     with authority_guard(binding, action=action) as website:
@@ -1446,7 +1555,8 @@ def record_publish_merge_intent(run, pull, pr_number, *, action="merge", source_
             "operation_id": binding.get("operation_id"), "recorded_at": timezone.now().isoformat()}
         locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
         locked.result = {**dict(locked.result or {}), "publish_merge_intent": intent}
-        locked.save(update_fields=["result", "updated_at"])
+        from .website_run_authority import event_owned
+        locked.save(update_fields=["result"] if event_owned(locked) else ["result", "updated_at"])
         run.result = locked.result
     return intent
 
@@ -1479,6 +1589,7 @@ def authorize_backend_provider_mutation(method, path):
     if scope is None or method.upper() in {"GET", "HEAD", "OPTIONS"}:
         return None
     binding, action = scope
+    require_run_not_stopped(binding)
     with authority_guard(binding, action=action) as website:
         identifier = binding.get("operation_id")
         op = website.operations.filter(pk=identifier).first() if identifier else None
@@ -1533,6 +1644,9 @@ def record_denied_terminal_callback(payload, denial):
         website = WebsiteConnection.objects.select_for_update().filter(pk=received["website_connection_id"],
             organization_id=candidate.organization_id).first()
         run = ContentFactoryRun.objects.select_for_update().get(pk=candidate.pk)
+        from .run_reconciliation import authoritative_run
+        if authoritative_run(run):
+            return False
         if website is None or website.generation != received["connection_generation"] or website.state not in {"connected", "paused"}:
             return False
         original = connection_contract(run.run_request or {})

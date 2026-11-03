@@ -48,6 +48,9 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
         self.enterContext(patch("startup_updates.benefits.has_monthly_update_discount", return_value=False))
         # B2 also reads reserved goal rows before allowing legacy redispatch.
         self.enterContext(patch.object(WebsiteConnectionOperation.objects, "filter", return_value=self.rows()))
+        # No event-owned child is saved in these database-free legacy cases.
+        # Individual child-read scopes below still supply their actual row.
+        self.enterContext(patch.object(ContentFactoryRun.objects, "filter", return_value=self.rows()))
         self.user = get_user_model()(pk=4, is_active=True, email="founder@example.test")
         self.org = Organization(pk=7, domain="fixture.test")
         self.website = WebsiteConnection(organization=self.org, authorized_by=self.user,

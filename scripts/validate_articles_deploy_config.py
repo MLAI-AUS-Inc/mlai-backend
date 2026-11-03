@@ -84,8 +84,10 @@ JOURNEY_DISABLED_ORGANIZATIONS = "MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZ
 # A Django REST framework rate such as 30/minute. A malformed one breaks every
 # invite resolve at request time.
 INVITE_RESOLVE_RATE = "COMMUNITY_CHAT_INVITE_RESOLVE_RATE"
+DISCOVERY_RECONCILIATION_SINCE = "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE"
+NIGHTLY_RECONCILIATION_SINCE = "CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE"
 KEYS = (*FLAG_KEYS, *COUNT_KEYS, *POSITIVE_KEYS, ALERTS_SINCE, WORKSHOP_WINDOWS,
-        JOURNEY_LAUNCHED_AT, JOURNEY_DISABLED_ORGANIZATIONS, INVITE_RESOLVE_RATE)
+        JOURNEY_LAUNCHED_AT, JOURNEY_DISABLED_ORGANIZATIONS, INVITE_RESOLVE_RATE, DISCOVERY_RECONCILIATION_SINCE, NIGHTLY_RECONCILIATION_SINCE)
 MAX_DISABLED_ORGANIZATIONS_LENGTH = 2000
 
 MAX_WORKSHOP_WINDOWS = 50
@@ -153,6 +155,9 @@ def validate_single(key: str, value: str, *, optional: bool = False) -> None:
     elif key == JOURNEY_LAUNCHED_AT:
         if _window_time(value) is None:
             raise ValueError(f"{key} must be an ISO 8601 time with an explicit offset")
+    elif key in {DISCOVERY_RECONCILIATION_SINCE, NIGHTLY_RECONCILIATION_SINCE}:
+        if value != "disabled" and _window_time(value) is None:
+            raise ValueError(f"{key} must be an ISO 8601 time with an explicit offset or disabled")
     elif key == JOURNEY_DISABLED_ORGANIZATIONS:
         if (len(value) > MAX_DISABLED_ORGANIZATIONS_LENGTH
                 or not re.fullmatch(r"[A-Za-z0-9.-]+(?: *, *[A-Za-z0-9.-]+)*", value)):

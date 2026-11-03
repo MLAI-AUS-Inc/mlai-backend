@@ -440,7 +440,9 @@ class StartTests(CardFixture, TestCase):
             with self.subTest(data=data):
                 response = self.press(data)
                 self.assertEqual((response.status_code, response.data["reason"]), (400, reason))
-                self.assertEqual(set(response.data), {"detail", "reason"})
+                self.assertEqual(set(response.data), {"detail", "reason", "articleError"})
+                from .founder_article_errors import article_error_envelope
+                self.assertEqual(response.data["articleError"], article_error_envelope({"reason": reason}))
         self.assertFalse(self.runs().exists())
         self.assertFalse(free_rows(self.org).exists())
 
@@ -461,7 +463,9 @@ class StartTests(CardFixture, TestCase):
             with self.subTest(status=upstream.status_code), \
                     patch.object(views, "start_article_generation", return_value=upstream):
                 response = self.press()
-                self.assertEqual((response.status_code, response.data), (upstream.status_code, upstream.data))
+                from .founder_article_errors import article_error_envelope
+                self.assertEqual((response.status_code, response.data), (upstream.status_code,
+                    {**upstream.data, "articleError": article_error_envelope(upstream.data)}))
 
     def test_a_non_owner_is_refused(self):
         with patch("community_chat.my_startup_views.user_may_use_organization", return_value=True), \
@@ -573,8 +577,10 @@ class SwitchTopicTests(CardFixture, TestCase):
         run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
         ContentFactoryRun.objects.filter(pk=run.pk).update(status="running")
         refused = self.switch(run)
+        from .founder_article_errors import article_error_envelope
+        original = {"detail": "You can't switch topics right now.", "reason": "not_available"}
         self.assertEqual((refused.status_code, refused.data),
-                         (409, {"detail": "You can't switch topics right now.", "reason": "not_available"}))
+            (409, {**original, "articleError": article_error_envelope(original)}))
         self.assertEqual(self.stops, [])
 
     def test_a_slow_free_run_is_superseded_and_attempt_two_starts_free(self):

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.core import signing
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
@@ -4136,6 +4136,39 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             slack_thread_ts="123.456",
             slack_root_message_ts="123.456",
         )
+
+    @override_settings(ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED=True)
+    @patch('integrations.services.slack.SlackService.update_message')
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_ignored_progress_preserves_job_and_mirrored_run(self, send, update):
+        for event in ("article_progress", "discovery_progress", "scan_progress"):
+            for reason in ("duplicate_progress_id", "stale_milestone"):
+                with self.subTest(event=event, reason=reason):
+                    job_id = f"ignored-{event}-{reason}"
+                    run = ContentFactoryRun.objects.create(
+                        run_id=job_id, workflow="direct_generate", domain="mlai.au", status="running",
+                    )
+                    job = ContentFactoryJob.objects.create(
+                        job_id=job_id, domain="mlai.au", slack_user_id="U123", status="cancelled",
+                        slack_channel_id="C123", slack_thread_ts="123.456",
+                        posted_progress_ids=["already-posted"], last_progress_milestone_index=2,
+                        last_progress_milestone_key="cancelled", last_progress_updated_at=timezone.now(),
+                    )
+                    payload = self.client._bound_payload({
+                        "event_type": event, "job_id": job_id, "domain": "mlai.au",
+                        "slack_user_id": "U-LATE-CALLBACK", "requested_by_slack_user_id": "U-LATE-CALLBACK",
+                        "progress_id": "already-posted" if reason == "duplicate_progress_id" else "older-milestone",
+                        "milestone_key": "research_started", "milestone_index": 1,
+                    })
+                    before_job = ContentFactoryJob.objects.filter(pk=job.pk).values().get()
+                    before_run = ContentFactoryRun.objects.filter(pk=run.pk).values().get()
+                    response = self.client.post(reverse('content_factory_callback'), payload, format="json")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.data["reason"], reason)
+                    self.assertEqual(ContentFactoryJob.objects.filter(pk=job.pk).values().get(), before_job)
+                    self.assertEqual(ContentFactoryRun.objects.filter(pk=run.pk).values().get(), before_run)
+        send.assert_not_called()
+        update.assert_not_called()
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_article_progress_callback_posts_thread_reply_and_records_progress(self, mock_send_message):

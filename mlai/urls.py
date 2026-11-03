@@ -66,3 +66,16 @@ urlpatterns = [
     ),
     path('api/v1/users/', include('core.urls_users')),
 ]
+
+# P2 (IF-P2-25): the source re-pin endpoint. It sits just before the
+# content-factory include, whose fenced runs/<run_id>/<action> route would
+# otherwise catch it. It answers 404 until its view ships.
+from content_factory.lazy_views import lazy_view  # noqa: E402
+
+_content_factory_include = next(index for index, pattern in enumerate(urlpatterns)
+                                if str(pattern.pattern) == 'api/content-factory/')
+urlpatterns[_content_factory_include:_content_factory_include] = [
+    path(f'api/content-factory/runs/<str:run_id>/repin{suffix}',
+         lazy_view('content_factory.source_repin_views', 'SourceRepinView'))
+    for suffix in ('', '/')
+]

@@ -392,6 +392,10 @@ def _project_state(run, operation, envelope, *, website, proof_connection=None):
 
 def receive_setup_delivery(payload, *, expected_kind=None, path_run_id=None, pull_pin=None):
     """Validate before writes, claim durably, then apply under original fences."""
+    from .run_owned_observations import maybe_receive_owned_observation
+    observation = maybe_receive_owned_observation(payload, run_id=path_run_id, expected_kind=expected_kind)
+    if observation is not None:
+        return observation
     from .setup_delivery_contract import DeliveryContractError, validate_envelope
     try:
         envelope = validate_envelope(payload, expected_kind=expected_kind, path_run_id=path_run_id)

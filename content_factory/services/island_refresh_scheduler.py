@@ -37,6 +37,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from content_factory.p2_foundation import P2_PRIVATE_STRATEGY_KEYS
 from content_factory.models import (
     ContentIsland,
     ContentIslandRefreshDispatch,
@@ -109,8 +110,10 @@ def build_island_refresh_idempotency_key(domain, local_date) -> str:
 # previous_owner, so neither becomes refresh-eligible on that alone. The P1
 # founder-journey keys (cohort marker, first profile, posted links) are
 # bookkeeping too.
+# P2 adds its own bookkeeping keys (IF-P2-28), which never make an org eligible either.
 _PRIVATE_STRATEGY_KEYS = frozenset({"ops_alerts", "previous_owner", "startup_profile_details",
-                                    "founder_journey", "founder_first_profile", "founder_posted_articles"})
+                                    "founder_journey", "founder_first_profile", "founder_posted_articles",
+                                    *P2_PRIVATE_STRATEGY_KEYS})
 
 
 def _has_pillar_strategy(config) -> bool:

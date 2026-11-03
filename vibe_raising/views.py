@@ -890,7 +890,7 @@ def _structured_memo_with_xero_metrics(draft):
 
 def _serialize_draft_for_form(draft):
     from startup_updates.revisions import revision_payload
-    from startup_updates.financial_history import history_payload, history_selection
+    from startup_updates.financial_history import history_payload, history_selection, history_owner_preview
     structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
@@ -929,6 +929,8 @@ def _serialize_draft_for_form(draft):
         "metricHistory": (structured_memo or {}).get("metric_history", {}),
         "financialHistory": history_payload(structured_memo.get("financial_history")),
         "financialHistorySelection": history_selection(structured_memo.get("financial_history")),
+        "financialHistoryOwnerPreview": history_owner_preview(structured_memo.get("financial_history")),
+        "financialHistoryAudiencePreview": history_owner_preview(structured_memo.get("financial_history"), share_amounts=False),
         "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
         "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
         "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
@@ -1071,7 +1073,7 @@ def _build_manual_structured_memo(payload):
 
 def _serialize_monthly_update(draft, structured_memo=None, *, published=False, shared=None):
     from .progress import public_chart_payload
-    from startup_updates.financial_history import history_payload, history_selection
+    from startup_updates.financial_history import history_payload, history_selection, history_owner_preview
     from startup_updates.revisions import frozen_memo, revision_payload
     revision = draft.published_revision if published and draft.published_revision_id else draft.current_revision
     if revision:
@@ -1126,6 +1128,8 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False, s
         "progressCharts": public_chart_payload(structured_memo.get("progress_charts")),
         "financialHistory": history_payload(structured_memo.get("financial_history")),
         "financialHistorySelection": history_selection(structured_memo.get("financial_history")),
+        "financialHistoryOwnerPreview": history_owner_preview(structured_memo.get("financial_history")),
+        "financialHistoryAudiencePreview": history_owner_preview(structured_memo.get("financial_history"), share_amounts=False),
         "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
         "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
         "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
@@ -2781,7 +2785,14 @@ class VibeRaisingMonthlyUpdateView(APIView):
             from rest_framework.exceptions import ValidationError
             raise ValidationError({"detail": str(exc)}) from exc
         history_selection = serializer.validated_data.get("financialHistorySelection")
-        if history_selection and history_selection.get("refresh"):
+        financial_history_snapshot = None
+        if serializer.validated_data.get("financialCandidateId"):
+            from startup_updates.financial_refresh import candidate_for_save
+            financial_history_snapshot = candidate_for_save(
+                serializer.validated_data["financialCandidateId"], company=company, user=request.user,
+                draft=draft, expected_revision=serializer.validated_data.get("expectedRevision"),
+                input_sources=serializer.validated_data.get("inputSources"))
+        if financial_history_snapshot is None and history_selection and history_selection.get("refresh"):
             # Explicitly refreshing the chart captures cached source evidence;
             # it never calls a provider or alters the prior approved revision.
             snapshot = capture_snapshot(organization, month_bucket)
@@ -2823,7 +2834,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
         revision = save_revision(draft, memo, snapshot=snapshot,
             expected_revision=serializer.validated_data.get("expectedRevision"),
             audience="public" if "public" in audience_visibility else "community" if "community" in audience_visibility else "private",
-            validation=validation)
+            validation=validation, financial_history_snapshot=financial_history_snapshot)
         draft.refresh_from_db()
         draft.status = MonthlyUpdateDraftStatus.DRAFT
         draft.run = None

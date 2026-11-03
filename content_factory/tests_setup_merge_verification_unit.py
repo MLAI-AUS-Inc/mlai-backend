@@ -396,7 +396,8 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
         self.assertEqual(payload["roo_points_action"], "repo_scan")
         self.assertEqual(payload["roo_points_cost"], 0)
         observed.points.assert_called_once_with(self.website.authorized_by, domain="example.test", action="repo_scan")
-        observed.actor.assert_called_once_with(self.website.authorized_by)
+        self.assertEqual([args[0][0] for args in observed.actor.call_args_list],
+            [self.website.authorized_by, self.website.authorized_by])
         observed.reserve.assert_called_once()
         self.assertEqual(observed.reserve.call_args.kwargs["workflow"], "repo_scan")
         observed.bind.assert_called_once()

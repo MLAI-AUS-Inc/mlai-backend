@@ -244,7 +244,11 @@ class CallbackRoutingTests(SimpleTestCase):
         from .service_views import ContentFactoryCallbackView
         view = ContentFactoryCallbackView()
         view._post_legacy = Mock(return_value="legacy")
-        with patch("content_factory.run_events.receive_run_events", return_value="events") as receive:
+        # These legacy routing fixtures have no saved admitted Run. Keep the
+        # real ownership discriminator and stub only its database lookup.
+        with patch("content_factory.run_events.receive_run_events", return_value="events") as receive, \
+                patch("workflow_runs.models.ContentFactoryRun.objects.filter") as runs:
+            runs.return_value.first.return_value = None
             return view.post(SimpleNamespace(data=payload)), view._post_legacy, receive
 
     def test_flag_off_keeps_the_legacy_callback_path(self):

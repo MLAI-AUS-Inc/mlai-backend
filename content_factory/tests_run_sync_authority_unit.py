@@ -68,6 +68,14 @@ class RunObservationTests(SimpleTestCase):
 
 
 class ObservationGuardTests(SimpleTestCase):
+    def setUp(self):
+        # These legacy observational fixtures have no backend-admitted Run.
+        # Execute the actual ownership predicate over an empty model read.
+        from unittest.mock import patch
+        reader = patch("workflow_runs.models.ContentFactoryRun.objects.filter")
+        self.addCleanup(reader.stop)
+        reader.start().return_value.first.return_value = None
+
     def test_identical_authorized_callback_does_not_rewrite_the_run(self):
         from contextlib import nullcontext
         from unittest.mock import patch

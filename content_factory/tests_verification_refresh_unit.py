@@ -356,6 +356,8 @@ class CheckWebsiteAgainTests(SimpleTestCase):
     """Retrying a completed preparation re-verifies a lapsed website."""
 
     def setUp(self):
+        from workflow_runs.models import ContentFactoryRun
+        self.enterContext(patch.object(ContentFactoryRun.objects, "filter", return_value=rows()))
         self.op = fixtures.PrepareJourneyTests().operation()
         self.op.state = "completed"
         self.op.payload = {**self.op.payload, "attempt": 4, "user_clicks": 2, "run_id": "old-child", "repair_setup": True}

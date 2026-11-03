@@ -1,8 +1,8 @@
 """Real DRF view/control-flow tests with in-memory persistence seams.
 
-Run with unittest, NOT manage.py test. No application settings, .env, Django
-model setup, database connection or migration is used. These tests do not prove
-real SQL locking or JWT validation; those need approved integration testing.
+Run with scripts/test_without_database.py, not manage.py test. Django model
+metadata is initialized while database and network operations remain forbidden.
+These in-memory seams do not prove SQL locking or JWT validation.
 """
 import ast
 from contextlib import contextmanager
@@ -137,7 +137,9 @@ class EditorialCatalogAPIUnitTests(unittest.TestCase):
         if authenticated:
             force_authenticate(request, user=self.user)
         view = self.views.EditorialCatalogApprovalView if approving else self.views.EditorialCatalogView
-        return view.as_view()(request)
+        # Match this fixture's original empty authentication-scheme list while
+        # retaining the actual IsAuthenticated permission and tenant checks.
+        return view.as_view(authentication_classes=[])(request)
 
     def test_authenticated_review_and_approval_derive_server_identity(self):
         review = self.request("get")

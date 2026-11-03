@@ -36,6 +36,8 @@ from django.db.models import F, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from .p2_foundation import P2_PRIVATE_STRATEGY_KEYS
+
 logger = logging.getLogger(__name__)
 
 MARKER_KEY = "founder_journey"
@@ -43,7 +45,9 @@ FIRST_PROFILE_KEY = "founder_first_profile"
 POSTED_ARTICLES_KEY = "founder_posted_articles"
 # pillar_strategy keys owned by the founder journey. A Content Factory
 # strategy sync must never drop them and workers must never see them.
-PRIVATE_STRATEGY_KEYS = (MARKER_KEY, FIRST_PROFILE_KEY, POSTED_ARTICLES_KEY)
+# P2 adds its own bookkeeping keys (self-heal counters, the startup team, founder
+# notices; IF-P2-28), which are stripped the same way.
+PRIVATE_STRATEGY_KEYS = (MARKER_KEY, FIRST_PROFILE_KEY, POSTED_ARTICLES_KEY, *P2_PRIVATE_STRATEGY_KEYS)
 
 
 
@@ -419,6 +423,7 @@ def public_payload(organization, *, user, config=None):
                             and _is_owner(user, organization))
     return {
         "version": 1,
+        **({"contractVersion": 2} if new else {}),
         "cohort": NEW_JOURNEY if new else LEGACY,
         "optInAvailable": opt_in_available,
         "staffView": bool(getattr(user, "is_staff", False)),
@@ -451,11 +456,13 @@ def account_payload(user):
         return None
     companies = _profile_companies(user)
     configs = _configs_by_org(companies)
+    admitted = {str(company.pk): NEW_JOURNEY for company in companies
+        if cohort(company.organization, configs.get(company.organization_id, _EmptyConfig)) == NEW_JOURNEY}
     return {
         "version": 1,
+        **({"contractVersion": 2} if admitted else {}),
         "newStartupCohort": new_startup_cohort(),
-        "companies": {str(company.pk): NEW_JOURNEY for company in companies
-                      if cohort(company.organization, configs.get(company.organization_id, _EmptyConfig)) == NEW_JOURNEY},
+        "companies": admitted,
     }
 
 

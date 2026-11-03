@@ -99,7 +99,7 @@ with patch('dotenv.load_dotenv', return_value=False), patch('socket.socket.conne
     assert settings.ROO_EVENT_DISCOUNTS_ENABLED is True
 """
         result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, check=False,
-            env={"PATH": os.defpath, "APP_ENV": "test", "DEBUG": "true", "SECRET_KEY": "synthetic-settings-test",
+            env={"PATH": os.defpath, "APP_ENV": "test", "APP_RELEASE": "synthetic-settings-test", "DEBUG": "true", "SECRET_KEY": "synthetic-settings-test",
                 "DATABASE_URL": "sqlite:///:memory:", "ROO_EVENT_DISCOUNTS_ENABLED": "true", "ROO_EVENT_DISCOUNT_WORKER_ENABLED": "true"},
             capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)

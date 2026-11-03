@@ -19,8 +19,48 @@ from integrations.services import article_generation as service
 from startup_updates.benefits import has_monthly_update_discount
 
 
-class ArticleQuoteReadTests(SimpleTestCase):
+def _legacy_atomic(using=None, *args, **kwargs):
+    """Keep both Django atomic decorator/context forms pure in ORM fixtures."""
+    return using if callable(using) else nullcontext()
+
+
+class _NoOwnedRunRows:
+    """An empty canonical Run selector for these explicitly legacy fixtures."""
+    def filter(self, *args, **kwargs):
+        return self
+
+    def order_by(self, *args):
+        return self
+
+    def select_for_update(self, *args, **kwargs):
+        return self
+
+    def first(self):
+        return None
+
+    def exists(self):
+        return False
+
+    def __iter__(self):
+        return iter(())
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            return []
+        raise IndexError(key)
+
+
+class _LegacyRunLookupTests(SimpleTestCase):
     def setUp(self):
+        super().setUp()
+        # Real ownership/lineage predicates still execute. These old Job-based
+        # fixtures have no canonical owned Run rows; model reads stay pure.
+        self.enterContext(patch("workflow_runs.models.ContentFactoryRun.objects", _NoOwnedRunRows()))
+
+
+class ArticleQuoteReadTests(_LegacyRunLookupTests):
+    def setUp(self):
+        super().setUp()
         self.user = Obj(pk=7, id=7, slack_id="U7", is_active=True)
         self.organization = Obj(pk=9, domain="example.test")
         company = Obj(organization=self.organization)
@@ -202,8 +242,9 @@ class ArticleQuoteReadTests(SimpleTestCase):
                 self.assertIs(type(response.data["costPoints"]), int)
 
 
-class ArticleConsentTransportTests(SimpleTestCase):
+class ArticleConsentTransportTests(_LegacyRunLookupTests):
     def setUp(self):
+        super().setUp()
         self.data = {"domain": "example.test", "slack_user_id": "U7", "request_source": "roo_slackbot",
             "client_request_id": "article-7", "topic": "Founder tools", "confirmed_keyword": "founder tools", "keyword": "founder tools"}
         self.error = service.ArticleGenerationError("Review the updated quote")
@@ -250,8 +291,9 @@ class ArticleConsentTransportTests(SimpleTestCase):
                     self.assertEqual(generate.call_args.args[1][alias], 6)
 
 
-class ArticleAdmissionQuoteTests(SimpleTestCase):
+class ArticleAdmissionQuoteTests(_LegacyRunLookupTests):
     def setUp(self):
+        super().setUp()
         self.user = Obj(pk=7, email="requester@example.test")
         self.payer = Obj(pk=8)
         self.context = Obj(organization=Obj(pk=9, id=9, domain="example.test"))
@@ -265,10 +307,14 @@ class ArticleAdmissionQuoteTests(SimpleTestCase):
         outboxes = self.enterContext(patch("content_factory.dispatch_models.ContentFactoryDispatchOutbox.objects.filter"))
         outboxes.return_value.first.return_value = None
         self.editorial = self.enterContext(patch.object(views, "_refresh_article_editorial_payload", return_value=None))
+        # Preserve real stamping; only membership/merge policy reads the
+        # database. Persisted authority and escrow are tested by the PostgreSQL
+        # provider-chain suite rather than these isolated pricing fixtures.
+        self.enterContext(patch("content_factory.p2_foundation.merge_policy_for", return_value=None))
         self.reservation = self.enterContext(patch.object(views, "_reserve_article_start_connection", return_value=None))
         self.admission = self.enterContext(patch.object(views, "_validate_article_start_admission"))
         self.enterContext(patch.object(views, "_validate_article_start_reservation"))
-        self.enterContext(patch.object(views.transaction, "atomic", side_effect=nullcontext))
+        self.enterContext(patch.object(views.transaction, "atomic", side_effect=_legacy_atomic))
         self.enterContext(patch.object(views, "founder_actor_id_for_user", return_value="founder:7"))
         self.enterContext(patch.object(views, "_roo_points_balance_for_user", return_value=20))
         self.charge = self.enterContext(patch.object(views, "charge_content_factory_request_for_user",
@@ -366,11 +412,17 @@ class ArticleAdmissionQuoteTests(SimpleTestCase):
                 self.assertIsNone(self.charge_request({name: 12})[3])
         self.ledgers.assert_not_called()
 
+    def test_cheaper_current_price_is_accepted_within_confirmed_ceiling(self):
+        for name in ("expectedCostPoints", "expected_cost_points"):
+            with self.subTest(name=name):
+                self.assertIsNone(self.charge_request({name: 18})[3])
+        self.charge.assert_called()
+
     def test_research_keeps_omitted_quote_compatibility(self):
         self.assertIsNone(views._quoted_price_response(Obj(data={}), cost_points=3))
 
 
-class ArticleOriginalAdmissionProofTests(SimpleTestCase):
+class ArticleOriginalAdmissionProofTests(_LegacyRunLookupTests):
     def test_original_debit_requires_same_company_and_no_refund_before_shared_spend(self):
         user = Obj(pk=7)
         ledger = Obj(pk=10, user_id=7, kind="SPEND", source="CONTENT_FACTORY", delta_microroo=-6_000_000,
@@ -433,14 +485,15 @@ class ArticleOriginalAdmissionProofTests(SimpleTestCase):
                 spend.assert_called_once()
 
 
-class ArticlePricingTests(SimpleTestCase):
+class ArticlePricingTests(_LegacyRunLookupTests):
     def setUp(self):
+        super().setUp()
         self.user = Obj(pk=7, email="pricing@example.test")
 
     def confirmation_io(self, job):
         self.enterContext(patch.object(service, "require_article_activation"))
         self.enterContext(patch.object(service, "_find_active_confirm_child_job", return_value=None))
-        self.enterContext(patch.object(service.transaction, "atomic", side_effect=nullcontext))
+        self.enterContext(patch.object(service.transaction, "atomic", side_effect=_legacy_atomic))
         rows = self.enterContext(patch("content_factory.models.ContentFactoryJob.objects.select_for_update"))
         rows.return_value.get.return_value = job
         ledgers = self.enterContext(patch("roo.models.Ledger.objects.filter"))

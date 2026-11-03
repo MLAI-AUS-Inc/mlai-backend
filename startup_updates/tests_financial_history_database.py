@@ -121,6 +121,71 @@ class FinancialHistoryPublicationTests(TestCase):
                     snapshot=revision.snapshot, audience=revision.audience, structured_memo=memo)
                 self.assertIsNone(revision_payload(candidate)["evidenceSnapshot"]["financial_history_evidence"])
 
+    def test_separate_chart_evidence_preserves_writing_narrative_evidence_and_publication(self):
+        first = self.save(selection={"enabled": True, "shareAmounts": True})
+        self.publish(first)
+        published_before = copy.deepcopy(self.published())
+        payload = evidence_payload()
+        replace_totals(payload, -1, 9000, 300)
+        chart_snapshot = self.make_snapshot(payload)
+        self.draft.refresh_from_db()
+        writing = {
+            "startupOverview": "We help builders learn together.",
+            "summary": "Writing typed before the refresh.",
+            "highlights": ["A new workshop shipped."],
+            "lowlights": ["A supplier was late."],
+            "learnings": ["Shorter sessions work well."],
+            "next_30_days": ["Run another workshop."],
+            "asks": ["Introduce us to a venue."],
+        }
+        edited = save_revision(self.draft, {
+            **writing,
+            "_financial_history_selection": {"enabled": True, "shareAmounts": True},
+        }, snapshot=self.snapshot, financial_history_snapshot=chart_snapshot,
+            audience="community", expected_revision=first.pk,
+            validation={"groundedness_status": "founder_asserted"})
+        for key, value in writing.items():
+            self.assertEqual(edited.structured_memo[key], value)
+        self.assertEqual(edited.snapshot_id, self.snapshot.pk)
+        self.assertEqual(edited.structured_memo["financial_history"]["snapshot"]["points"][-1]["revenue"], 9000)
+        receipt = revision_payload(edited)
+        self.assertEqual(receipt["evidenceSnapshot"]["charts"]["performance"][-1]["income"], 600)
+        self.assertEqual(receipt["evidenceSnapshot"]["financial_history_evidence"]["snapshotId"], chart_snapshot.pk)
+        self.assertEqual(self.published(), published_before)
+        self.publish(edited)
+        self.assertEqual(self.published()["financialHistory"]["points"][-1]["revenue"], 9000)
+
+    def test_separate_chart_candidate_cannot_cross_company_or_month(self):
+        from rest_framework.exceptions import ValidationError
+        first = self.save(selection={"enabled": True, "shareAmounts": True})
+        other = Organization.objects.create(name="Other chart owner", domain="other-chart.example.invalid")
+        for organization, month in ((other, self.month), (self.organization, date(2026, 7, 1))):
+            candidate = MonthlyEvidenceSnapshot.objects.create(organization=organization, month=month,
+                payload=evidence_payload(), content_hash=content_hash({"organization": organization.pk, "month": month.isoformat()}))
+            with self.subTest(organization=organization.pk, month=month), self.assertRaises(ValidationError):
+                save_revision(self.draft, {"summary": "Retained writing.",
+                    "_financial_history_selection": {"enabled": True, "shareAmounts": True}},
+                    snapshot=self.snapshot, financial_history_snapshot=candidate,
+                    expected_revision=first.pk)
+        self.draft.refresh_from_db()
+        self.assertEqual(self.draft.current_revision_id, first.pk)
+
+    def test_stale_revision_does_not_apply_a_separate_chart_candidate(self):
+        first = self.save(selection={"enabled": True, "shareAmounts": True})
+        self.publish(first)
+        published_before = copy.deepcopy(self.published())
+        newer = self.save(text="Writing saved in another tab.")
+        payload = evidence_payload()
+        replace_totals(payload, -1, 9000, 300)
+        with self.assertRaises(RevisionConflict):
+            save_revision(self.draft, {"summary": "Unsaved writing.",
+                "_financial_history_selection": {"enabled": True, "shareAmounts": True}},
+                snapshot=self.snapshot, financial_history_snapshot=self.make_snapshot(payload),
+                expected_revision=first.pk)
+        self.draft.refresh_from_db()
+        self.assertEqual(self.draft.current_revision_id, newer.pk)
+        self.assertEqual(self.published(), published_before)
+
     def test_captured_snapshot_hash_encoding_resolves_original_history_proof(self):
         payload = evidence_payload()
         payload["hash"] = content_hash(payload)

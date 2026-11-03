@@ -14,6 +14,18 @@ from integrations.services import article_generation as billing, research_automa
 
 class ResearchAutomationBillingTests(SimpleTestCase):
     def setUp(self):
+        # These legacy fixtures have no admitted canonical Run. Model the new
+        # read selectors while exercising the actual ownership/refund guards.
+        from workflow_runs.models import ContentFactoryRun
+        rows = MagicMock(name="unadmitted_research_runs")
+        rows.filter.return_value = rows.order_by.return_value = rows.select_for_update.return_value = rows
+        rows.__getitem__.return_value = rows
+        rows.first.return_value = None
+        rows.iterator.return_value = iter(())
+        rows.__iter__.return_value = iter(())
+        canonical = patch.object(ContentFactoryRun, "objects", rows)
+        canonical.start()
+        self.addCleanup(canonical.stop)
         self.user = Obj(pk=7, id=7)
         self.org = Obj(pk=9, domain="fixture.test")
         self.automation = Obj(status="active", pause_if_unanswered=False, organization=self.org, organization_id=9, user=self.user, notification_channel=Obj(user=self.user))
