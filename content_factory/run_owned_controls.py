@@ -61,6 +61,8 @@ def prepare_owned_control(*, run, user, action, context):
         from .article_publish_approval import article_publish_approval_receipt, article_publish_approval_receipt_matches
         from . import vibe_marketing_views as views
         refresh_owned_run(run)
+        from .founder_run_commands import validate_prior_approval
+        validate_prior_approval(run)
         if (article_publish_approval_receipt_matches(run)
                 and article_publish_approval_receipt(run).get("actor_id") == founder_actor_id_for_user(user)):
             return Response(views._serialize_run(run, context=context), status=202)

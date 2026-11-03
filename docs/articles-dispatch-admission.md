@@ -68,3 +68,20 @@ cannot be cancelled or closed by a saved switch for its predecessor.
 `content_factory.tests_first_article_switch_commands` exercises this HTTP contract
 against disposable PostgreSQL using synthetic provider responses, including
 concurrent requests, unavailable cache, lost acknowledgements and owned closure.
+# Keyed article controls
+
+An `Idempotency-Key` on an owned article's approve, deny or single-run cancel
+binds the full request body, action, current principal, company and original
+Run/execution identity before prior approval consent can return a noop. Accepted
+commands retain only private metadata in `founder_run_commands_v1`; replay
+serializes the same Run with current permission checks instead of caching a
+large response or submitting another Content Factory control.
+
+Immediately before transport, the backend rechecks the active account, current
+startup rights and exact outgoing admission/ticket. It persists `dispatching`
+before HTTP. An unknown response never expires into permission to resend. A
+known command acknowledgement does not establish execution status, stopped
+effects, grant release or refund; those remain with the existing typed event
+and settlement controllers. Changed bodies/actions/tickets conflict. Keyed
+group deletion is outside this single-run contract. Unkeyed and legacy controls,
+resume and other actions retain their existing behavior.

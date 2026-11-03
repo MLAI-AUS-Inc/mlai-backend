@@ -3045,15 +3045,16 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "1e7385e94d4712ee7ac0947383245b98cc69f539de33df706ac1602b2eda0c73",
+      "function_sha256": "5ba5b270a596a319755f64ebcdc1e617e63cddf54a9cc790f1db1aeb7fc7698a",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_run_current_review.py",
         "content_factory/tests_run_retired_writers.py",
-        "content_factory/tests_run_execution_control.py"
+        "content_factory/tests_run_execution_control.py",
+        "content_factory/tests_founder_run_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3176,15 +3177,16 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "1e7385e94d4712ee7ac0947383245b98cc69f539de33df706ac1602b2eda0c73",
+      "function_sha256": "5ba5b270a596a319755f64ebcdc1e617e63cddf54a9cc790f1db1aeb7fc7698a",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_run_current_review.py",
         "content_factory/tests_run_retired_writers.py",
-        "content_factory/tests_run_execution_control.py"
+        "content_factory/tests_run_execution_control.py",
+        "content_factory/tests_founder_run_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3204,15 +3206,16 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "1e7385e94d4712ee7ac0947383245b98cc69f539de33df706ac1602b2eda0c73",
+      "function_sha256": "5ba5b270a596a319755f64ebcdc1e617e63cddf54a9cc790f1db1aeb7fc7698a",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_run_current_review.py",
         "content_factory/tests_run_retired_writers.py",
-        "content_factory/tests_run_execution_control.py"
+        "content_factory/tests_run_execution_control.py",
+        "content_factory/tests_founder_run_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3234,15 +3237,16 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "1e7385e94d4712ee7ac0947383245b98cc69f539de33df706ac1602b2eda0c73",
+      "function_sha256": "5ba5b270a596a319755f64ebcdc1e617e63cddf54a9cc790f1db1aeb7fc7698a",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_run_current_review.py",
         "content_factory/tests_run_retired_writers.py",
-        "content_factory/tests_run_execution_control.py"
+        "content_factory/tests_run_execution_control.py",
+        "content_factory/tests_founder_run_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3503,15 +3507,16 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "1e7385e94d4712ee7ac0947383245b98cc69f539de33df706ac1602b2eda0c73",
+      "function_sha256": "5ba5b270a596a319755f64ebcdc1e617e63cddf54a9cc790f1db1aeb7fc7698a",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_run_current_review.py",
         "content_factory/tests_run_retired_writers.py",
-        "content_factory/tests_run_execution_control.py"
+        "content_factory/tests_run_execution_control.py",
+        "content_factory/tests_founder_run_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -6196,12 +6201,10 @@
     {
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_call_content_factory_run_action",
-      "function_sha256": "c4cf45d272c1f1fcece40c88055fe287a01334e5c12ee62bdead3973a7176a8a",
-      "reason": "An optional trusted expected binding is compared against the same Run snapshot used to form the owned cancel envelope; a changed ticket cannot be substituted for the saved original intent. Existing unbound control behavior is unchanged.",
+      "function_sha256": "0062dcbae02d0a101edeab8626f743b7632428ebb705dbd13e0d9b0ee412401e",
+      "reason": "Exact original control receipt, current active principal and outgoing admission/ticket are rechecked under SQL lock immediately before marking the external POST permanently uncertain; no transport occurs under that lock.",
       "test_refs": [
-        "content_factory.tests_first_article_switch_commands",
-        "content_factory.tests_run_owned_cancellation",
-        "content_factory.tests_run_terminal_settlement"
+        "content_factory/tests_founder_run_commands.py"
       ]
     },
     {
@@ -6224,6 +6227,51 @@
         "content_factory.tests_first_article_switch_commands",
         "content_factory.tests_run_owned_cancellation",
         "content_factory.tests_run_terminal_settlement"
+      ]
+    },
+    {
+      "path": "content_factory/founder_run_commands.py",
+      "function": "before_transport",
+      "function_sha256": "594f9786d2d232a4838d883dd682e04c9c99f54a9b7762a20ed877e248b6a163",
+      "reason": "Original binding plus current account and publish/write rights guard the only new command effect boundary. The dispatching state never expires.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_run_commands.py",
+      "function": "execute",
+      "function_sha256": "5f664cc60958e1697ab0741662fd1cbc804b4791041bfaf652e3fc0067ceed59",
+      "reason": "Durable accepted metadata replays a current authorized projection of the original Run, before prior consent noop and without another CF POST. No execution state or grant is written.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/run_owned_controls.py",
+      "function": "prepare_owned_control",
+      "function_sha256": "8e2d55b14c2ab37ecf59b3ffd2c54a5002ae7197c62bb2c4d2d381f7d7027f84",
+      "reason": "Owned control consent validates the keyed revision and comment waivers before its existing prior-approval noop; legacy and unkeyed behavior is unchanged.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_run_commands.py",
+      "function": "observe_acknowledgement",
+      "function_sha256": "b487fb0fd7de3c804eb2197c4eae8f26eeb63674a2121fe6b82ea25217fdf106",
+      "reason": "A successful response is command acceptance only; run/action/status/rejection and any supplied admission/ticket must match. No cancellation/effect or billing conclusion is inferred.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_run_commands.py",
+      "function": "_claim",
+      "function_sha256": "784408800efbb87dfba9bbfab6d1ccec7a125a336e4763d5b6855f4a3bc829c5",
+      "reason": "The exact header/body, company, principal, action, Run and original binding are durably compared under the current startup lock before prior consent can noop.",
+      "test_refs": [
+        "content_factory/tests_founder_run_commands.py"
       ]
     }
   ],

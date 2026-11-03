@@ -15611,6 +15611,8 @@ def _call_content_factory_run_action(
             retryable=True,
         )
 
+    from .founder_run_commands import before_transport, observe_acknowledgement
+    before_transport(run_id=run_id, action=action, payload=payload)
     try:
         response = http_client.post(
             f"{remote_config['base_url']}/api/runs/{run_id}/{action}",
@@ -15656,6 +15658,7 @@ def _call_content_factory_run_action(
             holding = resolve_dispatch_outcome(admitted_child)
             return {"status": "action_pending", "action": action, "child_run_id": holding.json()["run_id"],
                     "child_dispatch_pending_resolution": True, "retryable": True}
+        observe_acknowledgement(run_id=run_id, action=action, data=data)
         if admitted_child is not None:
             if publication_dispatch:
                 from .run_revision_child_admission import accept_revision_child_response
@@ -20196,8 +20199,13 @@ def _project_setup_pr_creation_failure(run, config, remote_data):
     return detail
 
 
-def control_article_run(*, user, context, run, action, data, run_id=None, goal_operation_id=None):
+def control_article_run(*, user, context, run, action, data, run_id=None, goal_operation_id=None, idempotency_key=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
+    from . import founder_run_commands
+    if founder_run_commands.applies(run, action, idempotency_key):
+        return founder_run_commands.execute(context=context, user=user, run=run, action=action, data=data,
+            header=idempotency_key, invoke=lambda current: control_article_run(user=user, context=context,
+                run=current, action=action, data=data, run_id=run_id, goal_operation_id=goal_operation_id))
     from .run_owned_controls import prepare_owned_control
     owned_response = prepare_owned_control(run=run, user=user, action=action, context=context)
     if owned_response is not None:
@@ -21158,7 +21166,8 @@ class VibeMarketingRunControlView(APIView):
             from .run_ownership import owner_receipt
             if owner_receipt(run) is not None and request.headers.get("Idempotency-Key"):
                 data = {**request.data, "_backend_control_command_key": request.headers["Idempotency-Key"]}
-        return control_article_run(user=request.user, context=context, data=data, run=run, action=action, run_id=run_id)
+        return control_article_run(user=request.user, context=context, data=data, run=run, action=action,
+            run_id=run_id, idempotency_key=request.headers.get("Idempotency-Key"))
 
 
 class VibeMarketingDailyReplayView(APIView):
