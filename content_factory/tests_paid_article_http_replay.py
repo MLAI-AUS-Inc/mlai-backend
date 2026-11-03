@@ -135,6 +135,42 @@ class PaidArticleHttpReplayTests(CardFixture, TransactionTestCase):
                 'response': {'status': replay.status_code, 'body': replay.json()},
                 'replay': {'run_id': run.run_id, 'spends': 1, 'outboxes': 1, 'worker_posts': 1}}, indent=2) + '\n')
 
+    def test_actual_full_client_shape_with_saved_author_replays_unchanged(self):
+        from .authors import normalize_authors
+        author_id, key = str(uuid4()), str(uuid4())
+        self.config.authors = normalize_authors([{'id': author_id, 'name': 'Reviewed clinic founder',
+            'role': 'Founder', 'bio': 'The owner-approved byline for this synthetic startup.'}])
+        self.config.default_author_id = author_id
+        self.config.save(update_fields=['authors', 'default_author_id'])
+        fields = ('audience_id', 'audience_version', 'conversion_intent', 'offer_id', 'offer_version',
+            'no_offer_reason', 'country', 'reader_task', 'distinct_contribution', 'acceptance_criteria')
+        brief = {name: self.body['editorial_brief'][name] for name in fields}
+        body = {'companyId': str(self.company.pk), 'client_request_id': key, 'authorId': author_id,
+            'editorialBrief': brief, 'expectedCostPoints': 12, 'costConfirmed': True,
+            'topic': self.body['topic'], 'targetKeyword': self.body['target_keyword'],
+            'deliveryMode': 'content_only', 'deliveryModeExplicit': True, 'deliveryModeConfirmed': True}
+        first = self.client.post(self.url, body, format='json', HTTP_IDEMPOTENCY_KEY=key)
+        self.assertEqual(first.status_code, 202, first.data)
+        run = ContentFactoryRun.objects.get(run_id=first.data['runId'])
+        self.assertEqual(run.run_request['author_id'], author_id)
+        self.assertEqual(run.run_request['client_request_id'], key)
+        self.assertEqual(run.run_request['default_author_profile']['personId'], author_id)
+        before = self.financial_dispatch_state()
+        replay = self.client.post(self.url, deepcopy(body), format='json', HTTP_IDEMPOTENCY_KEY=key)
+        self.assertEqual((replay.status_code, replay.json()), (202, first.json()))
+        self.assertEqual(self.financial_dispatch_state(), before)
+        self.assertEqual((Ledger.objects.filter(kind='SPEND').count(), ContentFactoryDispatchOutbox.objects.count(),
+            len(self.sent)), (1, 1, 1))
+        target = os.environ.get('FOUNDER_PAID_CLIENT_WIRE_EXPORT')
+        if target:
+            Path(target).write_text(json.dumps({'schema_version': 1,
+                'provenance': 'Actual account bearer + exact My startup facade; saved owner-approved author and catalogue brief; isolated worker HTTP.',
+                'company_id': str(self.company.pk), 'author_id': author_id, 'user_id': self.owner.pk,
+                'request': {'method': 'POST', 'path': self.url, 'headers': {'Idempotency-Key': key}, 'body': body},
+                'response': {'status': first.status_code, 'body': first.json()},
+                'replay_response': {'status': replay.status_code, 'body': replay.json()},
+                'effects': {'run_id': run.run_id, 'spends': 1, 'outboxes': 1, 'worker_posts': 1}}, indent=2) + '\n')
+
     def test_completed_original_replays_even_when_its_topic_is_now_covered(self):
         from .models import WrittenArticle
         run = self.start()
