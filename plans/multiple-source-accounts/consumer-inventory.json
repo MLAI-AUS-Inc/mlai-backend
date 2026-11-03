@@ -13,7 +13,7 @@
     "crm": "Only the global community calendar and explicitly selected MLAI-admin Luma connections are read. Union by event ID, source provenance, manage-only guest routing, no permissions imported, stale coverage after changed/failed sources.",
     "disconnect": "Facade requires an owned connection ID when several accounts exist; no provider-wide delete.",
     "desktop_web": "Account choices, add account, independent CRM selection, per-account disconnect; controlled failed-save behavior.",
-    "mobile": "Same choices implemented in native shared Connections screen; verification pending."
+    "mobile": "Native shared Connections screen supports report selection, admin CRM inclusion, add/reconnect and per-account disconnect."
   },
   "provider_identity": {
     "gmail": "verified Google sub",
@@ -45,7 +45,8 @@
     "backend": "285 synthetic PostgreSQL tests passed against approved379-file graph on isolated UTF-8 PostgreSQL17, external networking blocked",
     "schema": "makemigrations --check --dry-run: no changes detected",
     "test_assignment": "710fully selected,2partially selected,0omissions",
-    "desktop": "typecheck,build and account-control E2E passed",
-    "mobile": "36 focused connection widget tests passed; full just ci running"
+    "desktop": "Full just ci passed; current typecheck/build, legacy-response and account-control E2E passed",
+    "mobile": "36 focused connection widget tests and full 3093-test mobile suite passed; final analyzer clean",
+    "database_free": "401 CRM, Studio source, account bridge and selected-report scope tests passed"
   }
 }
