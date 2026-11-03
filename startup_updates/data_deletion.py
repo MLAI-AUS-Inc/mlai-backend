@@ -788,6 +788,14 @@ def delete_startup_data_for_organization(
         with transaction.atomic():
             from org_memory.kernel import tombstone_organization_memory
 
+            # Chart refreshes retain fetched reports outside narrative runs.
+            # Fence workers before removing immutable candidate snapshots.
+            from startup_updates.financial_refresh import WORKFLOW as FINANCIAL_REFRESH_WORKFLOW
+            financial_runs = list(ContentFactoryRun.objects.select_for_update().filter(
+                workflow=FINANCIAL_REFRESH_WORKFLOW, organization=organization))
+            _add_counts(deleted, _scrub_runs_with_counts(financial_runs,
+                request_id=deletion_request.request_id, reason=reason))
+
             memory_result = tombstone_organization_memory(
                 organization,
                 reason=reason,

@@ -287,12 +287,15 @@ def frozen_memo(draft, *, published=False):
 
 
 @transaction.atomic
-def save_revision(draft, memo, *, snapshot, audience="private", expected_revision=None, require_match=True, validation=None):
+def save_revision(draft, memo, *, snapshot, audience="private", expected_revision=None, require_match=True, validation=None, financial_history_snapshot=None):
     if audience not in {"private", "community", "public"}:
         raise ValidationError("Choose private, community, or public visibility.")
     draft = MonthlyUpdateDraft.objects.select_for_update().get(pk=draft.pk)
     if snapshot.organization_id != draft.organization_id or snapshot.month != draft.month:
         raise ValidationError("The evidence snapshot belongs to a different startup or period.")
+    if financial_history_snapshot is not None and (financial_history_snapshot.organization_id != draft.organization_id
+            or financial_history_snapshot.month != draft.month):
+        raise ValidationError("The financial chart evidence belongs to a different startup or period.")
     current = draft.current_revision
     if require_match and (str(expected_revision or "") != str(current.pk if current else "")):
         raise RevisionConflict()
@@ -338,7 +341,7 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
     from startup_updates.financial_history import FinancialHistoryError, history_for_revision
     try:
         financial_history = history_for_revision(draft, memo, current, snapshot,
-            captured_at=timezone.now().isoformat())
+            captured_at=timezone.now().isoformat(), financial_history_snapshot=financial_history_snapshot)
     except FinancialHistoryError as exc:
         raise ValidationError({"financialHistorySelection": str(exc)}) from exc
     if financial_history is not None:
