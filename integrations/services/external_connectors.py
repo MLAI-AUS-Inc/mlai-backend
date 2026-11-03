@@ -2570,7 +2570,7 @@ def _refresh_xero_connection(connection: ExternalServiceConnection) -> str:
     with transaction.atomic():
         # Sibling tenants authorised together share a rotating refresh token.
         # Serialize at the user boundary before locking any tenant row.
-        connection.user.__class__.objects.select_for_update().get(pk=connection.user_id)
+        get_user_model().objects.select_for_update().get(pk=connection.user_id)
         locked = ExternalServiceConnection.objects.select_for_update().get(pk=connection.pk)
         try:
             if (locked.access_token and (locked.token_expires_at is None
