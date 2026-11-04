@@ -8111,6 +8111,13 @@ def _deliver_to_slack(delivery: SlackDmMirrorDelivery) -> None:
         response = client.chat_postMessage(**request_kwargs)
         slack_ts = str(response.get("ts") or "").strip()
         _slack_ts_sort_key(slack_ts)
+        from .community_bridge.private_roo_actor import roo_dm_receipt
+
+        acknowledged = response.get("message") or {}
+        acknowledged_text = acknowledged.get("text")
+        source_metadata.update(roo_dm_receipt(
+            delivery, acknowledged_text if isinstance(acknowledged_text, str) else outgoing_text,
+        ))
     else:
         target_source_id = str(
             source_metadata.get("target_source_message_id")

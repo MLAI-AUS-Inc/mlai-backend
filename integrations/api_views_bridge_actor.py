@@ -5,6 +5,7 @@ from rest_framework.views import APIView
 
 from core.permissions import HasStrictRooApiKey
 from integrations.services.community_bridge.roo_actor import BridgeActorError, resolve_roo_actor
+from integrations.services.community_bridge.private_roo_actor import resolve_roo_dm_actor
 
 
 class CommunityBridgeRooActorView(APIView):
@@ -22,4 +23,21 @@ class CommunityBridgeRooActorView(APIView):
             })
         except BridgeActorError as exc:
             return Response({"error": exc.code}, status=exc.status)
+        return Response(actor, headers={"Cache-Control": "no-store"})
+
+
+class PrivateBridgeRooActorView(APIView):
+    """Read only the owner authority and body digest of a private Roo delivery."""
+
+    authentication_classes = []
+    permission_classes = [HasStrictRooApiKey]
+
+    def get(self, request):
+        try:
+            actor = resolve_roo_dm_actor(**{
+                name: request.query_params.get(name, "")
+                for name in ("workspace_id", "channel_id", "message_id", "thread_ts", "bridge_user_id")
+            })
+        except BridgeActorError as exc:
+            return Response({"error": exc.code}, status=exc.status, headers={"Cache-Control": "no-store"})
         return Response(actor, headers={"Cache-Control": "no-store"})
