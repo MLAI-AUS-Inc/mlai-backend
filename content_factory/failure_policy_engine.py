@@ -267,6 +267,12 @@ def _alert(organization, reason, *, run=None, slot=None, details=None):
 def _locked_config(organization):
     from organizations.models import Organization
     Organization.objects.select_for_update().get(pk=organization.pk)
+    try:
+        # The normal path needs one fresh locked read, rather than an ordinary
+        # get_or_create read followed by a second read of the same config.
+        return OrganizationContentConfig.objects.select_for_update().get(organization=organization)
+    except OrganizationContentConfig.DoesNotExist:
+        pass
     config, _ = OrganizationContentConfig.objects.get_or_create(organization=organization)
     return OrganizationContentConfig.objects.select_for_update().get(pk=config.pk)
 
