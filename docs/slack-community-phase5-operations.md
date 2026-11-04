@@ -110,7 +110,7 @@ provider attempt. Its `last_error` is a fixed code that says why it is held:
 | `legacy_community_send_unproven` | Legacy hold: the row has no enqueue marker, so it is retried every five minutes and never resent blindly. |
 | `community_channel_not_admitted` | The channel is out of the current workspace or channel scope, or processing is paused. |
 | `community_mapping_pending` | The room mapping or sync state changed, or is paused, while the send was running. |
-| `community_member_access_disabled` | A member post is waiting because member access is switched off. |
+| `community_member_access_disabled` | A member-room send (either direction) or a member-actor Community post is waiting because member access is switched off. |
 | `community_receipt_unverified` | Slack's response did not yet prove the expected poster. |
 | `community_source_closed` | The source channel was reduced while the send was running. |
 | `member_membership_unproven` | The author has a linked grant, but their channel membership could not be confirmed yet. |
