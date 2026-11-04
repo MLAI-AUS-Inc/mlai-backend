@@ -906,6 +906,9 @@ jobs:
           integrations.tests_message_sync_member_budgets \
           --verbosity 2
 
+    - name: Run mentoring PostgreSQL booking and ledger tests
+      run: python manage.py test mentoring.tests.test_booking_database --verbosity 2
+
     - name: Run meeting-room PostgreSQL tests
       run: python manage.py test roo.tests_meeting_rooms --verbosity 2
 

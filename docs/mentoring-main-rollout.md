@@ -8,10 +8,9 @@ and admins, or active Django staff/superusers. Ordinary members cannot use it.
 
 ## Migration review
 
-The files below are copied byte-for-byte from staging, not regenerated. No
-migration has been applied during this promotion. Production approval is still
-required before migration execution. CI also creates disposable databases, so its
-database lanes must wait for approval to apply these exact migrations there.
+The files below are copied byte-for-byte from staging, not regenerated. The user approved these exact two migrations for disposable local/CI test
+databases on 4 November 2026. That approval does not cover production. Production
+approval is still required for the actual host migration plan.
 
 | Migration | SHA-256 | Effect |
 | --- | --- | --- |
@@ -28,8 +27,8 @@ covers only 0001 and does not cover this full rollout.
 
 ## Merge and enablement order
 
-1. Review both PRs, confirm the exact migration approval for disposable CI/local
-   databases, and complete database-backed PostgreSQL booking/ledger tests. The
+1. Review both PRs and complete the approved disposable PostgreSQL booking/ledger
+   tests and normal CI checks. The
    existing database-free suites cover the state machine, permissions, points
    calls, scheduling/DST and mocked providers; they do not prove transaction locks
    or real ledger persistence.

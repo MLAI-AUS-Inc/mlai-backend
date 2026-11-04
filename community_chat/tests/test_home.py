@@ -200,6 +200,7 @@ class CommunityHomeTests(APITestCase):
                 "meeting_rooms": True,
                 "coworking_booking": False,
                 "event_discounts": False,
+                "mentor_booking": False,
             },
         )
 
