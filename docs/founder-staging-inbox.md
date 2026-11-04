@@ -90,6 +90,39 @@ The generation worker, isolated model provider, wildcard website and preview
 fixture, source pins, network policy and actual frontend acceptance workflow
 remain separate required work. No migration is added by the inbox component.
 
+## Proposed separate runtime boundary
+
+`mlai.founder_staging_environment.checked_founder_environment` is a pure
+startup guard for a future dedicated profile. Nothing currently imports it
+from a runtime profile. It makes no connection, grants no access and does not
+create the profile or its services.
+
+The proposed routes are `founder-postgres:5432/founder_acceptance` with a
+`founder_runtime` role, and `founder-redis:6379/0`. The guard refuses the old
+pilot's database/cache, URL routing overrides, `PG*` variables, ambient provider
+credentials (including supported secret-name aliases and Firebase's direct
+environment consumers), the inbox reader token, startup migrations and notification flags.
+Database/cache/signing/email-pepper/inbox-writer/adapter credentials must be
+independent. Reserved mail uses only `staging.founder.mlai.au`.
+
+URL checks do not prove server isolation. Before any activation, prepare and
+review the separate PostgreSQL service/network, restricted runtime role,
+controlled migration-owner path, cache and relay/adapter. No old accounts,
+aliases, sessions, tokens, roles or production data may be copied. A persistent
+fresh database's full 382-migration application is a different actual plan from
+the approved sixteen migrations on the existing pilot; obtain the specific
+migration approval required by `AGENTS.md` before that operation. This guard
+does not authorize provisioning, new credentials or network access.
+
+The eventual profile must also pin adapter/provider endpoints, delivery
+encryption and member-account secrets, and native/device/federation settings;
+this early guard does not constitute complete runtime isolation.
+
+Run `python -m unittest mlai.test_founder_staging_environment -v` for the
+database free startup refusal controls. They are also assigned to operational
+CI. Ordinary email verification, pending onboarding and signed relay enrollment
+remain the required user journey.
+
 ## Validation
 
 Run `python -m unittest ops.founder-staging.test_inbox_fixture -v`. The tests
