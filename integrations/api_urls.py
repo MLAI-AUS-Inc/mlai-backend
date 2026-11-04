@@ -1,7 +1,7 @@
 from django.urls import path
 from . import api_views
 from . import api_views_bridge
-from .api_views_bridge_actor import CommunityBridgeRooActorView
+from .api_views_bridge_actor import CommunityBridgeRooActorView, PrivateBridgeRooActorView
 from . import api_views_connectors
 from . import api_views_finance
 from . import api_views_luma
@@ -378,6 +378,7 @@ urlpatterns = [
 
     # Community bridge
     path('bridge/roo/actor', CommunityBridgeRooActorView.as_view(), name='community_bridge_roo_actor'),
+    path('bridge/roo/dm-actor', PrivateBridgeRooActorView.as_view(), name='private_bridge_roo_actor'),
     path('bridge/slack/events', api_views_bridge.SlackCommunityBridgeEventView.as_view(), name='community_bridge_slack_events'),
     path('bridge/buzz/events', api_views_bridge.BuzzCommunityBridgeEventView.as_view(), name='community_bridge_buzz_events'),
 ]
