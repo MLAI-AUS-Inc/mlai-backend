@@ -92,10 +92,13 @@ class RetirementFlowTests(SimpleTestCase):
         self.assertEqual(result['status'], 'waiting_for_proxy_merge')
         self.remote.assert_called_once_with(self.site, 'proxy_removal_pr')
         retirement.retire_site(self.site)
-        self.remote.assert_called_once()
+        self.assertEqual([call.args[1] for call in self.remote.call_args_list],
+                         ['proxy_removal_pr', 'proxy_removal_pr'])
 
     def test_delete_only_after_public_verification_and_retired_rerun_is_noop(self):
         self.served.return_value = True
+        self.remote.side_effect = lambda site, action, **fields: (
+            {'status': 'proxy_absent'} if action == 'proxy_removal_pr' else {'deleted': True})
         with patch('content_factory.hosted_retirement.transaction.atomic', return_value=MagicMock()):
             result = retirement.retire_site(self.site)
         self.assertEqual(result['status'], 'retired')
@@ -103,6 +106,33 @@ class RetirementFlowTests(SimpleTestCase):
         calls = len(self.events)
         self.assertEqual(retirement.retire_site(self.site), result)
         self.assertEqual(len(self.events), calls)
+
+    def test_missing_header_cannot_bypass_founder_proxy_merge(self):
+        self.served.return_value = True
+        pending = {'status': 'awaiting_founder_merge', 'pr_url': 'https://github.com/example/site/pull/1',
+                   'head_sha': 'a' * 40}
+        self.remote.side_effect = lambda site, action, **fields: pending
+        with patch('content_factory.hosted_retirement.transaction.atomic', return_value=MagicMock()):
+            receipt = retirement.retire_site(self.site)
+        self.assertEqual(receipt['status'], 'waiting_for_proxy_merge')
+        self.assertEqual(self.site.state, 'paused')
+        self.remote.assert_called_once_with(self.site, 'proxy_removal_pr')
+        self.remote.side_effect = lambda site, action, **fields: (
+            {'status': 'proxy_absent'} if action == 'proxy_removal_pr' else {'deleted': True})
+        with patch('content_factory.hosted_retirement.transaction.atomic', return_value=MagicMock()):
+            receipt = retirement.retire_site(self.site)
+        self.assertEqual(receipt['status'], 'retired')
+        self.assertEqual(receipt['proxy_removal']['pr_url'], pending['pr_url'])
+        self.assertEqual([call.args[1] for call in self.remote.call_args_list],
+                         ['proxy_removal_pr', 'proxy_removal_pr', 'delete_worker'])
+
+    def test_unproven_proxy_receipt_cannot_delete_worker(self):
+        self.served.return_value = True
+        self.remote.side_effect = lambda site, action, **fields: {}
+        with patch('content_factory.hosted_retirement.transaction.atomic', return_value=MagicMock()):
+            receipt = retirement.retire_site(self.site)
+        self.assertEqual(receipt['status'], 'waiting_for_proxy_merge')
+        self.remote.assert_called_once_with(self.site, 'proxy_removal_pr')
 
     def test_deadline_is_durable_and_allows_explicit_grace_expiry(self):
         retirement.retire_site(self.site, now=timezone.now()-timedelta(days=31))

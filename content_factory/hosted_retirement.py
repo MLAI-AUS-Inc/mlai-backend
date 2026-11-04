@@ -177,7 +177,8 @@ def retire_site(site, *, dry_run=False, now=None):
         receipt['alert_id'] = _alert(site, receipt, 'articles')
         _save(site, receipt)
         return receipt
-    if not receipt.get('proxy_removal'):
+    proxy = receipt.get('proxy_removal')
+    if not isinstance(proxy, dict) or proxy.get('status') != 'proxy_absent':
         binding = {}
         # Removing an existing proxy needs the current connection grant, not
         # a verified article publishing target. This also covers empty sites.
@@ -190,7 +191,11 @@ def retire_site(site, *, dry_run=False, now=None):
         except HostedPublishError:
             pass
         try:
-            receipt['proxy_removal'] = _remote(site, 'proxy_removal_pr', **binding)
+            # Re-read an outstanding PR through CF's idempotent planner. Only
+            # an inspected default branch with no managed proxy proves removal.
+            # Keep the original PR identity in the durable audit receipt.
+            receipt['proxy_removal'] = {**(proxy if isinstance(proxy, dict) else {}),
+                **_remote(site, 'proxy_removal_pr', **binding)}
         except ValueError as exc:
             receipt['status'] = 'proxy_modified' if str(exc) == 'proxy_modified' else 'proxy_removal_pending'
             if getattr(exc, 'instructions', None):
@@ -200,6 +205,11 @@ def retire_site(site, *, dry_run=False, now=None):
             if not expired:
                 return receipt
         _save(site, receipt)
+    proxy = receipt.get('proxy_removal')
+    if not expired and (not isinstance(proxy, dict) or proxy.get('status') != 'proxy_absent'):
+        receipt['status'] = 'waiting_for_proxy_merge'
+        _save(site, receipt)
+        return receipt
     index_clear = _founder_serves(f'https://{site.domain}{site.base_path}', site.domain)
     articles_clear = all(_founder_serves(a['url'], site.domain) for a in receipt['articles'])
     if not (index_clear and articles_clear) and not expired:
