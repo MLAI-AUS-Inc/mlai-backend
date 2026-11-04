@@ -94,10 +94,12 @@ class FederationStagingTests(TestCase):
                 self.assertEqual(self.complete(**changes).status_code,403)
         self.assertFalse(get_user_model().objects.exists())
 
-    def test_secondary_production_routes_are_absent(self):
-        for route in ('account/deletion/','auth/password/','account/onboarding/','slack/','startups/','coding/','admins/key/'):
-            self.assertEqual(self.client.post(ROOT+route,{},format='json').status_code,404)
-        self.assertEqual(self.client.get('/api/v1/auth/me/').status_code,404)
+    def test_ordinary_staging_routes_retain_authentication(self):
+        for route in ('account/deletion/','account/onboarding/','slack/','startups/','coding/','admins/key/'):
+            with self.subTest(route=route):
+                self.assertEqual(self.client.post(ROOT+route,{},format='json').status_code,401)
+        self.assertEqual(self.client.post(ROOT+'auth/password/',{},format='json').status_code,404)
+        self.assertEqual(self.client.get('/api/v1/auth/me/').status_code,401)
 
     def test_refresh_denies_removed_tester_and_upstream_outage(self):
         self.assertEqual(self.complete().status_code,302)

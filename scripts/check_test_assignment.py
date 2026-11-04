@@ -44,7 +44,9 @@ def selected_labels(workflow):
     labels = set()
     for command in re.findall(pattern, logical):
         for token in shlex.split(command):
-            if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", token):
+            # unittest imports dotted labels with importlib, which also accepts
+            # existing namespace directories such as ops/staging-chat.
+            if re.fullmatch(r"[A-Za-z_]\w*(?:-\w+)*(?:\.[A-Za-z_]\w*(?:-\w+)*)*", token):
                 labels.add(token)
     return labels
 

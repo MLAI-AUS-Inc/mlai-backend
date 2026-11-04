@@ -101,7 +101,9 @@ jobs:
       run: python scripts/test_without_database.py startup_updates.tests_generation_reliability.SelectionMatrixTests startup_updates.tests_generation_reliability.CachedAccountScopeTests
 
     - name: Check test-module assignment
-      run: python scripts/check_test_assignment.py
+      run: |
+        python -m unittest tests.test_ci_test_assignment -v
+        python scripts/check_test_assignment.py
 
     - name: Validate selected test labels without database access
       run: python scripts/test_without_database.py --collect-ci-selection
@@ -259,6 +261,12 @@ jobs:
 
     - name: Run mentoring service and endpoint checks without database access
       run: python scripts/test_without_database.py mentoring.tests.test_scheduling_unit mentoring.tests.test_google_unit mentoring.tests.test_service_unit mentoring.tests.test_dst_unit mentoring.tests.test_followup_unit community_chat.tests.test_mentoring_views_unit mentoring.tests.test_admin_unit community_chat.tests.test_mentoring_admin_views_unit community_chat.tests.test_staff_admin_unit
+
+    - name: Test isolated staging controller, network and startup gates
+      run: python -m unittest ops.staging-chat.test_auto_deploy ops.staging-chat.test_network_policy ops.staging-chat.test_start_api -v
+
+    - name: Test isolated staging provider and development boundaries without database access
+      run: python scripts/test_without_database.py mlai.tests_staging_integrations roo.tests_development_build
 
     - name: Run coworking account booking contract checks
       run: python -m unittest community_chat.tests.test_coworking_unit tests.test_article_notification_policy_unit community_chat.tests.test_meeting_room_unit
@@ -766,6 +774,18 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install --require-hashes -r requirements.lock
+
+    - name: Test isolated staging accounts, platform, points and room flows
+      run: |
+        python manage.py test \
+        community_chat.tests.test_staging_password \
+        community_chat.tests.test_staging_pilot_accounts \
+        community_chat.tests.test_staging_features \
+        mlai.tests_staging_local \
+        mlai.tests_staging_platform \
+        roo.tests_staging_meeting_rooms \
+        roo.tests_staging_points_flows \
+        --noinput --verbosity 2
 
     - name: Verify event discount row locks and service boundaries on PostgreSQL
       run: python manage.py test roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency --verbosity 2
