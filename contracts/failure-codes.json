@@ -5580,6 +5580,153 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "article_preview_browser_check_failed",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "article_preview_browser_check_failed",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "retry_same_step",
+      "user_message": "The preview could not finish its browser check. Our team is checking it before publishing."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "article_preview_component_style_mismatch",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "repairable",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "article_preview_component_style_mismatch",
+        "failure_class": "repairable",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "repair_owned_candidate",
+      "user_message": "Some article sections do not match your website's design yet. Our team is fixing them before publishing."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "article_preview_content_incomplete",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "repairable",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "article_preview_content_incomplete",
+        "failure_class": "repairable",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "repair_owned_candidate",
+      "user_message": "The preview is not showing the full article correctly. Our team is restoring it before publishing."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "article_preview_editorial_review_blocked",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "repairable",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "article_preview_editorial_review_blocked",
+        "failure_class": "repairable",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "repair_owned_candidate",
+      "user_message": "Some statements or links still need an evidence check. Our team is reviewing them before publishing."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "article_preview_editorial_score_unavailable",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "article_preview_editorial_score_unavailable",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "retry_same_step",
+      "user_message": "The final quality reviewer could not finish. Our team is checking it before publishing."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "article_preview_quality_blocked",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "repairable",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "article_preview_quality_blocked",
+        "failure_class": "repairable",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "repair_owned_candidate",
+      "user_message": "We couldn't finish the final check automatically. Our team has been notified."
+    },
+    {
+      "action_id": "review_draft",
+      "aliases": [],
+      "code": "article_preview_safety_review_required",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "needs_user",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "ask_review_draft",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "article_preview_safety_review_required",
+        "failure_class": "needs_user",
+        "retryable": false
+      },
+      "owner": "staff",
+      "refund": true,
+      "retry_policy": "await_owner_action",
+      "user_message": "Our team is checking the safety guidance in this article. We'll let you know when it's ready."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "article_request_conflict",
       "emitter_scopes": [
         "backend.articles"

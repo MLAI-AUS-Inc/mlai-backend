@@ -8974,6 +8974,8 @@ def _merge_django_owned_article_result(local_result, remote_result):
         if key not in backend_merge_keys or key in local}
     remote_quality = _run_mapping(merged.get("article_preview_quality"))
     remote_quality_status = str(remote_quality.get("status") or "").strip().lower()
+    if remote_quality_status == "self_healing":
+        merged.pop("approval_blocker", None)
     for key, value in local.items():
         if key == "approval_blocker":
             # A rejection is written locally before the next status poll. Keep
@@ -11081,9 +11083,10 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     package_can_promote = _run_can_promote_package(article_run, config=config)
     publish_complete = bool(publish_evidence.get("previewUrl") or publish_evidence.get("prUrl"))
     article_result = _run_mapping(article_run.result) if article_run else {}
-    preview_quality_status = str(
-        _run_mapping(article_result.get("article_preview_quality")).get("status") or ""
-    ).strip().lower()
+    preview_quality = _run_mapping(article_result.get("article_preview_quality"))
+    preview_quality_status = str(preview_quality.get("status") or "").strip().lower()
+    from .hosted_quality_state import preview_quality_publish_notice
+    quality_publish_notice = preview_quality_publish_notice(preview_quality)
     publish_handoff_pending = bool(article_result.get("publish_handoff_pending"))
     publish_handoff_stale = _publish_handoff_stale_for_run(article_run)
     publish_child_recoverable = _publish_child_run_recoverable(publish_child_run) or bool(article_result.get("publish_child_recoverable"))
@@ -11295,13 +11298,14 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         status_by_id["publish"] = "blocked"
         href_by_id["publish"] = _run_url(article_run) + "?articleStep=review"
         run_by_id["publish"] = article_run.run_id
-        action_by_id["publish"] = _workflow_step_action("Review preview findings", href=href_by_id["publish"])
-        summary_by_id["publish"] = "Resolve the hosted preview quality findings before publishing."
-    elif content_package_ready and preview_quality_status in {"queued", "running", "transient_findings"}:
+        action_by_id.pop("publish", None)
+        summary_by_id["publish"] = quality_publish_notice[1]
+    elif (content_package_ready and preview_quality_status in {"queued", "running", "transient_findings"}) or preview_quality_status == "self_healing":
         status_by_id["publish"] = "locked"
         href_by_id["publish"] = _run_url(article_run) + "?articleStep=review"
         run_by_id["publish"] = article_run.run_id
-        summary_by_id["publish"] = "Hosted preview quality verification must finish before publishing."
+        action_by_id.pop("publish", None)
+        summary_by_id["publish"] = quality_publish_notice[1]
     elif publish_child_recoverable and content_package_ready and package_can_promote:
         status_by_id["publish"] = "ready"
         href_by_id["publish"] = _run_url(article_run)

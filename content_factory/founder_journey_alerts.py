@@ -77,6 +77,8 @@ REASON_LABELS = {
 # IF-P2-23: the P2 reasons, each queued by the package the contract names.
 P2_REASON_LABELS = {
     "hosting_retired": "Move retired blog URLs to the startup website; see the site retirement receipt",
+    "article_safety_review_required": "An article needs staff review of safety guidance",
+    "article_quality_review_required": "An article's automatic quality repair needs staff review",
     "our_team_item": "A startup has an item no automatic path can finish",
     "unregistered_failure_code": "A run reported a failure code the registry does not know",
     "codeless_terminal": "A run stopped without a failure code",

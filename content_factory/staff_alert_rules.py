@@ -33,7 +33,8 @@ def mapping(value):
 def failure_code(run):
     """Read the authoritative worker failure without persisting its free text."""
     result = mapping(run.result)
-    return result.get("error_code") or mapping(result.get("failure")).get("code")
+    return (result.get("error_code") or mapping(result.get("failure")).get("code")
+            or mapping(result.get("article_preview_quality")).get("blocker_code"))
 
 
 def open_alert(receipt):
@@ -56,12 +57,13 @@ def enrich_alert_details(receipt, *, organization, run):
     result = mapping(getattr(run, "result", None))
     request = mapping(getattr(run, "run_request", None))
     heal = mapping(result.get("self_heal_v1"))
+    quality = mapping(result.get("article_preview_quality"))
     transitions = result.get("last_transitions", heal.get("history", []))
     transitions = transitions if isinstance(transitions, list) else []
     details = {"founder_user_id": request.get("roo_points_requested_by_user_id") or organization.billing_user_id,
                "item": "website" if getattr(run, "workflow", "") == "article_system_setup" else "article",
                "code": failure_code(run) if run else None, "run_id": getattr(run, "run_id", None),
-               "attempts": heal.get("attempts", 0), "last_transitions": transitions[-3:]}
+               "attempts": quality.get("self_heal_attempt", heal.get("attempts", 0)), "last_transitions": transitions[-3:]}
     return _safe_details(details)
 
 
@@ -113,6 +115,10 @@ def _run_reasons(run, now):
     result = mapping(run.result)
     code = failure_code(run)
     reasons = []
+    quality = mapping(result.get("article_preview_quality"))
+    if quality.get("status") == "blocking_findings" and quality.get("self_heal_exhausted"):
+        reasons.append("article_safety_review_required" if quality.get("escalation") == "safety_review"
+                       else "article_quality_review_required")
     if code and not is_registered(code):
         reasons.append("unregistered_failure_code")
     owner_cancel = result.get("cancellation_reason") in {"owner_cancelled", "draft_deleted", "article_discarded", "superseded"}
@@ -151,7 +157,8 @@ def run_alert_rule_sweep(now=None, limit=None):
     by_org = {row.organization_id: row for row in configs}
     day_start = timezone.make_aware(datetime.combine(now.astimezone(LOCAL).date(), time.min), LOCAL)
     runs = list(ContentFactoryRun.objects.filter(organization_id__in=by_org).filter(
-        Q(status__in=TERMINAL | {"queued", "pending", "starting"}) | Q(created_at__gte=day_start)).order_by("organization_id", "pk"))
+        Q(status__in=TERMINAL | {"queued", "pending", "starting"}) | Q(created_at__gte=day_start)
+        | Q(result__article_preview_quality__self_heal_exhausted=True)).order_by("organization_id", "pk"))
     queued = 0
     incidents = []
     setup = {}
