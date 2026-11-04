@@ -485,9 +485,17 @@ Hosted quality repair is owned by Content Factory. While its bounded repair runs
 `article_preview_quality.status=self_healing` locks publishing, clears an older
 approval blocker during status merge, and explains that the preview is being fixed
 automatically. A terminal block uses the worker's specific `founder_message`.
-Exhausted safety checks show a staff-review message without raw safety findings;
-the staff sweep raises `article_safety_review_required` or
-`article_quality_review_required`, including for runs still awaiting approval.
+Exhausted safety checks show a staff-review message without raw safety findings.
+After a successful current-owner status observation, an after-commit hook reloads
+the Run and verifies its hosted review identity, generation and inputs, honoring
+any current owner stop intent before queuing `article_safety_review_required` or
+`article_quality_review_required`. The existing Founder Journey alert sweep
+delivers these idempotent owner-queued receipts under its existing gate and limits;
+the broader staff-rule detector does not have to be enabled. An old article can
+queue an alert when its current owner observes a newly exhausted check, without
+backfilling historical runs or resetting prior receipts. No alert is queued for a
+superseded review, an active repair, an owner stop or an unverified owned snapshot.
+The separate broader staff sweep can recognize the same reasons using the same IDs.
 These states never count as accepted hosted quality for approval or promotion.
 Internal worker repairs do not create founder approval receipts or charge a
 founder revision. Existing organisation, billing and explicit approval boundaries
