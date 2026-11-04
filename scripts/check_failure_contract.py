@@ -1,0 +1,447 @@
+#!/usr/bin/env python3
+"""Audit vendored B1 bytes, exact emitters and immutable CF provenance.
+
+Offline validation is explicit about its limit. CI must use --remote; unavailable
+private-source access fails without printing tokens, response bodies or URLs.
+Receivers validate failure codes by membership, so a difference from the pinned
+Content Factory copy is reported as drift (codes and classes), not a failure.
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+ROOT = Path(__file__).resolve().parents[1]
+ARTIFACTS = ("contracts/failure-codes.json", "contracts/failure-envelope-v1.schema.json", "contracts/setup-delivery-v1.schema.json")
+SOURCE_REPOSITORY = "drsamdonegan/content-factory"
+FIELDS = {"code", "error_code", "errorCode", "blocking_code", "blockingCode", "reasonCode", "reason_code", "failure_code", "model_adapter_blocking_code"}
+CONSTRUCTORS = {"WebsiteAuthorityError": 0, "RunCommandConflict": 0}
+# P2 (IF-P2-27): a package's own emitter-audit fragment may hold only these keys.
+FRAGMENT_DIRECTORY = "contracts/failure-emitter-scopes.d"
+FRAGMENT_KEYS = frozenset({"dynamic_adapters", "nonfailure_sites"})
+# P2 (IF-P2-01, IF-P2-03): registry v2 vocabulary and the pre-P2 overlay.
+LIMIT_KEYS = frozenset({"repairable_max_attempts", "strategy_max_attempts_per_rung_per_source",
+                        "strategy_max_attempts_per_org_per_day", "wall_hours", "pull_requests_per_org_per_day",
+                        "source_repins_per_run"})
+NO_CHARGE_ACTIONS = frozenset({"buy_points", "agree_terms"})
+OVERLAY_PATH = "content_factory/failure_registry_pre_p2.json"
+PRE_P2_FIXTURE_PATH = "content_factory/tests/fixtures/p2/failure-codes.pre-p2.json"
+OVERLAY_RESERVED_KEYS = frozenset({"actions", "source_revision"})
+OVERLAY_FIELDS = ("failure_class", "retry_policy", "action_id")
+UNREGISTERED = "UNREGISTERED_FAILURE_CODE"
+
+
+class ContractCheckError(ValueError):
+    """A safe, bounded diagnostic for a source/registry/emitter check."""
+
+
+def canonical_bytes(value):
+    return (json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode()
+
+
+def site_key(row):
+    return hashlib.sha256(json.dumps({key: row[key] for key in ("path", "function", "field", "expression")}, sort_keys=True).encode()).hexdigest()
+
+
+def python_emissions(source, path):
+    """Parse production emission seams, preserving exact dynamic expressions."""
+    tree = ast.parse(source, filename=path)
+    constants = {}
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    constants[target.id] = node.value
+
+    def finite(node, seen=frozenset(), locals_=None):
+        values = {**constants, **(locals_ or {})}
+        if isinstance(node, ast.Constant):
+            return {node.value} if isinstance(node.value, str) else set() if node.value is None else None
+        if isinstance(node, ast.Name) and node.id not in seen and node.id in values:
+            return finite(values[node.id], seen | {node.id}, locals_)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            class_ = next((item for item in tree.body if isinstance(item, ast.ClassDef) and item.name == node.value.id), None)
+            if class_:
+                for item in class_.body:
+                    if isinstance(item, ast.Assign) and any(isinstance(target, ast.Name) and target.id == node.attr for target in item.targets):
+                        return finite(item.value, seen, locals_)
+        if isinstance(node, ast.IfExp):
+            branches = [finite(node.body, seen, locals_), finite(node.orelse, seen, locals_)]
+            return branches[0] | branches[1] if all(value is not None for value in branches) else None
+        if isinstance(node, ast.BoolOp):
+            branches = [finite(value, seen, locals_) for value in node.values]
+            return set().union(*branches) if all(value is not None for value in branches) else None
+        if isinstance(node, ast.JoinedStr):
+            values = {""}
+            for value in node.values:
+                part = finite(value.value, seen, locals_) if isinstance(value, ast.FormattedValue) else finite(value, seen, locals_)
+                if part is None or len(values) * len(part) > 256:
+                    return None
+                values = {prefix + suffix for prefix in values for suffix in part}
+            return values
+        return None
+
+    rows = []
+    class Visitor(ast.NodeVisitor):
+        def __init__(self):
+            self.scope = []
+            self.locals = []
+        def visit_FunctionDef(self, node):
+            self.scope.append(node.name)
+            # Resolve only unique assignments in this exact function; an ambiguous
+            # name remains dynamic and requires a reviewed boundary declaration.
+            candidates = {}
+            def function_nodes(item):
+                yield item
+                for child in ast.iter_child_nodes(item):
+                    if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                        yield from function_nodes(child)
+            for item in function_nodes(node):
+                if isinstance(item, ast.Assign):
+                    for target in item.targets:
+                        if isinstance(target, ast.Name):
+                            candidates.setdefault(target.id, []).append(item.value)
+            arguments = {value.arg for value in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)}
+            self.locals.append({key: values[0] if len(values) == 1 else ast.BoolOp(op=ast.Or(), values=values)
+                                for key, values in candidates.items() if key not in arguments})
+            self.generic_visit(node)
+            self.locals.pop(); self.scope.pop()
+        visit_AsyncFunctionDef = visit_FunctionDef
+        def emit(self, node, field, value):
+            literals = finite(value, locals_=self.locals[-1] if self.locals else None)
+            rows.append({"path": path, "function": ".".join(self.scope) or "<module>", "field": field,
+                         "expression": ast.unparse(value), "line": node.lineno,
+                         "literals": sorted(literals) if literals is not None else None})
+        def visit_Dict(self, node):
+            for key, value in zip(node.keys, node.values):
+                if isinstance(key, ast.Constant) and key.value in FIELDS:
+                    self.emit(node, key.value, value)
+            self.generic_visit(node)
+        def visit_Call(self, node):
+            for keyword in node.keywords:
+                if keyword.arg in FIELDS:
+                    self.emit(node, keyword.arg, keyword.value)
+            name = ast.unparse(node.func).split(".")[-1]
+            if name in CONSTRUCTORS and len(node.args) > CONSTRUCTORS[name]:
+                self.emit(node, "error_code", node.args[CONSTRUCTORS[name]])
+            if name == "setdefault" and len(node.args) > 1 and isinstance(node.args[0], ast.Constant) and node.args[0].value in FIELDS:
+                self.emit(node, node.args[0].value, node.args[1])
+            self.generic_visit(node)
+        def visit_Assign(self, node):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and target.attr in FIELDS:
+                    self.emit(node, target.attr, node.value)
+                elif isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant) and target.slice.value in FIELDS:
+                    self.emit(node, target.slice.value, node.value)
+            self.generic_visit(node)
+    Visitor().visit(tree)
+    return rows
+
+
+def inventory(root=ROOT):
+    """Cover backend website/scan/setup/generation/publication production Python.
+
+    Backend has no JavaScript/build emitter in this scope. CF's companion scanner
+    parses its build seams with pinned Acorn; cross-repo parity covers that inventory.
+    """
+    paths = [path for path in (root / "content_factory").rglob("*.py")
+             if not path.name.startswith(("test_", "tests_")) and not set(path.parts) & {"migrations", "__pycache__"}]
+    paths += [root / name for name in ("integrations/services/article_generation.py", "integrations/api_views_content_factory_app.py")]
+    return [row for path in sorted(paths) if path.is_file()
+            for row in python_emissions(path.read_text(), path.relative_to(root).as_posix())]
+
+
+def check_registry(root=ROOT):
+    registry = json.loads((root / ARTIFACTS[0]).read_text())
+    schema = json.loads((root / ARTIFACTS[1]).read_text())
+    for path, value in ((root / ARTIFACTS[0], registry), (root / ARTIFACTS[1], schema)):
+        if path.read_bytes() != canonical_bytes(value):
+            raise ContractCheckError("noncanonical_contract_bytes")
+    classes = {"transient", "waiting", "repairable", "strategy", "needs_user", "unsupported"}
+    if set(registry.get("classes", [])) != classes or type(registry.get("registry_version")) is not int or registry["registry_version"] != 1:
+        raise ContractCheckError("invalid_registry_version")
+    aliases = set()
+    for entry in registry.get("codes", []):
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", entry.get("code", "")):
+            raise ContractCheckError("invalid_registry_code")
+        for code in (entry["code"], *entry.get("aliases", [])):
+            if code in aliases:
+                raise ContractCheckError("duplicate_or_ambiguous_code")
+            aliases.add(code)
+        if entry.get("failure_class") not in classes or entry.get("retry_policy") not in registry.get("policies", {}):
+            raise ContractCheckError("invalid_registry_policy")
+        policy = registry["policies"][entry["retry_policy"]]
+        if policy.get("class") != entry["failure_class"]:
+            raise ContractCheckError("inconsistent_registry_policy")
+        if entry["failure_class"] == "needs_user" and entry.get("action_id") not in registry.get("actions", {}):
+            raise ContractCheckError("invalid_registry_owner_action")
+        if not entry.get("owner") or not entry.get("emitter_scopes") or not entry.get("user_message"):
+            raise ContractCheckError("missing_registry_provenance")
+        legacy = entry.get("legacy", {})
+        if legacy.get("failure_class") not in classes or type(legacy.get("retryable")) is not bool or not isinstance(legacy.get("code"), str):
+            raise ContractCheckError("invalid_legacy_adapter")
+    if sorted(entry["code"] for entry in registry["codes"]) != schema["properties"]["code"]["enum"]:
+        raise ContractCheckError("registry_schema_code_mismatch")
+    errors = registry_v2_errors(registry)
+    if errors:
+        raise ContractCheckError("; ".join(errors))
+    check_overlay(root, registry)
+    return registry, aliases
+
+
+def registry_v2_errors(registry):
+    """P2 (IF-P2-01) vocabulary checks over the raw registry; each defect is named."""
+    errors = []
+    actions = registry.get("actions") if isinstance(registry.get("actions"), dict) else {}
+    aliases = registry.get("action_aliases", {})
+    retired = registry.get("retired_actions", [])
+    copy_ids = registry.get("founder_copy_ids", [])
+    if not isinstance(aliases, dict) or any(alias in actions or target not in actions for alias, target in aliases.items()):
+        errors.append("invalid_action_aliases")
+        aliases = {}
+    if (not isinstance(retired, list) or retired != sorted(set(retired)) or
+            any(action_id in actions or action_id in aliases for action_id in retired)):
+        errors.append("invalid_retired_actions")
+        retired = []
+    if (not isinstance(copy_ids, list) or not copy_ids or copy_ids != sorted(set(copy_ids)) or
+            any(not isinstance(copy_id, str) for copy_id in copy_ids)):
+        errors.append("invalid_founder_copy_ids")
+        copy_ids = []
+    limits = registry.get("limits")
+    if (not isinstance(limits, dict) or set(limits) != LIMIT_KEYS or
+            any(type(value) is not int or value < 1 for value in limits.values())):
+        errors.append("invalid_registry_limits")
+    for entry in registry.get("codes", []):
+        code = entry.get("code")
+        if entry.get("founder_copy_id") not in copy_ids:
+            errors.append(f"{code}: missing_or_unknown_founder_copy_id")
+        elif entry["founder_copy_id"].startswith("ask_") is not (entry.get("failure_class") == "needs_user"):
+            errors.append(f"{code}: founder_copy_id_class_mismatch")
+        if type(entry.get("refund")) is not bool:
+            errors.append(f"{code}: missing_refund_flag")
+        elif entry["refund"] is (entry.get("failure_class") == "needs_user" and entry.get("action_id") in NO_CHARGE_ACTIONS):
+            errors.append(f"{code}: invalid_refund_flag")
+        if entry.get("failure_class") == "needs_user" and entry.get("action_id") not in actions:
+            errors.append(f"{code}: noncanonical_owner_action")
+    return errors
+
+
+def check_overlay(root, registry):
+    """The vendored pre-P2 overlay restores exactly today's view (IF-P2-03).
+
+    Every code whose class, policy or action changed against the vendored
+    pre-P2 fixture has an entry holding today's values. A new code has an entry
+    only when a pre-P2 path already emits it, and then it holds the unregistered
+    stop every reader saw before P2. Nothing else is overlaid.
+    """
+    try:
+        overlay = json.loads((root / OVERLAY_PATH).read_text())
+        pre = json.loads((root / PRE_P2_FIXTURE_PATH).read_text())
+    except (OSError, ValueError):
+        raise ContractCheckError("missing_or_unreadable_pre_p2_overlay") from None
+    if not isinstance(overlay, dict) or overlay.get("actions") != pre.get("actions"):
+        raise ContractCheckError("stale_pre_p2_overlay")
+    before = {entry["code"]: entry for entry in pre["codes"]}
+    current = {entry["code"]: entry for entry in registry["codes"]}
+    expected = {}
+    for name, entry in current.items():
+        old = before.get(name)
+        if old is None:
+            continue
+        if any(old.get(field) != entry.get(field) for field in OVERLAY_FIELDS):
+            expected[name] = old
+    for name, values in overlay.items():
+        if name in OVERLAY_RESERVED_KEYS:
+            continue
+        if name not in current or not isinstance(values, dict):
+            raise ContractCheckError("stale_pre_p2_overlay")
+        if name not in before:
+            expected[name] = before[UNREGISTERED]
+    for name, old in expected.items():
+        values = overlay.get(name)
+        if (not isinstance(values, dict) or
+                values != {"action_id": old.get("action_id"), "failure_class": old["failure_class"],
+                           "retry_policy": old["retry_policy"], "retryable": old["failure_class"] == "transient"}):
+            raise ContractCheckError("stale_pre_p2_overlay")
+    if set(overlay) - OVERLAY_RESERVED_KEYS != set(expected):
+        raise ContractCheckError("stale_pre_p2_overlay")
+
+
+def load_manifest(root=ROOT):
+    """The base emitter manifest merged with every package fragment (IF-P2-27).
+
+    Fragments load in sorted file-name order and may hold only `dynamic_adapters`
+    and `nonfailure_sites`. An unknown key, a non-list value, a site key another
+    file (or the same fragment) already declares, or an audit whose site key no
+    longer matches its own fields is an error.
+    """
+    errors = []
+    manifest = json.loads((root / "contracts/failure-emitter-scopes.json").read_text())
+    merged = {key: list(manifest.get(key, [])) for key in FRAGMENT_KEYS}
+    seen = {entry.get("site_sha256") for key in FRAGMENT_KEYS for entry in merged[key]}
+    directory = root / FRAGMENT_DIRECTORY
+    for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
+        name = f"{FRAGMENT_DIRECTORY}/{path.name}"
+        try:
+            fragment = json.loads(path.read_text())
+        except ValueError:
+            errors.append(f"{name}: invalid JSON"); continue
+        if not isinstance(fragment, dict):
+            errors.append(f"{name}: a fragment must be an object"); continue
+        for key in sorted(set(fragment) - FRAGMENT_KEYS):
+            errors.append(f"{name}: unknown fragment key {key}")
+        for key in sorted(FRAGMENT_KEYS & set(fragment)):
+            if not isinstance(fragment[key], list):
+                errors.append(f"{name}: {key} must be a list"); continue
+            for entry in fragment[key]:
+                if not isinstance(entry, dict) or any(not isinstance(entry.get(field), str)
+                                                      for field in ("path", "function", "field", "expression", "site_sha256")):
+                    errors.append(f"{name}: invalid {key} entry"); continue
+                if entry["site_sha256"] in seen:
+                    errors.append(f"{name}: duplicate site key {entry['site_sha256']} ({entry['path']} {entry['function']})")
+                    continue
+                if entry["site_sha256"] != site_key(entry):
+                    errors.append(f"{name}: stale audit {entry['path']} {entry['function']} (site key does not match its fields)")
+                    continue
+                seen.add(entry["site_sha256"])
+                merged[key].append(entry)
+    manifest.update(merged)
+    return manifest, errors
+
+
+def check_emitters(root=ROOT):
+    registry, codes = check_registry(root)
+    manifest, errors = load_manifest(root)
+    entries = manifest.get("dynamic_adapters", []) + manifest.get("nonfailure_sites", [])
+    declarations = {entry["site_sha256"]: entry for entry in entries}
+    if len(declarations) != len(entries):
+        raise ContractCheckError("duplicate_emitter_audit")
+    seen = set()
+    rows = inventory(root)
+    allowed_adapters = {"authority_registry_boundary", "validated_v1_projection", "audited_v0_observation", "closed_backend_code_union", "nonfailure_category"}
+    for row in rows:
+        where = f"{row['path']}:{row['line']} {row['function']}"
+        key = site_key(row)
+        audit = declarations.get(key)
+        if audit is not None:
+            seen.add(key)
+            if (audit.get("adapter") not in allowed_adapters or not audit.get("owner") or not audit.get("test")
+                    or not audit.get("source") or any(audit.get(field) != row[field] for field in ("path", "function", "field", "expression"))
+                    or audit.get("allowed_codes_ref") != "contracts/failure-codes.json#/codes"):
+                errors.append(f"{where}: invalid exact emitter audit")
+            elif not audit["source"].strip() or any("*" in str(audit.get(field, "")) for field in ("path", "function", "source")):
+                errors.append(f"{where}: forbidden wildcard emitter audit")
+            if row["literals"] is not None and audit.get("adapter") != "nonfailure_category":
+                unknown = set(row["literals"]) - codes - {""}
+                if unknown:
+                    errors.append(f"{where}: unknown literal in bounded adapter")
+        elif row["literals"] is None:
+            errors.append(f"{where}: unaudited dynamic {row['field']} emitter")
+        else:
+            for code in row["literals"]:
+                if code and code not in codes:
+                    errors.append(f"{where}: unregistered {row['field']} literal")
+    for key in declarations.keys() - seen:
+        errors.append(f"{declarations[key]['path']} {declarations[key]['function']}: stale emitter audit")
+    return errors, rows
+
+
+def describe_drift(path, local, peer):
+    """Report how the vendored copy differs from the pinned Content Factory copy."""
+    if path != ARTIFACTS[0]:
+        return [f"DRIFT {path}: bytes differ from the pinned Content Factory revision"]
+    try:
+        ours, theirs = ({entry["code"]: entry["failure_class"] for entry in json.loads(raw)["codes"]} for raw in (local, peer))
+    except (ValueError, KeyError, TypeError):
+        return [f"DRIFT {path}: the pinned Content Factory copy is not a readable registry"]
+    def safe(value):
+        return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", value) else "<invalid>"
+    lines = [f"DRIFT {path}: only in Content Factory: {safe(code)}" for code in sorted(theirs.keys() - ours.keys(), key=str)]
+    lines += [f"DRIFT {path}: only here: {code}" for code in sorted(ours.keys() - theirs.keys())]
+    lines += [f"DRIFT {path}: {code} is {ours[code]} here and {safe(theirs[code])} in Content Factory"
+              for code in sorted(ours.keys() & theirs.keys()) if ours[code] != theirs[code]]
+    return lines or [f"DRIFT {path}: bytes differ; codes and classes agree"]
+
+
+def verify_vendor(root=ROOT, *, remote=False, token=None, fetch=None):
+    """Verify exact local digests; with remote, return drift from the pinned source.
+
+    Local digests, the immutable pin and private-source access still fail
+    closed. Byte differences from the pinned Content Factory copy are returned
+    as drift lines because receivers accept codes by membership.
+    """
+    lock = json.loads((root / "contracts/failure-codes.lock.json").read_text())
+    if type(lock.get("schema_version")) is not int or lock["schema_version"] != 1:
+        raise ContractCheckError("invalid_vendor_lock_version")
+    revision = lock.get("source_revision")
+    if lock.get("source_repository") != SOURCE_REPOSITORY or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ContractCheckError("source_revision_must_be_immutable_commit")
+    if set(lock.get("files", {})) != set(ARTIFACTS):
+        raise ContractCheckError("invalid_vendor_file_set")
+    if remote and not token:
+        raise ContractCheckError("CONTENT_FACTORY_CONTRACT_READ_TOKEN_required_for_pinned_private_source")
+    drift = []
+    for path in ARTIFACTS:
+        raw = (root / path).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != lock["files"][path]:
+            raise ContractCheckError("vendor_digest_mismatch")
+        if remote:
+            peer = fetch(path, revision, token) if fetch else fetch_source(path, revision, token)
+            if peer != raw:
+                drift.extend(describe_drift(path, raw, peer))
+    return drift
+
+
+def fetch_source(path, revision, token):
+    request = Request(f"https://api.github.com/repos/{SOURCE_REPOSITORY}/contents/{path}?ref={revision}",
+                      headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+    try:
+        with urlopen(request, timeout=20) as response:
+            data = response.read(2 * 1024 * 1024 + 1)
+        if len(data) > 2 * 1024 * 1024:
+            raise ContractCheckError("pinned_source_response_oversized")
+        payload = json.loads(data)
+        if not isinstance(payload, dict) or payload.get("encoding") != "base64" or not isinstance(payload.get("content"), str):
+            raise ContractCheckError("pinned_source_response_invalid")
+        return base64.b64decode(payload["content"].replace("\n", ""), validate=True)
+    except HTTPError as exc:
+        raise ContractCheckError(f"pinned_source_access_failed_http_{exc.code}") from None
+    except (URLError, TimeoutError, ValueError, KeyError, TypeError):
+        raise ContractCheckError("pinned_source_fetch_failed") from None
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--inventory", action="store_true")
+    parser.add_argument("--remote", action="store_true")
+    args = parser.parse_args()
+    if args.inventory:
+        print(json.dumps(inventory(), sort_keys=True, indent=2)); return 0
+    try:
+        errors, rows = check_emitters()
+        drift = verify_vendor(remote=args.remote, token=os.getenv("CONTENT_FACTORY_CONTRACT_READ_TOKEN"))
+        if errors:
+            print("\n".join(errors)); return 1
+    except (ContractCheckError, OSError, ValueError) as exc:
+        print(f"Failure contract check failed: {exc}"); return 1
+    print(f"Failure contract: {len(rows)} production emissions audited; vendored digests valid.")
+    if drift:
+        print("\n".join(drift))
+        print("Pinned Content Factory copy differs (reported, not a gate); bump source_revision once both repos agree.")
+    else:
+        print("Pinned Content Factory provenance verified." if args.remote else "OFFLINE: remote pinned provenance was not rechecked.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

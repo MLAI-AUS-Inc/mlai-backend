@@ -25,6 +25,7 @@ class HospitalRoundArchiveTests(TestCase):
         self.initial_round_count = HospitalCompetitionRound.objects.count()
         self.user = User.objects.create_user(
             email='legacy-healthhack@example.com',
+            is_superuser=True,
             password='password',
             first_name='Legacy',
             last_name='Participant',
@@ -133,6 +134,7 @@ class HospitalRoundArchiveTests(TestCase):
 
         leaderboard_user = User.objects.create_user(
             email='hi@mlai.au',
+            is_superuser=True,
             password='password',
         )
         leaderboard_client = APIClient()
@@ -257,6 +259,7 @@ class HospitalRoundSlackArchiveTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(
             email='slack-viewer@example.com',
+            is_superuser=True,
             password='password',
         )
         self.client = APIClient()

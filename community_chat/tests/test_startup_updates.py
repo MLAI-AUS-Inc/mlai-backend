@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from django.core import signing
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.db import OperationalError
 from django.http import Http404
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
@@ -21,7 +22,7 @@ from community_chat.startups import views
 from community_chat.startups.connections import SALT, connect_browser, consume_ticket
 from community_chat.startups.presentation import PUBLIC_FIELDS, update_payload
 from startup_updates import revisions
-from startup_updates.review_policy import manual_validation
+from startup_updates.review_policy import NARRATIVE_MEMO_KEYS, has_narrative, manual_validation
 from vibe_raising.views import _serialize_monthly_update, _build_manual_structured_memo, _extract_display_config
 from vibe_raising.serializers import VibeRaisingMonthlyUpdateUpsertSerializer
 
@@ -150,12 +151,39 @@ class StartupFacadeTests(SimpleTestCase):
 
     def test_owner_keeps_metrics_and_private_source_evidence(self):
         dto = {'metrics': {'venue_invoice': 'AUD 960'}, 'metricEvidence': {}, 'evidenceSnapshot': {'private': 960}}
-        revision = Obj(structured_memo={}, validation={'groundedness_status': 'passed'}, snapshot=Obj(payload={}))
+        revision = Obj(structured_memo={}, validation={'groundedness_status': 'passed'}, snapshot=Obj(payload={'private': 960}))
         draft = Obj(current_revision=revision, current_revision_id=1, published_revision_id=None, organization=Obj(name='Acme'))
         with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
             result = update_payload(draft)
         self.assertEqual(result['metrics'], {'venue_invoice': 'AUD 960'})
         self.assertEqual(result['evidenceSnapshot'], {'private': 960})
+
+    def test_owner_published_read_keeps_approved_private_financial_evidence(self):
+        snapshot = {'metrics': [{'key': 'revenue', 'display_value': 'AUD 4000',
+            'quality': 'source_reported', 'unit': 'AUD'}]}
+        approved = Obj(structured_memo={'kpi_snapshot': [],
+            'display_config': {'full_metric_keys': []}},
+            validation={'groundedness_status': 'passed'}, snapshot=Obj(payload=snapshot))
+        draft = Obj(published_revision=approved, published_revision_id=2,
+            current_revision_id=3, organization=Obj(name='Acme'))
+        dto = {'metrics': {}, 'metricEvidence': {}, 'evidenceSnapshot': None}
+        with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
+            result = update_payload(draft, published=True)
+        self.assertEqual(result['metrics'], {})
+        self.assertEqual(result['evidenceSnapshot'], snapshot)
+        self.assertTrue(result['hasNewerDraft'])
+        result['evidenceSnapshot']['metrics'][0]['display_value'] = 'AUD 9999'
+        self.assertEqual(snapshot['metrics'][0]['display_value'], 'AUD 4000')
+
+    def test_approved_private_evidence_never_enters_community_projection(self):
+        snapshot = {'metrics': [{'key': 'revenue', 'display_value': 'AUD 4000'}]}
+        approved = Obj(structured_memo={'kpi_snapshot': []}, snapshot=Obj(payload=snapshot))
+        draft = Obj(published_revision=approved, organization=Obj(name='Acme'))
+        dto = {'metrics': {}, 'metricEvidence': {}, 'evidenceSnapshot': None}
+        with patch('community_chat.startups.presentation._serialize_monthly_update', return_value=dto):
+            result = update_payload(draft, published=True, community=True)
+        self.assertNotIn('evidenceSnapshot', result)
+        self.assertNotIn('4000', json.dumps(result))
 
     def test_shared_founder_serializer_does_not_return_amounts(self):
         memo = {'_audience_visibility': ['community'], 'highlights': ['We launched.', 'Venue invoice: AUD 960.'],
@@ -204,8 +232,8 @@ class ReviewPolicyTests(SimpleTestCase):
             result = revisions.approve_and_publish.__wrapped__(draft, **body)
         return result
 
-    def revision(self, status='passed'):
-        return Obj(pk=5, content_hash='exact-hash', structured_memo={'_audience_visibility': ['community']}, validation={'groundedness_status': status}, snapshot=Obj(payload={'period': {'timezone': 'UTC'}}))
+    def revision(self, status='passed', **memo):
+        return Obj(pk=5, content_hash='exact-hash', structured_memo={'highlights': ['We shipped.'], **memo, '_audience_visibility': ['community']}, validation={'groundedness_status': status}, snapshot=Obj(payload={'period': {'timezone': 'UTC'}}))
 
     def test_stale_receipt_cannot_publish(self):
         for override in ({'revision_id': 4}, {'revision_hash': 'stale'}, {'audience_visibility': ['just_me']}):
@@ -223,6 +251,18 @@ class ReviewPolicyTests(SimpleTestCase):
         self.assertIs(published.published_revision, revision)
         self.assertIsNone(published.run)
         published.save.assert_called_once()
+
+    def test_blank_update_cannot_be_approved(self):
+        blank = self.revision('founder_asserted', summary='  ', highlights=['', ' '], lowlights=[],
+            next_30_days=[{'text': ''}], kpi_snapshot=[{'metric_key': 'revenue', 'value': '100'}])
+        with self.assertRaises(revisions.EmptyUpdate):
+            self.approve(blank)
+
+    def test_any_narrative_section_is_enough_to_approve(self):
+        for key in NARRATIVE_MEMO_KEYS:
+            with self.subTest(key=key):
+                self.assertTrue(has_narrative({key: 'Signed our first customer.'}))
+        self.assertFalse(has_narrative({'kpi_snapshot': [{'value': '100'}], 'cover_image': {'url': 'cover.png'}}))
 
 
 @override_settings(COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED=True,
@@ -273,12 +313,12 @@ class ConnectionHandoffTests(SimpleTestCase):
 
 
 class FrozenManualEvidenceTests(SimpleTestCase):
-    def snapshot(self, *, metrics=None, base=None):
+    def snapshot(self, *, metrics=None, base=None, run_context=None):
         from contextlib import ExitStack
         from startup_updates import services
         profile = Obj(reporting_timezone='UTC', kpi_definitions=[], default_currency='AUD', reporting_config_version=1, stage='seed', short_description='Acme')
         org = Obj(pk=1, name='Acme')
-        run = Obj(result={}, pk=1, run_request={'input_sources': ['manual_documents'], 'manual_document_ids': ['doc'], 'manual_summary': 'Founder notes'})
+        run = Obj(result={}, pk=1, run_request={'input_sources': ['manual_documents'], 'manual_document_ids': ['doc'], 'manual_summary': 'Founder notes', **(run_context or {})})
         with ExitStack() as stack:
             profiles = stack.enter_context(patch.object(revisions.StartupProfile, 'objects'))
             profiles.get_or_create.return_value = (profile, False)
@@ -414,6 +454,60 @@ class CoverImageTests(SimpleTestCase):
         self.assertEqual(create.call_args.kwargs['cover_image'], cover)
         dispatch.assert_called_once()
 
+    def test_generate_endpoint_retries_a_deadlocked_commit_and_dispatches_once(self):
+        from vibe_raising import transaction_retry, views as founder_views
+
+        class AbortedCommit:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                if exc_type is None:
+                    cause = Exception('deadlock detected')
+                    cause.sqlstate = '40P01'
+                    raise OperationalError('deadlock detected') from cause
+                return False
+
+        org, company, binding = Obj(id=7), Obj(organization=Obj()), Obj(id=8, google_connection_id=None)
+        request = Obj(user=Obj(id=1), data={'updateDate': '2026-09-30'}, query_params={})
+        patches = {
+            '_get_founder_company_context_or_response': ({'company': company, 'domain': 'acme.example'}, None),
+            '_ensure_binding_for_company': (org, None, binding),
+            '_resolve_manual_documents_for_request': [], '_get_requested_manual_document_ids': [],
+            '_get_requested_manual_summary': 'Founder notes', '_get_requested_input_sources': ['manual_documents'],
+            '_requested_target_month_from_request': date(2026, 9, 1), 'google_connection_for_org': None,
+            'coerce_startup_update_sources_for_gmail_scope': (['manual_documents'], None, {}),
+            '_sync_selected_connector_sources_for_draft': {}, 'get_open_startup_update_run': None,
+            '_build_email_draft_payload': {},
+        }
+        transactions = [AbortedCommit(), nullcontext()]
+        with ExitStack() as stack:
+            for name, result in patches.items():
+                stack.enter_context(patch.object(founder_views, name, return_value=result))
+            stack.enter_context(patch.object(founder_views.transaction, 'atomic', side_effect=lambda: transactions.pop(0)))
+            sleep = stack.enter_context(patch.object(transaction_retry.time, 'sleep'))
+            drafts = [
+                Obj(pk=1, current_revision_id=None, month=date(2026, 9, 1), update_date=None, save=MagicMock())
+                for _ in range(2)
+            ]
+            resolve = stack.enter_context(patch('startup_updates.update_identity.resolve_update', side_effect=[(draft, True) for draft in drafts]))
+            stack.enter_context(patch('startup_updates.update_identity.identity_payload', return_value={}))
+            stack.enter_context(patch('startup_updates.update_identity.narrative_window', return_value={'start': '2026-09-01T00:00:00Z', 'end': '2026-10-01T00:00:00Z'}))
+            runs = [Obj(run_id='rolled-back', run_request={}), Obj(run_id='committed', run_request={})]
+            create = stack.enter_context(patch.object(founder_views, 'create_startup_update_run', side_effect=runs))
+            dispatch = stack.enter_context(patch.object(founder_views, '_dispatch_run_to_valley', return_value=True))
+            response = founder_views.VibeRaisingEmailDraftStartView().post(request)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(transactions, [])
+        self.assertEqual(resolve.call_count, 2)
+        self.assertEqual(create.call_count, 2)
+        # Each attempt starts from the request, not from the rolled-back draft.
+        self.assertEqual([call.kwargs['update_date'] for call in resolve.call_args_list], [date(2026, 9, 30)] * 2)
+        self.assertEqual(drafts[1].update_date, date(2026, 9, 30))
+        sleep.assert_called_once()
+        # Valley sees only the run whose transaction committed.
+        dispatch.assert_called_once_with(runs[1])
+
     def test_new_generation_run_persists_cover_without_provider_or_database_access(self):
         from startup_updates import services
 
@@ -421,7 +515,7 @@ class CoverImageTests(SimpleTestCase):
         org = Obj(id=7, startup_profile=None, domain='acme.example')
         binding = Obj(id=8, google_connection=None, user=Obj(), organization=org, user_id=1)
         with ExitStack() as stack:
-            stack.enter_context(patch('integrations.services.external_connectors.google_connection_for_org', return_value=None))
+            stack.enter_context(patch.object(services, 'google_connection_for_binding', return_value=None))
             stack.enter_context(patch.object(services, 'get_open_startup_update_run', return_value=None))
             stack.enter_context(patch.object(services, 'supersede_conflicting_startup_update_runs'))
             stack.enter_context(patch.object(services, 'build_external_context_for_sources', return_value={}))
@@ -433,6 +527,7 @@ class CoverImageTests(SimpleTestCase):
         request = runs.create.call_args.kwargs['run_request']
         self.assertEqual(request['cover_image'], cover)
         self.assertEqual(request['manual_summary'], 'A good month')
+        self.assertEqual(request['source_connection_pins'], {})
 
     def test_cover_does_not_disclose_arbitrary_metadata(self):
         from startup_updates.disclosure import shared_update

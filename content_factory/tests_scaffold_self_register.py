@@ -1,9 +1,5 @@
-"""A fresh articles scaffold self-registers its durable publish target on approve/merge.
-
-`_link_built_scaffold_publish_target` synthesizes + persists the react_article_system target from
-the built scaffold cache; the approve (`pr_created`) and merge mark helpers call it, so a scaffold
-becomes publishable the moment it's approved — no manual Accept.
-"""
+"""Setup cache and PR labels cannot replace a verified native target."""
+from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from content_factory.models import Organization, OrganizationContentConfig
@@ -13,6 +9,7 @@ from content_factory.vibe_marketing_views import (
     _mark_pending_article_system_setup_merged,
     _mark_pending_article_system_setup_pr_created,
 )
+from tests.website_fixtures import bind_verified_target_fixture
 
 SETUP_CACHE = {
     "content_root": "articles",
@@ -43,23 +40,25 @@ class ScaffoldSelfRegisterTests(TestCase):
     def _direct_target(self):
         return [t for t in (self.config.publish_targets or []) if is_directly_publishable_target(t)]
 
-    def test_link_helper_registers_direct_target_from_cache(self):
+    def test_link_helper_selects_current_verified_target(self):
+        user = get_user_model().objects.create_user(email='scaffold-owner@example.test')
+        bind_verified_target_fixture(self.config, user=user)
+        expected = list(self.config.publish_targets)
+        self.config.publish_targets = []
+        self.config.default_publish_target_id = None
+        self.config.save(update_fields=['publish_targets', 'default_publish_target_id'])
         self.assertTrue(_link_built_scaffold_publish_target(self.config))
         self.config.refresh_from_db()
-        direct = self._direct_target()
-        self.assertEqual(len(direct), 1)
-        self.assertEqual(direct[0]["content_path_pattern"], "src/pages/articles/{category}/{slug}.tsx")
-        self.assertEqual(self.config.article_path_pattern, "src/pages/articles/{category}/{slug}.tsx")
-        self.assertEqual(self.config.registry_path, "src/pages/articles/registry.ts")
-        self.assertEqual(self.config.article_system.get("system_type"), "react_article_system")
-        self.assertTrue(self.config.articles_scaffolded)
+        self.assertEqual(self._direct_target(), expected)
+        self.assertEqual(self.config.default_publish_target_id, expected[0]['target_id'])
 
-    def test_link_helper_clears_unlink_watermark(self):
+    def test_cache_without_current_verification_cannot_clear_unlink_watermark(self):
         self.config.article_system = {"state": "existing", "publish_disconnected_at": "2026-06-28T00:00:00Z"}
         self.config.save(update_fields=["article_system"])
-        self.assertTrue(_link_built_scaffold_publish_target(self.config))
+        self.assertFalse(_link_built_scaffold_publish_target(self.config))
         self.config.refresh_from_db()
-        self.assertNotIn("publish_disconnected_at", self.config.article_system)
+        self.assertIn("publish_disconnected_at", self.config.article_system)
+        self.assertEqual(self.config.publish_targets, [])
 
     def test_link_helper_noop_without_built_cache(self):
         self.config.article_system_setup_cache = {}
@@ -68,21 +67,21 @@ class ScaffoldSelfRegisterTests(TestCase):
         self.config.refresh_from_db()
         self.assertEqual(self.config.publish_targets, [])
 
-    def test_pr_created_mark_self_registers_target(self):
-        # The scaffold-approve path (PR created) self-registers without a manual Accept.
+    def test_pr_created_label_does_not_certify_a_publish_target(self):
         class _Run:
             run_id = "setup-run-1"
         _mark_pending_article_system_setup_pr_created(self.config, run=_Run(), result={})
         self.config.refresh_from_db()
-        self.assertEqual(len(self._direct_target()), 1)
+        self.assertEqual(self._direct_target(), [])
         self.assertEqual(
             self.config.article_system.get("pending_article_system_setup", {}).get("status"), "pr_created"
         )
 
-    def test_merge_mark_self_registers_target(self):
+    def test_merge_label_does_not_certify_a_publish_target(self):
         class _Run:
             run_id = "setup-run-1"
         _mark_pending_article_system_setup_merged(self.config, run=_Run(), result={})
         self.config.refresh_from_db()
-        self.assertEqual(len(self._direct_target()), 1)
-        self.assertTrue(self.config.articles_scaffolded)
+        self.assertEqual(self._direct_target(), [])
+        self.assertEqual(self.config.article_system['pending_article_system_setup']['status'], 'merged')
+        self.assertFalse(self.config.articles_scaffolded)

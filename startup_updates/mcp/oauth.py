@@ -20,13 +20,13 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.utils import timezone
-from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, AuthenticationFailed, PermissionDenied, ValidationError
 
 from community_chat.account_sessions import InvalidAccountSession, _valid_session, _validate_device_owner
 from community_chat.models import CommunityChatAccountSession
 from community_chat.onboarding import require_community_access
 from founder_tools.models import VibeRaisingCompany
-from .config import ALL_SCOPES, SCOPES, availability, mcp_url, mlai_url, public_base, resource_scopes
+from .config import ALL_SCOPES, DOT_SCOPES, SCOPES, availability, mcp_url, mlai_url, public_base, resource_scopes
 
 CODE_TTL = 300
 INTENT_TTL = 600
@@ -201,7 +201,7 @@ def grant_subject(company_id):
     return str(_company_uuid(company_id)) if company_id else "account"
 
 
-def approve_intent(request_id, *, user, session, company_id, approve, scopes=None, community_channel_ids=None):
+def approve_intent(request_id, *, user, session, company_id, approve, scopes=None, community_channel_ids=None, native_installation_id=None):
     if not isinstance(approve, bool):
         raise ValidationError("Choose whether to connect this agent.")
     with lock("intent", request_id):
@@ -222,29 +222,48 @@ def approve_intent(request_id, *, user, session, company_id, approve, scopes=Non
         legacy = intent["resource"] == mcp_url()
         if legacy and selected != set(intent["scopes"]):
             raise ValidationError("Reconnect Valley to change its permissions.")
+        native = bool(selected & DOT_SCOPES)
+        if native and (legacy or not DOT_SCOPES <= selected or not native_installation_id):
+            raise ValidationError("Select all personal agent permissions and an enrolled agent.")
+        if not native and native_installation_id:
+            raise ValidationError("Select personal agent permissions before choosing an agent.")
         needs_company = legacy or any(scope.startswith(("startup:", "article:")) for scope in selected)
-        company = company_for(user, company_id) if company_id or needs_company else None
+        company = company_for(user, company_id) if needs_company or (company_id and not native) else None
         channels = []
         if selected & {"community:read", "community:write"}:
             from .community import validate_channel_selection
             channels = validate_channel_selection(user, session, community_channel_ids)
         elif community_channel_ids:
             raise ValidationError("Select Community permissions before choosing channels.")
-        cache.delete(key("intent", request_id))
         grant_id = secrets.token_urlsafe(32)
         value = {"id": grant_id, "user_id": user.pk, "auth_version": user.auth_version,
             "session_id": str(session.pk), "company_id": str(company.pk) if company else None, "client_id": intent["client_id"],
             "clientName": intent["clientName"], "redirectOrigin": intent["redirectOrigin"], "scopes": sorted(selected), "resource": intent["resource"], "community_channels": channels,
             "createdAt": timezone.now().isoformat(), "expiresAt": int(time.time()) + GRANT_TTL, "revoked": False,
             "revocation_epoch": cache.get(key("epoch", f"{user.pk}:{grant_subject(company.pk if company else None)}")) or ""}
-        cache.set(key("grant", grant_id), value, timeout=GRANT_TTL)
-        with lock("index", f"{user.pk}:{grant_subject(company.pk if company else None)}"):
-            index_key = key("index", f"{user.pk}:{grant_subject(company.pk if company else None)}")
-            cache.set(index_key, [*(cache.get(index_key) or []), grant_id], timeout=GRANT_TTL)
+        from contextlib import nullcontext
+        from . import native_agents
         code = secrets.token_urlsafe(48)
-        cache.set(key("code", code), {"grant_id": grant_id, "client_id": intent["client_id"],
-            "redirect_uri": intent["redirect_uri"], "code_challenge": intent["code_challenge"],
-            "resource": intent["resource"]}, timeout=CODE_TTL)
+        try:
+            # Redis and PostgreSQL are separate stores. Hold the existing owner
+            # fence until the binding and cache records are durable; any missing
+            # reciprocal linkage makes queued native work fail closed.
+            with native_agents.consent_fence(user) if native else nullcontext():
+                if native:
+                    native_agents.bind_native_grant(user, session, value, native_installation_id)
+                remaining = max(1, int(value["expiresAt"] - time.time()))
+                cache.set(key("grant", grant_id), value, timeout=remaining)
+                with lock("index", f"{user.pk}:{grant_subject(company.pk if company else None)}"):
+                    index_key = key("index", f"{user.pk}:{grant_subject(company.pk if company else None)}")
+                    cache.set(index_key, [*(cache.get(index_key) or []), grant_id], timeout=GRANT_TTL)
+                cache.set(key("code", code), {"grant_id": grant_id, "client_id": intent["client_id"],
+                    "redirect_uri": intent["redirect_uri"], "code_challenge": intent["code_challenge"],
+                    "resource": intent["resource"]}, timeout=CODE_TTL)
+        except Exception:
+            cache.delete(key("code", code))
+            cache.delete(key("grant", grant_id))
+            raise
+        cache.delete(key("intent", request_id))
         return callback_url(intent, code=code)
 
 
@@ -346,14 +365,33 @@ def authenticate_token(raw_token, *, scope=None, resource=None):
     principal = valid_grant(record["grant_id"], scope=scope)
     if resource and principal.grant["resource"] != resource:
         raise AuthenticationFailed("This token was issued for a different MCP server.")
+    if principal.grant["resource"] == mlai_url() and DOT_SCOPES <= set(principal.grant["scopes"]):
+        from .native_agents import on_authenticated
+        from agent_runtime.policy import AgentPermissionDenied
+        try:
+            on_authenticated(principal)
+        except (APIException, AgentPermissionDenied):
+            # Native consent can be paused/revoked independently. Other
+            # explicitly granted MLAI capabilities remain available.
+            pass
+        # Native activation may wait on its durable owner fence. Account/session
+        # revocation during that wait still invalidates the entire unified token.
+        principal = valid_grant(principal.grant["id"], scope=scope)
     return principal
 
 
 def revoke_grant(grant_id):
     grant = cache.get(key("grant", grant_id))
     if grant:
-        grant["revoked"] = True
-        cache.set(key("grant", grant_id), grant, timeout=max(1, int(grant["expiresAt"] - time.time())))
+        try:
+            if grant.get("native_agent_grant_id"):
+                from .native_agents import revoke_native_grant
+                revoke_native_grant(grant)
+        finally:
+            # Even an unavailable native database must not leave the unified
+            # cached bearer/refresh family usable after this revocation attempt.
+            grant["revoked"] = True
+            cache.set(key("grant", grant_id), grant, timeout=max(1, int(grant["expiresAt"] - time.time())))
 
 
 def disconnect_company(user, company_id):

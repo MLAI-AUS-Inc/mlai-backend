@@ -977,17 +977,32 @@ def _whatsapp_address(number: str) -> str:
     return f"whatsapp:{text}"
 
 
-def _post_whatsapp_message(payload: dict[str, Any]) -> tuple[bool, str, dict]:
-    account_sid = str(getattr(settings, "TWILIO_ACCOUNT_SID", "") or "").strip()
-    auth_token = str(getattr(settings, "TWILIO_AUTH_TOKEN", "") or "").strip()
-    if not account_sid or not auth_token:
-        return False, "", {"error": "Twilio WhatsApp credentials are not configured"}
-    response = http_client.post(
+def twilio_credentials() -> tuple[str, str]:
+    """The Twilio account SID and auth token; empty strings when unset."""
+    return (
+        str(getattr(settings, "TWILIO_ACCOUNT_SID", "") or "").strip(),
+        str(getattr(settings, "TWILIO_AUTH_TOKEN", "") or "").strip(),
+    )
+
+
+def post_twilio_message(payload: dict[str, Any], *, account_sid: str, auth_token: str):
+    """POST one message to Twilio's Messages API and return the raw response.
+
+    Shared with the crm blast sender. Request errors propagate to the caller.
+    """
+    return http_client.post(
         f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
         data=payload,
         auth=(account_sid, auth_token),
         timeout=(3, 8),
     )
+
+
+def _post_whatsapp_message(payload: dict[str, Any]) -> tuple[bool, str, dict]:
+    account_sid, auth_token = twilio_credentials()
+    if not account_sid or not auth_token:
+        return False, "", {"error": "Twilio WhatsApp credentials are not configured"}
+    response = post_twilio_message(payload, account_sid=account_sid, auth_token=auth_token)
     try:
         response_payload = response.json()
     except ValueError:
@@ -1693,6 +1708,19 @@ def handle_whatsapp_webhook(payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         logger.warning("Failed handling WhatsApp inbound message: %s", exc)
         result = {}
+    # The crm contacts store shares this number: honour STOP / START / JOIN
+    # and keep replies to blasts. It must never change the result above.
+    try:
+        from crm.inbound import handle_inbound
+
+        handle_inbound(
+            channel="whatsapp",
+            from_address=str(payload.get("From") or "").strip() or sender,
+            body=str(payload.get("Body") or "") or str(payload.get("ButtonPayload") or ""),
+            provider_id=str(payload.get("MessageSid") or "").strip(),
+        )
+    except Exception as exc:
+        logger.warning("crm could not handle a WhatsApp inbound message: %s", exc.__class__.__name__)
     return {
         "status": "received",
         "opted_out": result.get("opted_out", 0),

@@ -49,6 +49,60 @@ class SetupMergeVerificationUnitTests(SimpleTestCase):
         self.assertEqual(self.website.verified_sha, "")
         self.website.targets.update_or_create.assert_not_called()
 
+    def test_first_setup_without_a_pinned_source_uses_its_current_scan(self):
+        # PawShare setup ccd3ea22 (23 Oct 2026): Prepare cannot pin a source for a
+        # site with no verified SHA, so every Publish answered 409.
+        self.run.run_request.pop("expected_source_sha")
+        with patch("content_factory.website_hosted_build.current_scan_source", return_value=self.base):
+            self.validate()
+        for scan in ("c" * 40, None):
+            with self.subTest(scan=scan), \
+                    patch("content_factory.website_hosted_build.current_scan_source", return_value=scan), \
+                    self.assertRaises(WebsiteAuthorityError):
+                self.validate()
+
+    def code_review(self):
+        # La Vie setup c12e1329 (23 Oct 2026): the preview worker could not run the
+        # app, so the founder approved the branch diff instead of a hosted preview.
+        self.run.result.update(preview_runtime_unsupported=True,
+            live_preview={"status": "unavailable", "exactRender": False, "commitSha": "", "platformStatus": "unsupported_runtime"},
+            directory_quality_verification={"status": "code_review_ready", "task_id": "verification-1",
+                "completed_at": "2026-10-23T03:41:45+00:00", "commit_sha": ""})
+        self.run.result["directory_quality_gates"].update(status="failed", failed_gate="browser", browser=False, visual_style=False)
+        self.run.result["article_system_setup"]["preview_runtime_unsupported"] = True
+
+    def test_an_approved_code_review_setup_merges_its_exact_head(self):
+        self.code_review()
+        self.validate()
+
+    def test_code_review_still_requires_approval_build_quality_and_the_exact_head(self):
+        self.code_review()
+        valid = deepcopy(self.run.result)
+        for label, change in (
+            ("not code review", lambda r: r.pop("preview_runtime_unsupported")),
+            ("no code review proof", lambda r: r["directory_quality_verification"].update(status="failed")),
+            ("local build failed", lambda r: r["directory_quality_gates"].update(local_build=False)),
+            ("local build skipped", lambda r: r["directory_quality_gates"].update(local_build_skipped=True)),
+            ("source quality failed", lambda r: r["directory_quality_gates"].update(dom_slot_compliance=False)),
+            ("different head", lambda r: r.update(branch_commit_sha="c" * 40)),
+        ):
+            with self.subTest(label):
+                self.run.result = deepcopy(valid)
+                change(self.run.result)
+                with self.assertRaises(WebsiteAuthorityError):
+                    self.validate()
+        self.run.result = deepcopy(valid)
+        self.run.approval_state = "approval_required"
+        with self.assertRaises(WebsiteAuthorityError):
+            self.validate()
+
+    def test_a_verified_site_never_falls_back_to_the_recorded_source(self):
+        self.run.run_request.pop("expected_source_sha")
+        self.website.verified_sha = self.base
+        with patch("content_factory.website_hosted_build.current_scan_source", return_value=self.base), \
+                self.assertRaises(WebsiteAuthorityError):
+            self.validate()
+
     def test_adopted_kit_requires_its_actual_preview_head_and_full_proof(self):
         self.run.approval_state = "not_required"
         self.run.result.update(status="adopted", adopted=True, adoption_kit_preview_verified=True,
@@ -73,6 +127,63 @@ class SetupMergeVerificationUnitTests(SimpleTestCase):
         self.assertEqual(authority._verified_setup_run_base(self.run, self.head, self.website, automatic_approval=True), self.base)
         self.run.result["directory_quality_gates"]["browser"] = False
         self.assertEqual(authority._verified_setup_run_base(self.run, self.head, self.website, automatic_approval=True), "")
+
+    def pending_setup(self):
+        self.run.status, self.run.approval_state = "awaiting_approval", "approval_required"
+        self.run.result["status"] = "preview_ready"
+        self.run.result["article_system_setup"]["status"] = "preview_ready"
+        self.run.result["live_preview"]["url"] = "https://preview.example/articles"
+        self.website.configuration_version = 3
+
+    def approve(self):
+        from . import website_prepare as prepare
+        config = SimpleNamespace(requires_review=False, website_connection=self.website)
+        return prepare.approve_prepared_setup(self.run, SimpleNamespace(company=SimpleNamespace(pk="company")),
+            config, user=SimpleNamespace(pk=1))
+
+    def test_proven_preview_asks_for_review_when_automatic_approval_is_ineligible(self):
+        # TalaThrive run af819ae1: a platform-deployed preview skips the local build,
+        # so prepare looped on "Waiting for exact setup preview proof" with passed proof.
+        self.pending_setup()
+        self.run.result["directory_quality_gates"]["local_build_skipped"] = True
+        ineligible = deepcopy(self.run.result)
+        for change in ("skipped_local_build", "approval_required_status", "stale_verified_source"):
+            with self.subTest(change=change):
+                self.run.result, self.run.status, self.website.verified_sha = deepcopy(ineligible), "awaiting_approval", ""
+                if change == "approval_required_status":
+                    self.run.status = "approval_required"
+                if change == "stale_verified_source":
+                    self.run.result["directory_quality_gates"]["local_build_skipped"] = False
+                    self.website.verified_sha = "c" * 40
+                self.assertEqual(authority._verified_setup_run_base(self.run, self.head, self.website, automatic_approval=True), "")
+                with patch.object(authority, "verify_repository_head") as verify:
+                    outcome = self.approve()
+                verify.assert_not_called()
+                self.assertEqual(outcome, {"status": "needs_user", "user_action": {"id": "review_setup",
+                    "label": "Review setup", "url": "https://preview.example/articles", "run_id": "setup-1"}})
+
+    def test_unfinished_preview_proof_keeps_waiting(self):
+        self.pending_setup()
+        self.run.result["directory_quality_gates"]["local_build_skipped"] = True
+        proven = deepcopy(self.run.result)
+        for key, value in (("status", "running"), ("completed_at", None), ("commit_sha", self.base)):
+            with self.subTest(key=key):
+                self.run.result = deepcopy(proven)
+                self.run.result["directory_quality_verification"][key] = value
+                with self.assertRaises(WebsiteAuthorityError) as raised:
+                    self.approve()
+                self.assertEqual(raised.exception.code, "setup_preview_verification_required")
+                self.assertTrue(raised.exception.retryable)
+
+    def test_eligible_preview_is_still_approved_automatically(self):
+        from . import vibe_marketing_views
+        self.pending_setup()
+        with patch.object(authority, "verify_repository_head", return_value=self.base) as verify, \
+                patch.object(vibe_marketing_views.VibeMarketingRunControlView, "post",
+                    return_value=SimpleNamespace(status_code=202, data={})) as control:
+            self.assertEqual(self.approve(), {"status": "pending"})
+        verify.assert_called_once_with(self.website, self.base)
+        self.assertEqual(control.call_args.args[1:], ("setup-1", "approve"))
 
     def test_preserves_existing_target_proof_path(self):
         self.website.verified_sha = self.base
@@ -223,7 +334,7 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
                 "owned_merge_run_id": "setup-1"}, receipt={}, attempts=0,
             next_attempt_at=None, save=Mock())
 
-    def process(self, *, now=None, points_error=None):
+    def process(self, *, now=None, points_error=None, prior=None, reserve_error=None):
         from . import website_reconciliation as reconciliation, website_operations as operations
         from . import website_verification as verification
         # Load decorated view dependencies before replacing the shared transaction seam.
@@ -234,6 +345,8 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
             claimed.return_value.select_related.return_value.filter.return_value.first.return_value = self.op
             stored = stack.enter_context(patch.object(reconciliation.WebsiteConnectionOperation.objects, "filter"))
             stored.return_value.update.return_value = 1
+            # The workflow operation previously reserved under this source's rescan key.
+            stored.return_value.first.return_value = prior
             stack.enter_context(patch.object(authority, "authority_guard", side_effect=lambda *a, **kw: nullcontext(self.website)))
             stack.enter_context(patch.object(authority, "require_unlocked_remote_call"))
             owned = stack.enter_context(patch.object(reconciliation, "_find_owned_merge"))
@@ -246,7 +359,7 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
             actor = stack.enter_context(patch("content_factory.vibe_marketing_views.founder_actor_id_for_user", return_value="mlai_user:8"))
             create = stack.enter_context(patch("content_factory.vibe_marketing_views._create_local_run",
                 return_value=SimpleNamespace(run_id="current-source-scan")))
-            reserve = stack.enter_context(patch.object(operations, "reserve_workflow_operation"))
+            reserve = stack.enter_context(patch.object(operations, "reserve_workflow_operation", side_effect=reserve_error))
             bind = stack.enter_context(patch.object(operations, "bind_operation_run"))
             post = stack.enter_context(patch("integrations.http_client.post", return_value=SimpleNamespace(
                 raise_for_status=lambda: None, json=lambda: {"run_id": "current-source-scan"})))
@@ -257,7 +370,8 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
             live = stack.enter_context(patch.object(verification, "verify_live_deployment",
                 return_value=SimpleNamespace(pk="live-1")))
             result = reconciliation._process_source_reverification(self.op.pk, now or timezone.now())
-        return SimpleNamespace(result=result, receipt=stored.return_value.update.call_args.kwargs["receipt"],
+        final = stored.return_value.update.call_args.kwargs
+        return SimpleNamespace(result=result, receipt=final["receipt"], state=final["state"], stored=stored,
             reserve=reserve, bind=bind, post=post, create=create, discover=discover, ci=ci, live=live, owned=owned,
             points=points, actor=actor)
 
@@ -282,7 +396,8 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
         self.assertEqual(payload["roo_points_action"], "repo_scan")
         self.assertEqual(payload["roo_points_cost"], 0)
         observed.points.assert_called_once_with(self.website.authorized_by, domain="example.test", action="repo_scan")
-        observed.actor.assert_called_once_with(self.website.authorized_by)
+        self.assertEqual([args[0][0] for args in observed.actor.call_args_list],
+            [self.website.authorized_by, self.website.authorized_by])
         observed.reserve.assert_called_once()
         self.assertEqual(observed.reserve.call_args.kwargs["workflow"], "repo_scan")
         observed.bind.assert_called_once()
@@ -329,3 +444,86 @@ class SetupSourceReverificationUnitTests(SimpleTestCase):
                 observed.bind.assert_not_called()
                 observed.ci.assert_not_called()
                 observed.live.assert_not_called()
+
+    # TalaThrive (9 Oct): the reserved rescan failed with dispatch_child_missing,
+    # then every hourly retry of the same key raised operation_key_conflict and
+    # the repository_source_changed blocker never cleared.
+
+    def rescan_id(self, observed):
+        return observed.reserve.call_args.kwargs["payload"]["client_request_id"]
+
+    def lookup_key(self, observed):
+        return next(call.kwargs["idempotency_key"] for call in observed.stored.call_args_list
+            if "idempotency_key" in call.kwargs)
+
+    def test_a_failed_reserved_rescan_dispatches_under_a_fresh_identity(self):
+        self.op.attempts = 124
+        observed = self.process(prior=SimpleNamespace(state="failed"))
+        first = f"source-rescan:{self.op.pk}"
+        self.assertEqual(self.lookup_key(observed), f"{self.website.pk}:workflow:{first}")
+        self.assertEqual(self.rescan_id(observed), f"{first}:1")
+        self.assertEqual(observed.post.call_args.kwargs["json"]["client_request_id"], f"{first}:1")
+        self.assertEqual((observed.result, observed.receipt["scan_run_id"]), ("pending", "current-source-scan"))
+        # The count is persisted under this attempt's claim before dispatch.
+        saved = observed.stored.return_value.update.call_args_list[0].kwargs["payload"]
+        self.assertEqual(saved["rescan_dispatch"], 1)
+        claimed = {"pk": self.op.pk, "attempts": 125, "state": "pending"}
+        self.assertEqual([call.kwargs for call in observed.stored.call_args_list].count(claimed), 2)
+        # A later attempt replays the fresh identity while its rescan is in flight.
+        self.op.receipt = {}
+        observed = self.process(prior=SimpleNamespace(state="running"), now=timezone.now() + timedelta(minutes=6))
+        self.assertEqual(self.lookup_key(observed), f"{self.website.pk}:workflow:{first}:1")
+        self.assertEqual(self.rescan_id(observed), f"{first}:1")
+        self.assertEqual(self.op.payload["rescan_dispatch"], 1)
+
+    def test_cancelled_denied_and_deleted_rescans_also_move_on(self):
+        for state in ("cancelled", "denied", "deleted"):
+            with self.subTest(state=state):
+                self.setUp()
+                self.op.payload["rescan_dispatch"] = 2
+                observed = self.process(prior=SimpleNamespace(state=state))
+                self.assertEqual(self.rescan_id(observed), f"source-rescan:{self.op.pk}:3")
+
+    def test_completed_running_or_new_rescans_keep_the_original_identity(self):
+        for prior in (None, SimpleNamespace(state="completed"), SimpleNamespace(state="running"),
+                      SimpleNamespace(state="pending"), SimpleNamespace(state="blocked")):
+            with self.subTest(prior=prior):
+                self.setUp()
+                observed = self.process(prior=prior)
+                self.assertEqual(self.rescan_id(observed), f"source-rescan:{self.op.pk}")
+                self.assertNotIn("rescan_dispatch", self.op.payload)
+                self.assertEqual(observed.stored.return_value.update.call_count, 1)
+
+    def test_a_conflict_retries_cannot_repair_stops_instead_of_hourly_retries(self):
+        from .website_contract import WebsiteAuthorityError
+        conflict = WebsiteAuthorityError("operation_key_conflict", "This request identity belongs to different or cancelled work.")
+        for prior in (None, SimpleNamespace(state="completed")):
+            with self.subTest(prior=prior):
+                self.setUp()
+                observed = self.process(prior=prior, reserve_error=conflict)
+                self.assertEqual((observed.result, observed.state), ("needs_attention", "needs_attention"))
+                self.assertEqual(observed.receipt["status"], "needs_attention")
+                self.assertEqual(observed.receipt["code"], "operation_key_conflict")
+                self.assertIs(observed.receipt["retryable"], False)
+                self.assertIn("Scan the repository again", observed.receipt["message"])
+                observed.post.assert_not_called()
+                observed.bind.assert_not_called()
+
+    def test_a_conflict_with_a_still_active_rescan_waits_for_it_to_settle(self):
+        from .website_contract import WebsiteAuthorityError
+        conflict = WebsiteAuthorityError("operation_key_conflict", "This request identity belongs to different or cancelled work.")
+        observed = self.process(prior=SimpleNamespace(state="running"), reserve_error=conflict)
+        self.assertEqual((observed.result, observed.state), ("pending", "pending"))
+        self.assertEqual(observed.receipt["code"], "source_reverification_unavailable")
+        self.assertIs(observed.receipt["retryable"], True)
+        observed.post.assert_not_called()
+
+    def test_a_claim_lost_before_the_fresh_identity_is_saved_never_dispatches(self):
+        from . import website_reconciliation as reconciliation
+        with patch.object(reconciliation.WebsiteConnectionOperation.objects, "filter") as stored:
+            stored.return_value.first.return_value = SimpleNamespace(state="failed")
+            stored.return_value.update.return_value = 0
+            with self.assertRaises(WebsiteAuthorityError) as raised:
+                reconciliation._source_rescan_request(self.op, self.website, 1)
+        self.assertEqual(raised.exception.code, "website_operation_cancelled")
+        self.assertNotIn("rescan_dispatch", self.op.payload)

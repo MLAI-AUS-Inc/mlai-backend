@@ -1,4 +1,4 @@
-"""Authenticated, organisation-scoped custom island creation. No research charge."""
+"""Authenticated, organisation-scoped custom island creation and removal. No research charge."""
 from django.db import transaction
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
@@ -42,5 +42,27 @@ class CustomContentIslandView(APIView):
                     "icon_key": "default", "color_key": "purple",
                 },
             )
+            if not created and island.removed_at is not None:
+                # Creating the same theme again is an explicit request to bring it back.
+                island.status, island.archived_at, island.removed_at = ContentIslandStatus.VISIBLE, None, None
+                island.promoted_at = timezone.now()
+                island.save(update_fields=["status", "archived_at", "removed_at", "promoted_at", "updated_at"])
         return Response({"island": custom_island_pillar(island), "created": created},
                         status=201 if created else 200)
+
+
+class ContentIslandRemoveView(APIView):
+    """Remove one island from the founder's map. Repeating the request is harmless."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, slug):
+        from .island_removal import remove_island
+        from .vibe_marketing_views import _resolve_context_or_response
+
+        context, error = _resolve_context_or_response(request)
+        if error is not None:
+            return error
+        island = remove_island(context.organization, slug)
+        if island is None:
+            return Response({"detail": "Island not found."}, status=404)
+        return Response({"removed": island.slug}, status=200)

@@ -12,7 +12,7 @@ services so adding a service without including it in stop/rollback handling fail
 | Group | Services | Startup selection |
 | --- | --- | --- |
 | Required | web, scheduler, jobs-worker, memory-worker, memory-scheduler, password-email-worker, community-email-worker | Every normal deployment |
-| Bridge | bridge-worker, bridge-reconciler, bridge-retention | Existing bridge enablement and adapter credential checks |
+| Bridge | bridge-worker, bridge-retention | Member-authorized durable sync and adapter credential checks |
 | Analytics | analytics-sync | Existing complete analytics configuration checks |
 | Handoff | web-candidate | Explicitly managed during code-only web handoff |
 

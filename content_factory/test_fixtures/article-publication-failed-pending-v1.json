@@ -1,0 +1,46 @@
+{
+  "original_request": {
+    "run_id": "article-original",
+    "workflow": "direct_generate",
+    "github_repo": "fixture/site",
+    "client_request_id": "paid-original-request",
+    "website_connection_id": "connection-original",
+    "connection_generation": 2,
+    "repository_id": 17,
+    "operation_id": "article-operation",
+    "operation_attempt": 1,
+    "deletion_epoch": 0,
+    "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "failed_snapshot": {
+    "run_id": "article-original",
+    "workflow": "direct_generate",
+    "status": "failed",
+    "generation": 0,
+    "state_version": 3,
+    "result": {
+      "error_code": "PUBLISH_FAILED",
+      "refundable": true,
+      "publication_evidence_v1": {
+        "version": 1,
+        "purpose": "article",
+        "run_id": "article-original",
+        "goal_id": null,
+        "scope": {
+          "website_connection_id": "connection-original",
+          "connection_generation": 2,
+          "repository_id": 17,
+          "github_repo": "fixture/site",
+          "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "operation_id": "article-operation",
+          "operation_attempt": 1,
+          "deletion_epoch": 0,
+          "client_request_id": "paid-original-request"
+        },
+        "generation": 0,
+        "state": "pending",
+        "kind": "unknown"
+      }
+    }
+  }
+}

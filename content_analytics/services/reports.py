@@ -235,17 +235,17 @@ def _per_article_search(organization, windows, *, connected):
         date__range=(windows.window_start, windows.window_end),
         country="", device="", engine="google", surface="web",
     ).values("article_id").annotate(
-        clicks=Sum("clicks"), impressions=Sum("impressions"),
+        clicks=Sum("clicks"), total_impressions=Sum("impressions"),
         position_weight=Sum(F("position") * F("impressions")),
         data_through=Max("date"),
     ).order_by()
     return {
         row["article_id"]: {
             "searchClicks": _float(row["clicks"], 4),
-            "searchImpressions": _float(row["impressions"], 4),
-            "searchCtr": _rate(row["clicks"], row["impressions"]),
-            "averagePosition": _float(row["position_weight"] / row["impressions"], 4)
-            if row["impressions"] else None,
+            "searchImpressions": _float(row["total_impressions"], 4),
+            "searchCtr": _rate(row["clicks"], row["total_impressions"]),
+            "averagePosition": _float(row["position_weight"] / row["total_impressions"], 4)
+            if row["total_impressions"] else None,
             "searchDataThroughDate": _iso(row["data_through"]),
         }
         for row in rows

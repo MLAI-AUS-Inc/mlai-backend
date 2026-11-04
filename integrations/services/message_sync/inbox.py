@@ -21,7 +21,8 @@ def enabled():
 
 def enqueue_slack_callback(payload):
     """Persist verified callback once; signature validation remains at the view."""
-    payload = {key: value for key, value in payload.items() if not key.startswith("_sync_")}
+    from integrations.services.community_bridge.community_source import strip_untrusted
+    payload = strip_untrusted({key: value for key, value in payload.items() if not key.startswith("_sync_")})
     app_id = str(payload.get("api_app_id") or "").strip()
     workspace_id = str(payload.get("team_id") or "").strip()
     source_id = str(payload.get("event_id") or "").strip()
@@ -83,17 +84,32 @@ def process_inbox_once():
                 row.lease_expires_at = None
                 row.save()
                 return 0
-            from integrations.services.community_bridge.store import ingest_slack_event
-            from integrations.services.slack_dm_mirror import ingest_slack_dm_event
-            from .read_activity import record_public_event
-            # Public ingestion locks the channel. Take state -> channel first,
-            # matching the history worker, in this same receipt transaction.
-            record_public_event(payload)
-            ingest_slack_dm_event(payload) or ingest_slack_event(payload)
-            from .read_priority import invalidate_event
-            invalidate_event(payload)
+            from integrations.services.community_bridge.member_channel_events import dispatch_authenticated_slack_callback
+            result = dispatch_authenticated_slack_callback(
+                payload, app_id=row.app_id, received_at=row.received_at, inbox_id=row.pk,
+                source_event_id=row.source_event_id,
+            )
             if row.lease_expires_at <= timezone.now():
                 raise LeaseLost("inbox_lease_expired")
+            waiting_member = isinstance(result, dict) and (
+                result.get("status") in {"member_audience_pending", "community_source_pending"}
+                or (row.last_error_code == "member_audience_pending"
+                    and result.get("status") == "ignored"
+                    and result.get("reason") == "member_channels_disabled_or_out_of_scope")
+            )
+            if waiting_member:
+                # Commit membership/order/pending wakes without acknowledging
+                # this content as delivered or erasing its encrypted receipt.
+                row.encrypted_payload = json.dumps(payload, separators=(",", ":"))
+                row.status = "pending"
+                row.available_at = timezone.now() + timedelta(seconds=5)
+                row.lease_token = None
+                row.lease_expires_at = None
+                row.last_error_code = ("community_source_pending"
+                                       if result.get("status") == "community_source_pending"
+                                       else "member_audience_pending")
+                row.save()
+                return 0
             row.status = "completed"
             row.completed_at = timezone.now()
             row.lease_token = None

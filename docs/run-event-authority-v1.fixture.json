@@ -1,0 +1,60 @@
+{
+  "event": "run_events_v2",
+  "schema_version": 1,
+  "run_id": "run-fixture-1",
+  "backend_run_admission_v1": {
+    "schema_version": 1,
+    "dispatch_key": "dispatch-fixture-1",
+    "organization_id": "42",
+    "principal": {
+      "kind": "user",
+      "user_id": "7",
+      "actor_id": "U_FIXTURE"
+    },
+    "workflow": "article_generation",
+    "domain": "example.test",
+    "github_repo": "",
+    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "scope": {
+      "website_connection_id": null,
+      "connection_generation": null,
+      "connection_target_id": null,
+      "repository_id": null,
+      "operation_id": null,
+      "operation_attempt": null,
+      "deletion_epoch": null,
+      "expected_source_sha": null,
+      "source_run_id": null
+    },
+    "event_protocol": 1
+  },
+  "events": [
+    {
+      "seq": 1,
+      "generation": 0,
+      "state_version": 1,
+      "type": "run_state",
+      "at": "2026-11-03T00:00:00+00:00",
+      "status": "running",
+      "digest": "cd6743d5b8e62a2f2ca636fdaea8820c0410c9e7fadcc546b1b1c644f04636b0"
+    }
+  ],
+  "backend_run_execution_v1": {
+    "schema_version": 1,
+    "execution_id": "execution-fixture-1",
+    "generation": 0,
+    "admission_digest": "e40baba455ae41fa145e348ccaa1fb95ce3537651d7ad037f103255f3a4ffc0b",
+    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "scope": {
+      "website_connection_id": null,
+      "connection_generation": null,
+      "connection_target_id": null,
+      "repository_id": null,
+      "operation_id": null,
+      "operation_attempt": null,
+      "deletion_epoch": null,
+      "expected_source_sha": null,
+      "source_run_id": null
+    }
+  }
+}

@@ -3,6 +3,7 @@
 from datetime import timedelta
 import base64
 import hashlib
+import logging
 from urllib.parse import quote
 
 from django.db import transaction
@@ -13,6 +14,10 @@ from .models import OrganizationContentConfig
 from .website_connections import contract_for, transition_connection
 from .website_contract import cleanup_plan, safe_repository_path, evidence_digest
 from .website_models import WebsiteConnection, WebsiteConnectionOperation, WebsiteScanSnapshot
+from . import website_preview_cleanup_budget as preview_budget
+from . import website_cancellation_retirement as cancel_work
+
+logger = logging.getLogger(__name__)
 
 
 def _merge_connection_identity(website):
@@ -43,13 +48,164 @@ def _merge_intent_matches(website, run, pull, source_sha):
             and head.get("sha") == intent.get("head_sha")
             and head.get("ref") == intent.get("head_branch")):
         return False
+    return _pull_from_selected_repository(website, head, base)
+
+
+def _pull_from_selected_repository(website, head, base):
+    """Both sides of a pull request are the selected repository itself, never a fork."""
     return all((side.get("repo") or {}).get("id") == website.repository_id
         and str((side.get("repo") or {}).get("full_name") or "").casefold() == website.github_repo.casefold()
         for side in (head, base))
 
 
+def _owner_merge_vouch(website, run):
+    """The pull request number and previewed head an open, exactly verified setup vouches for."""
+    from .vibe_marketing_views import _pull_request_number_from_run
+    from .website_connections import _verified_setup_run_base, scoped_run_contract, setup_pr_open
+    from .website_contract import SHA_PATTERN, connection_contract
+    saved = connection_contract(scoped_run_contract(run))
+    head_sha = str(run.result.get("branch_commit_sha") or "") if isinstance(run.result, dict) else ""
+    number = _pull_request_number_from_run(run) if setup_pr_open(run) else None
+    eligible = bool(number and number > 0 and SHA_PATTERN.fullmatch(head_sha)
+        and saved.get("website_connection_id") == str(website.pk)
+        and saved.get("connection_generation") == website.generation
+        and saved.get("repository_id") == website.repository_id
+        and str(run.github_repo or "").casefold() == website.github_repo.casefold()
+        and _verified_setup_run_base(run, head_sha, website))
+    return (number, head_sha) if eligible else None
+
+
+def _owner_merge_setup_candidates(website, rows):
+    """Approved setups whose own verified pull request MLAI has not merged.
+
+    Stopping preparation keeps such a pull request open to be merged, and its
+    owner may merge it on GitHub instead of with Publish. No merge intent exists
+    then, so only the setup's exact preview proof can vouch for its head.
+    """
+    from .website_contract import WebsiteAuthorityError
+    found = []
+    for run in rows.filter(workflow="article_system_setup", status="completed",
+            approval_state="approved").order_by("-updated_at")[:10]:
+        try:
+            vouch = _owner_merge_vouch(website, run)
+        except WebsiteAuthorityError:
+            continue
+        except Exception as exc:
+            # Unreadable saved results cannot vouch for a merge, and must not
+            # stop the push from being handled as an external change.
+            logger.warning("website_owner_setup_merge_unreadable connection=%s run_id=%s error_type=%s",
+                website.pk, run.run_id, type(exc).__name__)
+            continue
+        if vouch:
+            found.append((run, *vouch))
+    return found
+
+
+def _github_merged_at(pull):
+    """GitHub's aware merge time for a merged pull request, or "" when unusable."""
+    from django.utils.dateparse import parse_datetime
+    try:
+        merged_at = parse_datetime(pull["merged_at"]) if isinstance(pull.get("merged_at"), str) else None
+    except ValueError:
+        merged_at = None
+    return merged_at.isoformat() if merged_at and merged_at.tzinfo else ""
+
+
+def _setup_pull_merged_as(website, pull, *, number, head_sha, source_sha):
+    """GitHub merged this setup pull request, at its previewed head, as source_sha."""
+    head, base = pull.get("head") or {}, pull.get("base") or {}
+    return bool(pull.get("merged") is True and pull.get("merge_commit_sha") == source_sha
+        and pull.get("number") == number and base.get("ref") == website.branch
+        and head.get("sha") == head_sha and _pull_from_selected_repository(website, head, base))
+
+
+def _commit_tree_sha(website, sha, headers):
+    """Read the tree of one exact commit in the selected repository."""
+    from integrations import http_client
+    from .website_contract import SHA_PATTERN
+    response = http_client.get(f"https://api.github.com/repos/{website.github_repo}/git/commits/{sha}",
+        headers=headers, timeout=(3, 15))
+    response.raise_for_status()
+    commit = response.json()
+    tree = commit.get("tree") if isinstance(commit, dict) else None
+    tree_sha = tree.get("sha") if isinstance(tree, dict) else None
+    if not isinstance(tree_sha, str) or not SHA_PATTERN.fullmatch(tree_sha) or commit.get("sha") != sha:
+        raise ValueError("GitHub returned an unexpected commit identity.")
+    return tree_sha
+
+
+def _find_owner_merged_setup(website, rows, source_sha, identity):
+    """Recognize the owner's GitHub merge of a verified setup pull request.
+
+    GitHub must report the setup's recorded pull request merged into the
+    selected branch as source_sha, from this repository and at the exact head
+    the setup previewed, and source_sha must have that head's tree. The new
+    source is then exactly what was verified, whichever merge method was used.
+    Unavailable or ambiguous evidence remains an external source change.
+    A match carries that evidence for record_owner_setup_merge.
+    """
+    from .website_connections import authority_guard, require_unlocked_remote_call
+    from integrations import http_client
+    from integrations.services.github_app import create_installation_access_token
+    candidates = _owner_merge_setup_candidates(website, rows)
+    if not candidates:
+        return None
+    binding = {**contract_for(website), "domain": website.organization.domain, "github_repo": website.github_repo}
+    credential, headers, trees = None, {}, {}
+    try:
+        with authority_guard(binding, action="read"):
+            pass
+        require_unlocked_remote_call()
+        credential = create_installation_access_token(installation_id=website.installation_id,
+            repository=website.github_repo, repository_id=website.repository_id, permission_mode="read", use_cache=False)
+        headers = {"Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}
+        for run, number, head_sha in candidates:
+            try:
+                response = http_client.get(f"https://api.github.com/repos/{website.github_repo}/pulls/{number}",
+                    headers=headers, timeout=(3, 15))
+                response.raise_for_status()
+                pull = response.json()
+                if not isinstance(pull, dict) or not _setup_pull_merged_as(website, pull, number=number,
+                        head_sha=head_sha, source_sha=source_sha):
+                    continue
+                for sha in (source_sha, head_sha):
+                    if sha not in trees:
+                        trees[sha] = _commit_tree_sha(website, sha, headers)
+                if trees[source_sha] != trees[head_sha]:
+                    # Merged with other changes (a moved base or an edited merge):
+                    # that source was never previewed, so it is scanned as external.
+                    logger.info("website_owner_setup_merge_changed connection=%s run_id=%s pr_number=%s source_sha=%s",
+                        website.pk, run.run_id, number, source_sha)
+                    continue
+                evidence = {"pr_number": number, "head_sha": head_sha, "merge_commit_sha": source_sha,
+                    "merged_at": _github_merged_at(pull), "request_digest": evidence_digest(run.run_request or {})}
+                with authority_guard(binding, action="read") as current:
+                    if _merge_connection_identity(current) == identity:
+                        logger.info("website_owner_setup_merge_matched connection=%s run_id=%s pr_number=%s source_sha=%s",
+                            website.pk, run.run_id, number, source_sha)
+                        return {"run_id": run.run_id, "connection_identity": identity, "owner_merge": evidence}
+            except Exception as exc:
+                logger.warning("website_owner_setup_merge_unverified connection=%s run_id=%s error_type=%s",
+                    website.pk, run.run_id, type(exc).__name__)
+    except Exception as exc:
+        logger.warning("website_owner_setup_merge_unavailable connection=%s error_type=%s", website.pk, type(exc).__name__)
+    finally:
+        if credential:
+            try:
+                http_client.delete("https://api.github.com/installation/token", headers=headers, timeout=(3, 10))
+            except Exception:
+                pass
+    return None
+
+
 def _find_owned_merge(website, organization_id, source_sha):
-    """Resolve webhook races with read-only authenticated PR evidence, outside locks."""
+    """Resolve webhook races with read-only authenticated PR evidence, outside locks.
+
+    A push is owned when a run recorded it as its merge commit, when a saved
+    pre-merge intent matches the merged pull request, or when the owner merged
+    a verified setup pull request on GitHub with exactly its previewed source.
+    Anything else is an external source change.
+    """
     from workflow_runs.models import ContentFactoryRun
     from .website_connections import authority_guard, require_unlocked_remote_call
     from integrations import http_client
@@ -57,7 +213,9 @@ def _find_owned_merge(website, organization_id, source_sha):
     rows = ContentFactoryRun.objects.filter(organization_id=organization_id,
         github_repo__iexact=website.github_repo,
         run_request__website_connection_id=str(website.pk), run_request__connection_generation=website.generation)
-    saved = rows.filter(result__merge_status="merged", result__merge_response__sha=source_sha).first()
+    saved = rows.filter(result__merge_status="merged", result__merge_sha=source_sha).first()
+    if saved is None:
+        saved = rows.filter(result__merge_status="merged", result__merge_response__sha=source_sha).first()
     identity = _merge_connection_identity(website)
     if saved:
         return {"run_id": saved.run_id, "connection_identity": identity}
@@ -98,7 +256,75 @@ def _find_owned_merge(website, organization_id, source_sha):
                     http_client.delete("https://api.github.com/installation/token", headers=headers, timeout=(3, 10))
                 except Exception:
                     pass
-    return None
+    return _find_owner_merged_setup(website, rows, source_sha, identity)
+
+
+OWNER_SETUP_MERGE_SOURCE = "github_owner_merge"
+
+
+def _owner_merge_recordable(website, run, evidence):
+    """The run still vouches for the matched merge and records no merge commit.
+
+    It is either still the open setup whose exact proof vouched for the match,
+    or the same setup since marked merged without a commit. A recorded merge
+    commit is never replaced.
+    """
+    from .vibe_marketing_views import _pull_request_number_from_run
+    result = run.result if isinstance(run.result, dict) else {}
+    setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
+    response = result.get("merge_response") if isinstance(result.get("merge_response"), dict) else {}
+    if result.get("merge_sha") or setup.get("merge_sha") or response.get("sha"):
+        return False
+    number, head_sha = evidence["pr_number"], evidence["head_sha"]
+    if "merged" not in {result.get("merge_status"), setup.get("merge_status")}:
+        return _owner_merge_vouch(website, run) == (number, head_sha)
+    return bool(run.status == "completed" and run.approval_state == "approved"
+        and setup.get("setup_run_id") == run.run_id
+        and str(run.github_repo or "").casefold() == website.github_repo.casefold()
+        and evidence_digest(run.run_request or {}) == evidence["request_digest"]
+        and _pull_request_number_from_run(run) == number
+        and result.get("branch_commit_sha") == head_sha and setup.get("branch_commit_sha") == head_sha)
+
+
+def record_owner_setup_merge(website, owned_merge):
+    """Save the owner's tree-verified GitHub merge as its setup run's own merge.
+
+    Callers hold the organization and connection locks and have rechecked the
+    connection identity. Only _find_owner_merged_setup's match carries this
+    evidence; a recorded merge or a publish intent already has its own. The
+    run is locked before the saved pending setup, as MLAI's own merge does.
+    Settle and CI-lineage checks then accept it like MLAI's Publish merge,
+    while goal evidence still needs a publish intent to call it a backend
+    merge. Recording never fails the push: a refusal leaves the run as it was.
+    """
+    from workflow_runs.models import ContentFactoryRun
+    from .vibe_marketing_views import _mark_pending_article_system_setup_merged, _save_setup_merge_result
+    evidence = (owned_merge or {}).get("owner_merge")
+    if not isinstance(evidence, dict):
+        return False
+    run_id, source_sha = owned_merge.get("run_id"), evidence.get("merge_commit_sha")
+    try:
+        with transaction.atomic():
+            run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id,
+                organization_id=website.organization_id, workflow="article_system_setup",
+                run_request__website_connection_id=str(website.pk),
+                run_request__connection_generation=website.generation).first()
+            if run is None or not _owner_merge_recordable(website, run, evidence):
+                logger.info("website_owner_setup_merge_unrecorded connection=%s run_id=%s source_sha=%s reason=run_changed",
+                    website.pk, run_id, source_sha)
+                return False
+            config = OrganizationContentConfig.objects.select_for_update().filter(website_connection=website).first()
+            _save_setup_merge_result(run, checks_status="merged", merged_at=evidence["merged_at"] or None,
+                merge_response={"source": OWNER_SETUP_MERGE_SOURCE, "sha": source_sha, "pull": {
+                    "number": evidence["pr_number"], "merge_commit_sha": source_sha, "head_sha": evidence["head_sha"]}})
+            _mark_pending_article_system_setup_merged(config, run=run, result=run.result)
+    except Exception as exc:
+        logger.warning("website_owner_setup_merge_unrecorded connection=%s run_id=%s source_sha=%s error_type=%s",
+            website.pk, run_id, source_sha, type(exc).__name__)
+        return False
+    logger.info("website_owner_setup_merge_recorded connection=%s run_id=%s pr_number=%s source_sha=%s",
+        website.pk, run_id, evidence["pr_number"], source_sha)
+    return True
 
 
 def revoke_installation(installation_id, *, repository_ids=None, reason="github_authorization_revoked"):
@@ -154,29 +380,35 @@ def handle_website_github_event(event_type, payload):
                     continue
                 if owned_merge and owned_merge["connection_identity"] != _merge_connection_identity(website):
                     owned_merge = None
+                if owned_merge:
+                    record_owner_setup_merge(website, owned_merge)
                 _, created = WebsiteScanSnapshot.objects.get_or_create(connection=website, generation=website.generation,
                     run_id=f"github-head:{source_sha}", fingerprint=evidence_digest({"source_sha": source_sha}),
                     defaults={"source_sha": source_sha, "detector_version": "github_head", "evidence": {"source": "github_push", "branch": website.branch}})
                 if created:
+                    previous_revision = website.configuration_version
                     website.configuration_version += 1
+                    from .website_goal_scope import record_source_transition
+                    record_source_transition(website, previous_revision=previous_revision, source_sha=source_sha)
                     if not owned_merge:
                         website.capabilities = {**website.capabilities, "publishingReady": False, "previewSupported": False}
                     WebsiteConnectionOperation.objects.get_or_create(
                         idempotency_key=f"{website.pk}:source-reverify:{website.generation}:{source_sha}", defaults={
                             "connection": website, "generation": website.generation, "action": "source-reverify",
                             "payload": {"source_sha": source_sha, "target_id": config.default_publish_target_id,
+                                "previous_configuration_revision": previous_revision, "configuration_revision": website.configuration_version,
                                 "owned_merge_run_id": owned_merge["run_id"] if owned_merge else "", "scan_required": not bool(owned_merge)},
                             "receipt": {"status": "verification_queued", "repository_modified": False}})
                     if not owned_merge:
                         website.blockers = [item for item in website.blockers if item.get("code") != "repository_source_changed"] + [{"code": "repository_source_changed", "message": "The repository changed. Scan and verify the current source before publishing.", "source_sha": source_sha}]
                     website.save(update_fields=["configuration_version", "capabilities", "blockers", "updated_at"])
                     result["invalidated"] += 1
-                    prepare_wakes.append((website.pk, config.organization_id))
+                    prepare_wakes.append((website.pk, config.organization_id, owned_merge["run_id"] if owned_merge else ""))
         # Run no provider calls while the webhook transaction owns authority
         # locks. Both MLAI merges and customer pushes resume the same journey.
-        for identifier, organization_id in prepare_wakes:
+        for identifier, organization_id, owned_merge_run_id in prepare_wakes:
             from .website_prepare import wake_prepare_for_source
-            wake_prepare_for_source(identifier, organization_id=organization_id)
+            wake_prepare_for_source(identifier, organization_id=organization_id, owned_merge_run_id=owned_merge_run_id)
     else:
         result["ignored"] = True
     return result
@@ -295,6 +527,7 @@ def disable_pending_native_auto_merge(connection, urls):
 
 def _process_worker_followup(identifier, now):
     """Claim a durable follow-up, release all DB locks, then contact the worker."""
+    from content_factory.run_backend_facts import save_job_facts
     from .website_connections import authority_guard, owner_write_guard
     from .website_contract import WebsiteAuthorityError
     from integrations.services import article_generation
@@ -334,7 +567,7 @@ def _process_worker_followup(identifier, now):
                         markers.append(payload["callback_dedupe_key"])
                     actions["preview_ready_auto_approve"] = markers
                     job.request_meta = {**metadata, "publish_stage": "auto_approved", "callback_actions": actions}
-                    job.save(update_fields=["status", "request_meta", "updated_at"])
+                    save_job_facts(job, update_fields=["status", "request_meta", "updated_at"])
     except WebsiteAuthorityError as exc:
         state, receipt = "cancelled", {"status": "authority_revoked", "code": exc.code, "repository_modified": False}
         if isinstance(remote, dict) and (remote.get("run_id") or remote.get("job_id")):
@@ -349,22 +582,261 @@ def _process_worker_followup(identifier, now):
     return state
 
 
+SUPERSEDED_SETUP_CLEANUP_DEADLINE = timedelta(hours=24)
+
+
+def _superseded_setup_refs(body):
+    """Keep only bounded ref identities and outcomes from the worker's receipt."""
+    rows = body.get("refs") if isinstance(body, dict) and isinstance(body.get("refs"), list) else []
+    return [{key: str(row[key])[:255] for key in ("status", "reason", "github_repo", "branch_name") if isinstance(row.get(key), str)}
+        for row in rows[:20] if isinstance(row, dict)]
+
+
+def _process_superseded_setup_cleanup(identifier, now):
+    """Ask Content Factory to remove a replaced setup's own review branch.
+
+    CF fences the run, then deletes only a ledger-owned head that never had a
+    pull request. It retains everything else with a reason. An unknown outcome
+    retries until the deadline, then settles as timed out instead of retrying
+    forever.
+    """
+    from integrations import http_client
+    from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers
+    from .website_operations import deletion_epoch
+    with transaction.atomic():
+        operation = WebsiteConnectionOperation.objects.select_for_update().select_related("connection").filter(
+            pk=identifier, state="pending").first()
+        if operation is None or (operation.next_attempt_at and operation.next_attempt_at > now):
+            return None
+        operation.attempts += 1
+        attempt = operation.attempts
+        operation.next_attempt_at = now + timedelta(minutes=5)
+        operation.save(update_fields=["attempts", "next_attempt_at", "updated_at"])
+        payload, connection = dict(operation.payload), operation.connection
+        generation, created_at = operation.generation, operation.created_at
+    binding = payload.get("binding") if isinstance(payload.get("binding"), dict) else {}
+    run_id = str(payload.get("run_id") or "")
+    state, receipt = "pending", {"status": "cleanup_pending", "run_id": run_id, "repository_modified": None}
+    try:
+        if (not binding or binding.get("run_id") != run_id or connection.state != "connected" or connection.generation != generation
+                or str(binding.get("deletion_epoch")) != str(deletion_epoch(connection))):
+            # The worker would retain the ref for a changed connection anyway.
+            state, receipt = "cancelled", {"status": "authority_changed", "run_id": run_id, "repository_modified": False}
+        else:
+            remote = _content_factory_remote_config()
+            if not remote["enabled"]:
+                receipt["last_error"] = "content_factory_unavailable"
+            else:
+                response = http_client.post(f"{remote['base_url']}/api/connections/{connection.pk}/superseded-setup-cleanup",
+                    headers=_content_factory_headers(), json=binding, timeout=(3, 30))
+                try:
+                    body = response.json()
+                except (ValueError, AttributeError):
+                    body = {}
+                refs = _superseded_setup_refs(body)
+                if (response.status_code == 404 and isinstance(body, dict) and body.get("status") == "run_missing"
+                        and body.get("run_id") == run_id):
+                    # Any other 404 is a worker without this route yet; it retries until the deadline.
+                    state, receipt = "completed", {"status": "run_missing", "run_id": run_id, "repository_modified": False}
+                elif response.status_code == 409:
+                    # Identity mismatch, a live run, or a fenced operation: never retried.
+                    state, receipt = "cancelled", {"status": "refused", "run_id": run_id, "repository_modified": False}
+                elif (response.status_code == 200 and isinstance(body, dict) and body.get("run_id") == run_id
+                        and body.get("status") == "completed" and body.get("cleanup_pending") is False):
+                    state, receipt = "completed", {"status": "completed", "run_id": run_id, "refs": refs,
+                        "reason": str(body.get("reason") or "")[:64],
+                        "repository_modified": any(row.get("status") == "deleted" for row in refs)}
+                else:
+                    receipt.update(refs=refs, last_error="superseded_setup_cleanup_pending")
+    except Exception:
+        logging.getLogger(__name__).warning("superseded_setup_cleanup_failed operation=%s", identifier, exc_info=True)
+        receipt["last_error"] = "superseded_setup_cleanup_unavailable"
+    if state == "pending" and now - created_at >= SUPERSEDED_SETUP_CLEANUP_DEADLINE:
+        state, receipt = "completed", {**receipt, "status": "timed_out", "branch_cleanup_unconfirmed": True}
+    # Compare-and-set the claim: a duplicate reconciler cannot replace a newer receipt.
+    WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
+        state=state, receipt=receipt, updated_at=timezone.now(),
+        next_attempt_at=now + timedelta(seconds=min(3600, 15 * 2 ** min(attempt, 8))) if state == "pending" else None)
+    return state
+
+
+SETUP_PR_MERGE_TIMEOUT = timedelta(minutes=60)
+
+
+def _process_setup_pr_merge(identifier, now):
+    """Merge an owner-published setup PR once Content Factory verified its changed head."""
+    import logging
+    from django.contrib.auth import get_user_model
+    from django.utils.dateparse import parse_datetime
+    from workflow_runs.models import ContentFactoryRun
+    from .website_contract import WebsiteAuthorityError
+    from .vibe_marketing_views import (_attempt_setup_publish_merge, _call_content_factory_run_status, _get_config,
+        _mark_setup_merge_blocked, _setup_pr_reverification_record, _sync_local_run_from_remote,
+        get_founder_company_context)
+    with transaction.atomic():
+        operation = WebsiteConnectionOperation.objects.select_for_update().filter(pk=identifier, state="pending").first()
+        if operation is None or (operation.next_attempt_at and operation.next_attempt_at > now):
+            return None
+        operation.attempts += 1
+        attempt = operation.attempts
+        operation.next_attempt_at = now + timedelta(seconds=30)
+        operation.save(update_fields=["attempts", "next_attempt_at", "updated_at"])
+        payload = dict(operation.payload)
+    state, receipt = "pending", {"status": "checking", "repository_modified": False}
+    try:
+        run = ContentFactoryRun.objects.filter(run_id=payload.get("run_id")).first()
+        if run is None:
+            state, receipt = "cancelled", {"status": "run_missing", "repository_modified": False}
+        else:
+            user = get_user_model().objects.get(pk=payload["requested_by_user_id"], is_active=True)
+            context = get_founder_company_context(user, company_id=payload["company_id"])
+            config = _get_config(context.organization)
+            remote = _call_content_factory_run_status(run.run_id, workflow=run.workflow)
+            if isinstance(remote, dict) and remote.get("run_id") == run.run_id:
+                run = _sync_local_run_from_remote(run, remote)
+            record = _setup_pr_reverification_record(run)
+            requested_at = parse_datetime(str(payload.get("requested_at") or "")) or now
+            if (run.result or {}).get("merge_status") == "merged":
+                state, receipt = "completed", {"status": "merged", "repository_modified": False}
+            elif record.get("head_sha") != payload.get("head_sha"):
+                state, receipt = "cancelled", {"status": "superseded", "repository_modified": False}
+            elif record.get("status") == "passed":
+                outcome = _attempt_setup_publish_merge(run=run, context=context, automatic=False)
+                kind = outcome.get("outcome")
+                detail = str(outcome.get("detail") or "")[:300]
+                if kind == "waiting" or (kind == "error" and outcome.get("retryable")
+                                         and now - requested_at < SETUP_PR_MERGE_TIMEOUT):
+                    receipt = {"status": "merge_waiting", "detail": detail, "repository_modified": False}
+                else:
+                    if kind == "error":
+                        _mark_setup_merge_blocked(run=outcome.get("run") or run, config=config,
+                            reason=detail or "The setup pull request could not be merged. Publish again to retry.")
+                    state, receipt = "completed", {"status": kind, "detail": detail,
+                        "repository_modified": kind in {"merged", "auto_merge_pending"}}
+            elif record.get("status") == "failed":
+                reason = str(record.get("error") or "Your changes to the setup pull request did not pass verification.")
+                _mark_setup_merge_blocked(run=run, config=config, status_value="setup_changes_failed",
+                    reason=f"{reason} Fix it on GitHub, then publish again.")
+                state, receipt = "completed", {"status": "verification_failed", "code": record.get("error_code") or "",
+                    "repository_modified": False}
+            elif now - requested_at >= SETUP_PR_MERGE_TIMEOUT:
+                _mark_setup_merge_blocked(run=run, config=config, status_value="setup_changes_failed",
+                    reason="Checking your changes to the setup pull request took too long. Publish again to retry.")
+                state, receipt = "completed", {"status": "timed_out", "repository_modified": False}
+    except WebsiteAuthorityError as exc:
+        state, receipt = "cancelled", {"status": "authority_revoked", "code": exc.code, "repository_modified": False}
+    except Exception:
+        logging.getLogger(__name__).warning("setup_pr_merge_followup_failed operation=%s", identifier, exc_info=True)
+        receipt["last_error"] = "setup_pr_merge_unavailable"
+    # Compare-and-set the claim: a duplicate reconciler cannot replace a newer receipt.
+    WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
+        state=state, receipt=receipt, updated_at=timezone.now(),
+        next_attempt_at=now + timedelta(seconds=30) if state == "pending" else None)
+    return state
+
+
+# A stop follow-up whose runs are cancelled waits this long for Content Factory
+# to confirm its preview teardown: the TTL of CF's preview worker reaper.
+CANCEL_PREVIEW_STOP_DEADLINE = timedelta(days=7)
+
+
 def process_website_connection_operations(*, limit=20, now=None, connection_id=None):
     """Retry cancellation/token revocation, and build bounded cleanup proposals."""
     from integrations import http_client
     from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers
     from .website_tokens import revoke_generation_tokens
     now = now or timezone.now()
+    from django.conf import settings
+    from .website_notification_outbox import ACTION as notice_action
+    from .website_first_article_refunds import ACTION as refund_action
+    from .website_cost_recovery import ACTION as usage_action, advance as advance_usage
+    from .website_cost_ledger import enabled as accounting_enabled
+    from .website_operational_alert_delivery import ACTION as alert_action, advance as advance_alert, channel as alert_channel
+    notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
+    excluded = ["workflow"] if notices_enabled else ["workflow", notice_action]
+    if not accounting_enabled():
+        excluded.append(usage_action)
+    if not getattr(settings, "ARTICLES_OPERATIONAL_ALERTS_ENABLED", False):
+        excluded.append(alert_action)
+    unconfigured_alerts = Q(action=alert_action, state="needs_attention", receipt__status="unconfigured") if alert_channel() else Q(pk__in=[])
+    refreshes = []
+    try:
+        # Queue first, so a due refresh is checked in this same pass.
+        refreshes = queue_verification_refreshes(limit=limit, now=now, connection_id=connection_id)
+    except Exception as exc:
+        # Freshness upkeep must never stop cancellation, cleanup or preparation.
+        logger.warning("website_verification_refresh_sweep_failed error_type=%s", type(exc).__name__)
     due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now),
-        Q(state="pending") | Q(action="prepare", state="running")).exclude(action="workflow")
+        Q(state="pending") | Q(action="prepare", state="running") | Q(action=notice_action,state="running") | Q(action=refund_action,state="running") |
+        Q(action=usage_action, state="running") |
+        Q(action=alert_action, state="running") |
+        unconfigured_alerts |
+        Q(action="prepare", state="needs_user", receipt__user_action__id__in=["deploy_site","merge_pr","review_draft"])).exclude(action__in=excluded)
     if connection_id:
         due = due.filter(connection_id=connection_id)
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])
-    result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0, "operations": []}
+    result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0, "operations": [],
+        "verification_refreshes_queued": len(refreshes)}
     from .website_support import reconcile_support_verifications
     reconcile_support_verifications(limit=limit, connection_id=connection_id)
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
+    from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        from .article_publication_observation import ACTION as publication_action, advance as advance_publication
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action=publication_action).exists():
+            outcome = advance_publication(identifier, now=now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": publication_action, "outcome": outcome})
+            continue
+        if getattr(settings, "ARTICLES_OPERATIONAL_ALERTS_ENABLED", False) and WebsiteConnectionOperation.objects.filter(pk=identifier, action=alert_action).exists():
+            outcome = advance_alert(identifier, now=now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": alert_action, "outcome": outcome})
+            continue
+        if accounting_enabled() and WebsiteConnectionOperation.objects.filter(pk=identifier, action=usage_action).exists():
+            outcome = advance_usage(identifier, now=now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": usage_action, "outcome": outcome})
+            continue
+        if WebsiteConnectionOperation.objects.filter(pk=identifier,action=refund_action).exists():
+            from .website_first_article_refunds import advance_refund
+            outcome=advance_refund(identifier,now=now)
+            if outcome is not None:
+                result["processed"]+=1
+                result["pending" if outcome=="pending" else "completed"]+=1
+                if len(result["operations"])<20:result["operations"].append({"id":str(identifier),"action":refund_action,"outcome":outcome})
+                if outcome=="completed":
+                    row=WebsiteConnectionOperation.objects.filter(pk=identifier,action=refund_action).first()
+                    if row and row.payload.get("purge_after_reconciliation"):
+                        from .website_first_article_refunds import finish_purged_connection
+                        finish_purged_connection(row.connection_id)
+            continue
+        if notices_enabled and WebsiteConnectionOperation.objects.filter(pk=identifier,action=notice_action).exists():
+            from .website_notification_outbox import advance_notice
+            outcome=advance_notice(identifier,now=now)
+            if outcome is not None:
+                result["processed"]+=1
+                result["pending" if outcome=="pending" else "completed"]+=1
+                if len(result["operations"])<20:result["operations"].append({"id":str(identifier),"action":notice_action,"outcome":outcome})
+            continue
+        if event_wakes_enabled() and WebsiteConnectionOperation.objects.filter(pk=identifier, action="goal-wake").exists():
+            from .website_wakeups import advance_wake
+            outcome = advance_wake(identifier, now=now)
+            if outcome is not None:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "goal-wake", "outcome": outcome})
+            continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="prepare").exists():
             from .website_prepare import advance_prepare
             operation = advance_prepare(identifier, now=now)
@@ -380,6 +852,22 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 result["processed"] += 1
                 if len(result["operations"]) < 20:
                     result["operations"].append({"id": str(identifier), "action": "source-reverify", "outcome": outcome})
+                result["pending" if outcome == "pending" else "completed"] += 1
+            continue
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="setup-pr-merge").exists():
+            outcome = _process_setup_pr_merge(identifier, now)
+            if outcome is not None:
+                result["processed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "setup-pr-merge", "outcome": outcome})
+                result["pending" if outcome == "pending" else "completed"] += 1
+            continue
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action="superseded-setup-cleanup").exists():
+            outcome = _process_superseded_setup_cleanup(identifier, now)
+            if outcome is not None:
+                result["processed"] += 1
+                if len(result["operations"]) < 20:
+                    result["operations"].append({"id": str(identifier), "action": "superseded-setup-cleanup", "outcome": outcome})
                 result["pending" if outcome == "pending" else "completed"] += 1
             continue
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action="worker_followup").exists():
@@ -401,8 +889,10 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 continue
             result["processed"] += 1
             op.attempts += 1
+            preview_budget.start(op, now=now)
+            cancel_work.claim(op, now=now)
             op.next_attempt_at = now + timedelta(minutes=5)
-            op.save(update_fields=["attempts", "next_attempt_at", "updated_at"])
+            op.save(update_fields=["attempts", "receipt", "next_attempt_at", "updated_at"])
             claimed_at = op.updated_at
         from .website_connections import require_unlocked_remote_call
         require_unlocked_remote_call()
@@ -410,6 +900,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
             "refunded_run_ids": op.receipt.get("refunded_run_ids", []), "closed_mutation_ids": op.receipt.get("closed_mutation_ids", []),
             "tokens": op.receipt.get("tokens", {})})
         try:
+            preview_budget.begin(op, now=now)
             if op.action == "cleanup":
                 from .website_restoration import worker_restoration
                 op.receipt = worker_restoration(op) or _cleanup_proposal(op)
@@ -430,25 +921,50 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 preview_pending = list(preview_ids[20:])
                 remote = _content_factory_remote_config()
                 for run_id in cancel_ids[:20]:
+                    bounded_cancel = cancel_work.applicable(op)
+                    run = cancel_work.run_for(op, run_id) if bounded_cancel else None
+                    from .run_reconciliation import authoritative_run
+                    owned_cancel = authoritative_run(run)
+                    if not bounded_cancel:
+                        from workflow_runs.models import ContentFactoryRun
+                        candidate = ContentFactoryRun.objects.filter(run_id=run_id, organization_id=op.connection.organization_id).first()
+                        if authoritative_run(candidate):
+                            owned_cancel = True
+                            run = cancel_work.run_for(op, run_id)
+                            if run is None:
+                                pending.append(run_id)
+                                continue
+                    if bounded_cancel and (not cancel_work.can_call(op, now=now) or run is None
+                            or run_id not in op.receipt[cancel_work.KEY]["run_ids"]):
+                        pending.append(run_id)
+                        continue
                     if not remote["enabled"]:
                         pending.append(run_id)
                         continue
-                    if op.action == "cancel-operation" and op.payload.get("cancelled_action") != "prepare":
-                        cancelled = op.connection.operations.get(pk=op.payload["cancelled_operation_id"])
-                        from .website_operations import deletion_epoch
+                    from .run_state import ARTICLE_WORKFLOWS
+                    if bounded_cancel and run.workflow not in ARTICLE_WORKFLOWS:
                         response = http_client.post(f"{remote['base_url']}/api/connections/{op.connection_id}/cancel-operation",
-                            headers=_content_factory_headers(), json={**contract_for(op.connection), "run_id": run_id,
-                                "operation_id": str(cancelled.pk), "operation_attempt": cancelled.payload.get("attempt", 1),
-                                "deletion_epoch": deletion_epoch(op.connection)}, timeout=(3, 15))
+                            headers=_content_factory_headers(), json=cancel_work.scoped_nonarticle_request(run), timeout=(3, 15))
                     else:
+                        from .run_cancellation import cancellation_request_fields
+                        # A website connection change supersedes the run (IF-20).
+                        payload = {"reason": "website_connection_changed",
+                            **cancellation_request_fields("superseded", "system")}
+                        if bounded_cancel or owned_cancel:
+                            if run.workflow in ARTICLE_WORKFLOWS:
+                                payload["expected_cancellation_v1"] = cancel_work.expected_article_cancellation(run)
+                            payload.update(cancel_work.cancellation_echoes(run))
                         response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/cancel",
-                            headers=_content_factory_headers(), json={"reason": "website_connection_changed"}, timeout=(3, 15))
+                            headers=_content_factory_headers(), json=payload, timeout=(3, 15))
                     try:
                         body = response.json()
                     except (ValueError, AttributeError):
                         body = {}
                     cleanup_pending = isinstance(body, dict) and (body.get("cleanup_pending") is True or body.get("cleanupPending") is True)
-                    if response.status_code not in {200, 204, 404} or cleanup_pending:
+                    if bounded_cancel or owned_cancel:
+                        if not cancel_work.acknowledge(op, run, run_id, response.status_code, body):
+                            pending.append(run_id)
+                    elif response.status_code not in {200, 204, 404} or cleanup_pending:
                         pending.append(run_id)
                     if op.action == "cancel-operation" and isinstance(body, dict):
                         op.receipt["remote_outcomes"] = body.get("remote_outcomes", [])
@@ -456,8 +972,18 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                     if not remote["enabled"]:
                         preview_pending.append(run_id)
                         continue
+                    preview_payload = {"reason": "website_connection_changed"}
+                    from workflow_runs.models import ContentFactoryRun
+                    from .run_reconciliation import authoritative_run
+                    candidate = ContentFactoryRun.objects.filter(run_id=run_id, organization_id=op.connection.organization_id).first()
+                    if authoritative_run(candidate):
+                        current = cancel_work.run_for(op, run_id)
+                        if current is None:
+                            preview_pending.append(run_id)
+                            continue
+                        preview_payload.update(cancel_work.cancellation_echoes(current))
                     response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/preview/stop",
-                        headers=_content_factory_headers(), json={"reason": "website_connection_changed"}, timeout=(3, 15))
+                        headers=_content_factory_headers(), json=preview_payload, timeout=(3, 15))
                     try:
                         body = response.json()
                     except (ValueError, AttributeError):
@@ -473,6 +999,17 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                     "purge_run_ids": op.payload.get("purge_run_ids", preview_ids)}
                 op.receipt = {**op.receipt, "tokens": tokens, "preview_cleanup_pending": bool(preview_pending),
                     "remote_cleanup_pending": bool(pending or preview_pending or pending_merges or tokens["pending"])}
+                if (op.action == "cancel-operation" and remote["enabled"] and preview_pending
+                        and not (pending or pending_merges or tokens["pending"])
+                        and not op.payload.get("purge_after_reconciliation")
+                        and now - op.created_at >= CANCEL_PREVIEW_STOP_DEADLINE):
+                    # The stopped runs are cancelled and their tokens revoked. Only
+                    # Content Factory's own preview teardown is unconfirmed, and it
+                    # can stay so indefinitely (a missing provider credential), so
+                    # stop retrying it hourly. The receipt keeps the run ids.
+                    op.state = "completed"
+                    op.receipt.update(status="timed_out", unconfirmed_preview_run_ids=preview_pending,
+                        message="Stopped. Content Factory did not confirm its preview was removed.")
                 if op.action == "purge":
                     from .website_operations import deletion_epoch
                     manifest = {"phase": "apply", "approved": True, "connection_generation": op.payload["previous_generation"],
@@ -504,19 +1041,21 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 if not op.receipt["remote_cleanup_pending"]:
                     op.state = "completed"
                     op.receipt["status"] = "completed"
+        except preview_budget.PreviewCleanupBudgetReached:
+            pass
         except Exception:
             # No transport messages can accidentally include credentials or source bodies.
             op.receipt = {**op.receipt, "last_error": "remote_reconciliation_unavailable"}
-        op.next_attempt_at = now + timedelta(seconds=min(3600, 15 * 2 ** min(op.attempts, 8)))
+        cancel_work.finish(op, now=now)
+        preview_budget.completed(op, now=now)
+        op.next_attempt_at = None if op.state == "needs_attention" else now + timedelta(seconds=min(3600, 15 * 2 ** min(op.attempts, 8)))
         if op.action == "disconnect" and "remove_setup" in op.payload:
             from .website_disconnect import disconnect_retry_policy
             after_cleanup = evidence_digest({"payload": op.payload, "completed_steps": op.receipt.get("completed_steps", []),
                 "refunded_run_ids": op.receipt.get("refunded_run_ids", []), "closed_mutation_ids": op.receipt.get("closed_mutation_ids", []),
                 "tokens": op.receipt.get("tokens", {})})
             disconnect_retry_policy(op, now=now, progressed=before_cleanup != after_cleanup)
-        applied = WebsiteConnectionOperation.objects.filter(pk=op.pk, state="pending", attempts=op.attempts,
-            updated_at=claimed_at).update(receipt=op.receipt, payload=op.payload, state=op.state,
-                next_attempt_at=op.next_attempt_at, updated_at=timezone.now())
+        applied = preview_budget.persist(op, claimed_at=claimed_at, now=now)
         # Offboarding may redact the payload while transport runs. Never replace
         # that newer retention/erasure receipt with our pre-request snapshot.
         result["pending" if not applied or op.state == "pending" else "completed"] += 1
@@ -527,14 +1066,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         if purge_connection_id:
             # Follow the same org -> connection lock order as owner lifecycle
             # writes, after releasing the operation lock to avoid inversion.
-            from organizations.models import Organization
-            candidate = WebsiteConnection.objects.filter(pk=purge_connection_id).first()
-            if candidate:
-                with transaction.atomic():
-                    Organization.objects.select_for_update().get(pk=candidate.organization_id)
-                    candidate = WebsiteConnection.objects.select_for_update().filter(pk=purge_connection_id, authorized_by__isnull=True, state="revoked").first()
-                    if candidate and not candidate.operations.filter(state="pending").exists():
-                        candidate.delete()
+            from .website_first_article_refunds import finish_purged_connection
+            finish_purged_connection(purge_connection_id)
     return result
 
 
@@ -699,11 +1232,245 @@ def approve_cleanup_proposal(config, *, user, data):
             pass
 
 
+# A rescan reserved in one of these states can never replay under its key.
+SETTLED_SOURCE_RESCAN_STATES = frozenset({"failed", "cancelled", "denied", "deleted"})
+
+
+def _source_rescan_identity(op):
+    """Return this source check's rescan dispatch count and request identity."""
+    count = op.payload.get("rescan_dispatch", 0)
+    count = count if type(count) is int and count >= 0 else 0
+    return count, f"source-rescan:{op.pk}:{count}" if count else f"source-rescan:{op.pk}"
+
+
+def _source_rescan_finished(op, website):
+    """Whether the rescan this check dispatched can no longer record targets."""
+    from .website_operations import TERMINAL_WORKFLOW_STATES
+    _, request_id = _source_rescan_identity(op)
+    scan = WebsiteConnectionOperation.objects.filter(
+        idempotency_key=f"{website.pk}:workflow:{request_id}").first()
+    return scan is not None and scan.state in TERMINAL_WORKFLOW_STATES | SETTLED_SOURCE_RESCAN_STATES
+
+
+def _source_rescan_request(op, website, attempt):
+    """Name this source's rescan dispatch, moving past a settled failed one.
+
+    The first dispatch keeps ``source-rescan:<op>`` so an in-flight, completed
+    or running rescan still replays idempotently. Once its reserved operation
+    failed or was cancelled, that key is spent; retrying it only conflicts
+    forever. Count up instead and persist the count under this claim.
+    Returns the request identity and its existing reserved operation, if any.
+    """
+    count, request_id = _source_rescan_identity(op)
+    prior = WebsiteConnectionOperation.objects.filter(
+        idempotency_key=f"{website.pk}:workflow:{request_id}").first()
+    if prior is None or prior.state not in SETTLED_SOURCE_RESCAN_STATES:
+        return request_id, prior
+    from .website_contract import WebsiteAuthorityError
+    updated = {**op.payload, "rescan_dispatch": count + 1}
+    if WebsiteConnectionOperation.objects.filter(pk=op.pk, attempts=attempt, state="pending").update(
+            payload=updated, updated_at=timezone.now()) != 1:
+        raise WebsiteAuthorityError("website_operation_cancelled", "The source verification operation changed.")
+    op.payload = updated
+    return f"source-rescan:{op.pk}:{count + 1}", None
+
+
+VERIFICATION_REFRESH_PURPOSE = "verification_refresh"
+# A refresh that has not settled within this window stops retrying. The proof
+# then ages out as before, and the owner's "Check website again" (prepare)
+# reports the specific action it needs.
+VERIFICATION_REFRESH_RETRY_WINDOW = timedelta(hours=24)
+# How many due websites one sweep examines, most recently verified first, so
+# that ineligible long-stale rows cannot crowd out ones about to lapse.
+VERIFICATION_REFRESH_SCAN_LIMIT = 200
+VERIFICATION_REFRESH_BLOCKERS = frozenset({"repository_source_changed", "APPLICATION_ROOT_VERIFICATION_REQUIRED",
+    "SETUP_BRANCH_VERIFICATION_REQUIRED"})
+
+
+def _refresh_target(connection, config):
+    """The selected target whose accepted in-repository CI proof can be read again, or None.
+
+    Only a connected source with no newer observed head, no source blocker and
+    an exact selected target that authenticated in-repository CI accepted
+    qualifies. Hosted, sealed (version 3) and custom proofs re-attest through
+    their own flows, and a pushed source is owned by its push check.
+    """
+    from .activation import mapping
+    from .website_connections import observed_source_sha
+    from .website_contract import SHA_PATTERN
+    from .website_sealed_workflow import required
+    if (connection.state != "connected" or not connection.branch or connection.app_root
+            or not SHA_PATTERN.fullmatch(connection.verified_sha or "")
+            or not mapping(connection.capabilities).get("publishingReady")
+            or any(isinstance(item, dict) and item.get("code") in VERIFICATION_REFRESH_BLOCKERS for item in connection.blockers or [])
+            or observed_source_sha(connection) not in ("", connection.verified_sha)):
+        return None
+    key = str(config.default_publish_target_id or "")
+    target = connection.targets.filter(generation=connection.generation, target_key=key).first() if key else None
+    from .website_live_verification import accepted as live_url_accepted
+    live = target is not None and live_url_accepted(connection, target)
+    if (target is None or target.source_sha != connection.verified_sha or not target.verified_at
+            or not mapping(target.capabilities).get("publishingReady") or target.adapter == "custom_contract_v1"
+            or (required(connection, target) and not live)):
+        return None
+    if live:
+        # A new-journey website's live-URL proof is renewed by observing its
+        # live blog page again (website_live_verification.verify_live_url).
+        return target
+    accepted = connection.operations.filter(generation=connection.generation, action="ci-verify", state="completed",
+        payload__source_sha=connection.verified_sha, payload__target_id=target.target_key).order_by("-updated_at").first()
+    if accepted is None or mapping(accepted.receipt).get("attestation_origin") != "authenticated_ci":
+        return None
+    return target
+
+
+def queue_verification_refreshes(*, limit=20, now=None, connection_id=None):
+    """Re-attest unchanged sources before their accepted proof reaches VERIFICATION_MAX_AGE.
+
+    ``integration_evidence`` stops trusting a website's verification seven days
+    after it was accepted, although nothing about the website changed. The
+    ``source-reverify`` check re-reads GitHub's own sealed native check at the
+    exact commit, confirms the selected branch still points there and observes
+    the live listing, detail and unknown-slug routes before recording new
+    receipts (``record_ci_attestation``, ``verify_live_deployment``). Nothing
+    copies an older stamp. A same-source check needs no rescan and no new CI
+    run; the GitHub App holds no Actions permission to dispatch one.
+
+    At most one check is queued per accepted verification. A push's own check
+    supersedes it, and preparation adopts it when it reopens.
+    """
+    from django.db.models import Exists, OuterRef
+    from .activation import VERIFICATION_REFRESH_AFTER
+    now = now or timezone.now()
+    checked = WebsiteConnectionOperation.objects.filter(connection_id=OuterRef("website_connection_id"),
+        generation=OuterRef("website_connection__generation"), action="source-reverify",
+        created_at__gte=OuterRef("website_connection__last_verified_at"))
+    configs = (OrganizationContentConfig.objects.select_related("website_connection__organization")
+        .filter(website_connection__state="connected", website_connection__last_verified_at__lte=now - VERIFICATION_REFRESH_AFTER)
+        .exclude(default_publish_target_id="").filter(~Exists(checked)))
+    if connection_id:
+        configs = configs.filter(website_connection_id=connection_id)
+    queued = []
+    for config in configs.order_by("-website_connection__last_verified_at")[:VERIFICATION_REFRESH_SCAN_LIMIT]:
+        if len(queued) >= limit:
+            break
+        connection = config.website_connection
+        target = _refresh_target(connection, config)
+        if target is None:
+            continue
+        operation = _reserve_verification_refresh(connection, target, min(connection.last_verified_at, target.verified_at))
+        if operation is not None:
+            queued.append(str(operation.pk))
+    if len(queued) < limit:
+        queued += _queue_live_check_refreshes(limit=limit - len(queued), threshold=now - VERIFICATION_REFRESH_AFTER,
+            connection_id=connection_id)
+    return queued
+
+
+def _queue_live_check_refreshes(*, limit, threshold, connection_id=None):
+    """Renew a passed live check that ages out while its CI proof is still current.
+
+    Vyavos (25 Oct 2026): its CI check was read again that morning, but its
+    live-route check had passed on 17 Oct, so it could draft articles and not
+    publish them. The CI-age sweep above never saw it. Such a refresh observes
+    the live routes again with the current CI receipt (``renew=deployment``).
+    A source that never passed a live check is left to setup.
+    """
+    from django.db.models import Exists, OuterRef
+    live_checks = WebsiteConnectionOperation.objects.filter(connection_id=OuterRef("website_connection_id"),
+        generation=OuterRef("website_connection__generation"), action="deployment-verify", state="completed")
+    in_flight = WebsiteConnectionOperation.objects.filter(connection_id=OuterRef("website_connection_id"),
+        generation=OuterRef("website_connection__generation"), action="source-reverify", state="pending")
+    # An older CI proof belongs to the sweep above, which renews both checks.
+    configs = (OrganizationContentConfig.objects.select_related("website_connection__organization")
+        .filter(website_connection__state="connected", website_connection__last_verified_at__gt=threshold)
+        .exclude(default_publish_target_id="")
+        .filter(Exists(live_checks), ~Exists(live_checks.filter(updated_at__gt=threshold)), ~Exists(in_flight)))
+    if connection_id:
+        configs = configs.filter(website_connection_id=connection_id)
+    queued = []
+    for config in configs.order_by("-website_connection__last_verified_at")[:VERIFICATION_REFRESH_SCAN_LIMIT]:
+        if len(queued) >= limit:
+            break
+        connection = config.website_connection
+        target = _refresh_target(connection, config)
+        stamp = _aged_live_check(connection, target, threshold) if target is not None else None
+        operation = _reserve_verification_refresh(connection, target, stamp, renew="deployment") if stamp else None
+        if operation is not None:
+            queued.append(str(operation.pk))
+    return queued
+
+
+def _aged_live_check(connection, target, threshold):
+    """When the passed live check publication reads for this source and target ran, if that is due for renewal."""
+    from .activation import mapping
+    from .incident_guards import proof_stamp
+    latest = connection.operations.filter(generation=connection.generation, action="deployment-verify", state="completed",
+        payload__source_sha=connection.verified_sha, payload__target_id=target.target_key).order_by("-created_at").first()
+    receipt = mapping(latest.receipt) if latest else {}
+    stamp = proof_stamp(receipt) if receipt.get("status") == "passed" else None
+    return stamp if stamp and stamp <= threshold else None
+
+
+def _reserve_verification_refresh(connection, target, stamp, *, renew=None):
+    """Queue the one refresh for this proof stamp; None when it was queued before."""
+    payload = {"source_sha": connection.verified_sha, "target_id": target.target_key, "scan_required": False,
+        "owned_merge_run_id": "", "purpose": VERIFICATION_REFRESH_PURPOSE, "verified_at": stamp.isoformat(),
+        "configuration_revision": connection.configuration_version}
+    key = f"{connection.pk}:verification-refresh:{connection.generation}:{connection.verified_sha}:{stamp.isoformat()}"
+    if renew:
+        payload["renew"] = renew
+        key = f"{connection.pk}:verification-refresh:{connection.generation}:{connection.verified_sha}:{renew}:{stamp.isoformat()}"
+    operation, created = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=key,
+        defaults={"connection": connection, "generation": connection.generation, "action": "source-reverify",
+            "payload": payload, "receipt": {"status": "verification_queued", "repository_modified": False}})
+    if not created:
+        return None
+    logger.info("website_verification_refresh_queued connection=%s operation=%s generation=%s source_sha=%s verified_at=%s renew=%s",
+        connection.pk, operation.pk, connection.generation, connection.verified_sha, stamp.isoformat(), renew or "all")
+    return operation
+
+
+# Opening Articles runs a site's due refresh at most this often.
+VERIFICATION_PAGE_REFRESH_SECONDS = 10 * 60
+
+
+def refresh_verification_for_page(organization, *, now=None):
+    """Run this website's due verification refresh while its owner opens Articles.
+
+    The scheduler queues and runs refreshes every minute. This covers a page
+    opened before it gets there, or while it is down, so the page projects the
+    renewed proof instead of "Check website again". It runs only a refresh
+    that is already due, under the worker's own claim and retry backoff, and
+    at most once per website every ten minutes.
+    """
+    from django.conf import settings
+    from django.core.cache import cache
+    if not getattr(settings, "WEBSITE_VERIFICATION_PAGE_REFRESH_ENABLED", True):
+        return None
+    connection_id = (OrganizationContentConfig.objects.filter(organization=organization)
+        .values_list("website_connection_id", flat=True).first())
+    if not connection_id or not cache.add(f"website-verification-refresh:page:{connection_id}", "1", VERIFICATION_PAGE_REFRESH_SECONDS):
+        return None
+    now = now or timezone.now()
+    queue_verification_refreshes(limit=1, now=now, connection_id=connection_id)
+    due = (WebsiteConnectionOperation.objects.filter(connection_id=connection_id, action="source-reverify", state="pending",
+            payload__purpose=VERIFICATION_REFRESH_PURPOSE).filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now))
+        .order_by("created_at").values_list("pk", flat=True).first())
+    return _process_source_reverification(due, now) if due else None
+
+
+def _renews_by_live_url(website, target):
+    """Whether this website's source check re-verifies by live URL instead of CI proof."""
+    from .website_live_verification import applicable, selected
+    return selected(website.organization) and applicable(target)
+
+
 def _process_source_reverification(identifier, now):
     """Re-scan external changes and then authenticate current CI/live proof."""
     from .website_connections import authority_guard, require_unlocked_remote_call
     from .website_contract import WebsiteAuthorityError
-    from .website_verification import discover_source_attestation, record_ci_attestation, verify_live_deployment
+    from .website_verification import current_ci_attestation, discover_source_attestation, record_ci_attestation, verify_live_deployment
     from .vibe_marketing_views import (_content_factory_remote_config, _content_factory_headers, _create_local_run,
         _require_roo_points_for_ai_agent, _mark_roo_points_gate_authorized, founder_actor_id_for_user)
     from .contract import CONTENT_FACTORY_REQUEST_SOURCE
@@ -723,10 +1490,14 @@ def _process_source_reverification(identifier, now):
     state, receipt = "pending", dict(op.receipt)
     try:
         with authority_guard(binding, action="read") as website:
-            target = website.targets.filter(generation=website.generation, target_key=op.payload.get("target_id")).first()
-            if target is None and not op.payload.get("target_id") and receipt.get("scan_run_id"):
+            pinned = op.payload.get("target_id")
+            target = website.targets.filter(generation=website.generation, target_key=pinned).first()
+            if target is None and receipt.get("scan_run_id"):
+                # The push pinned the default it saw. That id can name a target this
+                # generation never recorded, or one no scan re-derives, so waiting
+                # for it never succeeds. After the rescan, verify the target selected now.
                 config = OrganizationContentConfig.objects.get(website_connection=website)
-                if config.default_publish_target_id:
+                if config.default_publish_target_id and config.default_publish_target_id != pinned:
                     target = website.targets.filter(generation=website.generation,
                         target_key=config.default_publish_target_id).first()
         # First-time scaffold merges have no publishing target yet. Their owned
@@ -746,6 +1517,7 @@ def _process_source_reverification(identifier, now):
                         raise WebsiteAuthorityError("website_operation_cancelled", "The source verification operation changed.")
                     op.payload = updated_payload
                     scan_required = False
+                    record_owner_setup_merge(current, owned_merge)
         if scan_required and not receipt.get("scan_run_id"):
             require_unlocked_remote_call()
             remote = _content_factory_remote_config()
@@ -758,14 +1530,26 @@ def _process_source_reverification(identifier, now):
                 domain=website.organization.domain, action="repo_scan")
             if points_error is not None:
                 raise WebsiteAuthorityError("roo_points_required", "The website owner needs sufficient Roo points to verify this integration.", retryable=True)
-            scan_payload = {**binding, "client_request_id": f"source-rescan:{op.pk}", "force_refresh": True,
+            request_id, prior = _source_rescan_request(op, website, attempt)
+            scan_payload = {**binding, "client_request_id": request_id, "force_refresh": True,
                 "request_source": CONTENT_FACTORY_REQUEST_SOURCE, "slack_user_id": founder_actor_id_for_user(owner),
                 "scan_purpose": "setup", "scaffold_if_missing": False,
                 "auto_setup_preview": False, "generate_components": False}
             _mark_roo_points_gate_authorized(scan_payload, domain=website.organization.domain,
                 action="repo_scan", current_balance=balance)
-            scan_op = reserve_workflow_operation(website, workflow="repo_scan", payload=scan_payload)
-            response = http_client.post(f"{remote['base_url']}/api/runs/scan", json=scan_payload,
+            try:
+                scan_op = reserve_workflow_operation(website, workflow="repo_scan", payload=scan_payload)
+            except WebsiteAuthorityError as exc:
+                if exc.authority_code == "operation_key_conflict" and prior is not None and prior.state in {"running", "pending"}:
+                    # Different, still-active work owns this key. It completes,
+                    # or settles and the next attempt takes a fresh identity.
+                    raise WebsiteAuthorityError("source_reverification_unavailable",
+                        "Waiting for the earlier repository scan to settle.", retryable=True) from exc
+                raise
+            from .dispatch_admission import post_dispatch, reserve_user_dispatch
+            admitted = reserve_user_dispatch(payload=scan_payload, workflow="repo_scan", domain=website.organization.domain,
+                actor_id=founder_actor_id_for_user(owner), user=owner)
+            response = post_dispatch(admitted, http_client.post, f"{remote['base_url']}/api/runs/scan", json=scan_payload,
                 headers=_content_factory_headers(), timeout=(3, 30))
             response.raise_for_status()
             remote_run = response.json()
@@ -775,20 +1559,68 @@ def _process_source_reverification(identifier, now):
                 github_repo=website.github_repo, payload=scan_payload, remote_data=remote_run)
             bind_operation_run(scan_op, run)
             receipt["scan_run_id"] = run.run_id
-        if target is None:
+        if target is None and op.receipt.get("scan_run_id") and _source_rescan_finished(op, website):
+            # An earlier attempt's rescan finished without recording the pinned
+            # or the selected target, so no row this check could verify will
+            # appear. Only a setup registers and verifies one, so it owns this
+            # source now.
+            state = "cancelled"
+            receipt.update(status="superseded", code="verified_target_required", retryable=False,
+                message="No publishing target exists at this source. Setting up articles verifies it.")
+        elif target is None:
             raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
-        proof = discover_source_attestation(website, target, op.payload["source_sha"])
-        ci = record_ci_attestation(proof)
-        config = OrganizationContentConfig.objects.get(website_connection=website)
-        deployment = verify_live_deployment(config, data=ci.receipt)
-        state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
-            "ci_operation_id": str(ci.pk), "deployment_operation_id": str(deployment.pk), "repository_modified": False}
+        elif _renews_by_live_url(website, target):
+            # New-journey websites have no CI workflow: their proof is the scan's
+            # build proof plus the live blog page, observed again here.
+            from .website_live_verification import verify_live_url
+            if target.source_sha != op.payload["source_sha"]:
+                # The rescan has not recorded this source's build proof yet.
+                raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
+            config = OrganizationContentConfig.objects.get(website_connection=website)
+            verified = verify_live_url(config, target, setup_run_id=op.payload.get("owned_merge_run_id") or "")
+            state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
+                "target_id": target.target_key, "ci_operation_id": "", "ci_reused": False, "method": "live_url",
+                "deployment_operation_id": verified["operation_id"], "repository_modified": False}
+        else:
+            ci, attested = None, None
+            if op.payload.get("renew") == "deployment":
+                # Only the live check aged out, and the current CI receipt still
+                # proves this commit. Read the check again only if it no longer does.
+                attested = current_ci_attestation(website, target)
+            if attested is None:
+                proof = discover_source_attestation(website, target, op.payload["source_sha"])
+                ci = record_ci_attestation(proof)
+                attested = ci.receipt
+            config = OrganizationContentConfig.objects.get(website_connection=website)
+            deployment = verify_live_deployment(config, data=attested)
+            state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
+                "target_id": target.target_key, "ci_operation_id": str(ci.pk) if ci else "", "ci_reused": ci is None,
+                "deployment_operation_id": str(deployment.pk), "repository_modified": False}
     except WebsiteAuthorityError as exc:
         receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
         if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:
             state = "cancelled"
+        elif exc.authority_code == "website_source_changed":
+            # GitHub's branch has moved past this source, and that newer push
+            # queued its own verification. Retrying this one can never succeed.
+            state = "cancelled"
+            receipt.update(status="superseded", retryable=False)
+        elif exc.authority_code == "operation_key_conflict":
+            # A settled rescan already moved to a fresh identity, so this key
+            # belongs to finished or different work: retrying cannot repair it.
+            # Stop; the source blocker stays until a new scan re-verifies.
+            state = "needs_attention"
+            receipt.update(status="needs_attention", code="operation_key_conflict", retryable=False,
+                message="The repository scan for this change could not be restarted. Scan the repository again.")
     except Exception:
         receipt.update(status="verification_pending", code="source_reverification_unavailable", retryable=True)
+    if state == "pending" and op.payload.get("purpose") == VERIFICATION_REFRESH_PURPOSE and (
+            receipt.get("retryable") is False or now - op.created_at >= VERIFICATION_REFRESH_RETRY_WINDOW):
+        # A same-source refresh never revoked anything, so stopping it changes
+        # nothing: the accepted proof ages out as before and the owner's own
+        # re-check reports the cause instead of an hourly retry forever.
+        state = "needs_attention"
+        receipt.update(status="needs_attention", retryable=False)
     WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
         state=state, receipt=receipt, next_attempt_at=now + timedelta(seconds=min(3600, 15 * 2 ** min(attempt, 8))), updated_at=timezone.now())
     return state

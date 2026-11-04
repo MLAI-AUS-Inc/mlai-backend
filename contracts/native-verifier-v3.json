@@ -1,0 +1,9 @@
+{
+  "playwright_version": "1.58.0",
+  "profile": "native_ci_v1",
+  "proof_schema_version": 3,
+  "python_version": "3.11",
+  "runner_path": "backend/ci_templates/articles_verification.py",
+  "runner_sha256": "fa2bfeb3014a8f15f67cd4c1a44a3e17d6e01977ca6c91db1ca1f629a7344aa3",
+  "schema_version": 1
+}

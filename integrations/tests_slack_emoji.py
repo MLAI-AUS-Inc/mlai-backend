@@ -19,6 +19,11 @@ class SlackEmojiTests(unittest.TestCase):
                     slack_reaction_to_emoji(emoji_to_slack_reaction(native)), native
                 )
 
+    def test_recent_unicode_standard_emoji(self):
+        self.assertEqual(slack_reaction_to_emoji("face_with_bags_under_eyes"), "\U0001fae9")
+        self.assertEqual(slack_reaction_to_emoji("orca"), "\U0001facd")
+        self.assertEqual(emoji_to_slack_reaction(slack_reaction_to_emoji("ballet_dancer::skin-tone-4")), "ballet_dancer::skin-tone-4")
+
     def test_examples_and_legacy_spelling(self):
         self.assertEqual(slack_reaction_to_emoji("white_check_mark"), "✅")
         self.assertEqual(emoji_to_slack_reaction("👍"), "thumbsup")
@@ -35,6 +40,6 @@ class SlackEmojiTests(unittest.TestCase):
             emoji_to_slack_reaction(":thumbsup::skin-tone-4:"), "thumbsup::skin-tone-4"
         )
         self.assertEqual(slack_reaction_to_emoji("x" * 62), ":" + "x" * 62 + ":")
-        for name in ["x" * 63, "<script>", "bad name", "wave::skin-tone-9"]:
+        for name in ["x" * 101, "<script>", "bad name", "wave::skin-tone-9"]:
             self.assertEqual(slack_reaction_to_emoji(name), "")
             self.assertEqual(emoji_to_slack_reaction(":" + name + ":"), "")

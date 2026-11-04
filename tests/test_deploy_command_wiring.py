@@ -1,4 +1,5 @@
 from io import StringIO
+from pathlib import Path
 
 from django.core.management import get_commands, load_command_class
 from django.test import SimpleTestCase
@@ -14,6 +15,20 @@ from core.management.commands.deploy_preflight import PREFLIGHT_STEPS
 # mid-deploy before runtime replacement. These tests
 # check the wiring against the real command registry.
 class DeployCommandWiringTests(SimpleTestCase):
+    def test_workflows_cannot_call_retired_slack_replay_operators(self):
+        retired = {
+            "backfill_community_bridge_slack_avatars", "backfill_community_bridge_slack_mentions",
+            "backfill_community_bridge_thread_references", "repair_community_bridge_slack_thread",
+            "reconcile_community_bridge_slack_threads", "repair_community_bridge_threads",
+            "reconcile_recent_community_bridge_slack",
+        }
+        commands = get_commands()
+        self.assertTrue(retired.isdisjoint(commands))
+        self.assertIn("message_sync_repair", commands)
+        for workflow in (Path(__file__).resolve().parents[1] / ".github/workflows").glob("*.yml"):
+            for command in retired:
+                self.assertNotIn(command, workflow.read_text(), workflow.name)
+
     def _assert_step_is_callable(self, name, kwargs):
         commands = get_commands()
         self.assertIn(name, commands, f"deploy step calls unknown command {name!r}")

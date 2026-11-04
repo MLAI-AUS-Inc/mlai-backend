@@ -1,0 +1,380 @@
+{
+  "body": {
+    "backend_run_admission_v1": {
+      "dispatch_key": "island-refresh:actual-nightly.fixture.test:2026-11-03",
+      "domain": "actual-nightly.fixture.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "2447",
+      "principal": {
+        "kind": "scheduler",
+        "service": "island_refresh"
+      },
+      "request_digest": "ecebd2a5716ff7b0febc7157e83ec7deca10cb89430a3cfb6c768f9a6d97b128",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "island_refresh"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "7a544345c7ec1dc1c01cd63e0567107375742c8dd78c876e5027ae0e8fd289b6",
+      "execution_id": "admit:7a544345c7ec1dc1c01cd63e0567107375742c8dd78c876e5027ae0e8fd289b6",
+      "generation": 0,
+      "request_digest": "ecebd2a5716ff7b0febc7157e83ec7deca10cb89430a3cfb6c768f9a6d97b128",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "control_key": "cfdb8f8a145ec09f33a827ae4f976c86a79dccab5ca39bbcb2b69f6a7d7fa56e",
+    "reason": "orphan_resume",
+    "schema_version": 1
+  },
+  "budget_producer": "actual authenticated read-only GET /execution-budget from same pending original run; original ledger created at admission; no manufactured counters",
+  "execution_budget": {
+    "backend_run_admission_v1": {
+      "dispatch_key": "island-refresh:actual-nightly.fixture.test:2026-11-03",
+      "domain": "actual-nightly.fixture.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "2447",
+      "principal": {
+        "kind": "scheduler",
+        "service": "island_refresh"
+      },
+      "request_digest": "ecebd2a5716ff7b0febc7157e83ec7deca10cb89430a3cfb6c768f9a6d97b128",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "island_refresh"
+    },
+    "backend_run_budget_v1": {
+      "max_model_tokens": 100000,
+      "max_model_usd": "5",
+      "runtime": "article",
+      "schema_version": 1
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "7a544345c7ec1dc1c01cd63e0567107375742c8dd78c876e5027ae0e8fd289b6",
+      "execution_id": "admit:7a544345c7ec1dc1c01cd63e0567107375742c8dd78c876e5027ae0e8fd289b6",
+      "generation": 0,
+      "request_digest": "ecebd2a5716ff7b0febc7157e83ec7deca10cb89430a3cfb6c768f9a6d97b128",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "event_cursor": 4,
+    "run_id": "r3-actual-nightly-worker",
+    "schema_version": 1,
+    "uncertain_calls": 0,
+    "used_model_tokens": 0,
+    "used_model_usd_upper_bound": "0.000000"
+  },
+  "history": {
+    "batches": [
+      {
+        "backend_run_admission_v1": {
+          "dispatch_key": "island-refresh:actual-nightly.fixture.test:2026-11-03",
+          "domain": "actual-nightly.fixture.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "2447",
+          "principal": {
+            "kind": "scheduler",
+            "service": "island_refresh"
+          },
+          "request_digest": "ecebd2a5716ff7b0febc7157e83ec7deca10cb89430a3cfb6c768f9a6d97b128",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "7a544345c7ec1dc1c01cd63e0567107375742c8dd78c876e5027ae0e8fd289b6",
+          "execution_id": "admit:7a544345c7ec1dc1c01cd63e0567107375742c8dd78c876e5027ae0e8fd289b6",
+          "generation": 0,
+          "request_digest": "ecebd2a5716ff7b0febc7157e83ec7deca10cb89430a3cfb6c768f9a6d97b128",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "emitted_at": "2026-11-02T21:56:07.625591+00:00",
+        "event": "run_events_v2",
+        "event_id": "0fbeed409617b322884a2f85c2b01266cc084c892bbe8c85f46af5b7e46deb45",
+        "event_type": "run_events_v2",
+        "events": [
+          {
+            "at": "2026-11-02T21:56:07.609125+00:00",
+            "digest": "78ff6e2b0a2d447ffebbd2d3581f6dea54b88d85d025893d5a881e4f2c68d0fd",
+            "generation": 0,
+            "seq": 1,
+            "state_version": 1,
+            "status": "queued",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:07.616322+00:00",
+            "digest": "b9df95de606a013fff304bb9f062d478404251fe5bdb674e89d423d644577096",
+            "generation": 0,
+            "seq": 2,
+            "state_version": 2,
+            "status": "queued",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:07.625591+00:00",
+            "digest": "58ebaed032b7410d27c0e1a9162680d81289ffe3fd86d943ed7d367a7650122e",
+            "generation": 0,
+            "seq": 3,
+            "state_version": 3,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:07.625591+00:00",
+            "attempt": 1,
+            "digest": "c2fb0ad5e1f5d084ccc0cd9533a5598bf8be086146499327683a95f52861e1e4",
+            "generation": 0,
+            "seq": 4,
+            "state_version": 3,
+            "step": "load_context",
+            "type": "step_started"
+          }
+        ],
+        "run_id": "r3-actual-nightly-worker",
+        "schema_version": 1
+      }
+    ],
+    "has_more": false,
+    "next_cursor": 4,
+    "run_id": "r3-actual-nightly-worker",
+    "schema_version": 1
+  },
+  "original_backend_admission": {
+    "control_request_example": {
+      "backend_run_admission_v1": {
+        "dispatch_key": "island-refresh:actual-nightly.fixture.test:2026-11-03",
+        "domain": "actual-nightly.fixture.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "2447",
+        "principal": {
+          "kind": "scheduler",
+          "service": "island_refresh"
+        },
+        "request_digest": "ecebd2a5716ff7b0febc7157e83ec7deca10cb89430a3cfb6c768f9a6d97b128",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "island_refresh"
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "7a544345c7ec1dc1c01cd63e0567107375742c8dd78c876e5027ae0e8fd289b6",
+        "execution_id": "admit:7a544345c7ec1dc1c01cd63e0567107375742c8dd78c876e5027ae0e8fd289b6",
+        "generation": 0,
+        "request_digest": "ecebd2a5716ff7b0febc7157e83ec7deca10cb89430a3cfb6c768f9a6d97b128",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "control_key": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "reason": "orphan_resume",
+      "schema_version": 1
+    },
+    "producer": "actual dispatch_island_refresh -> reserve_scheduler_dispatch -> HTTP, only external POST mocked",
+    "run_id": "r3-actual-nightly-worker",
+    "run_request": {
+      "backend_run_admission_v1": {
+        "dispatch_key": "island-refresh:actual-nightly.fixture.test:2026-11-03",
+        "domain": "actual-nightly.fixture.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "2447",
+        "principal": {
+          "kind": "scheduler",
+          "service": "island_refresh"
+        },
+        "request_digest": "ecebd2a5716ff7b0febc7157e83ec7deca10cb89430a3cfb6c768f9a6d97b128",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "island_refresh"
+      },
+      "backend_run_budget_v1": {
+        "max_model_tokens": 100000,
+        "max_model_usd": "5",
+        "runtime": "article",
+        "schema_version": 1
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "7a544345c7ec1dc1c01cd63e0567107375742c8dd78c876e5027ae0e8fd289b6",
+        "execution_id": "admit:7a544345c7ec1dc1c01cd63e0567107375742c8dd78c876e5027ae0e8fd289b6",
+        "generation": 0,
+        "request_digest": "ecebd2a5716ff7b0febc7157e83ec7deca10cb89430a3cfb6c768f9a6d97b128",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "client_request_id": "island-refresh:actual-nightly.fixture.test:2026-11-03",
+      "domain": "actual-nightly.fixture.test",
+      "include_expansion": true,
+      "island_refresh_recovery_version": 1,
+      "request_source": "mlai_backend_scheduler"
+    },
+    "schema_version": 1
+  },
+  "producer": "actual CF HTTP admission + real begun step + orphan selector + resume_refresh -> prepare_rewind -> execution-ticket HTTP transport; no manufactured control key",
+  "run_id": "r3-actual-nightly-worker",
+  "run_request": {
+    "backend_run_admission_v1": {
+      "dispatch_key": "island-refresh:actual-nightly.fixture.test:2026-11-03",
+      "domain": "actual-nightly.fixture.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "2447",
+      "principal": {
+        "kind": "scheduler",
+        "service": "island_refresh"
+      },
+      "request_digest": "ecebd2a5716ff7b0febc7157e83ec7deca10cb89430a3cfb6c768f9a6d97b128",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "island_refresh"
+    },
+    "backend_run_budget_v1": {
+      "max_model_tokens": 100000,
+      "max_model_usd": "5",
+      "runtime": "article",
+      "schema_version": 1
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "7a544345c7ec1dc1c01cd63e0567107375742c8dd78c876e5027ae0e8fd289b6",
+      "execution_id": "admit:7a544345c7ec1dc1c01cd63e0567107375742c8dd78c876e5027ae0e8fd289b6",
+      "generation": 0,
+      "request_digest": "ecebd2a5716ff7b0febc7157e83ec7deca10cb89430a3cfb6c768f9a6d97b128",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "client_request_id": "island-refresh:actual-nightly.fixture.test:2026-11-03",
+    "domain": "actual-nightly.fixture.test",
+    "github_repo": "",
+    "include_expansion": true,
+    "island_refresh_recovery_version": 1,
+    "request_source": "mlai_backend_scheduler",
+    "run_id": "r3-actual-nightly-worker",
+    "workflow": "island_refresh"
+  },
+  "schema_version": 1
+}

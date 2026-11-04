@@ -18,7 +18,7 @@ from content_factory.vibe_marketing_views import (
 )
 
 PAID_DOMAIN = "vyavos.com"   # not in FREE_CONTENT_FACTORY_DOMAINS
-FREE_DOMAIN = "mlai.au"
+MLAI_DOMAIN = "mlai.au"
 
 
 def _run(run_request: dict):
@@ -38,27 +38,46 @@ def _valid_web_auth():
 class ReuseAuthorizationDecisionTests(SimpleTestCase):
     """Verifier decision logic (lineage lookup mocked — no DB)."""
 
-    def test_web_authorized_run_reuses_without_lineage_lookup(self):
+    def test_verified_web_charge_reuses_without_a_lineage_walk(self):
         payload: dict = {}
-        with patch.object(views, "_reusable_content_factory_charge_for_run") as lineage:
+        charge = SimpleNamespace(reference_id='web-article-original')
+        with patch('roo.models.Ledger.objects.filter') as ledger, \
+             patch.object(views, "_reusable_content_factory_charge_for_run") as lineage:
+            ledger.side_effect = [SimpleNamespace(first=lambda: charge), SimpleNamespace(exists=lambda: False)]
             result = _reuse_roo_points_authorization_for_article_job(
                 run=_run(_valid_web_auth()), payload=payload, domain=PAID_DOMAIN, failure_detail="x",
             )
+            self.assertEqual(ledger.call_args_list[0].kwargs, {'pk': 777, 'kind': 'SPEND', 'source': 'CONTENT_FACTORY'})
+            self.assertEqual(ledger.call_args_list[1].kwargs,
+                {'kind': 'REFUND', 'source': 'CONTENT_FACTORY', 'reference_id': charge.reference_id})
         self.assertIsNone(result)
-        lineage.assert_not_called()  # stamped run -> no lineage query needed
+        lineage.assert_not_called()  # Verified charge -> no lineage walk needed.
         self.assertEqual(payload["roo_points_billing_status"], "reused")
         self.assertEqual(payload["roo_points_ledger_id"], "777")
 
+    def test_stamp_without_a_real_charge_cannot_authorize_reuse(self):
+        payload = {}
+        with patch('roo.models.Ledger.objects.filter') as ledger, \
+             patch.object(views, '_reusable_content_factory_charge_for_run', return_value=None):
+            ledger.return_value.first.return_value = None
+            result = _reuse_roo_points_authorization_for_article_job(run=_run(_valid_web_auth()),
+                payload=payload, domain=PAID_DOMAIN, failure_detail='No payment')
+        self.assertEqual(result.status_code, 409)
+        self.assertEqual(result.data['code'], 'roo_points_billing_required')
+        self.assertEqual(payload, {})
+
     def test_unstamped_run_reuses_real_lineage_charge(self):
         payload: dict = {}
-        with patch.object(views, "_reusable_content_factory_charge_for_run", return_value=2127):
+        with patch.object(views, "_reusable_content_factory_charge_for_run", return_value=2127), \
+             patch("roo.models.Ledger.objects.get", return_value=SimpleNamespace(delta_microroo=-6_000_000)):
             result = _reuse_roo_points_authorization_for_article_job(
                 run=_run({"domain": PAID_DOMAIN}), payload=payload, domain=PAID_DOMAIN, failure_detail="x",
             )
         self.assertIsNone(result)  # reused from the lineage charge
         self.assertEqual(payload["roo_points_billing_status"], "reused")
         self.assertEqual(payload["roo_points_ledger_id"], "2127")
-        self.assertEqual(payload["roo_points_cost"], get_content_factory_article_cost_points(PAID_DOMAIN))
+        self.assertEqual(payload["roo_points_cost"], 6)
+        self.assertEqual(payload["roo_points_required"], 6)
 
     def test_unstamped_run_without_any_charge_is_blocked(self):
         payload: dict = {}
@@ -71,13 +90,15 @@ class ReuseAuthorizationDecisionTests(SimpleTestCase):
         self.assertEqual(result.data["code"], "roo_points_billing_required")
         self.assertEqual(result.data["detail"], "blocked")
 
-    def test_free_domain_is_authorized(self):
+    def test_mlai_article_without_a_charge_is_blocked(self):
         payload: dict = {}
-        result = _reuse_roo_points_authorization_for_article_job(
-            run=_run({}), payload=payload, domain=FREE_DOMAIN, failure_detail="x",
-        )
-        self.assertIsNone(result)
-        self.assertEqual(payload["roo_points_billing_status"], "free")
+        with patch.object(views, "_reusable_content_factory_charge_for_run", return_value=None):
+            result = _reuse_roo_points_authorization_for_article_job(
+                run=_run({}), payload=payload, domain=MLAI_DOMAIN, failure_detail="Article payment required",
+            )
+        self.assertEqual(result.status_code, 409)
+        self.assertEqual(result.data["code"], "roo_points_billing_required")
+        self.assertEqual(payload, {})
 
 
 class ReusableChargeLineageTests(TestCase):

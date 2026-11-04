@@ -14,6 +14,18 @@ from integrations.services import article_generation as billing, research_automa
 
 class ResearchAutomationBillingTests(SimpleTestCase):
     def setUp(self):
+        # These legacy fixtures have no admitted canonical Run. Model the new
+        # read selectors while exercising the actual ownership/refund guards.
+        from workflow_runs.models import ContentFactoryRun
+        rows = MagicMock(name="unadmitted_research_runs")
+        rows.filter.return_value = rows.order_by.return_value = rows.select_for_update.return_value = rows
+        rows.__getitem__.return_value = rows
+        rows.first.return_value = None
+        rows.iterator.return_value = iter(())
+        rows.__iter__.return_value = iter(())
+        canonical = patch.object(ContentFactoryRun, "objects", rows)
+        canonical.start()
+        self.addCleanup(canonical.stop)
         self.user = Obj(pk=7, id=7)
         self.org = Obj(pk=9, domain="fixture.test")
         self.automation = Obj(status="active", pause_if_unanswered=False, organization=self.org, organization_id=9, user=self.user, notification_channel=Obj(user=self.user))
@@ -133,14 +145,22 @@ class ResearchAutomationBillingTests(SimpleTestCase):
     def test_article_confirmation_does_not_reuse_previous_research_quote(self):
         original = {"roo_points_action": "content_island_topic_generation", "expectedCostPoints": 3,
                     "client_request_id": "research-key"}
-        job = Obj(job_id="research-1", client_request_id="research-key", request_meta=original,
+        job = Obj(pk=7, job_id="research-1", domain="fixture.test", client_request_id="research-key", request_meta=original,
                   billing_status="charged", save=Mock())
         def charge(actor, payload, domain, **kwargs):
             self.assertNotIn("expectedCostPoints", payload)
             return self.user, Obj(pk=14), 6
-        with patch.object(billing, "_charge_content_factory_request", side_effect=charge):
+        from contextlib import nullcontext
+        with patch.object(billing, "_charge_content_factory_request", side_effect=charge), \
+             patch.object(billing, "_find_active_confirm_child_job", return_value=None), \
+             patch.object(billing, "require_article_activation"), \
+             patch.object(billing.transaction, "atomic", side_effect=nullcontext), \
+             patch("content_factory.models.ContentFactoryJob.objects.select_for_update") as rows, \
+             patch("roo.models.Ledger.objects.filter") as ledgers:
+            rows.return_value.get.return_value = job
+            ledgers.return_value.exists.return_value = False
             billing._charge_deferred_discovery_job_if_needed(source_job=job, slack_user_id="mlai_user:7",
-                domain="fixture.test", confirmed_keyword="Culture")
+                domain="fixture.test", confirmed_keyword="Culture", expected_cost_points=6)
         self.assertEqual(job.billing_amount, 6)
         self.assertEqual(job.request_meta["roo_points_action"], "article_generation")
         self.assertEqual(original["expectedCostPoints"], 3)

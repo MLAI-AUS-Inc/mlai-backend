@@ -33,6 +33,20 @@ def _open_pull(merged=False, node_id="PR_node_1"):
         "base": {"ref": "main", "repo": {"id": 12345, "full_name": REPO}}, "node_id": node_id}
 
 
+def _branch_policy_get(url, **kwargs):
+    """Replace the shared policy's provider reads, retaining its real decisions."""
+    response = mock.Mock(headers={})
+    if url == f"https://api.github.com/repos/{REPO}/rules/branches/main":
+        response.status_code = 200
+        response.json.return_value = []
+    elif url == f"https://api.github.com/repos/{REPO}/branches/main/protection":
+        response.status_code = 403
+        response.json.return_value = {"message": PERMISSION_ERROR}
+    else:
+        raise AssertionError(f"Unexpected branch policy read: {url}")
+    return response
+
+
 class SetupMergeBase(TestCase):
     def setUp(self):
         self.org = Organization.objects.create(domain="theproductbus.com", name="TPB")
@@ -49,6 +63,7 @@ class SetupMergeBase(TestCase):
             mock.patch("content_factory.website_connections.verify_repository_head", return_value="a" * 40),
             mock.patch("content_factory.website_connections.read_repository_native_target", return_value={"id": 12345, "full_name": REPO, "default_branch": "main"}),
             mock.patch("content_factory.website_connections.read_setup_merge_pull", side_effect=lambda connection, number: _open_pull(merged=True)),
+            mock.patch.object(views.http_client, "get", side_effect=_branch_policy_get),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -295,3 +310,73 @@ class MaybeAutoPublishSetupTests(SetupMergeBase):
         with mock.patch.object(views, "_attempt_setup_publish_merge") as attempt:
             views._maybe_auto_publish_setup(run=self.run, context=self.context)
         attempt.assert_not_called()
+
+
+class OpenSetupPullRequestDatabaseTests(TestCase):
+    """The open setup PR lookup and stale-source observation use real JSON and snapshot queries."""
+
+    def setUp(self):
+        from content_factory.website_models import WebsiteScanSnapshot
+        self.org = Organization.objects.create(domain="talathrive.example.test", name="Synthetic")
+        self.website = WebsiteConnection.objects.create(organization=self.org, github_repo="Example/Stories",
+            repository_id=777, installation_id="45", branch="main", verified_sha="d" * 40)
+        WebsiteScanSnapshot.objects.create(connection=self.website, generation=self.website.generation,
+            run_id="github-head:" + "a" * 40, source_sha="a" * 40, detector_version="github_head", fingerprint="head")
+
+    def setup_run(self, run_id, *, generation=None, base="a" * 40, status="completed", setup_status="pr_created", merge="not_merged"):
+        return ContentFactoryRun.objects.create(run_id=run_id, workflow="article_system_setup", domain=self.org.domain,
+            organization=self.org, github_repo="example/stories", status=status, approval_state="approved",
+            run_request={"website_connection_id": str(self.website.pk), "connection_generation":
+                self.website.generation if generation is None else generation, "expected_source_sha": base},
+            result={"status": "setup_pr_created", "pr_number": 40, "merge_status": merge,
+                "article_system_setup": {"status": setup_status, "pr_number": 40, "merge_status": merge}})
+
+    def test_lookup_returns_the_current_generation_open_pull_request(self):
+        from content_factory.website_connections import open_setup_pr_run
+        self.setup_run("open-pr")
+        self.setup_run("other-generation", generation=self.website.generation + 1)
+        self.setup_run("cancelled-retry", status="cancelled")
+        self.assertEqual(open_setup_pr_run(self.website, source_sha="a" * 40).run_id, "open-pr")
+        self.assertIsNone(open_setup_pr_run(self.website, source_sha="b" * 40))
+
+    def test_merged_and_closed_pull_requests_are_not_returned(self):
+        from content_factory.website_connections import open_setup_pr_run
+        self.setup_run("merged", merge="merged")
+        self.setup_run("closed", setup_status="pr_closed")
+        self.assertIsNone(open_setup_pr_run(self.website, source_sha="a" * 40))
+
+    def test_only_this_generations_observed_head_stands_in_for_a_stale_verified_source(self):
+        from content_factory.website_connections import _source_observed
+        self.assertTrue(_source_observed(self.website, "a" * 40))
+        self.assertFalse(_source_observed(self.website, "b" * 40))
+        self.website.generation += 1
+        self.assertFalse(_source_observed(self.website, "a" * 40))
+
+
+class SettledSetupDatabaseTests(TestCase):
+    """A merged setup is found by its own merge commit with real JSON queries."""
+
+    def setUp(self):
+        self.org = Organization.objects.create(domain="vyavos.example.test", name="Synthetic")
+        self.website = WebsiteConnection.objects.create(organization=self.org, github_repo="Example/Site",
+            repository_id=888, installation_id="45", branch="main", verified_sha="")
+
+    def merged_run(self, run_id, merge_sha, *, generation=None):
+        return ContentFactoryRun.objects.create(run_id=run_id, workflow="article_system_setup", domain=self.org.domain,
+            organization=self.org, github_repo="example/site", status="completed", approval_state="approved",
+            run_request={"website_connection_id": str(self.website.pk), "connection_generation":
+                self.website.generation if generation is None else generation, "expected_source_sha": "a" * 40},
+            result={"status": "merged", "merge_status": "merged", "merge_sha": merge_sha, "pr_number": 3,
+                "adoption": {"kit_paths": [".mlai/articles-verification.json"]},
+                "article_system_setup": {"status": "merged", "merge_status": "merged"}})
+
+    def test_settled_setup_and_owned_merge_use_this_generations_merge_commit(self):
+        from content_factory.website_connections import settled_setup_run
+        from content_factory.website_verification import _setup_merged_at
+        self.merged_run("merged-pr-3", "b" * 40)
+        self.merged_run("older-generation", "c" * 40, generation=self.website.generation + 1)
+        self.assertEqual(settled_setup_run(self.website, source_sha="b" * 40).run_id, "merged-pr-3")
+        self.assertIsNone(settled_setup_run(self.website, source_sha="c" * 40))
+        self.assertTrue(_setup_merged_at(self.website, "merged-pr-3", "b" * 40))
+        self.assertFalse(_setup_merged_at(self.website, "merged-pr-3", "c" * 40))
+        self.assertFalse(_setup_merged_at(self.website, "older-generation", "c" * 40))

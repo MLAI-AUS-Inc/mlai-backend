@@ -5,7 +5,7 @@ import threading
 from datetime import timedelta
 from io import StringIO
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from django.core.cache import cache
 from django.contrib.auth import get_user_model
@@ -90,12 +90,28 @@ class IndependentSlotTests(IsolatedAsyncioTestCase):
                             await pending
                 release.set()
 
+    async def test_history_seeding_recovers_after_a_failed_maintenance_turn(self):
+        seed = MagicMock(side_effect=[RuntimeError("synthetic failure"), None])
+        with patch.object(execution, "close_old_connections"), patch.object(execution, "run_slots", new=AsyncMock()), \
+                patch.object(execution.asyncio, "sleep", new=AsyncMock(side_effect=[None, asyncio.CancelledError])):
+            await execution.run_lane(lambda _: 0, worker_id="synthetic", lane="history", slots=4, seed=seed)
+        self.assertEqual(seed.call_count, 2)
+
+    async def test_history_seeding_resumes_on_each_worker_restart(self):
+        seed = MagicMock()
+        with patch.object(execution, "close_old_connections"), patch.object(execution, "run_slots", new=AsyncMock()), \
+                patch.object(execution.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)):
+            for _ in range(2):
+                await execution.run_lane(lambda _: 0, worker_id="synthetic", lane="history", slots=4, seed=seed)
+        self.assertEqual(seed.call_count, 2)
+
     async def test_both_worker_entrypoints_use_shared_bounded_lanes(self):
         from integrations.services.community_bridge import worker
         with patch.object(worker, "run_lane") as lane, patch.object(worker, "process_history_once") as page:
             await worker._run_history_workers()
             kwargs = lane.call_args.kwargs
             self.assertEqual(kwargs['slots'], 4)
+            self.assertIs(kwargs['seed'], worker.seed_states)
             for slot in range(4):
                 lane.call_args.args[0](slot)
             self.assertEqual([c.kwargs['prefer_import'] for c in page.call_args_list], [True, False, True, False])
@@ -268,6 +284,7 @@ class InitialImportPriorityTests(SlackDmIoAuthorityFixture, TransactionTestCase)
             call_command('message_sync_status', window_minutes=1, stdout=output)
         payload = output.getvalue()
         self.assertNotIn('TSECRET', payload)
+        self.assertTrue({'discovery', 'open_requests', 'open_latency'} <= json.loads(payload).keys())
         row = json.loads(payload)['provider_throughput']['measured_scopes'][0]
         self.assertEqual(row['requests_per_minute'], 20)
         output = StringIO()
@@ -278,3 +295,37 @@ class InitialImportPriorityTests(SlackDmIoAuthorityFixture, TransactionTestCase)
         self.assertIsNone(partial['measured_scopes'][0]['requests_per_minute'])
         self.assertIsNone(partial['measured_scopes'][0]['configured_budget_used_percent'])
         self.assertIn('best_effort', partial['reliability'])
+
+
+    @override_settings(MESSAGE_SYNC_OPEN_PRIORITY_ENABLED=True)
+    def test_explicit_open_bypasses_older_owner_only_in_import_slot_and_stops_after_proof(self):
+        from integrations.models import SlackDmMirrorDelivery
+        from integrations.services.slack_chat_refresh import FOREGROUND_STATE_ID
+        from uuid import uuid4
+        user = get_user_model().objects.create_user(email='open-priority-other@example.invalid')
+        connection = ExternalServiceConnection.objects.create(user=user, provider='slack', access_token='synthetic')
+        grant = SlackDmMirrorGrant.objects.create(user=user, connection=connection, slack_workspace_id=self.grant.slack_workspace_id, slack_user_id='UOTHEROWNER', consented_at=timezone.now())
+        other = ensure_state(SlackDmMirrorConversation.objects.create(grant=grant, slack_workspace_id=grant.slack_workspace_id, slack_conversation_id='DOTHEROWNER', status='live'))
+        self.recent.mlai_channel_id = uuid4()
+        self.recent.save(update_fields=['mlai_channel_id'])
+        SlackDmMirrorDelivery.objects.create(conversation=self.recent, source_platform='slack', source_message_id=FOREGROUND_STATE_ID, operation='create', encrypted_text='', status='completed', available_at=timezone.now() + timedelta(minutes=5))
+        BridgeSyncJob.objects.filter(state__private_conversation__grant=self.grant).update(last_served_at=timezone.now())
+        ordinary = claim_job(prefer_import=False)
+        self.assertEqual(ordinary.state_id, other.pk)
+        finish_job(ordinary, checkpoint={}, delay_seconds=3600)
+        opened = claim_job(prefer_import=True)
+        self.assertEqual((opened.state_id, opened.kind), (self.pending.pk, 'archive'))
+        finish_job(opened, checkpoint={})
+        self.pending.verified_ranges = {'presentation': {'scope': 'current-proof'}}
+        self.pending.save(update_fields=['verified_ranges'])
+        BridgeSyncJob.objects.filter(state=other).update(last_served_at=None, due_at=timezone.now())
+        self.assertEqual(claim_job(prefer_import=True).state_id, other.pk)
+
+    @override_settings(MESSAGE_SYNC_OPEN_PRIORITY_ENABLED=True)
+    def test_expired_open_marker_rejoins_ordinary_owner_fairness(self):
+        from integrations.models import SlackDmMirrorDelivery
+        from integrations.services.slack_chat_refresh import FOREGROUND_STATE_ID
+        SlackDmMirrorDelivery.objects.create(conversation=self.recent, source_platform='slack', source_message_id=FOREGROUND_STATE_ID, operation='create', encrypted_text='', status='completed', available_at=timezone.now() - timedelta(seconds=1))
+        # A foreground mark that has expired must not outrank the unserved public owner.
+        public = ensure_state(CommunityBridgeChannel.objects.create(slack_workspace_id=self.grant.slack_workspace_id, slack_channel_id='CEXPIRED', destination_platform='buzz', destination_workspace_id='test.invalid', destination_channel_id='expired-priority-public'))
+        self.assertEqual(claim_job(prefer_import=True).state_id, public.pk)

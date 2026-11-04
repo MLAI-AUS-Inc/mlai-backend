@@ -123,10 +123,20 @@ class WorkerScopeTests(SimpleTestCase):
         from startup_updates import api_views
         connection = Obj(pk=3)
         run = Obj(run_request={"target_month": "2026-09-01", "narrative_period": PERIOD, "backfill_window_start": PERIOD["start"], "backfill_window_end": PERIOD["end"]})
-        threads = MagicMock()
-        with patch.object(api_views.SlackMessageArtifact, "objects") as messages, patch.object(api_views, "Exists") as exists:
+        threads, messages = MagicMock(), MagicMock()
+        with (
+            patch.object(api_views, "slack_source_queryset", return_value=messages) as public_sources,
+            patch.object(api_views, "Exists") as exists,
+        ):
             api_views._slack_threads_in_run_window(threads, run, connection)
-        self.assertEqual(messages.filter.call_args.kwargs["connection"], connection)
+        public_sources.assert_called_once_with(api_views.SlackMessageArtifact)
+        messages.filter.assert_called_once_with(
+            connection=connection, channel_id=api_views.OuterRef("channel_id"),
+        )
+        messages.filter.return_value.filter.assert_called_once_with(
+            api_views.Q(thread_ts=api_views.OuterRef("thread_ts"))
+            | api_views.Q(slack_message_ts=api_views.OuterRef("thread_ts")),
+        )
         bounds = messages.filter.return_value.filter.return_value.filter.call_args.kwargs
         self.assertEqual(bounds["posted_at__gte"], datetime.fromisoformat(PERIOD["start"]))
         self.assertEqual(bounds["posted_at__lte"] + timedelta(microseconds=1), datetime.fromisoformat(PERIOD["end"]))

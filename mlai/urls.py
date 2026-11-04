@@ -20,6 +20,7 @@ from startup_updates import data_views as startup_data_views
 
 urlpatterns = [
     path('', include('startup_updates.mcp.urls')),
+    path('api/v1/agent-runtime/', include('agent_runtime.native_setup_urls')),
     path('', health_check, name='health_check'),
     path('healthz/live', health_live, name='health_live'),
     path('healthz/points', health_points, name='health_points'),
@@ -40,6 +41,7 @@ urlpatterns = [
     path('api/v1/points/', include('roo.urls')),
     path('api/v1/org-memory/', include('org_memory.urls')),
     path('api/v1/community-chat/', include('community_chat.urls')),
+    path('api/v1/crm/webhooks/', include('crm.urls_webhooks')),
     path('api/v1/public-brain/', include('org_memory.public_urls')),
     path('api/v1/jobs/', include('jobs.urls')),
     path('api/v1/medhack/', include('hospital.medhack_urls')),
@@ -63,4 +65,17 @@ urlpatterns = [
         name='startup_data_delete',
     ),
     path('api/v1/users/', include('core.urls_users')),
+]
+
+# P2 (IF-P2-25): the source re-pin endpoint. It sits just before the
+# content-factory include, whose fenced runs/<run_id>/<action> route would
+# otherwise catch it. It answers 404 until its view ships.
+from content_factory.lazy_views import lazy_view  # noqa: E402
+
+_content_factory_include = next(index for index, pattern in enumerate(urlpatterns)
+                                if str(pattern.pattern) == 'api/content-factory/')
+urlpatterns[_content_factory_include:_content_factory_include] = [
+    path(f'api/content-factory/runs/<str:run_id>/repin{suffix}',
+         lazy_view('content_factory.source_repin_views', 'SourceRepinView'))
+    for suffix in ('', '/')
 ]

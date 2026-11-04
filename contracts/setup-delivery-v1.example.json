@@ -1,0 +1,288 @@
+{
+  "callback": {
+    "schema_version": 1,
+    "kind": "setup_callback",
+    "event_id": "callback_fixture_one",
+    "event_type": "article_system_setup_failed",
+    "run_id": "setup-one",
+    "workflow": "article_system_setup",
+    "emitted_at": "2026-10-13T22:31:46.356066+00:00",
+    "scope": {
+      "domain": "fixture.example.org",
+      "github_repo": "fixture/site",
+      "website_connection_id": "fcb13798-de52-4dd0-a1b8-6636bb7f2cc2",
+      "connection_generation": 1,
+      "repository_id": 7,
+      "operation_id": "cdf32198-9745-4dd0-a1b8-6636bb7f2cc2",
+      "operation_attempt": 1,
+      "deletion_epoch": 0,
+      "client_request_id": "fixture-one",
+      "branch": "main",
+      "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "execution": {
+      "generation": 0,
+      "state_version": 2
+    },
+    "state_sha256": "9e627884377d6d296b8652674634de0f30ab6c3d91bd98f5c5ddd07d3a0c0b35",
+    "body": {
+      "state_projection": {
+        "status": "failed",
+        "current_step": "validate_plan",
+        "generation": 0,
+        "state_version": 2,
+        "approval_state": "not_required",
+        "resume_available": true,
+        "failure": {
+          "action": null,
+          "code": "ARTICLE_DIRECTORY_AGENT_OUTPUT_INVALID",
+          "evidence_refs": [],
+          "failure_class": "repairable",
+          "failure_fingerprint": "sha256:eb6b9733b9c57b82d1f0e1661a26563209e201139d4e6776f09a1f75baa515e4",
+          "fingerprint_version": 1,
+          "registry_sha256": "17a17b189772e7b44c593510100e005eb8445a5db32358b11adb8359173ffd1c",
+          "registry_version": 1,
+          "retryable": false,
+          "schema_version": 1,
+          "stage": "validate_plan",
+          "user_message": "The model response did not match the candidate protocol."
+        },
+        "failure_occurrence_id": "e32917c9-0a06-544c-b495-5555e18b7ed7",
+        "result": {
+          "error_code": "ARTICLE_DIRECTORY_AGENT_OUTPUT_INVALID",
+          "failure": {
+            "action": null,
+            "code": "ARTICLE_DIRECTORY_AGENT_OUTPUT_INVALID",
+            "evidence_refs": [],
+            "failure_class": "repairable",
+            "failure_fingerprint": "sha256:eb6b9733b9c57b82d1f0e1661a26563209e201139d4e6776f09a1f75baa515e4",
+            "fingerprint_version": 1,
+            "registry_sha256": "17a17b189772e7b44c593510100e005eb8445a5db32358b11adb8359173ffd1c",
+            "registry_version": 1,
+            "retryable": false,
+            "schema_version": 1,
+            "stage": "validate_plan",
+            "user_message": "The model response did not match the candidate protocol."
+          },
+          "failure_class": "repairable",
+          "failure_fingerprint": "sha256:eb6b9733b9c57b82d1f0e1661a26563209e201139d4e6776f09a1f75baa515e4",
+          "failure_occurrence_id": "e32917c9-0a06-544c-b495-5555e18b7ed7",
+          "retryable": false,
+          "status": "failed"
+        },
+        "step_states": {
+          "validate_plan": {
+            "status": "pending",
+            "required": true,
+            "attempts": 0
+          }
+        },
+        "verification_summary": {
+          "all_required_passed": false,
+          "blocked": false,
+          "checks": [],
+          "generated_at": "2026-10-13T22:31:46.345346+00:00"
+        },
+        "acceptance_summary": {
+          "approval_recorded": false,
+          "browser_skipped": false,
+          "browser_verified": false,
+          "build_verified": false,
+          "content_packaged": false,
+          "evidence_summary": {
+            "accessibility_snapshot_path": null,
+            "article_component_manifest_path": null,
+            "article_html_path": null,
+            "article_json_path": null,
+            "article_markdown_path": null,
+            "article_meta_path": null,
+            "browser_report_path": null,
+            "build_log_path": null,
+            "claim_map_path": null,
+            "comparison_artifacts": [],
+            "content_package_path": null,
+            "content_package_slug": null,
+            "content_package_target_keyword": null,
+            "content_package_title": null,
+            "generated_inline_image_count": 0,
+            "grounding_report_path": null,
+            "hero_image_url": null,
+            "html_snapshot_path": null,
+            "image_errors": [],
+            "image_manifest_path": null,
+            "image_manifest_status": null,
+            "pr_url": null,
+            "preview_available": false,
+            "preview_evidence_path": null,
+            "preview_mode": null,
+            "preview_url": null,
+            "reference_screenshots": [],
+            "resource_manifest_path": null,
+            "resource_pdf_status": null,
+            "resource_pdf_url": null,
+            "review_summary_path": null,
+            "screenshots": [],
+            "style_review_report_path": null
+          },
+          "grounding_verified": false,
+          "pr_ready": false,
+          "publish_bundle_packaged": false,
+          "static_verified": false,
+          "style_review_verified": false,
+          "warnings": []
+        }
+      }
+    },
+    "payload_sha256": "c15aee091a5c04ceaaf4cfd8c4f68917d3504829247686fce561762affd1246b"
+  },
+  "snapshot": {
+    "body": {
+      "state_projection": {
+        "acceptance_summary": {
+          "approval_recorded": false,
+          "browser_skipped": false,
+          "browser_verified": false,
+          "build_verified": false,
+          "content_packaged": false,
+          "evidence_summary": {
+            "accessibility_snapshot_path": null,
+            "article_component_manifest_path": null,
+            "article_html_path": null,
+            "article_json_path": null,
+            "article_markdown_path": null,
+            "article_meta_path": null,
+            "browser_report_path": null,
+            "build_log_path": null,
+            "claim_map_path": null,
+            "comparison_artifacts": [],
+            "content_package_path": null,
+            "content_package_slug": null,
+            "content_package_target_keyword": null,
+            "content_package_title": null,
+            "generated_inline_image_count": 0,
+            "grounding_report_path": null,
+            "hero_image_url": null,
+            "html_snapshot_path": null,
+            "image_errors": [],
+            "image_manifest_path": null,
+            "image_manifest_status": null,
+            "pr_url": null,
+            "preview_available": false,
+            "preview_evidence_path": null,
+            "preview_mode": null,
+            "preview_url": null,
+            "reference_screenshots": [],
+            "resource_manifest_path": null,
+            "resource_pdf_status": null,
+            "resource_pdf_url": null,
+            "review_summary_path": null,
+            "screenshots": [],
+            "style_review_report_path": null
+          },
+          "grounding_verified": false,
+          "pr_ready": false,
+          "publish_bundle_packaged": false,
+          "static_verified": false,
+          "style_review_verified": false,
+          "warnings": []
+        },
+        "approval_state": "not_required",
+        "current_step": "validate_plan",
+        "failure": {
+          "action": null,
+          "code": "ARTICLE_DIRECTORY_AGENT_OUTPUT_INVALID",
+          "evidence_refs": [],
+          "failure_class": "repairable",
+          "failure_fingerprint": "sha256:eb6b9733b9c57b82d1f0e1661a26563209e201139d4e6776f09a1f75baa515e4",
+          "fingerprint_version": 1,
+          "registry_sha256": "17a17b189772e7b44c593510100e005eb8445a5db32358b11adb8359173ffd1c",
+          "registry_version": 1,
+          "retryable": false,
+          "schema_version": 1,
+          "stage": "validate_plan",
+          "user_message": "The model response did not match the candidate protocol."
+        },
+        "failure_occurrence_id": "e32917c9-0a06-544c-b495-5555e18b7ed7",
+        "generation": 0,
+        "result": {
+          "error_code": "ARTICLE_DIRECTORY_AGENT_OUTPUT_INVALID",
+          "failure": {
+            "action": null,
+            "code": "ARTICLE_DIRECTORY_AGENT_OUTPUT_INVALID",
+            "evidence_refs": [],
+            "failure_class": "repairable",
+            "failure_fingerprint": "sha256:eb6b9733b9c57b82d1f0e1661a26563209e201139d4e6776f09a1f75baa515e4",
+            "fingerprint_version": 1,
+            "registry_sha256": "17a17b189772e7b44c593510100e005eb8445a5db32358b11adb8359173ffd1c",
+            "registry_version": 1,
+            "retryable": false,
+            "schema_version": 1,
+            "stage": "validate_plan",
+            "user_message": "The model response did not match the candidate protocol."
+          },
+          "failure_class": "repairable",
+          "failure_fingerprint": "sha256:eb6b9733b9c57b82d1f0e1661a26563209e201139d4e6776f09a1f75baa515e4",
+          "failure_occurrence_id": "e32917c9-0a06-544c-b495-5555e18b7ed7",
+          "retryable": false,
+          "status": "failed"
+        },
+        "resume_available": true,
+        "state_version": 2,
+        "status": "failed",
+        "step_states": {
+          "validate_plan": {
+            "attempts": 0,
+            "required": true,
+            "status": "pending"
+          }
+        },
+        "verification_summary": {
+          "all_required_passed": false,
+          "blocked": false,
+          "checks": [],
+          "generated_at": "2026-10-13T22:31:46.345346+00:00"
+        }
+      }
+    },
+    "emitted_at": "2026-10-13T22:31:46.356066+00:00",
+    "event_id": "snapshot_4edd53a26efc53e38747a451798b1fc2",
+    "event_type": null,
+    "execution": {
+      "generation": 0,
+      "state_version": 2
+    },
+    "kind": "run_snapshot",
+    "payload_sha256": "b33adc15206f88feebf33139c08fcc2fec242f10df62d03f7d8f34ff3826e395",
+    "run_id": "setup-one",
+    "schema_version": 1,
+    "scope": {
+      "branch": "main",
+      "client_request_id": "fixture-one",
+      "connection_generation": 1,
+      "deletion_epoch": 0,
+      "domain": "fixture.example.org",
+      "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "github_repo": "fixture/site",
+      "operation_attempt": 1,
+      "operation_id": "cdf32198-9745-4dd0-a1b8-6636bb7f2cc2",
+      "repository_id": 7,
+      "website_connection_id": "fcb13798-de52-4dd0-a1b8-6636bb7f2cc2"
+    },
+    "state_sha256": "9e627884377d6d296b8652674634de0f30ab6c3d91bd98f5c5ddd07d3a0c0b35",
+    "workflow": "article_system_setup"
+  },
+  "failure": {
+    "action": null,
+    "code": "ARTICLE_DIRECTORY_AGENT_OUTPUT_INVALID",
+    "evidence_refs": [],
+    "failure_class": "repairable",
+    "failure_fingerprint": "sha256:eb6b9733b9c57b82d1f0e1661a26563209e201139d4e6776f09a1f75baa515e4",
+    "fingerprint_version": 1,
+    "registry_sha256": "17a17b189772e7b44c593510100e005eb8445a5db32358b11adb8359173ffd1c",
+    "registry_version": 1,
+    "retryable": false,
+    "schema_version": 1,
+    "stage": "validate_plan",
+    "user_message": "The model response did not match the candidate protocol."
+  }
+}

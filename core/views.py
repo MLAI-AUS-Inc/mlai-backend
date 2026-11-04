@@ -304,7 +304,7 @@ class CheckUserView(APIView):
         if not email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        user = User.objects.filter(email__iexact=email).first()
+        user = User.objects.resolve_email(email)
         if app == 'admin' and not _is_operations_admin(user):
             return _operations_admin_only_response()
         if _healthhack_admin_only_requested(data, app) and not (
@@ -346,7 +346,7 @@ class SendMagicLinkView(APIView):
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            user = User.objects.filter(email__iexact=email).first()
+            user = User.objects.resolve_email(email)
 
             # Admin-surface gates are preserved. They gate on privilege, not on
             # existence, and return an identical response for every non-admin
@@ -408,7 +408,7 @@ class CreateUserView(APIView):
 
         try:
             with transaction.atomic():
-                if User.objects.filter(email__iexact=email).exists():
+                if User.objects.for_email(email).exists():
                     return Response(
                         {"error": "User with this email already exists."}, 
                         status=status.HTTP_400_BAD_REQUEST
@@ -995,7 +995,7 @@ class LinkSlackView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        if not User.objects.filter(email__iexact=email).exists():
+        if not User.objects.for_email(email).exists():
             return Response(
                 {
                     "code": "slack_account_not_found",

@@ -1,0 +1,73 @@
+{
+  "coverage": "partial",
+  "gaps": [
+    "enrollment_scope_unknown",
+    "fleet_coverage_unknown",
+    "original_run_eligibility_unknown"
+  ],
+  "observations": [
+    {
+      "configuration": "observed",
+      "configuration_digest": "54862291f7afb7f4b585570a7c3631c95d459ac424ea5fb85fe58a246c008023",
+      "configuration_scope": "named_articles_rollout_flags_v1",
+      "configured_queues": [],
+      "enrollment_scope_digest": null,
+      "event": "read",
+      "flags": {
+        "CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_DEPENDENCY_CACHE_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_EXISTING_INVENTORY_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_FAILURE_TAXONOMY_EMIT_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_GOAL_USAGE_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_REPRODUCIBLE_BUILDS_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_SITE_FINGERPRINT_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED": false,
+        "CONTENT_FACTORY_SETUP_DELIVERY_V1_ENABLED": false,
+        "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED": false
+      },
+      "instance_id": "487c53eaecf54bfeb16c403977e5b9f0",
+      "observed_at": "2026-10-18T07:23:17.301530+00:00",
+      "revision": "69d2d69a1fff5397928fbb4496a8676abf0462db",
+      "role": "web",
+      "run_eligibility": null,
+      "schema_version": 1,
+      "sequence": 2
+    },
+    {
+      "age_seconds": 0.000121,
+      "configuration": "observed",
+      "configuration_digest": "54862291f7afb7f4b585570a7c3631c95d459ac424ea5fb85fe58a246c008023",
+      "configuration_scope": "named_articles_rollout_flags_v1",
+      "configured_queues": [
+        "default"
+      ],
+      "enrollment_scope_digest": null,
+      "event": "ready",
+      "flags": {
+        "CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_DEPENDENCY_CACHE_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_EXISTING_INVENTORY_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_FAILURE_TAXONOMY_EMIT_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_GOAL_USAGE_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_REPRODUCIBLE_BUILDS_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLES_SITE_FINGERPRINT_ENABLED": false,
+        "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED": false,
+        "CONTENT_FACTORY_SETUP_DELIVERY_V1_ENABLED": false,
+        "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED": false
+      },
+      "instance_id": "487c53eaecf54bfeb16c403977e5b9f0",
+      "observed_at": "2026-10-18T07:23:17.301409+00:00",
+      "revision": "69d2d69a1fff5397928fbb4496a8676abf0462db",
+      "role": "worker_parent",
+      "run_eligibility": null,
+      "schema_version": 1,
+      "sequence": 1
+    }
+  ],
+  "observed_at": "2026-10-18T07:23:17.301530+00:00",
+  "run_eligibility": null,
+  "runtime_scope": "observed_processes_only",
+  "schema_version": 1
+}

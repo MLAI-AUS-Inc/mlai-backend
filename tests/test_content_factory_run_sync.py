@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.db import OperationalError
 from django.test import TestCase
 from rest_framework import status
-from rest_framework.test import APIClient
+from tests.website_fixtures import CallbackFixtureClient
 
 from content_factory.models import ContentFactoryJob, OrganizationContentConfig
 from organizations.models import Organization
@@ -18,7 +18,7 @@ User = get_user_model()
 
 class ContentFactoryRunSyncTests(TestCase):
     def setUp(self):
-        self.client = APIClient()
+        self.client = CallbackFixtureClient()
         self.api_key = "test_roo_key"
         os.environ["ROO_API_KEY"] = self.api_key
         os.environ["INTERNAL_API_KEY"] = self.api_key
@@ -29,6 +29,11 @@ class ContentFactoryRunSyncTests(TestCase):
         settings.INTERNAL_API_KEY = self.api_key
         self.client.credentials(HTTP_X_API_KEY=self.api_key)
         self.user = User.objects.create_user(email="test@example.com", password="password")
+
+    def _scope_for_run(self, run):
+        scope = self.client._bound_payload({"run_id": run.run_id})
+        run.refresh_from_db()
+        return scope
 
     def test_run_sync_accepts_reduced_or_extended_payload(self):
         payload = {
@@ -543,6 +548,7 @@ class ContentFactoryRunSyncTests(TestCase):
         synced = _sync_local_run_from_remote(
             run,
             {
+                **self._scope_for_run(run),
                 "run_id": "setup-poll-sync-1",
                 "workflow": "article_system_setup",
                 "status": "processing",
@@ -586,6 +592,7 @@ class ContentFactoryRunSyncTests(TestCase):
         synced = _sync_local_run_from_remote(
             run,
             {
+                **self._scope_for_run(run),
                 "run_id": "setup-poll-nul-1",
                 "workflow": "article_system_setup",
                 "status": "preview_failed",
@@ -916,6 +923,14 @@ class ContentFactoryRunSyncTests(TestCase):
                 "binding_id": binding.id,
                 "draft_months": ["2026-03-01"],
                 "current_month": "2026-03-01",
+                "target_month": "2026-03-01",
+                "source_period_contract": "calendar_month_v1",
+                "narrative_period": {
+                    "start": "2026-03-01T00:00:00+00:00",
+                    "end": "2026-04-01T00:00:00+00:00",
+                    "timezone": "UTC",
+                    "end_exclusive": True,
+                },
             },
             result={},
         )

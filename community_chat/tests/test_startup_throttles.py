@@ -3,6 +3,7 @@ from types import SimpleNamespace as Obj
 from unittest.mock import patch
 
 from django.core.cache import cache
+from django.conf import settings
 from django.test import SimpleTestCase, override_settings
 from django.urls import URLResolver, resolve
 from corsheaders.middleware import CorsMiddleware
@@ -52,6 +53,19 @@ class StartupThrottleTests(SimpleTestCase):
         # APIView evaluates every throttle, including when another one denies.
         decisions = [item.allow_request(view.request, view) for item in view.get_throttles()]
         return all(decisions)
+
+    def test_every_registered_chat_route_uses_a_configured_account_bucket(self):
+        for cls in {view for _, view in my_startup_urls.ROUTES}:
+            for method in ("GET", "POST"):
+                with self.subTest(view=cls.__name__, method=method):
+                    cache.clear()
+                    view = cls()
+                    view.request = self.request(method=method)
+                    self.assertIn(view.startup_throttle_scope, settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"])
+                    throttle = StartupScopedThrottle()
+                    self.assertTrue(throttle.allow_request(view.request, view))
+                    self.assertTrue(throttle.allow_request(view.request, view))
+                    self.assertFalse(throttle.allow_request(view.request, view))
 
     def test_home_reads_polling_and_writes_cannot_starve_bootstrap(self):
         request = self.request()

@@ -4,6 +4,52 @@ import requests
 from django.test import SimpleTestCase, override_settings
 
 from integrations.services.valley_harness import get_valley_harness_api_key, notify_valley_run_created
+from integrations.services.valley_harness import VALLEY_WORKER_UNAVAILABLE_MESSAGE
+from datetime import timedelta
+from types import SimpleNamespace
+from django.utils import timezone
+from vibe_raising.views import _queued_valley_warning, _valley_dispatch_failure_payload
+
+
+@override_settings(VALLEY_HARNESS_URL="http://valley.local", VALLEY_HARNESS_API_KEY="synthetic-key")
+class ValleyWorkerAvailabilityTests(SimpleTestCase):
+    @patch("integrations.services.valley_harness.requests.post")
+    def test_worker_unavailable_is_preserved_as_a_safe_retryable_error(self, post):
+        response = requests.Response()
+        response.status_code = 503
+        response._content = b'{"detail":{"code":"valley_worker_unavailable","message":"synthetic-upstream-detail"}}'
+        post.side_effect = requests.HTTPError("unavailable", response=response)
+        result = notify_valley_run_created("run-123")
+        self.assertFalse(result)
+        self.assertEqual(result.failure_kind, "worker_unavailable")
+        self.assertEqual(result.detail, VALLEY_WORKER_UNAVAILABLE_MESSAGE)
+        payload = _valley_dispatch_failure_payload(SimpleNamespace(run_id="run-123"), result)
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(payload["message"], VALLEY_WORKER_UNAVAILABLE_MESSAGE)
+        self.assertEqual(payload["valleyDispatch"]["failureKind"], "worker_unavailable")
+
+    @patch("integrations.services.valley_harness.requests.post")
+    def test_unrelated_503_keeps_existing_failure_classification(self, post):
+        response = requests.Response()
+        response.status_code = 503
+        response._content = b"upstream unavailable"
+        post.side_effect = requests.HTTPError("unavailable", response=response)
+        self.assertEqual(notify_valley_run_created("run-123").failure_kind, "http_status")
+
+    def test_queued_warning_explains_dispatch_failure_without_changing_run_state(self):
+        run = SimpleNamespace(status="queued", updated_at=timezone.now(), result={"_valley_meta": {
+            "dispatch_status": "failed", "last_dispatch_error_kind": "worker_unavailable"}})
+        self.assertEqual(_queued_valley_warning(run), VALLEY_WORKER_UNAVAILABLE_MESSAGE)
+        self.assertEqual(run.status, "queued")
+
+    def test_old_acknowledged_queue_is_not_presented_as_started_work(self):
+        run = SimpleNamespace(status="queued", updated_at=timezone.now() - timedelta(hours=2), result={"_valley_meta": {"dispatch_status": "queued"}})
+        self.assertIn("has not started reading", _queued_valley_warning(run))
+        run.updated_at = timezone.now()
+        self.assertIsNone(_queued_valley_warning(run))
+        run.status = "running"
+        run.updated_at -= timedelta(hours=2)
+        self.assertIsNone(_queued_valley_warning(run))
 
 
 class ValleyHarnessServiceTests(SimpleTestCase):

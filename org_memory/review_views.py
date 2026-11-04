@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import claims_have_members, digest_has_members, exclude_members_claims, exclude_members_evidence, source_is_members, summary_has_members
+
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Case, IntegerField, Q, Value, When
@@ -173,12 +175,12 @@ def _claims_for_target(target):
 def _authorized_review_evidence(review, authorization):
     classifications = allowed_memory_classifications(authorization)
     target = review.target
-    claims = _claims_for_target(target).filter(
+    claims = exclude_members_claims(_claims_for_target(target)).filter(
         organization=review.organization,
         classification__in=classifications,
     )
     return (
-        MemoryEvidence.objects.filter(
+        exclude_members_evidence(MemoryEvidence.objects.filter(
             claim__in=claims,
             source_version__classification__in=classifications,
             chunk__classification__in=classifications,
@@ -187,7 +189,7 @@ def _authorized_review_evidence(review, authorization):
             source_version__tombstoned_at__isnull=True,
             source_version__acl_snapshot__is_accessible=True,
             source_version__acl_snapshot__revoked_at__isnull=True,
-        )
+        ), source_path='source')
         .select_related(
             "claim",
             "source",
@@ -207,7 +209,8 @@ def _authorized_extraction_chunks(review, authorization):
     version = target.source_version
     classifications = allowed_memory_classifications(authorization)
     if (
-        version.classification not in classifications
+        source_is_members(version.source)
+        or version.classification not in classifications
         or version.tombstoned_at is not None
         or version.source.lifecycle_state != MemorySourceLifecycle.ACTIVE
         or version.source.access_revoked_at is not None
@@ -245,6 +248,9 @@ def _target_payload(review, authorization):
         "type": review.target_content_type.model,
         "id": str(target.pk),
     }
+    if (claims_have_members(_claims_for_target(target))
+            or isinstance(target, MemoryExtractionRun) and source_is_members(target.source_version.source)):
+        return payload
     if isinstance(target, MemoryClaim) and target.classification in classifications:
         payload.update(
             {
@@ -1141,7 +1147,7 @@ def _summary_payload(summary, *, include_lineage=False):
 
 
 def _summary_currently_authorized(summary):
-    return not summary.claim_links.exclude(
+    return not summary_has_members(summary) and not summary.claim_links.exclude(
         claim__status="active",
     ).exists() and not summary.evidence_links.exclude(
         evidence__source__lifecycle_state=MemorySourceLifecycle.ACTIVE,
@@ -1262,7 +1268,7 @@ def _digest_payload(digest, *, include_lineage=False):
 
 
 def _digest_currently_authorized(digest):
-    return not digest.items.exclude(
+    return not digest_has_members(digest) and not digest.items.exclude(
         claim__status="active",
     ).exists() and not MemoryDigestItemEvidence.objects.filter(
         item__digest=digest,
@@ -1291,6 +1297,8 @@ class OrgMemoryDigestListView(OrgMemoryDerivedArtifactView):
         ).select_related("source_report")
         visible = []
         for row in rows.iterator(chunk_size=200):
+            if digest_has_members(row):
+                continue
             if row.status == MemoryDerivedArtifactStatus.BLOCKED:
                 visible.append(row)
             elif self._authorized(request, row) and _digest_currently_authorized(row):
@@ -1313,7 +1321,7 @@ class OrgMemoryDigestDetailView(OrgMemoryDerivedArtifactView):
             .select_related("source_report")
             .first()
         )
-        if digest is None:
+        if digest is None or digest_has_members(digest):
             return Response(
                 {"detail": "Digest was not found."},
                 status=status.HTTP_404_NOT_FOUND,

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Original native article inventory display summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "run_id", "source_scope", "origin", "listing_route", "inventory_kind", "existing_article_count", "native_inventory_digest", "archive_manifest_digest", "digest"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "kind": {"const": "native_article_inventory_summary"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$"},
+    "inventory_kind": {"enum": ["static_html", "literal_collection"]},
+    "existing_article_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "origin": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "listing_route": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "native_inventory_digest": {"$ref": "#/$defs/digest"},
+    "archive_manifest_digest": {"$ref": "#/$defs/digest"},
+    "digest": {"$ref": "#/$defs/digest"},
+    "source_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_id", "website_connection_id", "connection_generation", "branch", "app_root", "source_sha"],
+      "properties": {
+        "repository_id": {"type": "integer", "minimum": 1},
+        "website_connection_id": {"type": "string", "minLength": 1, "maxLength": 255},
+        "connection_generation": {"type": "integer", "minimum": 1},
+        "branch": {"type": "string", "minLength": 1, "maxLength": 255},
+        "app_root": {"type": "string", "maxLength": 1024},
+        "source_sha": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"}
+      }
+    }
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
+  "$comment": "Display evidence only. The producer validates the complete catalog first. The digest uses SHA-256 of sorted compact UTF-8 JSON without the digest field, ensure_ascii=false and no NaN. Consumers must independently bind the carrier setup run, tenant, website, generation, repository, branch, app root and deletion epoch. Source SHA remains the observed original revision; this grants no ownership, approval or readiness."
+}

@@ -27,7 +27,7 @@ class PrepareJourneyTests(SimpleTestCase):
         journey = {"nextAction": {"id": step}, "capabilities": {"canPublishArticle": False}}
         handler = handler or Mock(return_value={"status": "completed"})
         with patch.object(prepare, "_claim_prepare", return_value=op), \
-                patch.object(prepare, "_prepare_context", return_value=(context, config)), \
+                patch.object(prepare, "_prepare_context", return_value=(context, config, SimpleNamespace(pk=4))), \
                 patch.object(prepare, "journey_for_context", return_value=journey), \
                 patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kwargs: operation):
             result = prepare.advance_prepare(op.pk, handlers={step: handler})
@@ -46,7 +46,7 @@ class PrepareJourneyTests(SimpleTestCase):
         self.assertEqual(op.state, "needs_user")
         self.assertEqual(op.receipt["user_action"]["id"], "authorize_github")
 
-    def test_retryable_failure_backoff_then_attention(self):
+    def test_transient_failure_keeps_backoff_until_24_hour_deadline(self):
         from .website_prepare import prepare_failure
         op = self.operation()
         error = WebsiteAuthorityError("worker_unavailable", "Temporarily unavailable.", retryable=True)
@@ -57,14 +57,18 @@ class PrepareJourneyTests(SimpleTestCase):
             if attempt < 3:
                 self.assertEqual(op.state, "pending")
                 self.assertEqual(op.next_attempt_at, now + timedelta(minutes=[1, 2][attempt - 1]))
+        self.assertEqual(op.state, "pending")
+        prepare_failure(op, "setup", error, now=now + timedelta(hours=24))
         self.assertEqual(op.state, "needs_attention")
 
     def test_publish_ready_completes_without_dispatch(self):
         from . import website_prepare as prepare
         op = self.operation()
         with patch.object(prepare, "_claim_prepare", return_value=op), \
-                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock())), \
-                patch.object(prepare, "journey_for_context", return_value={"capabilities": {"canPublishArticle": True}}), \
+                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock(), Mock())), \
+                patch.object(prepare, "journey_for_context", return_value={"policy":{"allowed":True},
+                    "prerequisites":{"deployment":{"status":"complete"}},
+                    "capabilities": {"canGenerateArticle":True,"repositoryWriteVerified":True,"canPublishArticle": True}}), \
                 patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kwargs: operation):
             prepare.advance_prepare(op.pk, handlers={})
         self.assertEqual(op.state, "completed")
@@ -91,20 +95,21 @@ class PrepareJourneyTests(SimpleTestCase):
         self.assertEqual(rows.call_args.kwargs["connection__state"], "connected")
         self.assertEqual(rows.call_args.kwargs["updated_at"], op._claimed_at)
 
-    def test_dead_child_is_cleared_before_retry(self):
+    def test_transient_child_retains_identity_for_resume(self):
         from . import website_prepare as prepare
         from workflow_runs.models import ContentFactoryRun
         op = self.operation()
         op.receipt = {"child_run_id": "dead-child", "current_step": "setup"}
         with patch.object(prepare, "_claim_prepare", return_value=op), \
-                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock())), \
+                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock(), Mock())), \
                 patch.object(prepare, "journey_for_context", return_value={"nextAction": {"id": "setup"}}), \
                 patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kw: operation), \
                 patch.object(ContentFactoryRun.objects, "filter") as runs:
             runs.return_value.first.return_value = SimpleNamespace(status="failed", result={"retryable": True}, workflow="article_system_setup")
             prepare.advance_prepare(op.pk)
-        self.assertNotIn("child_run_id", op.receipt)
-        self.assertEqual(op.payload["attempt"], 2)
+        self.assertEqual(op.receipt["child_run_id"], "dead-child")
+        self.assertTrue(op.receipt["child_resume_pending"])
+        self.assertNotIn("attempt", op.payload)
         self.assertEqual(op.state, "pending")
 
     def test_setup_ready_for_review_checks_merge_without_waiting_for_terminal(self):
@@ -115,7 +120,7 @@ class PrepareJourneyTests(SimpleTestCase):
         child = SimpleNamespace(status="needs_review", workflow="article_system_setup", result={
             "article_system_setup": {"status": "preview_ready"}})
         with patch.object(prepare, "_claim_prepare", return_value=op), \
-                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock())), \
+                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock(), Mock())), \
                 patch.object(prepare, "journey_for_context", return_value={"nextAction": {"id": "verify"}}), \
                 patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kw: operation), \
                 patch.object(prepare, "maybe_merge_prepared_setup", return_value={"status": "needs_user",
@@ -126,6 +131,29 @@ class PrepareJourneyTests(SimpleTestCase):
         merge.assert_called_once()
         self.assertEqual(op.state, "needs_user")
         self.assertEqual(op.receipt["user_action"]["pr_number"], 42)
+        self.assertEqual((op.receipt["current_step"], op.receipt["message"]),
+            ("merge", "Merge the articles setup pull request."))
+
+    def test_setup_review_prompt_describes_review_not_a_missing_pull_request(self):
+        from . import website_prepare as prepare
+        from workflow_runs.models import ContentFactoryRun
+        op = self.operation()
+        op.receipt = {"child_run_id": "setup-child", "current_step": "setup"}
+        child = SimpleNamespace(status="awaiting_approval", workflow="article_system_setup", result={
+            "article_system_setup": {"status": "preview_ready"}})
+        review = {"id": "review_setup", "label": "Review setup", "url": None, "run_id": "setup-child"}
+        with patch.object(prepare, "_claim_prepare", return_value=op), \
+                patch.object(prepare, "_prepare_context", return_value=(Mock(), Mock(), Mock())), \
+                patch.object(prepare, "journey_for_context", return_value={"nextAction": {"id": "verify"}}), \
+                patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kw: operation), \
+                patch.object(prepare, "maybe_merge_prepared_setup",
+                    return_value={"status": "needs_user", "user_action": review}), \
+                patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.return_value = child
+            prepare.advance_prepare(op.pk)
+        self.assertEqual((op.state, op.receipt["status"], op.receipt["current_step"]), ("needs_user", "needs_you", "setup"))
+        self.assertEqual(op.receipt["user_action"], review)
+        self.assertIn("Review the articles setup preview", op.receipt["message"])
 
     def test_prepare_callback_waits_for_commit(self):
         from . import website_prepare as prepare
@@ -145,15 +173,23 @@ class BillingClarityTests(SimpleTestCase):
         import time
         payload = {"startup": "Melbourne café", "points": 0}
         response = _timed_vibe_response(payload, started_at=time.perf_counter(), metric_name="vibe_bootstrap")
-        self.assertEqual(int(response["X-MLAI-Payload-Bytes"]), len(JSONRenderer().render(payload)))
+        self.assertNotIn("X-MLAI-Payload-Bytes", response)
+        response.accepted_renderer = JSONRenderer()
+        response.accepted_media_type = "application/json"
+        response.renderer_context = {}
+        response.render()
+        self.assertEqual(int(response["X-MLAI-Payload-Bytes"]), len(response.content))
+        self.assertEqual(response.content, JSONRenderer().render(payload))
 
     def test_setup_is_free_and_account_balance_is_named(self):
         from .billing import build_roo_points_payload, get_content_factory_setup_cost_points
         self.assertEqual(get_content_factory_setup_cost_points("customer.test"), 0)
         payload = build_roo_points_payload(domain="customer.test", action="article_generation", current_balance=2,
             account_email="sam@example.test", other_founder_has_points=True)
-        self.assertIn("s***@example.test", payload["message"])
-        self.assertIn("2 Roo points", payload["message"])
+        # The masked account stays in its own key; the sentence names numbers only.
+        self.assertEqual(payload["signed_in_account"], "s***@example.test")
+        self.assertTrue(payload["message"].startswith("This article uses 12 points. You have 2."))
+        self.assertNotIn("@", payload["message"])
         self.assertTrue(payload["other_founder_has_points"])
 
     def test_company_billing_can_only_charge_a_current_opted_in_founder(self):
@@ -171,10 +207,15 @@ class BillingClarityTests(SimpleTestCase):
 
 
 class DispatchOutboxTests(SimpleTestCase):
+    def setUp(self):
+        from workflow_runs.models import ContentFactoryRun
+        lookup = self.enterContext(patch.object(ContentFactoryRun.objects, "filter"))
+        lookup.return_value.filter.return_value.first.return_value = None
+
     def test_unconfirmed_prior_delivery_cannot_refund_on_a_new_http_refusal(self):
         from .dispatch_outbox import dispatch_outcome
         self.assertEqual(dispatch_outcome(401, {"detail": "Unavailable"}), ("pending", True))
-        self.assertEqual(dispatch_outcome(401, {}, known_key_outcome="absent"), ("failed", False))
+        self.assertEqual(dispatch_outcome(401, {}, known_key_outcome="not_received"), ("failed", False))
 
     def test_accepted_child_cancelled_by_disconnect_requires_original_payer_refund(self):
         from . import dispatch_outbox as outbox
@@ -189,7 +230,7 @@ class DispatchOutboxTests(SimpleTestCase):
         from . import dispatch_outbox as outbox
         row = SimpleNamespace(client_request_id="saved-key", payload={"request": {}, "endpoint": "article"})
         with patch("content_factory.vibe_marketing_views._content_factory_remote_config", return_value={"enabled": True}), \
-                patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("dispatched", {"run_id": "real-run"})), \
+                patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("started", {"run_id": "real-run"})), \
                 patch("content_factory.vibe_marketing_views._refresh_article_editorial_payload") as policy, \
                 patch.object(outbox, "_accept_delivery", return_value=("delivered", "", "real-run")) as adopt, \
                 patch("integrations.http_client.post") as post:
@@ -204,7 +245,7 @@ class DispatchOutboxTests(SimpleTestCase):
         row = SimpleNamespace(client_request_id="saved-key", organization=Mock(), payload={"request": {
             "delivery_mode": "content_only", "delivery_mode_confirmed": True}, "endpoint": "article"})
         with patch("content_factory.vibe_marketing_views._content_factory_remote_config", return_value={"enabled": True}), \
-                patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("absent", {})), \
+                patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("not_received", {})), \
                 patch("content_factory.vibe_marketing_views._refresh_article_editorial_payload", return_value=Response({"code": "editorial_policy_changed"}, status=409)), \
                 patch("integrations.http_client.post") as post:
             self.assertEqual(outbox._deliver(row), ("pending", "editorial_policy_changed", ""))
@@ -213,8 +254,8 @@ class DispatchOutboxTests(SimpleTestCase):
     def test_exhausted_unknown_delivery_never_authorizes_refund(self):
         from .dispatch_outbox import exhausted_dispatch_outcome
         self.assertEqual(exhausted_dispatch_outcome("unknown"), "awaiting_resolution")
-        self.assertEqual(exhausted_dispatch_outcome("absent"), "failed")
-        self.assertEqual(exhausted_dispatch_outcome("dispatched"), "delivered")
+        self.assertEqual(exhausted_dispatch_outcome("not_received"), "failed")
+        self.assertEqual(exhausted_dispatch_outcome("started"), "delivered")
 
     def test_terminal_refusal_is_not_retried(self):
         from .dispatch_outbox import dispatch_outcome

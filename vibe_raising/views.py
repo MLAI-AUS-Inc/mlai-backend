@@ -51,10 +51,16 @@ from startup_updates.metric_catalog import (
     startup_update_metric_label,
 )
 from integrations.services.external_connectors import (
+    _ACTIVE_ORG,
+    _scope_org,
     ConnectorOAuthError,
+    ConnectorReconnectRequired,
+    ConnectorTemporarilyUnavailable,
+    ConnectorRateLimitError,
     active_google_connection,
     active_organization_for_user,
     google_connection_for_org,
+    ensure_linear_connection_authorized,
     mark_sources_sync_requested,
     refresh_linear_activity_selections,
 )
@@ -95,12 +101,14 @@ from startup_updates.services import (
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from founder_tools.services import (
     CompanyDomainChangeBlocked,
+    CompanyDomainClaimedError,
     DomainOwnershipError,
     DuplicateCompanyDomainError,
     apply_company_domain_change,
     assert_company_domain_available,
     domain_is_available_to,
     ensure_company_organization,
+    queue_domain_claim_alert,
     set_active_company,
     user_may_use_organization,
 )
@@ -115,6 +123,7 @@ from vibe_raising.audience_visibility import (
 from integrations.services.valley_harness import cancel_valley_run, notify_valley_run_created
 from integrations.utils import normalize_domain
 from .metric_history import build_metric_history
+from .transaction_retry import run_in_retryable_transaction
 from .serializers import (
     VibeRaisingActiveCompanySerializer,
     VibeRaisingCompanySerializer,
@@ -202,6 +211,28 @@ def _connector_oauth_guarded(callback):
     def wrapped(*args, **kwargs):
         try:
             return callback(*args, **kwargs)
+        except ConnectorReconnectRequired as exc:
+            # Run creation rolled back; its credential error must survive that
+            # rollback. This never replaces a newer OAuth callback's credentials.
+            exc.persist()
+            return Response(
+                {"detail": str(exc), "code": "startup_update_sources_unavailable",
+                 "unavailableSources": [exc.provider]},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except ConnectorTemporarilyUnavailable as exc:
+            return Response(
+                {"detail": str(exc), "code": "startup_update_source_unavailable",
+                 "unavailableSources": [exc.provider]},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except ConnectorRateLimitError as exc:
+            return Response(
+                {"detail": "A selected source is busy. Try again shortly, or remove it from this update.",
+                 "code": "startup_update_source_rate_limited"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            )
         except ConnectorOAuthError as exc:
             return Response(
                 {"detail": str(exc)},
@@ -211,10 +242,10 @@ def _connector_oauth_guarded(callback):
     return wrapped
 
 
-def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *, organization=None, automatic_scope=False) -> dict[str, list[str]]:
+def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *, organization=_ACTIVE_ORG, automatic_scope=False) -> dict[str, list[str]]:
     warnings: dict[str, list[str]] = {}
     selected = set(input_sources or [])
-    organization = organization or active_organization_for_user(user)
+    organization = _scope_org(user, organization)
     provider_labels = {
         ExternalServiceProvider.XERO: "Xero",
         ExternalServiceProvider.LINEAR: "Linear",
@@ -227,9 +258,9 @@ def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *
             user=user,
             provider=provider,
         ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        if organization is not None:
-            connection_qs = connection_qs.filter(organization=organization)
-        connection = connection_qs.order_by("-updated_at", "-id").first()
+        from integrations.services.source_accounts import report_connection
+        connection_qs = connection_qs.filter(organization=organization)
+        connection = report_connection(connection_qs, user=user, organization=organization, provider=provider)
         if not connection:
             warnings[provider] = [
                 f"{label} was selected but no active {label} connection is available."
@@ -244,9 +275,12 @@ def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *
         # connection to close before the run is even created.
         if provider == ExternalServiceProvider.LINEAR:
             if automatic_scope:
+                ensure_linear_connection_authorized(connection)
                 continue  # The run discovers its own catalog without changing manual selections.
             try:
                 refresh_linear_activity_selections(connection)
+            except (ConnectorReconnectRequired, ConnectorTemporarilyUnavailable, ConnectorRateLimitError):
+                raise
             except Exception as exc:
                 logger.exception(
                     "Unable to refresh Linear activity scope before monthly update draft",
@@ -275,6 +309,7 @@ def _sync_selected_connector_sources_for_draft(user, input_sources: list[str], *
                 [provider],
                 financial_only=True,
                 organization=organization,
+                connection_ids=[connection.pk],
             )
         except Exception as exc:
             logger.exception(
@@ -460,6 +495,7 @@ def _serialize_run_summary(run):
         "stepStates": step_states,
         "targetMonth": target_month.isoformat() if target_month else None,
         "inputSources": startup_update_run_input_sources(run),
+        "sourceChecks": ((run.result or {}).get("source_preflight") or {}).get("checks", []),
         "sourceWarnings": merge_source_warnings(
             {key: value.get("warnings", []) for key, value in ((run.run_request or {}).get("external_context") or {}).items() if isinstance(value, dict)},
             (run.result or {}).get("source_warnings") or {},
@@ -518,12 +554,14 @@ def _should_dispatch_existing_run(run) -> bool:
 
 
 def _valley_dispatch_failure_payload(run, dispatch_result) -> dict:
+    from integrations.services.valley_harness import VALLEY_WORKER_UNAVAILABLE_MESSAGE
+    worker_unavailable = getattr(dispatch_result, "failure_kind", "") == "worker_unavailable"
     return {
         "run_id": run.run_id,
         "runId": run.run_id,
         "error": "valley_dispatch_failed",
         "retryable": True,
-        "message": "The update run was saved, but Valley could not be reached. Check Valley connectivity and retry.",
+        "message": VALLEY_WORKER_UNAVAILABLE_MESSAGE if worker_unavailable else "The update run was saved, but Valley could not be reached. Check Valley connectivity and retry.",
         "valleyDispatch": {
             "status": "failed",
             "failureKind": str(getattr(dispatch_result, "failure_kind", "") or "unknown"),
@@ -537,6 +575,21 @@ def _dispatch_run_to_valley(run):
     dispatch_result = notify_valley_run_created(run.run_id)
     record_valley_dispatch_result(run, dispatch_result)
     return dispatch_result
+
+
+def _queued_valley_warning(run):
+    """Distinguish a waiting job from source processing without changing run state."""
+    if run is None or run.status != ContentFactoryRunStatus.QUEUED:
+        return None
+    meta = _get_run_meta(run)
+    if meta.get("dispatch_status") == "failed":
+        if meta.get("last_dispatch_error_kind") == "worker_unavailable":
+            from integrations.services.valley_harness import VALLEY_WORKER_UNAVAILABLE_MESSAGE
+            return VALLEY_WORKER_UNAVAILABLE_MESSAGE
+        return "Your update is saved, but Valley could not start it. Please try again shortly."
+    if run.updated_at and run.updated_at <= timezone.now() - QUEUED_REDISPATCH_AFTER:
+        return "Your update is still queued. Valley has not started reading your sources yet. Your update is saved."
+    return None
 
 
 def _requested_target_month_from_request(request) -> date:
@@ -610,9 +663,15 @@ def _normalize_input_source_list(value):
 
 
 def _get_requested_input_sources(request):
-    return _normalize_input_source_list(
-        request.data.get("inputSources") or request.data.get("input_sources")
-    )
+    from startup_updates.preflight import selected_sources
+    if "inputSources" in request.data:
+        raw = request.data["inputSources"]
+    elif "input_sources" in request.data:
+        raw = request.data["input_sources"]
+    else:
+        raw = ["gmail"]  # Compatibility for pre-selection legacy clients only.
+    return selected_sources(raw, manual=bool(_get_requested_manual_document_ids(request)
+        or _get_requested_manual_summary(request)))
 
 
 def _get_requested_manual_document_ids(request):
@@ -834,6 +893,7 @@ def _structured_memo_with_xero_metrics(draft):
 
 def _serialize_draft_for_form(draft):
     from startup_updates.revisions import revision_payload
+    from startup_updates.financial_history import history_payload, history_selection, history_owner_preview
     structured_memo = _structured_memo_with_xero_metrics(draft)
     video_metadata = _structured_memo_video_metadata(structured_memo)
     month_value = draft.month
@@ -845,6 +905,8 @@ def _serialize_draft_for_form(draft):
         "audienceVisibility": structured_memo.get("_audience_visibility", ["just_me"]),
         "month": calendar.month_name[month_value.month],
         "year": month_value.year,
+        **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+           if "startupOverview" in structured_memo else {}),
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
@@ -868,6 +930,10 @@ def _serialize_draft_for_form(draft):
         "reportingPeriod": (structured_memo or {}).get("reporting_period"),
         "evidenceWarnings": (structured_memo or {}).get("evidence_warnings", []),
         "metricHistory": (structured_memo or {}).get("metric_history", {}),
+        "financialHistory": history_payload(structured_memo.get("financial_history")),
+        "financialHistorySelection": history_selection(structured_memo.get("financial_history")),
+        "financialHistoryOwnerPreview": history_owner_preview(structured_memo.get("financial_history")),
+        "financialHistoryAudiencePreview": history_owner_preview(structured_memo.get("financial_history"), share_amounts=False),
         "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
         "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
         "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
@@ -950,6 +1016,9 @@ def _build_manual_structured_memo(payload):
     if "coverImage" in payload:
         memo["cover_image"] = payload["coverImage"]
 
+    if "startupOverview" in payload:
+        memo["startupOverview"] = str(payload["startupOverview"]).strip()
+
     display_config = payload.get("displayConfig")
     if display_config is not None:
         memo["display_config"] = display_config
@@ -1007,6 +1076,7 @@ def _build_manual_structured_memo(payload):
 
 def _serialize_monthly_update(draft, structured_memo=None, *, published=False, shared=None):
     from .progress import public_chart_payload
+    from startup_updates.financial_history import history_payload, history_selection, history_owner_preview
     from startup_updates.revisions import frozen_memo, revision_payload
     revision = draft.published_revision if published and draft.published_revision_id else draft.current_revision
     if revision:
@@ -1033,6 +1103,8 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False, s
         "visibility": "published" if published_at else "private",
         "audienceVisibility": structured_memo.get("_audience_visibility") or monthly_update_visibility(draft),
         "publishedAt": published_at.isoformat() if published_at else None,
+        **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+           if "startupOverview" in structured_memo else {}),
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
@@ -1057,6 +1129,10 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False, s
         "evidenceWarnings": (structured_memo or {}).get("evidence_warnings", []),
         "metricHistory": (structured_memo or {}).get("metric_history", {}),
         "progressCharts": public_chart_payload(structured_memo.get("progress_charts")),
+        "financialHistory": history_payload(structured_memo.get("financial_history")),
+        "financialHistorySelection": history_selection(structured_memo.get("financial_history")),
+        "financialHistoryOwnerPreview": history_owner_preview(structured_memo.get("financial_history")),
+        "financialHistoryAudiencePreview": history_owner_preview(structured_memo.get("financial_history"), share_amounts=False),
         "financialSnapshot": _structured_memo_financial_snapshot(structured_memo),
         "conciseAnalysis": _structured_memo_concise_analysis(structured_memo),
         "presentationMode": _structured_memo_text(structured_memo, "presentation_mode", "presentationMode"),
@@ -1071,7 +1147,8 @@ def _serialize_monthly_update(draft, structured_memo=None, *, published=False, s
             value.update(metrics={}, metricEvidence={}, metricSuggestions={}, metricHistory={},
                 financialSnapshot=None, conciseAnalysis=None, financialChart=None)
     if shared:
-        return shared_update(value, metric_items=structured_memo.get("kpi_snapshot"))
+        return shared_update(value, metric_items=structured_memo.get("kpi_snapshot"),
+            financial_history=structured_memo.get("financial_history"))
     return value
 
 
@@ -1087,6 +1164,8 @@ def _serialize_draft_bundle(drafts):
         past_months.append(
             {
                 "month": f"{calendar.month_name[month_value.month]} {month_value.year}",
+                **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+                   if "startupOverview" in structured_memo else {}),
                 "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
                 "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
                 "asks": _join_named_sections(structured_memo, [
@@ -1118,6 +1197,8 @@ def _serialize_email_draft_month(draft):
         "isoMonth": month_value.isoformat(),
         "month": calendar.month_name[month_value.month],
         "year": month_value.year,
+        **({"startupOverview": _structured_memo_text(structured_memo, "startupOverview") or ""}
+           if "startupOverview" in structured_memo else {}),
         "summary": _structured_memo_text(structured_memo, "summary", "topline"),
         "sourceUrl": _structured_memo_text(structured_memo, "sourceUrl", "source_url"),
         "manualDocuments": _structured_memo_manual_documents(structured_memo),
@@ -1851,10 +1932,15 @@ def _build_status_payload(*, user, company, domain):
     )
 
     error = None
-    if latest_run_requires_gmail and not google_scope_status["hasGmailScope"]:
+    if (
+        latest_run_requires_gmail
+        and not google_scope_status["hasGmailScope"]
+        and not (latest_run and (latest_run.run_request or {}).get("source_preflight_version"))
+    ):
         state = "needs_google_auth"
     elif open_run is not None:
         state = "processing"
+        error = _queued_valley_warning(open_run)
     elif latest_run and latest_run.status == ContentFactoryRunStatus.CANCELLED:
         state = "cancelled"
     elif latest_run and latest_run.status in {
@@ -1974,10 +2060,15 @@ def _build_email_draft_payload(
     )
 
     error = None
-    if latest_run_requires_gmail and not google_scope_status["hasGmailScope"]:
+    if (
+        latest_run_requires_gmail
+        and not google_scope_status["hasGmailScope"]
+        and not (latest_run and (latest_run.run_request or {}).get("source_preflight_version"))
+    ):
         state = "auth_required"
     elif latest_run is not None and latest_run.status == ContentFactoryRunStatus.QUEUED:
         state = "queued"
+        error = _queued_valley_warning(latest_run)
     elif latest_run is not None and latest_run.status in {
         ContentFactoryRunStatus.RUNNING,
         ContentFactoryRunStatus.BLOCKED,
@@ -2025,11 +2116,13 @@ def _build_email_draft_payload(
         "currentStep": run_payload["currentStep"] if run_payload else None,
         "stepStates": (run_payload or {}).get("stepStates", {}),
         "inputSources": (run_payload or {}).get("inputSources", []),
+        "sourceChecks": (run_payload or {}).get("sourceChecks", []),
+        "reviewRequired": bool(latest_run and (latest_run.result or {}).get("review_required")),
         "completedSteps": progress_payload["completedSteps"] if progress_payload else 0,
         "totalSteps": progress_payload["totalSteps"] if progress_payload else len(RUN_STEP_ORDER),
         "displayStage": progress_payload["displayStage"] if progress_payload else _get_email_draft_display_stage(None),
         "lastHeartbeatAt": progress_payload["lastHeartbeatAt"] if progress_payload else None,
-        "canRetry": progress_payload["canRetry"] if progress_payload else False,
+        "canRetry": bool(progress_payload and progress_payload["canRetry"] and not (latest_run.result or {}).get("review_required")),
         "terminalState": progress_payload["terminalState"] if progress_payload else None,
         "generatedDraftMonths": progress_payload["generatedDraftMonths"] if progress_payload else [],
         "targetMonth": resolved_target_month.isoformat() if resolved_target_month else None,
@@ -2187,6 +2280,11 @@ class VibeRaisingCompanyView(APIView):
                 ensure_company_organization(company)
                 if profile.active_company_id is None:
                     set_active_company(profile, company)
+        except CompanyDomainClaimedError as exc:
+            # A claim that raced the check above: the company writes have
+            # rolled back, so ops hears about it once and the founder can carry on.
+            queue_domain_claim_alert(organization=exc.organization, claimant_user_id=request.user.id)
+            return exc.response()
         except DuplicateCompanyDomainError as exc:
             return Response(
                 {
@@ -2689,6 +2787,21 @@ class VibeRaisingMonthlyUpdateView(APIView):
         except FinancialMetricEditError as exc:
             from rest_framework.exceptions import ValidationError
             raise ValidationError({"detail": str(exc)}) from exc
+        history_selection = serializer.validated_data.get("financialHistorySelection")
+        financial_history_snapshot = None
+        if serializer.validated_data.get("financialCandidateId"):
+            from startup_updates.financial_refresh import candidate_for_save
+            financial_history_snapshot = candidate_for_save(
+                serializer.validated_data["financialCandidateId"], company=company, user=request.user,
+                draft=draft, expected_revision=serializer.validated_data.get("expectedRevision"),
+                input_sources=serializer.validated_data.get("inputSources"))
+        if financial_history_snapshot is None and history_selection and history_selection.get("refresh"):
+            # Explicitly refreshing the chart captures cached source evidence;
+            # it never calls a provider or alters the prior approved revision.
+            snapshot = capture_snapshot(organization, month_bucket)
+            if changed_metrics:
+                snapshot = capture_snapshot(organization, month_bucket,
+                    manual_metrics=changed_metrics, base_snapshot=snapshot)
         memo = _build_manual_structured_memo(structured_payload)
         if draft.current_revision_id:
             # Agent origin, citations and retry receipts are server-owned history.
@@ -2699,6 +2812,8 @@ class VibeRaisingMonthlyUpdateView(APIView):
                     memo[field] = copy.deepcopy(draft.current_revision.structured_memo[field])
         if "chartSelections" in serializer.validated_data:
             memo["_progress_chart_specs"] = serializer.validated_data["chartSelections"]
+        if history_selection is not None:
+            memo["_financial_history_selection"] = history_selection
         if is_creation_request and not draft.current_revision_id:
             memo["_creation_request_hash"] = creation_request_hash
         if draft.current_revision_id:
@@ -2722,7 +2837,7 @@ class VibeRaisingMonthlyUpdateView(APIView):
         revision = save_revision(draft, memo, snapshot=snapshot,
             expected_revision=serializer.validated_data.get("expectedRevision"),
             audience="public" if "public" in audience_visibility else "community" if "community" in audience_visibility else "private",
-            validation=validation)
+            validation=validation, financial_history_snapshot=financial_history_snapshot)
         draft.refresh_from_db()
         draft.status = MonthlyUpdateDraftStatus.DRAFT
         draft.run = None
@@ -2907,21 +3022,7 @@ class VibeRaisingStartupUpdateRunView(APIView):
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = google_connection_for_org(request.user, organization)
-        input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
-            input_sources,
-            google_connection,
-        )
-        source_warnings = merge_source_warnings(
-            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization, automatic_scope=bool(getattr(self, "automatic_source_scope", False))),
-            gmail_scope_warnings,
-        )
-        if gmail_required_for_sources(input_sources) and (
-            google_connection is None or not has_gmail_read_scope(google_connection)
-        ):
-            return Response(
-                _build_status_payload(user=request.user, company=company, domain=domain),
-                status=status.HTTP_200_OK,
-            )
+        source_warnings = {}
 
         existing_run = get_open_startup_update_run(
             organization=organization,
@@ -2965,20 +3066,14 @@ class VibeRaisingStartupUpdateRunView(APIView):
                 return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         else:
             run = existing_run
-            set_startup_update_run_target_month(run, target_month)
-            if input_sources:
-                windows = build_startup_update_target_windows(target_month)
-                refresh_startup_update_run_source_context(
-                    run=run,
-                    organization=organization,
-                    input_sources=input_sources,
-                    start_date=windows["financial_start_date"],
-                    end_date=windows["financial_end_date"],
-                    source_warnings=source_warnings,
-                    manual_document_ids=manual_document_ids,
-                    manual_summary=manual_summary,
-                )
-            if _should_dispatch_existing_run(run):
+            redispatch_existing = _should_dispatch_existing_run(existing_run)
+            from startup_updates.revisions import RevisionConflict
+            original = existing_run.run_request or {}
+            if (set(original.get("input_sources", [])) != set(input_sources)
+                or original.get("manual_summary", "") != manual_summary
+                or sorted(original.get("manual_document_ids", [])) != sorted(manual_document_ids)):
+                raise RevisionConflict("Inputs changed. Finish or cancel this generation first.")
+            if redispatch_existing:
                 logger.info(
                     "Re-dispatching queued startup update run to Valley",
                     extra={"run_id": run.run_id, "organization_id": organization.id},
@@ -3028,6 +3123,16 @@ class VibeRaisingEmailDraftStartView(APIView):
         display_config = normalize_vibe_raising_display_config(
             request.data.get("displayConfig", request.data.get("display_config")), validate_cover=True,
         )
+        history_selection = None
+        if "financialHistorySelection" in request.data:
+            from vibe_raising.serializers import FinancialHistorySelectionField
+            history_selection = FinancialHistorySelectionField().run_validation(request.data["financialHistorySelection"])
+        startup_overview = None
+        if "startupOverview" in request.data:
+            startup_overview = request.data["startupOverview"]
+            if not isinstance(startup_overview, str) or len(startup_overview) > 2000:
+                return Response({"startupOverview": "Use a short text overview of at most 2000 characters."}, status=status.HTTP_400_BAD_REQUEST)
+            startup_overview = startup_overview.strip()
 
         company = context["company"]
         domain = context["domain"]
@@ -3068,29 +3173,8 @@ class VibeRaisingEmailDraftStartView(APIView):
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = google_connection_for_org(request.user, organization)
-        input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
-            input_sources,
-            google_connection,
-        )
-        source_warnings = merge_source_warnings(
-            _sync_selected_connector_sources_for_draft(request.user, input_sources, organization=organization, automatic_scope=bool(getattr(self, "automatic_source_scope", False))),
-            gmail_scope_warnings,
-        )
-        if gmail_required_for_sources(input_sources) and (
-            google_connection is None or not has_gmail_read_scope(google_connection)
-        ):
-            return Response(
-                _build_email_draft_payload(
-                    request=request,
-                    user=request.user,
-                    company=company,
-                    domain=domain,
-                    target_month=target_month,
-                ),
-                status=status.HTTP_200_OK,
-            )
-
-        if google_connection is not None and binding.google_connection_id != google_connection.id:
+        source_warnings = {}
+        if "gmail" in input_sources and google_connection is not None and binding.google_connection_id != google_connection.id:
             binding.google_connection = google_connection
             binding.save(update_fields=["google_connection", "updated_at"])
 
@@ -3105,19 +3189,26 @@ class VibeRaisingEmailDraftStartView(APIView):
         except (ValueError, TypeError):
             raise ValidationError({"updateId": "Choose a valid update."})
         requested_date = parse_generation_date(request.data, update_id=requested_id)
-        with transaction.atomic():
-            draft, _ = resolve_update(organization, month=target_month, update_id=requested_id,
+        requested_month = target_month
+
+        def resolve_and_queue_run():
+            # A deadlock rolls this whole attempt back and it runs again, so it
+            # derives every value from the request. Only database writes and
+            # read-only source lookups happen here; Valley dispatch waits for
+            # the commit below and therefore happens once.
+            draft, _ = resolve_update(organization, month=requested_month, update_id=requested_id,
                 creation_key=request.data.get("creationKey"), update_date=requested_date)
             if str(request.data.get("expectedRevision") or "") != str(draft.current_revision_id or ""):
                 raise RevisionConflict()
-            if requested_date is None:
+            update_date = requested_date
+            if update_date is None:
                 from zoneinfo import ZoneInfo
                 reporting_zone = ZoneInfo(_startup_profile.reporting_timezone or "UTC")
-                requested_date = default_generation_date(
+                update_date = default_generation_date(
                     draft, today=timezone.now().astimezone(reporting_zone).date(),
                 )
-            target_month = draft.month
-            period = narrative_window(organization, draft, requested_date,
+            run_month = draft.month
+            period = narrative_window(organization, draft, update_date,
                 requested_start=request.data.get("narrativeStart"), requested_end=request.data.get("narrativeEnd"))
             try:
                 requested_audience = normalize_audience_visibility(request.data.get("audienceVisibility"))
@@ -3135,32 +3226,41 @@ class VibeRaisingEmailDraftStartView(APIView):
                     cancelled_by_user_id=request.user.id)
                 existing_run = None
                 draft.refresh_from_db()
+            redispatch_existing = False
             if existing_run:
+                if history_selection is not None and (existing_run.run_request or {}).get("financial_history_selection") != history_selection:
+                    raise RevisionConflict("Financial sharing choices changed. Finish or cancel the current generation before starting again.")
+                if startup_overview is not None and (existing_run.run_request or {}).get("startup_overview") != startup_overview:
+                    raise RevisionConflict("This run uses a different startup overview. Finish or cancel it before generating again.")
                 from startup_updates.activity_scope import run_uses_month_scope
                 if not run_uses_month_scope(existing_run.run_request or {}):
                     raise RevisionConflict("This draft was started with an older source period. Cancel it and generate the monthly update again.")
-                windows = build_startup_update_target_windows(target_month)
-                refresh_startup_update_run_source_context(
-                    run=existing_run,
-                    organization=organization,
-                    input_sources=input_sources,
-                    start_date=windows["financial_start_date"],
-                    end_date=windows["financial_end_date"],
-                    source_warnings=source_warnings,
-                    manual_document_ids=manual_document_ids,
-                    manual_summary=manual_summary,
-                )
+                # Refreshing source context advances updated_at; retain the
+                # stale-queue decision from before that write on this attempt.
+                redispatch_existing = _should_dispatch_existing_run(existing_run)
+                original = existing_run.run_request or {}
+                if (set(original.get("input_sources", [])) != set(input_sources)
+                    or sorted(original.get("manual_document_ids", [])) != sorted(manual_document_ids)
+                    or original.get("manual_summary", "") != manual_summary
+                    or original.get("audience_visibility", ["just_me"]) != requested_audience):
+                    raise RevisionConflict("The selected sources or input changed. Finish or cancel this generation first.")
             if not existing_run:
-                draft.update_date = requested_date
+                draft.update_date = update_date
                 draft.save(update_fields=["update_date"])
             run = existing_run or create_startup_update_run(organization=organization, binding=binding,
-                input_sources=input_sources, source_warnings=source_warnings, target_month=target_month,
+                input_sources=input_sources, source_warnings=source_warnings, target_month=run_month,
                 manual_document_ids=manual_document_ids, manual_summary=manual_summary,
                 force_regenerate=force, update_draft=draft, narrative_period=period,
                 automatic_source_scope=bool(getattr(self, "automatic_source_scope", False)),
                 audience_visibility=requested_audience,
-                cover_image=(display_config or {}).get("cover_image"))
-        if not existing_run or _should_dispatch_existing_run(run):
+                cover_image=(display_config or {}).get("cover_image"),
+                financial_history_selection=history_selection, startup_overview=startup_overview)
+            return draft, run, existing_run, run_month, redispatch_existing
+
+        draft, run, existing_run, target_month, redispatch_existing = run_in_retryable_transaction(
+            resolve_and_queue_run, label="startup_update_draft_start",
+        )
+        if not existing_run or redispatch_existing:
             dispatch_result = _dispatch_run_to_valley(run)
             if not dispatch_result:
                 return Response(_valley_dispatch_failure_payload(run, dispatch_result), status=503)
@@ -3168,6 +3268,7 @@ class VibeRaisingEmailDraftStartView(APIView):
             domain=domain, run_id=run.run_id, target_month=target_month)
         payload.update(identity_payload(draft))
         payload["narrativePeriod"] = (run.run_request or {}).get("narrative_period")
+        payload["sourceChecks"] = []
         return Response(payload, status=200 if existing_run else 201)
 
 

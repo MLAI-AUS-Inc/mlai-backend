@@ -1,4 +1,5 @@
 """Measured multi-selection and durable evolution state, owned by the research run."""
+from .website_run_authority import event_owned
 import hashlib
 import math
 
@@ -117,7 +118,7 @@ def adopt_selection(organization, run, ids):
             state["daily_priority_events"] = events[-30:]
             state.pop("pending", None)
             run.result = {**run.result, STATE_KEY: state}
-            run.save(update_fields=["result", "updated_at"])
+            run.save(update_fields=["result"] if event_owned(run) else ["result", "updated_at"])
             from integrations.services.daily_research_policy import record_engagement
             record_engagement(organization, resume=True)
         slugs = {g["slug"] for g in groups if set(g["proposal_ids"]) & set(ids)}
@@ -199,7 +200,12 @@ def apply_evolution(organization, proposals, captured_on, now):
         islands = list(ContentIsland.objects.filter(organization=organization,
             slug__in=state.get("managed_slugs", []), status="visible").prefetch_related("memberships__keyword"))
         old = [{"slug": i.slug, "keywords": [m.keyword.keyword_normalized for m in i.memberships.all()]} for i in islands]
-        groups = proposed.get("groups") or []
+        # A theme the founder removed stays removed even though its research keywords remain in scope.
+        from .island_removal import removed_island_centroids, suppressed_by_removed_island
+        removed = removed_island_centroids(ContentIsland.objects.filter(
+            organization=organization, removed_at__isnull=False))
+        groups = [group for group in proposed.get("groups") or []
+                  if not suppressed_by_removed_island(group.get("centroid_embedding"), removed)]
         if not old or not groups or len(groups) > 30:
             continue
         # Resolve evidence in this organisation; missing/partial syncs must not retire themes.
@@ -217,7 +223,7 @@ def apply_evolution(organization, proposals, captured_on, now):
         state["last_observed_on"] = day
         if structural and not confirm_topology(state, topology_signature(groups, old), day):
             run.result = {**run.result, STATE_KEY: state}
-            run.save(update_fields=["result", "updated_at"])
+            run.save(update_fields=["result"] if event_owned(run) else ["result", "updated_at"])
             continue
         matches, used = {}, set()
         # Largest overlap owns the stable link, independent of opportunity order.
@@ -277,6 +283,6 @@ def apply_evolution(organization, proposals, captured_on, now):
                      last_applied_on=day, revision=state.get('revision', 0) + 1)
         state.pop('pending', None)
         run.result = {**run.result, STATE_KEY: state}
-        run.save(update_fields=['result', 'updated_at'])
+        run.save(update_fields=["result"] if event_owned(run) else ["result", "updated_at"])
         results.append({'run_id': run.run_id, 'islands': state['managed_slugs'], 'changed': structural})
     return results

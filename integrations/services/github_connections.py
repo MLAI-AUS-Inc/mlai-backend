@@ -375,3 +375,35 @@ def get_owned_org_config(slack_user_id: str, domain: str) -> Optional[Organizati
         )
         .first()
     )
+
+
+def read_bound_repository(connection, url):
+    """Read a bound repository, refreshing one stale installation token once.
+
+    Only the P2 cohort opts into refresh. A repository's 404 is never interpreted
+    as proof that its installation was revoked. Existing boundary classification
+    retains that distinction. P2 reads require an unlocked provider boundary;
+    older callers retain their existing boundary behavior while the flag is off.
+    """
+    from integrations import http_client
+    from integrations.services.github_app import create_installation_access_token
+    from content_factory.p2_foundation import p2_applies
+    from content_factory.website_connections import require_unlocked_remote_call
+    refresh_enabled = (getattr(settings, 'ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED', False)
+                       and p2_applies(connection.organization))
+    if refresh_enabled:
+        require_unlocked_remote_call()
+    prefix = f'https://api.github.com/repos/{connection.github_repo}'
+    if url != prefix and not url.startswith(prefix + '/'):
+        raise ValueError('A bound GitHub repository URL is required.')
+    arguments = dict(installation_id=connection.installation_id, repository=connection.github_repo,
+                     repository_id=connection.repository_id, permission_mode='read')
+    credential = create_installation_access_token(**arguments)
+    def send(token):
+        return http_client.get(url, headers={'Authorization': f'Bearer {token}',
+                                             'Accept': 'application/vnd.github+json'}, timeout=(3, 15))
+    response = send(credential.token)
+    if response.status_code == 401 and refresh_enabled:
+        credential = create_installation_access_token(**arguments, use_cache=False)
+        response = send(credential.token)
+    return response

@@ -1,10 +1,11 @@
 """Fail-closed identity, permissions and source boundaries for Volunteer."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -33,9 +34,11 @@ def flag(name):
 
 
 def awards_enabled(action_key):
-    """Permit advice rewards without enabling unrelated Volunteer credits."""
+    """Permit advice and intro rewards without enabling unrelated credits."""
     return flag("awards_enabled") or (
         action_key == "helpful_answer" and flag("advice_rewards_enabled")
+    ) or (
+        action_key == "introduce_yourself" and flag("intro_rewards_enabled")
     )
 
 
@@ -118,20 +121,34 @@ def linked_member(member_id):
         user = get_user_model().objects.get(pk=member_id, is_active=True)
     except (ValueError, TypeError, get_user_model().DoesNotExist) as exc:
         raise VolunteerError("member_unavailable", 404) from exc
-    if not CommunityChatDevice.objects.filter(user=user, status="verified").exists():
+    if not CommunityChatDevice.objects.filter(user=user, status="verified", revoked_at__isnull=True).exists():
         raise VolunteerError("member_unavailable", 404)
     return user
 
 
-def actor_for_key(public_key):
-    """Map a verified device to its active canonical account across platforms."""
+def actor_for_key(public_key, *, occurred_at=None):
+    """Map a current device, optionally proving ownership at source time too."""
     from community_chat.models import CommunityChatDevice
 
     device = (
         CommunityChatDevice.objects.select_related("user")
-        .filter(public_key=public_key, status="verified", user__is_active=True)
+        .filter(public_key=public_key, status="verified", revoked_at__isnull=True, user__is_active=True)
         .first()
     )
     if device is None:
         raise VolunteerError("member_unavailable", 404)
+    if occurred_at is not None:
+        # Signed relay timestamps have second precision. A key may be revoked
+        # and enrolled by another account; its latest owner cannot inherit an
+        # older introduction. Conflicting owners in one second stay unknown.
+        start = occurred_at.replace(microsecond=0)
+        end = start + timedelta(seconds=1)
+        owners = list(CommunityChatDevice.objects.filter(
+            public_key=public_key, status__in=("verified", "revoked"),
+            created_at__lt=end, verified_at__lt=end,
+        ).filter(Q(revoked_at__isnull=True) | Q(revoked_at__gte=start)).order_by().values_list(
+            "user_id", flat=True,
+        ).distinct()[:2])
+        if owners != [device.user_id]:
+            raise VolunteerError("member_unavailable", 404)
     return device.user

@@ -8,8 +8,13 @@ behaviour until the new endpoint is explicitly enabled and wired.
 ## Trust boundary
 
 The public answer path imports no private retrieval, search, selection, or
-answering service. It queries only active `PublicKnowledgeItem` rows and their
-dedicated full-text/vector fields.
+answering service. It retrieves content only from active `PublicKnowledgeItem`
+rows and their dedicated full-text/vector fields. A negative, content-free
+identity/lineage subquery excludes published snapshots whose current source
+lineage binds to a Members Slack mapping. That guard reads identifiers and
+source identity metadata only; it cannot select or search private statements,
+quotes, chunks, summaries or publication proposals. It does not grant a private
+retrieval fallback or alter the stored publication lifecycle.
 
 ```text
 private claim or current summary

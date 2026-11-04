@@ -1,0 +1,20 @@
+{
+  "archive_manifest_digest": "4cf37cb0afcc255f73f11b5acc4b4f069966a0e3d04dd3839c13b712eb290856",
+  "digest": "1e658e65c1dc60ef0255084d8df87a903d9b49b5f9264c12bfb3806f7b8f4572",
+  "existing_article_count": 35,
+  "inventory_kind": "static_html",
+  "kind": "native_article_inventory_summary",
+  "listing_route": "/stories",
+  "native_inventory_digest": "8048651813697e38301611dba4ebbe4ef5963850f6beec79eab16bf05c898924",
+  "origin": "https://site.example",
+  "run_id": "synthetic-static-setup",
+  "schema_version": 1,
+  "source_scope": {
+    "app_root": "",
+    "branch": "main",
+    "connection_generation": 2,
+    "repository_id": 123,
+    "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "website_connection_id": "connection-fixture"
+  }
+}

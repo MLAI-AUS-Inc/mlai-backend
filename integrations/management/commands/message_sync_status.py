@@ -1,19 +1,26 @@
 """Content-free diagnostics and worker liveness for the durable sync lanes."""
 import json
 import socket
+import math
+from collections import Counter
 from datetime import timedelta
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
-from django.db.models import Count, Max, Min
+from django.db.models import Count, Max, Min, FloatField
+from django.db.models.functions import Cast
 from django.utils import timezone
 from integrations.models import (
     BridgeApiBudget, BridgeSyncInbox, BridgeSyncJob, BridgeSyncState,
-    BridgeWorkerHeartbeat, CommunityBridgeDelivery, SlackDmMirrorDelivery,
+    BridgeWorkerHeartbeat, CommunityBridgeDelivery, SlackDmMirrorDelivery, SlackDmMirrorGrant,
 )
 from integrations.services.message_sync import telemetry
-from integrations.services.message_sync.scheduler import eligible_states
+from integrations.services.message_sync import event_routing
+from integrations.services.message_sync.scheduler import eligible_states, safe_error_code
+from integrations.services.message_sync.discovery import KEY as DISCOVERY_KEY, due_discovery_grants
+from integrations.services.slack_open_requests import KEY as OPEN_KEY
 from integrations.services.message_sync.slack_client import provider_interval
+from integrations.services.community_bridge import community_source
 
 
 class Command(BaseCommand):
@@ -88,9 +95,53 @@ class Command(BaseCommand):
                               reliability='best_effort_lower_bound; observed buckets do not prove all requests were recorded')
         except Exception:
             throughput = {'available': False}
+        active_grants = SlackDmMirrorGrant.objects.filter(status="active", revoked_at__isnull=True, connection__isnull=False)
+        discovery, opens = summarize_open_discovery(active_grants.values_list("connection__sync_cursor", flat=True), now=now.timestamp())
+        discovery.update(
+            heartbeat_age_seconds=age(lane_times.get("discovery")) if lane_times.get("discovery") else None,
+            due_grants=due_discovery_grants(300, now=now).count(),
+        )
+        event_status = event_routing.summarize(active_grants.values_list("connection__sync_cursor", flat=True), now=now.timestamp())
+        window_seconds = options['window_hours'] * 3600 if options['window_hours'] is not None else options['window_minutes'] * 60
+        event_deliveries = SlackDmMirrorDelivery.objects.filter(metadata__event_routing_v1__isnull=False)
+        outstanding = event_deliveries.exclude(status="completed")
+        oldest_parked = outstanding.aggregate(value=Min(Cast("metadata__event_routing_v1__parked_at", FloatField())))["value"]
+        event_status["delivery"] = event_routing.summarize_deliveries(
+            event_deliveries.filter(status="completed", metadata__event_routing_v1__completed_at__gte=now.timestamp() - window_seconds)
+            .order_by("-completed_at", "-id").values_list("metadata__event_routing_v1", "status")[:5001],
+            now=now.timestamp(),
+            window_seconds=window_seconds,
+            completed_only=True,
+        )
+        event_status["delivery"].update(
+            outstanding_by_status=list(outstanding.values("status").annotate(count=Count("id")).order_by("status")),
+            oldest_outstanding_age_seconds=max(0, int(now.timestamp() - oldest_parked)) if oldest_parked is not None else 0,
+            noop_completed=event_deliveries.filter(status="completed", metadata__event_routing_v1__completed_at__isnull=True).count(),
+        )
+        try:
+            latency = telemetry.latency_snapshot(minutes=options['window_minutes'], hours=options['window_hours'])
+            latency['available'] = True
+        except Exception:
+            latency = {'available': False}
+        public_dependency = {}
+        for platform in ('buzz', 'slack', 'discord'):
+            deliveries = CommunityBridgeDelivery.objects.filter(target_platform=platform)
+            waiting = deliveries.filter(status='waiting_parent')
+            public_dependency[platform] = {
+                'waiting_count': waiting.count(),
+                'parked_count': waiting.filter(last_error__startswith='parent_mapping_parked:').count(),
+                'dead_unresolvable_by_code': dict(Counter(err.split(':', 2)[1] if ':' in err else 'unknown' for err in
+                    deliveries.filter(status='dead', last_error__startswith='parent_unresolvable:').values_list('last_error', flat=True)[:1000])),
+                'noop_completed_7d': deliveries.filter(status='completed', completed_at__gte=now - timedelta(days=7), last_error__startswith='dependency_noop:').count(),
+                'oldest_waiting_age_seconds': age(waiting.aggregate(value=Min('dependency_first_seen_at'))['value']),
+            }
         result = {
             'enabled': enabled, 'checked_at': now.isoformat(), 'stale_lanes': stale,
+            'community_source': community_source.status(),
             'provider_throughput': throughput,
+            'public_dependency': public_dependency,
+            'discovery': discovery, 'open_requests': opens, 'open_latency': latency,
+            'event_routing': event_status,
             'inbox_pending': inbox.count(),
             'oldest_inbox_age_seconds': age(inbox.aggregate(value=Min('received_at'))['value']),
             'inbox_retrying': inbox.exclude(last_error_code='').count(),
@@ -100,8 +151,44 @@ class Command(BaseCommand):
             'provider_cooldowns': list(BridgeApiBudget.objects.filter(cooldown_until__gt=now).exclude(method__startswith='priority:').values('method').annotate(count=Count('id'), until=Max('cooldown_until')).order_by('method')),
             'public_delivery': delivery(CommunityBridgeDelivery.objects.filter(target_platform='buzz')),
             'private_delivery': delivery(SlackDmMirrorDelivery.objects.all()),
+            'private_undeliverable_by_reason': dict(Counter(str(r or 'unknown') for r in
+                SlackDmMirrorDelivery.objects.filter(metadata__undeliverable=True, updated_at__gte=now - timedelta(days=7))
+                .values_list('metadata__undeliverable_reason', flat=True)[:5000])),
             'workers': list(BridgeWorkerHeartbeat.objects.values(
                 'worker_id', 'lane', 'heartbeat_at', 'progressed_at', 'completed_count', 'failed_count', 'last_error_code',
             )),
         }
         self.stdout.write(json.dumps(result, default=str, sort_keys=True))
+
+
+def summarize_open_discovery(cursors, *, now):
+    """Aggregate queue health without returning keys, source IDs or contents."""
+    errors, opens, oldest = Counter(), Counter(), {"pending": 0, "importing": 0}
+    leased = 0
+    def finite(value):
+        return float(value) if type(value) in (int, float) and math.isfinite(value) else 0
+    for cursor in cursors:
+        if not isinstance(cursor, dict):
+            continue
+        discovery = cursor.get(DISCOVERY_KEY) or {}
+        if isinstance(discovery, dict):
+            leased += int(finite(discovery.get("expires")) > now)
+            if discovery.get("error"):
+                errors[safe_error_code(discovery['error'])] += 1
+        requests = cursor.get(OPEN_KEY) or {}
+        if not isinstance(requests, dict):
+            continue
+        for request in requests.values():
+            if not isinstance(request, dict) or finite(request.get("until")) <= now:
+                continue
+            state = request.get("state")
+            if state not in {"pending", "importing", "error"}:
+                continue
+            opens[state] += 1
+            stamp = finite(request.get("requested_at"))
+            if state in oldest and stamp > 0:
+                oldest[state] = max(oldest[state], max(0, int(now - stamp)))
+    deferred = errors.pop("BudgetDeferred", 0)
+    return ({"leased_grants": leased, "budget_deferred_grants": deferred, "error_codes": dict(errors)},
+            {**{name: opens[name] for name in ("pending", "importing", "error")},
+             **{f"oldest_{name}_age_seconds": value for name, value in oldest.items()}})

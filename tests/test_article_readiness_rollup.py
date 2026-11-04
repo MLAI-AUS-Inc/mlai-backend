@@ -1,12 +1,9 @@
-"""compute_article_readiness: the single source of truth for article-generation readiness.
+"""Readiness requires current integration proof, including for legacy configs."""
+import json
+from datetime import timedelta
 
-It collapses the three previously-duplicated OR chains (the readiness primitive, the setup
-gate, and _profile_checks' history fallback) into one function that returns the SAME boolean
-plus an explicit blocking_reason / reason_code so the wizard can tell the user which step is
-missing instead of a generic "setup required". These lock the boolean semantics (so the
-#484/#486/#490 tuning is preserved) and the reason classification.
-"""
 from django.test import TestCase
+from django.utils import timezone
 
 from content_factory.models import OrganizationContentConfig, WrittenArticle
 from content_factory.vibe_marketing_views import compute_article_readiness
@@ -27,16 +24,26 @@ class ComputeArticleReadinessTests(TestCase):
         kwargs.setdefault("github_repo", "acme/site")
         return self._config(**kwargs)
 
-    # --- ready paths -----------------------------------------------------------------
-    def test_scaffolded_is_ready_via_scaffolded(self):
-        result = compute_article_readiness(self.org, self._connected(articles_scaffolded=True), [])
-        self.assertTrue(result["generation_ready"])
-        self.assertIsNone(result["blocking_reason"])
-        self.assertEqual(result["reason_code"], "")
-        self.assertEqual(result["via"], "scaffolded")
-        self.assertTrue(result["proofs"]["articles_scaffolded"])
+    def _verified(self, **overrides):
+        target = {"target_id": "articles", "kind": "react_article_system", "publish_capability": "direct"}
+        scan = {
+            "github_repo": "acme/site",
+            "default_branch": "main",
+            "default_branch_sha": "a" * 40,
+            "scan_completed_at": timezone.now().isoformat(),
+            "article_system_readiness": {"ready": True, "safe_publish_route": True},
+            "publish_targets": [target],
+        }
+        scan.update(overrides)
+        return self._connected(publish_targets=[target], scan_summary=json.dumps(scan))
 
-    def test_written_article_history_makes_ready(self):
+    def test_scaffold_flag_does_not_grant_generation(self):
+        result = compute_article_readiness(self.org, self._connected(articles_scaffolded=True), [])
+        self.assertFalse(result["generation_ready"])
+        self.assertEqual(result["reason_code"], "integration_required")
+        self.assertFalse(result["proofs"]["integration_verified"])
+
+    def test_written_article_history_does_not_grant_generation(self):
         WrittenArticle.objects.create(
             organization=self.org,
             title="Existing article",
@@ -45,32 +52,48 @@ class ComputeArticleReadinessTests(TestCase):
             primary_keyword="existing article",
         )
         result = compute_article_readiness(self.org, self._connected(), [])
-        self.assertTrue(result["generation_ready"])
-        self.assertEqual(result["via"], "history")
-        self.assertTrue(result["proofs"]["generation_history"])
+        self.assertFalse(result["generation_ready"])
+        self.assertEqual(result["via"], "")
+        self.assertFalse(result["proofs"]["integration_verified"])
 
-    # --- blocked paths, classified in wizard order -----------------------------------
     def test_github_required_when_not_connected(self):
         result = compute_article_readiness(self.org, self._config(github_repo=""), [])
         self.assertFalse(result["generation_ready"])
         self.assertEqual(result["reason_code"], "github_required")
         self.assertTrue(result["blocking_reason"])
 
-    def test_scan_required_when_connected_without_scan(self):
+    def test_integration_required_when_connected_without_scan(self):
         result = compute_article_readiness(self.org, self._connected(), [])
         self.assertFalse(result["generation_ready"])
-        self.assertEqual(result["reason_code"], "scan_required")
+        self.assertEqual(result["reason_code"], "integration_required")
 
-    def test_articles_location_required_when_scanned_but_no_surface(self):
+    def test_integration_required_when_scan_has_no_surface(self):
         # Scan ran (scan_summary present) but no publish target / ready article system was found.
         result = compute_article_readiness(self.org, self._connected(scan_summary="repo scanned"), [])
         self.assertFalse(result["generation_ready"])
-        self.assertEqual(result["reason_code"], "articles_location_required")
+        self.assertEqual(result["reason_code"], "integration_required")
 
-    def test_passing_setup_gate_is_reused_not_recomputed(self):
-        # When a caller already has the gate, the rollup honors it (no divergent recompute).
+    def test_passing_setup_gate_does_not_replace_integration_proof(self):
         config = self._connected()
         gate = {"generationReady": True, "published": False, "setupMerged": False, "setupBlocked": False}
         result = compute_article_readiness(self.org, config, [], setup_gate=gate)
+        self.assertFalse(result["generation_ready"])
+        self.assertEqual(result["reason_code"], "integration_required")
+
+    def test_current_scoped_scan_grants_generation(self):
+        result = compute_article_readiness(self.org, self._verified(), [])
         self.assertTrue(result["generation_ready"])
+        self.assertEqual(result["via"], "verified_integration")
+        self.assertTrue(result["proofs"]["integration_verified"])
         self.assertIsNone(result["blocking_reason"])
+
+    def test_other_repository_scan_does_not_grant_generation(self):
+        result = compute_article_readiness(self.org, self._verified(github_repo="other/site"), [])
+        self.assertFalse(result["generation_ready"])
+        self.assertEqual(result["reason_code"], "verification_required")
+
+    def test_old_verification_does_not_grant_generation(self):
+        config = self._verified(scan_completed_at=(timezone.now() - timedelta(days=8)).isoformat())
+        result = compute_article_readiness(self.org, config, [])
+        self.assertFalse(result["generation_ready"])
+        self.assertEqual(result["reason_code"], "verification_stale")

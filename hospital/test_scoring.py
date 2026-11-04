@@ -48,6 +48,7 @@ class SubmissionScoringTests(TestCase):
         self.client = APIClient()
         self.user = User.objects.create_user(
             email='scorer@example.com',
+            is_superuser=True,
             password='password',
             first_name='Score',
             last_name='Tester',

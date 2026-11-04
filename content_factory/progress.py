@@ -46,7 +46,7 @@ def build_content_factory_live_cost_text(job_or_domain) -> str:
         job = None
         domain = job_or_domain
 
-    cost_points = get_content_factory_article_cost_points(domain)
+    cost_points = int(job.billing_amount) if job is not None else get_content_factory_article_cost_points(domain)
     if cost_points == 0:
         normalized_domain = normalize_content_factory_domain(domain) or "this domain"
         return f"💳 Articles for {normalized_domain} are free. No Roo points will be deducted for this run."
@@ -221,6 +221,7 @@ def upsert_live_progress_card(
     quiet_note: Optional[str] = None,
     failed: bool = False,
 ) -> tuple[bool, Optional[str]]:
+    from content_factory.run_backend_facts import save_job_facts
     channel_id, _root_message_ts, thread_ts = resolve_job_thread_context(job, data=data)
     if not channel_id or not thread_ts:
         return False, None
@@ -246,12 +247,13 @@ def upsert_live_progress_card(
         message_ts = None
     if success and message_ts:
         job.progress_message_ts = message_ts
-        job.save(update_fields=["progress_message_ts", "updated_at"])
+        save_job_facts(job, update_fields=["progress_message_ts", "updated_at"])
         return True, message_ts
     return success, message_ts
 
 
 def maybe_send_still_working_ping(job) -> bool:
+    from content_factory.run_backend_facts import save_job_facts
     if not active_watchdog_status(job):
         return False
     if not str(job.progress_message_ts or "").strip():
@@ -272,5 +274,5 @@ def maybe_send_still_working_ping(job) -> bool:
         return False
 
     job.still_working_pinged_at = now
-    job.save(update_fields=["still_working_pinged_at", "updated_at"])
+    save_job_facts(job, update_fields=["still_working_pinged_at", "updated_at"])
     return True

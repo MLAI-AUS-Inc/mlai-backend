@@ -107,21 +107,23 @@ def _refresh_status(conversation):
             Q(metadata__history_outside_window__isnull=True)
             | Q(metadata__history_outside_window=False)
         )
-        .filter(
-            Q(metadata__history_recovery_superseded__isnull=True)
-            | Q(metadata__history_recovery_superseded=False)
-        )
-        .filter(
-            Q(metadata__dependency_superseded__isnull=True)
-            | Q(metadata__dependency_superseded=False)
-        )
     )
+    from integrations.services.slack_chat_catalog import STALLED_DELIVERY_ATTEMPTS
+    live = (Q(metadata__history_recovery_superseded__isnull=True) | Q(metadata__history_recovery_superseded=False)) & (
+        Q(metadata__dependency_superseded__isnull=True) | Q(metadata__dependency_superseded=False))
+    superseded = Q(metadata__history_recovery_superseded=True) | Q(metadata__dependency_superseded=True)
+    queued = Q(status__in=("pending", "processing"))
     counts = rows.aggregate(
-        imported_messages=Count("pk", filter=Q(status="completed", operation="create")),
-        queued_messages=Count("pk", filter=Q(status__in=("pending", "processing"))),
-        failed_messages=Count("pk", filter=Q(status__in=("failed", "dead"))),
-        delivery_revision=Max("updated_at", filter=Q(status="completed")),
+        imported_messages=Count("pk", filter=Q(status="completed", operation="create") & live),
+        queued_messages=Count("pk", filter=queued & live & Q(attempts__lt=STALLED_DELIVERY_ATTEMPTS)),
+        stalled_messages=Count("pk", filter=queued & live & Q(attempts__gte=STALLED_DELIVERY_ATTEMPTS)),
+        failed_messages=Count("pk", filter=Q(status="failed") & live),
+        skipped_messages=Count("pk", filter=Q(status="dead") | superseded),
+        undeliverable_messages=Count("pk", filter=Q(metadata__undeliverable=True)),
+        delivery_revision=Max("updated_at", filter=Q(status="completed") & live),
     )
+    for key in ("imported_messages", "queued_messages", "stalled_messages", "failed_messages", "skipped_messages", "undeliverable_messages"):
+        counts[key] = int(counts.get(key) or 0)
     failed = counts["failed_messages"] > 0
     pending = counts["queued_messages"] > 0
     scan_error = bool(
@@ -152,8 +154,17 @@ def _refresh_status(conversation):
         coverage = archive
     if sync and sync.last_error_code:
         state = "error"
-    elif sync and coverage.get("classification") in {None, "incomplete", "unknown"}:
+    elif sync and not failed and not scan_error and coverage.get("classification") in {None, "incomplete", "unknown"}:
         state = "syncing"
+    from integrations.services.message_sync import recent_history
+    marker = recent_history.private_progress(conversation) if recent_history.enabled() else None
+    # A paused deep archive is idle, not a never-ending initial import. This is
+    # availability only; history_scan_complete retains its full-archive meaning.
+    preload_idle = bool(marker is not None and (marker.metadata or {}).get("complete") is not None
+            and recent_history.private_page_limit(conversation, 50) == 0
+            and not pending and not failed and not scan_error and not (sync and sync.last_error_code))
+    if preload_idle:
+        state = "complete"
     return {
         "source_coverage": coverage,
         "channel_id": str(conversation.mlai_channel_id),
@@ -163,8 +174,12 @@ def _refresh_status(conversation):
         ),
         "history_days": conversation.grant.history_days,
         "history_scan_complete": conversation.history_backfilled_at is not None,
+        "history_preload_complete": preload_idle,
         "last_synced_at": conversation.history_backfilled_at,
         **counts,
+        "retryable": state == "error",
+        "stalled": counts["stalled_messages"] > 0 and counts["queued_messages"] == 0,
+        "partial": state == "complete" and (counts["skipped_messages"] > 0 or counts["stalled_messages"] > 0),
     }
 
 
@@ -215,10 +230,12 @@ def request_conversation_refresh(user, channel_id, *, public_key):
             reset_deliveries=False,
             reconcile_current_state=True,
         )
+    preserved = {key: marker.metadata[key] for key in ("open_request_id", "open_requested_at")
+                 if marker is not None and marker.available_at > now and key in (marker.metadata or {})}
     marker = _ensure_history_state(
         conversation,
         source_message_id=FOREGROUND_STATE_ID,
-        metadata={"history_scan_state": "foreground-refresh"},
+        metadata={"history_scan_state": "foreground-refresh", **preserved},
     )
     marker.available_at = now + timedelta(minutes=5)
     marker.save(update_fields=("available_at", "updated_at"))

@@ -80,7 +80,7 @@ class CustomIslandUnitTests(unittest.TestCase):
             key = (kwargs["organization"].pk, kwargs["slug"])
             created = key not in self.store
             if created:
-                self.store[key] = SimpleNamespace(slug=kwargs["slug"], **kwargs["defaults"])
+                self.store[key] = SimpleNamespace(slug=kwargs["slug"], removed_at=None, **kwargs["defaults"])
             return self.store[key], created
         self.manager.get_or_create.side_effect = save
         org_manager = Mock()
@@ -115,6 +115,15 @@ class CustomIslandUnitTests(unittest.TestCase):
         self.assertEqual(island.status, "visible")
         self.assertEqual(first.data["island"]["pillarKeyword"], BRIEF["keyword"])
         self.assertEqual(first.data["island"]["topicCandidates"], [])
+
+    def test_creating_a_removed_island_again_brings_it_back(self):
+        self.assertEqual(self.post().status_code, 201)
+        island = next(iter(self.store.values()))
+        island.status, island.archived_at, island.removed_at, island.save = "archived", "then", "then", Mock()
+        self.assertEqual(self.post().status_code, 200)
+        self.assertEqual((island.status, island.archived_at, island.removed_at), ("visible", None, None))
+        island.save.assert_called_once_with(
+            update_fields=["status", "archived_at", "removed_at", "promoted_at", "updated_at"])
 
     def test_auth_and_company_access_fail_before_persistence(self):
         self.assertIn(self.post(authenticated=False).status_code, (401, 403))

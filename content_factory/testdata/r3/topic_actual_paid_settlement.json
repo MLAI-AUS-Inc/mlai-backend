@@ -1,0 +1,721 @@
+{
+  "schema_version": 1,
+  "producer": "actual guarded discovery task, real durable events/canonical bytes and authenticated read/cancel HTTP; research/config provider responses substituted",
+  "run_id": "r3-topic-paid-worker",
+  "original_backend_admission": {
+    "original_ledger": {
+      "delta_microroo": -3000000,
+      "id": 1084,
+      "idempotency_key": "content_factory:topic_generation:charge:r3-topic-paid-original",
+      "kind": "SPEND",
+      "source": "CONTENT_FACTORY",
+      "user_id": 999
+    },
+    "run_id": "r3-topic-paid-worker",
+    "run_request": {
+      "backend_run_admission_v1": {
+        "dispatch_key": "r3-topic-paid-original",
+        "domain": "topic-paid.fixture.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "2363",
+        "principal": {
+          "actor_id": "mlai_user:999",
+          "kind": "user",
+          "user_id": "999"
+        },
+        "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "auto_discovery"
+      },
+      "backend_run_budget_v1": {
+        "max_model_tokens": 100000,
+        "max_model_usd": "5",
+        "runtime": "article",
+        "schema_version": 1
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+        "execution_id": "admit:22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+        "generation": 0,
+        "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "client_request_id": "r3-topic-paid-original",
+      "domain": "topic-paid.fixture.test",
+      "request_source": "roo_slackbot",
+      "requested_by_slack_user_id": "mlai_user:999",
+      "requested_topic_count": 3,
+      "roo_points_action": "content_island_topic_generation",
+      "roo_points_authorized": true,
+      "roo_points_billing_status": "charged",
+      "roo_points_billing_user_id": 999,
+      "roo_points_cost": 3,
+      "roo_points_ledger_id": "1084",
+      "roo_points_required": 3
+    },
+    "schema_version": 1
+  },
+  "cancel_request": {
+    "backend_run_admission_v1": {
+      "dispatch_key": "r3-topic-paid-original",
+      "domain": "topic-paid.fixture.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "2363",
+      "principal": {
+        "actor_id": "mlai_user:999",
+        "kind": "user",
+        "user_id": "999"
+      },
+      "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "auto_discovery"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+      "execution_id": "admit:22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+      "generation": 0,
+      "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "cancellation_reason": "system_stop",
+    "cancelled_by": "system"
+  },
+  "cancel_response": {
+    "accepted": true,
+    "action": "cancel",
+    "backend_run_admission_v1": {
+      "dispatch_key": "r3-topic-paid-original",
+      "domain": "topic-paid.fixture.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "2363",
+      "principal": {
+        "actor_id": "mlai_user:999",
+        "kind": "user",
+        "user_id": "999"
+      },
+      "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "auto_discovery"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+      "execution_id": "admit:22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+      "generation": 0,
+      "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "job_id": "r3-topic-paid-worker",
+    "reconciliation_required": false,
+    "run_id": "r3-topic-paid-worker",
+    "status": "cancelled",
+    "terminal_topic_settlement_v1": {
+      "backend_run_admission_v1": {
+        "dispatch_key": "r3-topic-paid-original",
+        "domain": "topic-paid.fixture.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "2363",
+        "principal": {
+          "actor_id": "mlai_user:999",
+          "kind": "user",
+          "user_id": "999"
+        },
+        "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "auto_discovery"
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+        "execution_id": "admit:22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+        "generation": 0,
+        "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "closed_at": "2026-11-02T20:53:46.303509+00:00",
+      "event_cursor": 12,
+      "kind": "topic_selection_v1",
+      "receipt_sha256": "fe15ead0327d893ef282e6e16fbe5bcd8a88499691b707cff4ac8ea52b8fc661",
+      "run_id": "r3-topic-paid-worker",
+      "schema_version": 1,
+      "status": "closed_no_effects"
+    }
+  },
+  "cancel_replay": {
+    "accepted": true,
+    "action": "cancel",
+    "article_cancellation_v1": null,
+    "backend_run_admission_v1": {
+      "dispatch_key": "r3-topic-paid-original",
+      "domain": "topic-paid.fixture.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "2363",
+      "principal": {
+        "actor_id": "mlai_user:999",
+        "kind": "user",
+        "user_id": "999"
+      },
+      "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "auto_discovery"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+      "execution_id": "admit:22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+      "generation": 0,
+      "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "cleanup": {},
+    "job_id": "r3-topic-paid-worker",
+    "job_url": "/api/runs/r3-topic-paid-worker",
+    "reconciliation_required": false,
+    "run_id": "r3-topic-paid-worker",
+    "status": "cancelled",
+    "terminal_topic_settlement_v1": {
+      "backend_run_admission_v1": {
+        "dispatch_key": "r3-topic-paid-original",
+        "domain": "topic-paid.fixture.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "2363",
+        "principal": {
+          "actor_id": "mlai_user:999",
+          "kind": "user",
+          "user_id": "999"
+        },
+        "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "auto_discovery"
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+        "execution_id": "admit:22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+        "generation": 0,
+        "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "closed_at": "2026-11-02T20:53:46.303509+00:00",
+      "event_cursor": 12,
+      "kind": "topic_selection_v1",
+      "receipt_sha256": "fe15ead0327d893ef282e6e16fbe5bcd8a88499691b707cff4ac8ea52b8fc661",
+      "run_id": "r3-topic-paid-worker",
+      "schema_version": 1,
+      "status": "closed_no_effects"
+    }
+  },
+  "canonical_topic_response": null,
+  "delivery_evidence": {
+    "backend_run_admission_v1": {
+      "dispatch_key": "r3-topic-paid-original",
+      "domain": "topic-paid.fixture.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "2363",
+      "principal": {
+        "actor_id": "mlai_user:999",
+        "kind": "user",
+        "user_id": "999"
+      },
+      "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "auto_discovery"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+      "execution_id": "admit:22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+      "generation": 0,
+      "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "evidence": [],
+    "run_id": "r3-topic-paid-worker",
+    "schema_version": 1
+  },
+  "history": {
+    "batches": [
+      {
+        "backend_run_admission_v1": {
+          "dispatch_key": "r3-topic-paid-original",
+          "domain": "topic-paid.fixture.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "2363",
+          "principal": {
+            "actor_id": "mlai_user:999",
+            "kind": "user",
+            "user_id": "999"
+          },
+          "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+          "execution_id": "admit:22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+          "generation": 0,
+          "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "emitted_at": "2026-11-02T20:53:46.295391+00:00",
+        "event": "run_events_v2",
+        "event_id": "67e505a0f9e2bf541e7249c6f1b7494e9687c5d221e4a108e92bf9a822e4f227",
+        "event_type": "run_events_v2",
+        "events": [
+          {
+            "at": "2026-11-02T20:53:46.242983+00:00",
+            "digest": "2eae2d3713823d4ca6ddae9190acfbe501827fde9c5f5890cb84b512cdd55b9c",
+            "generation": 0,
+            "seq": 1,
+            "state_version": 1,
+            "status": "queued",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T20:53:46.254255+00:00",
+            "digest": "ce5f1338238e70e92722757ec95487056425fbe63e173ec38687f89e6dd94028",
+            "generation": 0,
+            "seq": 2,
+            "state_version": 2,
+            "status": "queued",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T20:53:46.261157+00:00",
+            "digest": "fddc78790344da7753228deca197663bb2f2bb7d6b24fe54f728b6c5955e8f31",
+            "generation": 0,
+            "seq": 3,
+            "state_version": 3,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T20:53:46.261157+00:00",
+            "attempt": 1,
+            "digest": "add8a339da9a7f9554660697179d2b9eae4d0a8e1a01c3b2b43c044484e96b2b",
+            "generation": 0,
+            "seq": 4,
+            "state_version": 3,
+            "step": "load_context",
+            "type": "step_started"
+          },
+          {
+            "at": "2026-11-02T20:53:46.268510+00:00",
+            "digest": "f5e8ffa3639e75554ba7e1b28eb342c812c67fb1f440a9ed92e1e418b7d36ec2",
+            "generation": 0,
+            "seq": 5,
+            "state_version": 4,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T20:53:46.268510+00:00",
+            "attempt": 1,
+            "digest": "f5c9969d7e54209836ee5fc3a5154ca526cc35b29f3cc8cefa62609a230bede7",
+            "generation": 0,
+            "seq": 6,
+            "state_version": 4,
+            "status": "failed",
+            "step": "load_context",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T20:53:46.274202+00:00",
+            "digest": "6a5a900fb836f869678d1ce8749099e51c1b906ba2a70df626fd6396fe0fd882",
+            "generation": 0,
+            "seq": 7,
+            "state_version": 5,
+            "status": "failed",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T20:53:46.281033+00:00",
+            "digest": "b5265d9c1f0f55b1fe11271dc3716b97a20e6aa1b39434ca7410f6f0b9c30b17",
+            "generation": 0,
+            "seq": 8,
+            "state_version": 6,
+            "status": "failed",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T20:53:46.295391+00:00",
+            "digest": "fef68b940321109bba66931a5488265396ed12ca5cb05bc51d7072845924f81a",
+            "generation": 0,
+            "seq": 9,
+            "state_version": 7,
+            "status": "cancelled",
+            "step": "cancelled",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T20:53:46.295391+00:00",
+            "attempt": 1,
+            "digest": "fab335b422e5935851a983cdcbe850f4406464d571b88f271bcc8c71ab3146de",
+            "generation": 0,
+            "seq": 10,
+            "state_version": 7,
+            "status": "cancelled",
+            "step": "load_context",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T20:53:46.295391+00:00",
+            "attempt": 0,
+            "digest": "651299cdfbd354358e8482cf59373fa4efe21957456c1b59bfd68c872e7146ab",
+            "generation": 0,
+            "seq": 11,
+            "state_version": 7,
+            "status": "cancelled",
+            "step": "research_sources",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T20:53:46.295391+00:00",
+            "attempt": 0,
+            "digest": "6ded927e55771ab618c2b025e064ff4ec41d81b4d70206d9463ebd77f40b7cf3",
+            "generation": 0,
+            "seq": 12,
+            "state_version": 7,
+            "status": "cancelled",
+            "step": "finalize",
+            "type": "step_done"
+          }
+        ],
+        "run_id": "r3-topic-paid-worker",
+        "schema_version": 1
+      }
+    ],
+    "has_more": false,
+    "next_cursor": 12,
+    "run_id": "r3-topic-paid-worker",
+    "schema_version": 1
+  },
+  "history_before_cancel": {
+    "batches": [
+      {
+        "backend_run_admission_v1": {
+          "dispatch_key": "r3-topic-paid-original",
+          "domain": "topic-paid.fixture.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "2363",
+          "principal": {
+            "actor_id": "mlai_user:999",
+            "kind": "user",
+            "user_id": "999"
+          },
+          "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "auto_discovery"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+          "execution_id": "admit:22efbe85542363f0f2e69033ee62e647781b7632b0dbf00efda7b5faf12cf433",
+          "generation": 0,
+          "request_digest": "7acb342ac31ca4c8561a1e1eb278c4b5d1f69208aca96bfd194cd2e333566edd",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "emitted_at": "2026-11-02T20:53:46.281033+00:00",
+        "event": "run_events_v2",
+        "event_id": "24b814a84c1faa64709f1b1425b274e09b81c6c5433d47883b0e1c3b13ae20e6",
+        "event_type": "run_events_v2",
+        "events": [
+          {
+            "at": "2026-11-02T20:53:46.242983+00:00",
+            "digest": "2eae2d3713823d4ca6ddae9190acfbe501827fde9c5f5890cb84b512cdd55b9c",
+            "generation": 0,
+            "seq": 1,
+            "state_version": 1,
+            "status": "queued",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T20:53:46.254255+00:00",
+            "digest": "ce5f1338238e70e92722757ec95487056425fbe63e173ec38687f89e6dd94028",
+            "generation": 0,
+            "seq": 2,
+            "state_version": 2,
+            "status": "queued",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T20:53:46.261157+00:00",
+            "digest": "fddc78790344da7753228deca197663bb2f2bb7d6b24fe54f728b6c5955e8f31",
+            "generation": 0,
+            "seq": 3,
+            "state_version": 3,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T20:53:46.261157+00:00",
+            "attempt": 1,
+            "digest": "add8a339da9a7f9554660697179d2b9eae4d0a8e1a01c3b2b43c044484e96b2b",
+            "generation": 0,
+            "seq": 4,
+            "state_version": 3,
+            "step": "load_context",
+            "type": "step_started"
+          },
+          {
+            "at": "2026-11-02T20:53:46.268510+00:00",
+            "digest": "f5e8ffa3639e75554ba7e1b28eb342c812c67fb1f440a9ed92e1e418b7d36ec2",
+            "generation": 0,
+            "seq": 5,
+            "state_version": 4,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T20:53:46.268510+00:00",
+            "attempt": 1,
+            "digest": "f5c9969d7e54209836ee5fc3a5154ca526cc35b29f3cc8cefa62609a230bede7",
+            "generation": 0,
+            "seq": 6,
+            "state_version": 4,
+            "status": "failed",
+            "step": "load_context",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T20:53:46.274202+00:00",
+            "digest": "6a5a900fb836f869678d1ce8749099e51c1b906ba2a70df626fd6396fe0fd882",
+            "generation": 0,
+            "seq": 7,
+            "state_version": 5,
+            "status": "failed",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T20:53:46.281033+00:00",
+            "digest": "b5265d9c1f0f55b1fe11271dc3716b97a20e6aa1b39434ca7410f6f0b9c30b17",
+            "generation": 0,
+            "seq": 8,
+            "state_version": 6,
+            "status": "failed",
+            "step": "load_context",
+            "type": "run_state"
+          }
+        ],
+        "run_id": "r3-topic-paid-worker",
+        "schema_version": 1
+      }
+    ],
+    "has_more": false,
+    "next_cursor": 8,
+    "run_id": "r3-topic-paid-worker",
+    "schema_version": 1
+  }
+}

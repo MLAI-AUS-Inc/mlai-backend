@@ -25,6 +25,21 @@ them; confirmed absence/refusal refunds the original research debit using the
 topic-generation ledger family. Refunds read the recorded spend, including when
 pricing or the free-domain exception changes after the request.
 
+Dispatch-key reconciliation distinguishes `not_received` (the lookup endpoint's
+own 404), `received_not_started` (a durable failed dispatch receipt, retaining
+the worker's reason), `rejected` (backend authorization refused the dispatch),
+`started` (a worker run exists), and `unknown`. A missing endpoint, missing
+request identity, provider errors or an in-progress claim cannot establish that
+the request was never received. Polling, delivery-budget reconciliation and
+restart/orphan receipts preserve this distinction. Confirmed no-work outcomes
+retain the original refund identity, amount and grace policy; restart receipts
+release reused authorization without creating another charge.
+
+Preparation messages promise automatic retries only for pending operations with
+an actual next-attempt time. Exhausted or non-retryable preparation records say
+that work stopped and offer Try again. The operation summary applies the same
+message correction to historical receipts on read without changing saved rows.
+
 `article:draft:write` accepts deterministic text edits against the exact current
 revision and original field values. It cannot approve comments, generate images,
 change the website or publish. `article:publish` can inspect the private founder
@@ -115,6 +130,17 @@ inventory/rescan verification path first. Blockers return 409 with
 `code: article_system_setup_blocked`, `reasonCode`, `articleCapabilities` and the
 next setup step. Saving/viewing existing drafts remains available.
 
+A company with a connected (or paused) website always gets a website preview
+(owner decision, 17 Oct 2026). Its saved and reported delivery mode is never
+`content_only`: settings saves store `review_draft` instead, and bootstrap
+reports `review_draft` with the existing readiness flags while setup is
+unfinished. An explicit `content_only` article start returns 409
+`code: website_preview_required` ("Finish website setup to generate an article
+you can preview on your site."), with `reasonCode`, `nextRequiredStep` and
+`articleCapabilities`, before any charge when the website cannot generate yet;
+when it can, the request runs as `review_draft` under the submitted reviewed
+connection identity. Companies without a connected website keep portable drafts.
+
 Integrated Content Factory workers fetch admission immediately before article
 producing steps, retries/resume, image generation and publication. The existing
 service-authenticated `GET /api/content-factory/org/config` accepts
@@ -136,14 +162,80 @@ Topic discovery is available before publishing setup. Each requested topic
 costs one Roo Point, bounded to 1–8 topics; the default four-topic batch costs
 four. Brief-led island exploration costs one point. Scheduled and manual
 notification research creates three topics and costs three points per run.
-`prices.automationResearch` advertises that quote. Articles cost six. The
-existing `mlai.au` free-domain exception remains. Bootstrap advertises the
-same values used by charging.
+`prices.automationResearch` advertises that quote. Articles cost 12 points for
+every domain, including `mlai.au`. Founders with the existing active monthly
+update benefit pay 6 points (50% off), using the same approval window and
+eligibility as coworking. The `mlai.au` research exception remains. Bootstrap,
+company billing and first-article setup consent quote the requesting founder's
+price. Retries and refunds retain the original recorded debit.
 
-`expectedCostPoints` (or legacy `expected_cost_points`) is optional for older
-clients. New clients submit their confirmed integer quote. A changed/invalid
-quote returns 409 `roo_points_quote_changed` with the current `costPoints`
-before any debit. Research keys are bound to payer/startup; ledger and remote
+Legacy topic confirmations without a research run use the paid article path.
+They accept `client_request_id` to reuse an accepted request across caller
+retries. For older clients, a generated request identity stays unchanged through
+queue transport retries. Confirmation timeout responses retain the
+`confirm_topic` operation identity.
+
+New article admission through founder HTTP/MCP, the authenticated Articles app,
+and Roo API-key generation/confirmation requires the confirmed integer
+`expectedCostPoints` (or legacy `expected_cost_points`) in the request body.
+Missing, null, changed or invalid quotes return 409 `roo_points_quote_changed`
+with the current `costPoints` before website reservation, debit or dispatch.
+A retry may omit the quote only after a recorded positive `CONTENT_FACTORY`
+spend with that request key is verified against the same company payer. It
+retains the original price, including historical six-point charges; a request
+key alone or another payer's debit cannot grant consent. Original payload and
+website authority checks still apply. Company-bound outbox/job proof and the absence of a refund marker are required
+before an original debit can supply admission, even without a saved charged
+job. Unbound historical ledger rows fail closed and require reconciliation;
+they cannot authorize a new company request. Refund-only original-spend lookup
+and repeated refunds retain their existing behavior. An inactive or former
+configured billing founder returns a typed 409 denial on quote/source reads.
+These financial request denials have exact function/expression emitter audits,
+using the existing noncausal billing category. They do not change the pinned
+causal failure registry, article retry policy or run failure classification.
+Internal first-article
+goal dispatch consumes its persisted explicit consent and reservation.
+API-key authentication and a saved job's billing status do not establish price
+consent. Replayed jobs also require their original article-spend proof, normalized
+startup domain and current resolved company payer; a research debit cannot be
+reused as an article payment. Confirmation forwards only the newly submitted
+article quote and strips the prior research quote. Already paid six-point work
+does not need to accept today's twelve-point price.
+Historical app confirmation children without copied billing fields may reuse
+their linked, already-paid source after the same domain and payer checks.
+Partial or conflicting child payment records cannot use this fallback.
+Research/deferred confirmation checks for an existing active child under the
+source lock before a new article debit. An incompatible child is rejected
+without changing the source payment or requiring a compensating refund.
+
+`POST /api/v1/content/quote` is a price-only read protected by `HasStrictRooApiKey`.
+Supply `slack_user_id` or `requested_by_slack_user_id` (the latter selects the
+actual requester when both are present), and `domain` or `source_run_id`.
+Optional `client_request_id` and `source_run_id` select verified original paid
+work; a supplied paid-source key must match its original request key.
+Source-only quote and confirmation may omit `client_request_id`; the backend
+resolves the source's saved key after domain/payer/payment/refund checks.
+An explicitly supplied mismatched paid-source key is rejected. Research/deferred
+confirmation may supply a new stable article key, retained through payment and
+retries. A source-only
+read resolves its saved domain before checking founder ownership. The response
+is HTTP 200 with exactly `{"costPoints": 12}` or the applicable integer price,
+including six-point benefits and verified original six-point article payments.
+Unknown/inactive actors and unowned domains are refused. Cross-company,
+changed-payer, refunded or unproven original payments cannot supply a replay
+quote. Paid research returns the new article quote. This read creates no user,
+wallet, reservation, debit or provider operation and does not activate setup.
+Caller-supplied billing users and cost fields are ignored.
+
+Roo/Slack/Chat callers must display the returned article price, obtain explicit
+confirmation and submit that exact integer using a stable request identity.
+On 409 `roo_points_quote_changed`, show the returned price for reconfirmation;
+do not retry automatically at a higher price. Older clients without confirmed
+quotes safely receive 409 for new paid work.
+
+Research keeps omitted-quote compatibility for older clients. A supplied
+changed/invalid quote returns the same 409 before any debit. Research keys are
+bound to payer/startup; ledger and remote
 dispatch share the same key. Retry reuses a durable run. An ambiguous queue
 response holds the debit until key lookup establishes whether the worker
 accepted it; confirmed rejection uses the existing idempotent refund path.

@@ -1,0 +1,319 @@
+{
+  "as_of": "2026-11-02 Australia/Melbourne",
+  "source": "Founder Pipeline Robustness.md, audit dated 29 October 2026",
+  "source_note": "Original audit bullets are retained as requirements, not execution authority. Implemented/deployed/enabled/verified are separate claims.",
+  "items": [
+    {
+      "id": "R0.1",
+      "original_requirement": "CF: send the last 6,000 characters of the build log to build repair, not the first 2,000 (`agents/bug_fixer.py:399`).",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R0.2",
+      "original_requirement": "CF: make the review budget per pass and let a resume start from saved findings (`harness/review_budget.py`).",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R0.3",
+      "original_requirement": "CF: replace dashes in the renderer and post-pass. A static failure rewinds assembly once with the failing text instead of stopping.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R0.4",
+      "original_requirement": "CF: add \"disagree\" and similar markers to the opinion regex, or let the reviewer's typed verdict win (`claim_context.py`).",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R0.5",
+      "original_requirement": "CF and backend, in lockstep: register the unregistered codes.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R0.6",
+      "original_requirement": "CF: pass the backend's real authority code into founder copy instead of the generic \"disconnected, changed or no longer authorized\" (`website_connection.py:39-43`).",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R0.7",
+      "original_requirement": "Backend: a same-repo reconnect keeps the generation (`website_connections.py:785`). Only queue nightly refresh for orgs with keywords, and add it to the reconciliation and orphan-resume coverage.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R0.8",
+      "original_requirement": "Backend: refund denied first-article runs for `CONNECTION_AUTHORIZATION_FAILED` and for blocked runs that time out.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R0.9",
+      "original_requirement": "Ops: set the ops Slack channel ID and turn on operational alerts and the consistency sweep after a dry run.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "alerts_enabled_consistency_and_article_recovery_disabled",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Verify ops destination without sending a test message; dry run recovery policy before explicit activation."
+    },
+    {
+      "id": "R1.1",
+      "original_requirement": "One rule for every quality check: send the finding and the offending text back to the model, within the run's dollar budget. Only budget exhaustion or a safety rule can stop.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R1.2",
+      "original_requirement": "Unsupported claims become a rewrite request. Acceptance is the only component that deletes, and the editor stops restoring.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R1.3",
+      "original_requirement": "Style-only findings never block. The draft reaches review with the passages highlighted.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R1.4",
+      "original_requirement": "The corpus crawler degrades to a partial corpus and asks the model to pick the body when its heuristics disagree.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R1.5",
+      "original_requirement": "Enforce the human-voice rules once in the prompt, once in a deterministic post-pass and once as a check, not in six places.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R1.6",
+      "original_requirement": "Budgets measure dollars and tokens, not call counts.",
+      "owner": "robustness",
+      "implementation_status": "long_context_support_reviewed_in_1609463d",
+      "deployment_status": "base_spend_flags_enabled_no_dollar_ceilings",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Review and ship optional context tiers; verify rates for effective models; calibrate finite ceilings from authorised real runs."
+    },
+    {
+      "id": "R2.1",
+      "original_requirement": "The first article is delivered as a hosted or copy-ready draft in the app. Repo integration becomes an upgrade the founder can do later.",
+      "owner": "founder_journey_peer_then_robustness_integration",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R2.2",
+      "original_requirement": "Escrow billing: reserve points at dispatch, capture them on a delivered draft, and release them automatically on any other terminal state or after a timeout. This closes all six stranding paths and retires the refund code lists.",
+      "owner": "founder_journey_peer_then_robustness_integration",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R3.1",
+      "original_requirement": "Merge `ContentFactoryJob` into `ContentFactoryRun`. CF sends append-only events (step done, failure code, artifact) instead of whole snapshots.",
+      "owner": "robustness",
+      "implementation_status": "partial_foundation_live",
+      "deployment_status": "dual_write_enabled_read_cutover_blocked",
+      "outcome_status": "unproven",
+      "evidence": [
+        "https://github.com/MLAI-AUS-Inc/mlai-backend/pull/1261"
+      ],
+      "next_action": "Deploy approved Job identity migration; refill four fields; resolve missing254 records; then establish shadow traffic parity before real reads. Event authority and run-only writes still follow."
+    },
+    {
+      "id": "R3.2",
+      "original_requirement": "Fence only irreversible writes. Elsewhere, re-read the current commit and generation and continue.",
+      "owner": "founder_journey_peer_then_robustness_integration",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R3.3",
+      "original_requirement": "One generated status module per repo, built from `run-statuses.json`, with `is_active` and `is_terminal`.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R3.4",
+      "original_requirement": "Validate failure codes by membership. Drop the hash pins, and map unknown codes to a generic class.",
+      "owner": "founder_journey_peer_then_robustness_integration",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R3.5",
+      "original_requirement": "Turn reconciliation on by default for every workflow and every non-terminal status. For the goal runner, doctor and wakes: turn them on or delete them.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R4.1",
+      "original_requirement": "Run setup in a sandbox with the repository checked out. Use an off-the-shelf coding-agent runtime with tools to read, edit, install, build and run the harness's checks.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R4.2",
+      "original_requirement": "The agent loops until the site's own build and the checks pass or the budget ends. It rebases onto new commits and never stops because one landed.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R4.3",
+      "original_requirement": "Output is a pull request. Founder approval and the exact-commit proof at merge stay.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R4.4",
+      "original_requirement": "This retires the one-shot adapter synthesis and most of the deterministic adapter validation.",
+      "owner": "robustness",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R5.1",
+      "original_requirement": "One server-computed journey object: next action, capabilities, delivery mode, and done or blocked per step, with copy.",
+      "owner": "founder_journey_peer_then_robustness_integration",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R5.2",
+      "original_requirement": "Generated types and zod schemas from the backend contracts, one casing, loud failure on mismatch.",
+      "owner": "founder_journey_peer_then_robustness_integration",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R5.3",
+      "original_requirement": "One transport with auth refresh, backoff on 429, 5xx and network errors, and an idempotency key on every POST.",
+      "owner": "founder_journey_peer_then_robustness_integration",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R5.4",
+      "original_requirement": "One error renderer keyed on the failure code, with copy from the server. Raw backend text never reaches a founder.",
+      "owner": "founder_journey_peer_then_robustness_integration",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    },
+    {
+      "id": "R5.5",
+      "original_requirement": "One status hook driven by a server `pollAfterMs`. Rebuild the article path as new screens and retire its legacy routes.",
+      "owner": "founder_journey_peer_then_robustness_integration",
+      "implementation_status": "needs_current_validation",
+      "deployment_status": "needs_current_validation",
+      "outcome_status": "unproven",
+      "evidence": [],
+      "next_action": "Use NEXT.md and verify current code before changing shared modules."
+    }
+  ]
+}

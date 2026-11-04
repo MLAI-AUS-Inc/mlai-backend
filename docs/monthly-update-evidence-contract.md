@@ -14,6 +14,8 @@ Only observations with the accepted calculation basis enter Revenue snapshots. M
 
 The former invoice/bill fallback charts and proportional category allocations have been removed. Historical chart gaps are null. Accounting chart points must match the corrected parser against a hashed report with matching dates and accrual basis; unverified legacy observations cannot populate chart history. The snapshot retains each accepted report once and links chart points to its hash. Historical partial reports retain their partial-period flag. New memo KPIs carry numeric values and units from the snapshot; the history serializer does not regex-parse unquantified founder assertions or join different currencies into one series.
 
+Opt-in six-month history retains its original evidence even when a later narrative revision captures newer accounting data. At chart creation or an explicit chart refresh, the server freezes `financial_history._source` with the immutable evidence snapshot ID and hash; this private receipt is included in the revision hash. The private review receipt resolves it only within the same startup and reporting month, verifies the original payload hash, and supplies `evidenceSnapshot.financial_history_evidence` (source ID/hash, period, metrics and charts). Historical chart review uses that proof; current-month prose still uses the revision's current evidence. Missing, malformed or cross-startup references yield `null`, never newer values or the chart output as proof. Existing publications are not rewritten. An explicit chart refresh creates a new source receipt and requires approval of the new revision. Reader projections omit the private receipt and proof, and no client or MCP write accepts them.
+
 Generated financial claims must use `{{metric:revenue}}` style references. The server substitutes the snapshot display value, and replaces generated KPI displays with snapshot values. Free-form financial claims still require evidence review. This is a deterministic guard, not a proof that every narrative claim is true. Groundedness review and founder review remain necessary.
 
 ## Worker protocol
@@ -21,8 +23,8 @@ Generated financial claims must use `{{metric:revenue}}` style references. The s
 1. `POST /api/v1/integrations/startup-updates/runs/{run_id}/evidence-snapshot` captures each requested month's evidence once. The run pins `snapshot_id` and the base `expected_revision`.
 2. Valley generates a private draft from that frozen payload. Live context and newly fetched memory are not merged back into generation or review.
 3. Each draft-result write includes `snapshot_id` and `expected_revision`. Django locks the run and draft, checks startup/month ownership, and creates a numbered revision.
-4. The response includes `revisionId`, `revisionHash`, `snapshotId`, and the private evidence payload. Valley stores these exact returned references.
-5. Groundedness review submits `revision_id` and `revision_hash` for those saved revisions. Stale writes return HTTP 409. Review attaches validation metadata without rewriting content.
+4. The backend saves the founder-selected Private, Community, or Public disclosure on an unpublished revision. The response includes `revisionId`, `revisionHash`, `snapshotId`, `audience`, and the frozen evidence payload for internal verification. Valley stores these exact returned references and checks disclosure against the run's requested audience.
+5. Groundedness review submits `revision_id`, `revision_hash`, and the saved `audience` for those revisions. Stale writes or an audience mismatch return HTTP 409. Review attaches validation metadata without rewriting content or publishing the update. Public review receipts are accepted alongside Private and Community receipts.
 6. A retry after a retryable save failure resubmits the stored generated payload. The backend only acknowledges duplicate generation when its input hash and current revision agree.
 
 Candidate auto-selection is not publication approval. Generated revisions start with pending validation. Pending, failed, and needs-review validation block publication.
@@ -125,3 +127,73 @@ the projected history in the run checkpoint, budgets the complete request, and
 does not automatically replay a context-limit failure. This change requires no
 database schema migration. The new serializer and endpoint-composition tests
 run through `scripts/test_without_database.py` and are assigned to CI.
+
+
+## Frozen startup context storage
+
+New source receipts retain `startup_context_hash` and the unchanged extraction
+fingerprint instead of repeating the full founder profile. Snapshot capture stores
+the run's context once at top level. Identical legacy receipt copies are normalized;
+distinct legacy values stay in their receipts so no evidence is dropped. Amendments
+retain the base snapshot's context. Classification/extraction still use the original
+`run_request.startup_context` and their cache identities are unchanged.
+
+Deploy Valley V1 before this backend change: synthesis must remove top-level
+`startup_context` before prompting. The snapshot content hash changes with its
+storage shape; the owner approved this hash-only writer-input difference. All other
+writer input must remain identical. Groundedness review still visits every frozen
+value, and founder approval remains tied to the exact saved revision.
+
+Before merging B1, the owner must run Appendix B of the 18 October Pulse speed-up
+plan against the latest completed sharded runs and confirm
+`only_in_startup_context = 0`. A nonzero result stops rollout for owner review.
+
+
+## Pulse synchronization and metadata page bounds
+
+Run PUTs with `X-Run-Sync-Response: ack` return control fields and `sync_status`
+without the result, step states or attempts. Requests without the header retain
+the full response; cancellation and conflict bodies retain their existing shape.
+Stored Pulse source_evidence, update_candidates and _cancel_backups survive worker
+snapshots that omit them. Sync persistence updates only changed step/attempt fields;
+attempt history remains append-only and stale steps are still removed.
+
+Gmail backfill pages now default to 25 metadata IDs and a 40-second work deadline
+(`GMAIL_METADATA_PAGE_MAX_RESULTS`, `GMAIL_METADATA_PAGE_DEADLINE_SECONDS`). After
+at least one new message, a page may stop fetching metadata at the deadline while
+including all reusable artifacts. An incomplete page returns `page_complete: false`
+and the same input token, including null for the first page. Re-listing uses the
+same run-pinned query; persisted messages are reused until every ID is consumed.
+Only a complete final page sets backfill_completed_at. Deploy Valley V2 first so
+incomplete first pages are requeued rather than mistaken for completion.
+
+Incremental history pages retain the previous five-result cap because they do not
+yet implement the resumable deadline protocol. The larger cap applies to timed
+backfill pages.
+
+
+## B3 source throughput and extraction index
+
+The Linear backfill endpoint processes at most ten project-detail pages or twenty
+seconds of work per request, stopping sooner when complete. Counts and project
+receipts are aggregated in the response. A rate limit after progress returns that
+progress with has_more and the existing retry hint. Each project's saved cursor
+retains its original meaning. The run's external_context.linear.last_sync remains
+the final individual project response, preserving the curation prompt input.
+
+SourceExtractionReceipt indexes exact extraction fingerprints within an organization
+and provider/source identity, with origin run provenance. complete_source writes the
+same output alongside the existing run receipt. Lookup excludes cancelled/current/
+wrong-workflow origins and verifies that the origin still retains that exact receipt
+and output. Missing/stale entries use the original JSON scan; indexed hits bound
+that scan to newer runs so an older resumed run cannot displace a newer legacy
+receipt. Out-of-order completions retain the newest origin run ID. Fingerprints,
+classification versions and extraction contracts are unchanged. No historical data
+migration is included. Startup/Gmail source deletion scrubs indexed copies after
+locking/scrubbing their origin run, including already completed runs.
+
+The owner initially approved creation of startup_updates.0025_sourceextractionreceipt
+for B3 review and execution in disposable CI tests. Production application requires
+specific approval for the exact pending migration plan and its matching deployment
+SHA256 gate. The migration creates only the receipt table, fingerprint index,
+foreign keys and unique organization/provider/source/fingerprint constraint.

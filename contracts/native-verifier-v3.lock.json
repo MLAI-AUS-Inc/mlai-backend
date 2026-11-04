@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "source_repository": "drsamdonegan/content-factory",
+  "source_revision": "faabf66f2515e22f8e8a424516e0bba0eb07c5b1",
+  "artifacts": {
+    "contracts/native-verifier-v3.json": {
+      "source_path": "contracts/native-verifier-v3.json",
+      "sha256": "0088d007d7ef808c35ddeea505a454708e8818b445728ab3876bed5fe0ec976a"
+    },
+    "content_factory/testdata/sealed-verification-v3/static.json": {
+      "source_path": "backend/tests/fixtures/native_evidence_v3_static.json",
+      "sha256": "8469427cae634db265db5d0467ef47caa64e4f3b8e8d5ab323e873f4702a3138"
+    },
+    "content_factory/testdata/sealed-verification-v3/proposal.json": {
+      "source_path": "backend/tests/fixtures/native_candidate_v3_static.json",
+      "sha256": "6de6498c2e984e202749f649935bee6091e2c8aeafc3ccfb4d22d26ccf766f90"
+    }
+  },
+  "runner": {
+    "source_path": "backend/ci_templates/articles_verification.py",
+    "sha256": "fa2bfeb3014a8f15f67cd4c1a44a3e17d6e01977ca6c91db1ca1f629a7344aa3"
+  }
+}

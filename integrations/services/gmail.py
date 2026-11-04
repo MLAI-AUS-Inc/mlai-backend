@@ -87,7 +87,9 @@ GMAIL_API_RETRYABLE_EXCEPTIONS = (
     httplib2.HttpLib2Error,
 )
 DEFAULT_GMAIL_API_HTTP_TIMEOUT_SECONDS = 4.0
-DEFAULT_GMAIL_METADATA_PAGE_MAX_RESULTS = 5
+DEFAULT_GMAIL_METADATA_PAGE_MAX_RESULTS = 25
+DEFAULT_GMAIL_METADATA_PAGE_DEADLINE_SECONDS = 40.0
+MAX_UNTIMED_HISTORY_METADATA_RESULTS = 5
 
 
 def _gmail_api_http_timeout_seconds() -> float:
@@ -106,6 +108,15 @@ def _gmail_metadata_page_max_results() -> int:
     except (TypeError, ValueError):
         value = DEFAULT_GMAIL_METADATA_PAGE_MAX_RESULTS
     return max(1, value)
+
+
+def _gmail_metadata_page_deadline_seconds() -> float:
+    value = getattr(settings, "GMAIL_METADATA_PAGE_DEADLINE_SECONDS", DEFAULT_GMAIL_METADATA_PAGE_DEADLINE_SECONDS)
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        value = DEFAULT_GMAIL_METADATA_PAGE_DEADLINE_SECONDS
+    return max(0.0, value)
 
 
 def _effective_metadata_page_size(max_results: int) -> int:
@@ -595,7 +606,12 @@ def sync_message_metadata_page(
     before_dt,
     page_token: Optional[str] = None,
     max_results: int = 500,
+    deadline_seconds: Optional[float] = None,
 ) -> dict:
+    """Persist a pinned metadata page, resuming the same token at the deadline."""
+    deadline = time.monotonic() + (
+        _gmail_metadata_page_deadline_seconds() if deadline_seconds is None else max(0.0, deadline_seconds)
+    )
     query = build_backfill_query(after_dt=after_dt, before_dt=before_dt)
     effective_max_results = _effective_metadata_page_size(max_results)
     service = build_gmail_service(connection, cache_discovery=False)
@@ -618,6 +634,8 @@ def sync_message_metadata_page(
     )
     artifacts = []
     reused_existing_count = 0
+    fetched_count = 0
+    page_complete = True
     for message_id in message_ids:
         existing_artifact = existing_artifacts.get(message_id)
         if existing_artifact is not None:
@@ -625,7 +643,13 @@ def sync_message_metadata_page(
             reused_existing_count += 1
             continue
 
+        # Always fetch one new message for progress, even if setup exhausted
+        # the deadline. Continue visiting the list to include all reused rows.
+        if fetched_count and time.monotonic() >= deadline:
+            page_complete = False
+            continue
         metadata = get_message_metadata(connection, message_id, service=service)
+        fetched_count += 1
         artifacts.append(
             upsert_message_artifact_from_message_data(
                 organization=organization,
@@ -638,7 +662,8 @@ def sync_message_metadata_page(
         "query": query,
         "mode": "backfill",
         "result_size_estimate": int(page.get("resultSizeEstimate") or 0),
-        "next_page_token": page.get("nextPageToken"),
+        "next_page_token": page.get("nextPageToken") if page_complete else page_token,
+        "page_complete": page_complete,
         "requested_max_results": int(max_results or 0),
         "effective_max_results": effective_max_results,
         "reused_existing_count": reused_existing_count,
@@ -655,7 +680,9 @@ def sync_history_metadata_page(
     page_token: Optional[str] = None,
     max_results: int = 250,
 ) -> dict:
-    effective_max_results = _effective_metadata_page_size(max_results)
+    # Only backfill has the resumable deadline protocol. Keep the prior
+    # history cap until incremental pages have an equivalent time bound.
+    effective_max_results = min(_effective_metadata_page_size(max_results), MAX_UNTIMED_HISTORY_METADATA_RESULTS)
     service = build_gmail_service(connection, cache_discovery=False)
     page = list_history_page(
         connection,

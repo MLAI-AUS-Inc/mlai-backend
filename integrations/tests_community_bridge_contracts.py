@@ -42,7 +42,7 @@ class SlackChatAttributionTests(SimpleTestCase):
                     "payload": {"text": "Hello from MLAI Chat"},
                 }
                 with (
-                    patch(f"{worker}.send_with_ai_consent", side_effect=lambda delivery, send, **kwargs: send(**kwargs)),
+                    patch(f"{worker}.legacy_send", side_effect=lambda delivery, send, *args, require_ai=False, **kwargs: send(*args, **kwargs)),
                     patch(f"{worker}.SlackBridgeClient.post_message", return_value={}) as post,
                     patch(f"{worker}.SlackBridgeClient.update_message") as update,
                     patch(f"{worker}.complete_create_delivery"),
@@ -194,8 +194,16 @@ class SlackReactionFormattingTests(SimpleTestCase):
         self.assertEqual(emoji_to_slack_reaction("❤️"), "heart")
 
     def test_valid_custom_shortcodes_round_trip_without_execution_markup(self):
-        self.assertEqual(slack_reaction_to_emoji("ship_it+1"), ":ship_it+1:")
+        # Legacy retained values remain removable; new NIP-30 values use a
+        # portable shortcode and recover the original name from the catalog.
         self.assertEqual(emoji_to_slack_reaction(":ship_it+1:"), "ship_it+1")
+        from integrations.services.slack_custom_emoji import resolve_catalog
+        catalog = resolve_catalog({
+            "ship_it+1": "https://emoji.slack-edge.com/TTEST/ship_it/abc.png",
+        })
+        encoded = slack_reaction_to_emoji("ship_it+1")
+        self.assertRegex(encoded, r"^:slack_[a-f0-9]{40}:$")
+        self.assertEqual(emoji_to_slack_reaction(encoded, catalog=catalog), "ship_it+1")
         boundary_name = "a" * 62
         self.assertEqual(
             slack_reaction_to_emoji(boundary_name),
@@ -211,7 +219,7 @@ class SlackReactionFormattingTests(SimpleTestCase):
         self.assertEqual(emoji_to_slack_reaction(":two words:"), "")
         self.assertEqual(emoji_to_slack_reaction(":PartyParrot:"), "")
         self.assertEqual(emoji_to_slack_reaction(":_private:"), "")
-        self.assertEqual(slack_reaction_to_emoji("a" * 63), "")
+        self.assertEqual(slack_reaction_to_emoji("a" * 101), "")
 
 
 class PrivateConversationRegistrationTests(SimpleTestCase):

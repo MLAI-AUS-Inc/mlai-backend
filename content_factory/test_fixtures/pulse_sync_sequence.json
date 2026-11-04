@@ -1,0 +1,3207 @@
+[
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-1"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:00Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 1,
+        "message": "Page 1",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/1",
+        "artifacts": [
+          {
+            "page": 1
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Batch 1",
+            "started_at": "2026-10-18T00:00:00Z",
+            "completed_at": "2026-10-18T00:01:00Z",
+            "artifacts": [
+              {
+                "batch": 1
+              }
+            ],
+            "input_path": "in/1",
+            "output_path": "out/1"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-2"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:01Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 2,
+        "message": "Page 2",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/2",
+        "artifacts": [
+          {
+            "page": 2
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Batch 1",
+            "started_at": "2026-10-18T00:00:00Z",
+            "completed_at": "2026-10-18T00:01:00Z",
+            "artifacts": [
+              {
+                "batch": 1
+              }
+            ],
+            "input_path": "in/1",
+            "output_path": "out/1"
+          },
+          {
+            "attempt": 2,
+            "status": "completed",
+            "message": "Batch 2",
+            "started_at": "2026-10-18T00:00:01Z",
+            "completed_at": "2026-10-18T00:01:01Z",
+            "artifacts": [
+              {
+                "batch": 2
+              }
+            ],
+            "input_path": "in/2",
+            "output_path": "out/2"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-3"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:02Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 3,
+        "message": "Page 3",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/3",
+        "artifacts": [
+          {
+            "page": 3
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Batch 1",
+            "started_at": "2026-10-18T00:00:00Z",
+            "completed_at": "2026-10-18T00:01:00Z",
+            "artifacts": [
+              {
+                "batch": 1
+              }
+            ],
+            "input_path": "in/1",
+            "output_path": "out/1"
+          },
+          {
+            "attempt": 2,
+            "status": "completed",
+            "message": "Batch 2",
+            "started_at": "2026-10-18T00:00:01Z",
+            "completed_at": "2026-10-18T00:01:01Z",
+            "artifacts": [
+              {
+                "batch": 2
+              }
+            ],
+            "input_path": "in/2",
+            "output_path": "out/2"
+          },
+          {
+            "attempt": 3,
+            "status": "completed",
+            "message": "Batch 3",
+            "started_at": "2026-10-18T00:00:02Z",
+            "completed_at": "2026-10-18T00:01:02Z",
+            "artifacts": [
+              {
+                "batch": 3
+              }
+            ],
+            "input_path": "in/3",
+            "output_path": "out/3"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-4"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:03Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 4,
+        "message": "Page 4",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/4",
+        "artifacts": [
+          {
+            "page": 4
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Batch 1",
+            "started_at": "2026-10-18T00:00:00Z",
+            "completed_at": "2026-10-18T00:01:00Z",
+            "artifacts": [
+              {
+                "batch": 1
+              }
+            ],
+            "input_path": "in/1",
+            "output_path": "out/1"
+          },
+          {
+            "attempt": 2,
+            "status": "completed",
+            "message": "Batch 2",
+            "started_at": "2026-10-18T00:00:01Z",
+            "completed_at": "2026-10-18T00:01:01Z",
+            "artifacts": [
+              {
+                "batch": 2
+              }
+            ],
+            "input_path": "in/2",
+            "output_path": "out/2"
+          },
+          {
+            "attempt": 3,
+            "status": "completed",
+            "message": "Batch 3",
+            "started_at": "2026-10-18T00:00:02Z",
+            "completed_at": "2026-10-18T00:01:02Z",
+            "artifacts": [
+              {
+                "batch": 3
+              }
+            ],
+            "input_path": "in/3",
+            "output_path": "out/3"
+          },
+          {
+            "attempt": 4,
+            "status": "completed",
+            "message": "Batch 4",
+            "started_at": "2026-10-18T00:00:03Z",
+            "completed_at": "2026-10-18T00:01:03Z",
+            "artifacts": [
+              {
+                "batch": 4
+              }
+            ],
+            "input_path": "in/4",
+            "output_path": "out/4"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-5"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:04Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 5,
+        "message": "Page 5",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/5",
+        "artifacts": [
+          {
+            "page": 5
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Batch 1",
+            "started_at": "2026-10-18T00:00:00Z",
+            "completed_at": "2026-10-18T00:01:00Z",
+            "artifacts": [
+              {
+                "batch": 1
+              }
+            ],
+            "input_path": "in/1",
+            "output_path": "out/1"
+          },
+          {
+            "attempt": 2,
+            "status": "completed",
+            "message": "Batch 2",
+            "started_at": "2026-10-18T00:00:01Z",
+            "completed_at": "2026-10-18T00:01:01Z",
+            "artifacts": [
+              {
+                "batch": 2
+              }
+            ],
+            "input_path": "in/2",
+            "output_path": "out/2"
+          },
+          {
+            "attempt": 3,
+            "status": "completed",
+            "message": "Batch 3",
+            "started_at": "2026-10-18T00:00:02Z",
+            "completed_at": "2026-10-18T00:01:02Z",
+            "artifacts": [
+              {
+                "batch": 3
+              }
+            ],
+            "input_path": "in/3",
+            "output_path": "out/3"
+          },
+          {
+            "attempt": 4,
+            "status": "completed",
+            "message": "Batch 4",
+            "started_at": "2026-10-18T00:00:03Z",
+            "completed_at": "2026-10-18T00:01:03Z",
+            "artifacts": [
+              {
+                "batch": 4
+              }
+            ],
+            "input_path": "in/4",
+            "output_path": "out/4"
+          },
+          {
+            "attempt": 5,
+            "status": "completed",
+            "message": "Batch 5",
+            "started_at": "2026-10-18T00:00:04Z",
+            "completed_at": "2026-10-18T00:01:04Z",
+            "artifacts": [
+              {
+                "batch": 5
+              }
+            ],
+            "input_path": "in/5",
+            "output_path": "out/5"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification",
+      "temporary_step"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-6"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:05Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 6,
+        "message": "Page 6",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/6",
+        "artifacts": [
+          {
+            "page": 6
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Batch 1",
+            "started_at": "2026-10-18T00:00:00Z",
+            "completed_at": "2026-10-18T00:01:00Z",
+            "artifacts": [
+              {
+                "batch": 1
+              }
+            ],
+            "input_path": "in/1",
+            "output_path": "out/1"
+          },
+          {
+            "attempt": 2,
+            "status": "completed",
+            "message": "Batch 2",
+            "started_at": "2026-10-18T00:00:01Z",
+            "completed_at": "2026-10-18T00:01:01Z",
+            "artifacts": [
+              {
+                "batch": 2
+              }
+            ],
+            "input_path": "in/2",
+            "output_path": "out/2"
+          },
+          {
+            "attempt": 3,
+            "status": "completed",
+            "message": "Batch 3",
+            "started_at": "2026-10-18T00:00:02Z",
+            "completed_at": "2026-10-18T00:01:02Z",
+            "artifacts": [
+              {
+                "batch": 3
+              }
+            ],
+            "input_path": "in/3",
+            "output_path": "out/3"
+          },
+          {
+            "attempt": 4,
+            "status": "completed",
+            "message": "Batch 4",
+            "started_at": "2026-10-18T00:00:03Z",
+            "completed_at": "2026-10-18T00:01:03Z",
+            "artifacts": [
+              {
+                "batch": 4
+              }
+            ],
+            "input_path": "in/4",
+            "output_path": "out/4"
+          },
+          {
+            "attempt": 5,
+            "status": "completed",
+            "message": "Batch 5",
+            "started_at": "2026-10-18T00:00:04Z",
+            "completed_at": "2026-10-18T00:01:04Z",
+            "artifacts": [
+              {
+                "batch": 5
+              }
+            ],
+            "input_path": "in/5",
+            "output_path": "out/5"
+          },
+          {
+            "attempt": 6,
+            "status": "completed",
+            "message": "Batch 6",
+            "started_at": "2026-10-18T00:00:05Z",
+            "completed_at": "2026-10-18T00:01:05Z",
+            "artifacts": [
+              {
+                "batch": 6
+              }
+            ],
+            "input_path": "in/6",
+            "output_path": "out/6"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      },
+      "temporary_step": {
+        "status": "running",
+        "attempts": 1,
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "running"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification",
+      "temporary_step"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-7"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:06Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 7,
+        "message": "Page 7",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/7",
+        "artifacts": [
+          {
+            "page": 7
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Batch 1",
+            "started_at": "2026-10-18T00:00:00Z",
+            "completed_at": "2026-10-18T00:01:00Z",
+            "artifacts": [
+              {
+                "batch": 1
+              }
+            ],
+            "input_path": "in/1",
+            "output_path": "out/1"
+          },
+          {
+            "attempt": 2,
+            "status": "completed",
+            "message": "Batch 2",
+            "started_at": "2026-10-18T00:00:01Z",
+            "completed_at": "2026-10-18T00:01:01Z",
+            "artifacts": [
+              {
+                "batch": 2
+              }
+            ],
+            "input_path": "in/2",
+            "output_path": "out/2"
+          },
+          {
+            "attempt": 3,
+            "status": "completed",
+            "message": "Batch 3",
+            "started_at": "2026-10-18T00:00:02Z",
+            "completed_at": "2026-10-18T00:01:02Z",
+            "artifacts": [
+              {
+                "batch": 3
+              }
+            ],
+            "input_path": "in/3",
+            "output_path": "out/3"
+          },
+          {
+            "attempt": 4,
+            "status": "completed",
+            "message": "Batch 4",
+            "started_at": "2026-10-18T00:00:03Z",
+            "completed_at": "2026-10-18T00:01:03Z",
+            "artifacts": [
+              {
+                "batch": 4
+              }
+            ],
+            "input_path": "in/4",
+            "output_path": "out/4"
+          },
+          {
+            "attempt": 5,
+            "status": "completed",
+            "message": "Batch 5",
+            "started_at": "2026-10-18T00:00:04Z",
+            "completed_at": "2026-10-18T00:01:04Z",
+            "artifacts": [
+              {
+                "batch": 5
+              }
+            ],
+            "input_path": "in/5",
+            "output_path": "out/5"
+          },
+          {
+            "attempt": 6,
+            "status": "completed",
+            "message": "Batch 6",
+            "started_at": "2026-10-18T00:00:05Z",
+            "completed_at": "2026-10-18T00:01:05Z",
+            "artifacts": [
+              {
+                "batch": 6
+              }
+            ],
+            "input_path": "in/6",
+            "output_path": "out/6"
+          },
+          {
+            "attempt": 7,
+            "status": "completed",
+            "message": "Batch 7",
+            "started_at": "2026-10-18T00:00:06Z",
+            "completed_at": "2026-10-18T00:01:06Z",
+            "artifacts": [
+              {
+                "batch": 7
+              }
+            ],
+            "input_path": "in/7",
+            "output_path": "out/7"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      },
+      "temporary_step": {
+        "status": "running",
+        "attempts": 1,
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "running"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification",
+      "temporary_step"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-8"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:07Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 8,
+        "message": "Page 8",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/8",
+        "artifacts": [
+          {
+            "page": 8
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Batch 1",
+            "started_at": "2026-10-18T00:00:00Z",
+            "completed_at": "2026-10-18T00:01:00Z",
+            "artifacts": [
+              {
+                "batch": 1
+              }
+            ],
+            "input_path": "in/1",
+            "output_path": "out/1"
+          },
+          {
+            "attempt": 2,
+            "status": "completed",
+            "message": "Batch 2",
+            "started_at": "2026-10-18T00:00:01Z",
+            "completed_at": "2026-10-18T00:01:01Z",
+            "artifacts": [
+              {
+                "batch": 2
+              }
+            ],
+            "input_path": "in/2",
+            "output_path": "out/2"
+          },
+          {
+            "attempt": 3,
+            "status": "completed",
+            "message": "Batch 3",
+            "started_at": "2026-10-18T00:00:02Z",
+            "completed_at": "2026-10-18T00:01:02Z",
+            "artifacts": [
+              {
+                "batch": 3
+              }
+            ],
+            "input_path": "in/3",
+            "output_path": "out/3"
+          },
+          {
+            "attempt": 4,
+            "status": "completed",
+            "message": "Batch 4",
+            "started_at": "2026-10-18T00:00:03Z",
+            "completed_at": "2026-10-18T00:01:03Z",
+            "artifacts": [
+              {
+                "batch": 4
+              }
+            ],
+            "input_path": "in/4",
+            "output_path": "out/4"
+          },
+          {
+            "attempt": 5,
+            "status": "completed",
+            "message": "Batch 5",
+            "started_at": "2026-10-18T00:00:04Z",
+            "completed_at": "2026-10-18T00:01:04Z",
+            "artifacts": [
+              {
+                "batch": 5
+              }
+            ],
+            "input_path": "in/5",
+            "output_path": "out/5"
+          },
+          {
+            "attempt": 6,
+            "status": "completed",
+            "message": "Batch 6",
+            "started_at": "2026-10-18T00:00:05Z",
+            "completed_at": "2026-10-18T00:01:05Z",
+            "artifacts": [
+              {
+                "batch": 6
+              }
+            ],
+            "input_path": "in/6",
+            "output_path": "out/6"
+          },
+          {
+            "attempt": 7,
+            "status": "completed",
+            "message": "Batch 7",
+            "started_at": "2026-10-18T00:00:06Z",
+            "completed_at": "2026-10-18T00:01:06Z",
+            "artifacts": [
+              {
+                "batch": 7
+              }
+            ],
+            "input_path": "in/7",
+            "output_path": "out/7"
+          },
+          {
+            "attempt": 8,
+            "status": "completed",
+            "message": "Batch 8",
+            "started_at": "2026-10-18T00:00:07Z",
+            "completed_at": "2026-10-18T00:01:07Z",
+            "artifacts": [
+              {
+                "batch": 8
+              }
+            ],
+            "input_path": "in/8",
+            "output_path": "out/8"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      },
+      "temporary_step": {
+        "status": "running",
+        "attempts": 1,
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "running"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification",
+      "temporary_step"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-9"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:08Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 9,
+        "message": "Page 9",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/9",
+        "artifacts": [
+          {
+            "page": 9
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Batch 1",
+            "started_at": "2026-10-18T00:00:00Z",
+            "completed_at": "2026-10-18T00:01:00Z",
+            "artifacts": [
+              {
+                "batch": 1
+              }
+            ],
+            "input_path": "in/1",
+            "output_path": "out/1"
+          },
+          {
+            "attempt": 2,
+            "status": "completed",
+            "message": "Batch 2",
+            "started_at": "2026-10-18T00:00:01Z",
+            "completed_at": "2026-10-18T00:01:01Z",
+            "artifacts": [
+              {
+                "batch": 2
+              }
+            ],
+            "input_path": "in/2",
+            "output_path": "out/2"
+          },
+          {
+            "attempt": 3,
+            "status": "completed",
+            "message": "Batch 3",
+            "started_at": "2026-10-18T00:00:02Z",
+            "completed_at": "2026-10-18T00:01:02Z",
+            "artifacts": [
+              {
+                "batch": 3
+              }
+            ],
+            "input_path": "in/3",
+            "output_path": "out/3"
+          },
+          {
+            "attempt": 4,
+            "status": "completed",
+            "message": "Batch 4",
+            "started_at": "2026-10-18T00:00:03Z",
+            "completed_at": "2026-10-18T00:01:03Z",
+            "artifacts": [
+              {
+                "batch": 4
+              }
+            ],
+            "input_path": "in/4",
+            "output_path": "out/4"
+          },
+          {
+            "attempt": 5,
+            "status": "completed",
+            "message": "Batch 5",
+            "started_at": "2026-10-18T00:00:04Z",
+            "completed_at": "2026-10-18T00:01:04Z",
+            "artifacts": [
+              {
+                "batch": 5
+              }
+            ],
+            "input_path": "in/5",
+            "output_path": "out/5"
+          },
+          {
+            "attempt": 6,
+            "status": "completed",
+            "message": "Batch 6",
+            "started_at": "2026-10-18T00:00:05Z",
+            "completed_at": "2026-10-18T00:01:05Z",
+            "artifacts": [
+              {
+                "batch": 6
+              }
+            ],
+            "input_path": "in/6",
+            "output_path": "out/6"
+          },
+          {
+            "attempt": 7,
+            "status": "completed",
+            "message": "Batch 7",
+            "started_at": "2026-10-18T00:00:06Z",
+            "completed_at": "2026-10-18T00:01:06Z",
+            "artifacts": [
+              {
+                "batch": 7
+              }
+            ],
+            "input_path": "in/7",
+            "output_path": "out/7"
+          },
+          {
+            "attempt": 8,
+            "status": "completed",
+            "message": "Batch 8",
+            "started_at": "2026-10-18T00:00:07Z",
+            "completed_at": "2026-10-18T00:01:07Z",
+            "artifacts": [
+              {
+                "batch": 8
+              }
+            ],
+            "input_path": "in/8",
+            "output_path": "out/8"
+          },
+          {
+            "attempt": 9,
+            "status": "completed",
+            "message": "Batch 9",
+            "started_at": "2026-10-18T00:00:08Z",
+            "completed_at": "2026-10-18T00:01:08Z",
+            "artifacts": [
+              {
+                "batch": 9
+              }
+            ],
+            "input_path": "in/9",
+            "output_path": "out/9"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      },
+      "temporary_step": {
+        "status": "running",
+        "attempts": 1,
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "running"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification",
+      "temporary_step"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-10"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:09Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 10,
+        "message": "Page 10",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/10",
+        "artifacts": [
+          {
+            "page": 10
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Batch 1",
+            "started_at": "2026-10-18T00:00:00Z",
+            "completed_at": "2026-10-18T00:01:00Z",
+            "artifacts": [
+              {
+                "batch": 1
+              }
+            ],
+            "input_path": "in/1",
+            "output_path": "out/1"
+          },
+          {
+            "attempt": 2,
+            "status": "completed",
+            "message": "Batch 2",
+            "started_at": "2026-10-18T00:00:01Z",
+            "completed_at": "2026-10-18T00:01:01Z",
+            "artifacts": [
+              {
+                "batch": 2
+              }
+            ],
+            "input_path": "in/2",
+            "output_path": "out/2"
+          },
+          {
+            "attempt": 3,
+            "status": "completed",
+            "message": "Batch 3",
+            "started_at": "2026-10-18T00:00:02Z",
+            "completed_at": "2026-10-18T00:01:02Z",
+            "artifacts": [
+              {
+                "batch": 3
+              }
+            ],
+            "input_path": "in/3",
+            "output_path": "out/3"
+          },
+          {
+            "attempt": 4,
+            "status": "completed",
+            "message": "Batch 4",
+            "started_at": "2026-10-18T00:00:03Z",
+            "completed_at": "2026-10-18T00:01:03Z",
+            "artifacts": [
+              {
+                "batch": 4
+              }
+            ],
+            "input_path": "in/4",
+            "output_path": "out/4"
+          },
+          {
+            "attempt": 5,
+            "status": "completed",
+            "message": "Batch 5",
+            "started_at": "2026-10-18T00:00:04Z",
+            "completed_at": "2026-10-18T00:01:04Z",
+            "artifacts": [
+              {
+                "batch": 5
+              }
+            ],
+            "input_path": "in/5",
+            "output_path": "out/5"
+          },
+          {
+            "attempt": 6,
+            "status": "completed",
+            "message": "Batch 6",
+            "started_at": "2026-10-18T00:00:05Z",
+            "completed_at": "2026-10-18T00:01:05Z",
+            "artifacts": [
+              {
+                "batch": 6
+              }
+            ],
+            "input_path": "in/6",
+            "output_path": "out/6"
+          },
+          {
+            "attempt": 7,
+            "status": "completed",
+            "message": "Batch 7",
+            "started_at": "2026-10-18T00:00:06Z",
+            "completed_at": "2026-10-18T00:01:06Z",
+            "artifacts": [
+              {
+                "batch": 7
+              }
+            ],
+            "input_path": "in/7",
+            "output_path": "out/7"
+          },
+          {
+            "attempt": 8,
+            "status": "completed",
+            "message": "Batch 8",
+            "started_at": "2026-10-18T00:00:07Z",
+            "completed_at": "2026-10-18T00:01:07Z",
+            "artifacts": [
+              {
+                "batch": 8
+              }
+            ],
+            "input_path": "in/8",
+            "output_path": "out/8"
+          },
+          {
+            "attempt": 9,
+            "status": "completed",
+            "message": "Batch 9",
+            "started_at": "2026-10-18T00:00:08Z",
+            "completed_at": "2026-10-18T00:01:08Z",
+            "artifacts": [
+              {
+                "batch": 9
+              }
+            ],
+            "input_path": "in/9",
+            "output_path": "out/9"
+          },
+          {
+            "attempt": 10,
+            "status": "completed",
+            "message": "Batch 10",
+            "started_at": "2026-10-18T00:00:09Z",
+            "completed_at": "2026-10-18T00:01:09Z",
+            "artifacts": [
+              {
+                "batch": 10
+              }
+            ],
+            "input_path": "in/10",
+            "output_path": "out/10"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      },
+      "temporary_step": {
+        "status": "running",
+        "attempts": 1,
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "running"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-11"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:10Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 11,
+        "message": "Page 11",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/11",
+        "artifacts": [
+          {
+            "page": 11
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 2,
+            "status": "completed",
+            "message": "Batch 2",
+            "started_at": "2026-10-18T00:00:01Z",
+            "completed_at": "2026-10-18T00:01:01Z",
+            "artifacts": [
+              {
+                "batch": 2
+              }
+            ],
+            "input_path": "in/2",
+            "output_path": "out/2"
+          },
+          {
+            "attempt": 3,
+            "status": "completed",
+            "message": "Batch 3",
+            "started_at": "2026-10-18T00:00:02Z",
+            "completed_at": "2026-10-18T00:01:02Z",
+            "artifacts": [
+              {
+                "batch": 3
+              }
+            ],
+            "input_path": "in/3",
+            "output_path": "out/3"
+          },
+          {
+            "attempt": 4,
+            "status": "completed",
+            "message": "Batch 4",
+            "started_at": "2026-10-18T00:00:03Z",
+            "completed_at": "2026-10-18T00:01:03Z",
+            "artifacts": [
+              {
+                "batch": 4
+              }
+            ],
+            "input_path": "in/4",
+            "output_path": "out/4"
+          },
+          {
+            "attempt": 5,
+            "status": "completed",
+            "message": "Batch 5",
+            "started_at": "2026-10-18T00:00:04Z",
+            "completed_at": "2026-10-18T00:01:04Z",
+            "artifacts": [
+              {
+                "batch": 5
+              }
+            ],
+            "input_path": "in/5",
+            "output_path": "out/5"
+          },
+          {
+            "attempt": 6,
+            "status": "completed",
+            "message": "Batch 6",
+            "started_at": "2026-10-18T00:00:05Z",
+            "completed_at": "2026-10-18T00:01:05Z",
+            "artifacts": [
+              {
+                "batch": 6
+              }
+            ],
+            "input_path": "in/6",
+            "output_path": "out/6"
+          },
+          {
+            "attempt": 7,
+            "status": "completed",
+            "message": "Batch 7",
+            "started_at": "2026-10-18T00:00:06Z",
+            "completed_at": "2026-10-18T00:01:06Z",
+            "artifacts": [
+              {
+                "batch": 7
+              }
+            ],
+            "input_path": "in/7",
+            "output_path": "out/7"
+          },
+          {
+            "attempt": 8,
+            "status": "completed",
+            "message": "Batch 8",
+            "started_at": "2026-10-18T00:00:07Z",
+            "completed_at": "2026-10-18T00:01:07Z",
+            "artifacts": [
+              {
+                "batch": 8
+              }
+            ],
+            "input_path": "in/8",
+            "output_path": "out/8"
+          },
+          {
+            "attempt": 9,
+            "status": "completed",
+            "message": "Batch 9",
+            "started_at": "2026-10-18T00:00:08Z",
+            "completed_at": "2026-10-18T00:01:08Z",
+            "artifacts": [
+              {
+                "batch": 9
+              }
+            ],
+            "input_path": "in/9",
+            "output_path": "out/9"
+          },
+          {
+            "attempt": 10,
+            "status": "completed",
+            "message": "Batch 10",
+            "started_at": "2026-10-18T00:00:09Z",
+            "completed_at": "2026-10-18T00:01:09Z",
+            "artifacts": [
+              {
+                "batch": 10
+              }
+            ],
+            "input_path": "in/10",
+            "output_path": "out/10"
+          },
+          {
+            "attempt": 11,
+            "status": "completed",
+            "message": "Batch 11",
+            "started_at": "2026-10-18T00:00:10Z",
+            "completed_at": "2026-10-18T00:01:10Z",
+            "artifacts": [
+              {
+                "batch": 11
+              }
+            ],
+            "input_path": "in/11",
+            "output_path": "out/11"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-12"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:11Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 12,
+        "message": "Page 12",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/12",
+        "artifacts": [
+          {
+            "page": 12
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 3,
+            "status": "completed",
+            "message": "Batch 3",
+            "started_at": "2026-10-18T00:00:02Z",
+            "completed_at": "2026-10-18T00:01:02Z",
+            "artifacts": [
+              {
+                "batch": 3
+              }
+            ],
+            "input_path": "in/3",
+            "output_path": "out/3"
+          },
+          {
+            "attempt": 4,
+            "status": "completed",
+            "message": "Batch 4",
+            "started_at": "2026-10-18T00:00:03Z",
+            "completed_at": "2026-10-18T00:01:03Z",
+            "artifacts": [
+              {
+                "batch": 4
+              }
+            ],
+            "input_path": "in/4",
+            "output_path": "out/4"
+          },
+          {
+            "attempt": 5,
+            "status": "completed",
+            "message": "Batch 5",
+            "started_at": "2026-10-18T00:00:04Z",
+            "completed_at": "2026-10-18T00:01:04Z",
+            "artifacts": [
+              {
+                "batch": 5
+              }
+            ],
+            "input_path": "in/5",
+            "output_path": "out/5"
+          },
+          {
+            "attempt": 6,
+            "status": "completed",
+            "message": "Batch 6",
+            "started_at": "2026-10-18T00:00:05Z",
+            "completed_at": "2026-10-18T00:01:05Z",
+            "artifacts": [
+              {
+                "batch": 6
+              }
+            ],
+            "input_path": "in/6",
+            "output_path": "out/6"
+          },
+          {
+            "attempt": 7,
+            "status": "completed",
+            "message": "Batch 7",
+            "started_at": "2026-10-18T00:00:06Z",
+            "completed_at": "2026-10-18T00:01:06Z",
+            "artifacts": [
+              {
+                "batch": 7
+              }
+            ],
+            "input_path": "in/7",
+            "output_path": "out/7"
+          },
+          {
+            "attempt": 8,
+            "status": "completed",
+            "message": "Batch 8",
+            "started_at": "2026-10-18T00:00:07Z",
+            "completed_at": "2026-10-18T00:01:07Z",
+            "artifacts": [
+              {
+                "batch": 8
+              }
+            ],
+            "input_path": "in/8",
+            "output_path": "out/8"
+          },
+          {
+            "attempt": 9,
+            "status": "completed",
+            "message": "Batch 9",
+            "started_at": "2026-10-18T00:00:08Z",
+            "completed_at": "2026-10-18T00:01:08Z",
+            "artifacts": [
+              {
+                "batch": 9
+              }
+            ],
+            "input_path": "in/9",
+            "output_path": "out/9"
+          },
+          {
+            "attempt": 10,
+            "status": "completed",
+            "message": "Batch 10",
+            "started_at": "2026-10-18T00:00:09Z",
+            "completed_at": "2026-10-18T00:01:09Z",
+            "artifacts": [
+              {
+                "batch": 10
+              }
+            ],
+            "input_path": "in/10",
+            "output_path": "out/10"
+          },
+          {
+            "attempt": 11,
+            "status": "completed",
+            "message": "Batch 11",
+            "started_at": "2026-10-18T00:00:10Z",
+            "completed_at": "2026-10-18T00:01:10Z",
+            "artifacts": [
+              {
+                "batch": 11
+              }
+            ],
+            "input_path": "in/11",
+            "output_path": "out/11"
+          },
+          {
+            "attempt": 12,
+            "status": "completed",
+            "message": "Batch 12",
+            "started_at": "2026-10-18T00:00:11Z",
+            "completed_at": "2026-10-18T00:01:11Z",
+            "artifacts": [
+              {
+                "batch": 12
+              }
+            ],
+            "input_path": "in/12",
+            "output_path": "out/12"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-13"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:12Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 13,
+        "message": "Page 13",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/13",
+        "artifacts": [
+          {
+            "page": 13
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 4,
+            "status": "completed",
+            "message": "Batch 4",
+            "started_at": "2026-10-18T00:00:03Z",
+            "completed_at": "2026-10-18T00:01:03Z",
+            "artifacts": [
+              {
+                "batch": 4
+              }
+            ],
+            "input_path": "in/4",
+            "output_path": "out/4"
+          },
+          {
+            "attempt": 5,
+            "status": "completed",
+            "message": "Batch 5",
+            "started_at": "2026-10-18T00:00:04Z",
+            "completed_at": "2026-10-18T00:01:04Z",
+            "artifacts": [
+              {
+                "batch": 5
+              }
+            ],
+            "input_path": "in/5",
+            "output_path": "out/5"
+          },
+          {
+            "attempt": 6,
+            "status": "completed",
+            "message": "Batch 6",
+            "started_at": "2026-10-18T00:00:05Z",
+            "completed_at": "2026-10-18T00:01:05Z",
+            "artifacts": [
+              {
+                "batch": 6
+              }
+            ],
+            "input_path": "in/6",
+            "output_path": "out/6"
+          },
+          {
+            "attempt": 7,
+            "status": "completed",
+            "message": "Batch 7",
+            "started_at": "2026-10-18T00:00:06Z",
+            "completed_at": "2026-10-18T00:01:06Z",
+            "artifacts": [
+              {
+                "batch": 7
+              }
+            ],
+            "input_path": "in/7",
+            "output_path": "out/7"
+          },
+          {
+            "attempt": 8,
+            "status": "completed",
+            "message": "Batch 8",
+            "started_at": "2026-10-18T00:00:07Z",
+            "completed_at": "2026-10-18T00:01:07Z",
+            "artifacts": [
+              {
+                "batch": 8
+              }
+            ],
+            "input_path": "in/8",
+            "output_path": "out/8"
+          },
+          {
+            "attempt": 9,
+            "status": "completed",
+            "message": "Batch 9",
+            "started_at": "2026-10-18T00:00:08Z",
+            "completed_at": "2026-10-18T00:01:08Z",
+            "artifacts": [
+              {
+                "batch": 9
+              }
+            ],
+            "input_path": "in/9",
+            "output_path": "out/9"
+          },
+          {
+            "attempt": 10,
+            "status": "completed",
+            "message": "Batch 10",
+            "started_at": "2026-10-18T00:00:09Z",
+            "completed_at": "2026-10-18T00:01:09Z",
+            "artifacts": [
+              {
+                "batch": 10
+              }
+            ],
+            "input_path": "in/10",
+            "output_path": "out/10"
+          },
+          {
+            "attempt": 11,
+            "status": "completed",
+            "message": "Batch 11",
+            "started_at": "2026-10-18T00:00:10Z",
+            "completed_at": "2026-10-18T00:01:10Z",
+            "artifacts": [
+              {
+                "batch": 11
+              }
+            ],
+            "input_path": "in/11",
+            "output_path": "out/11"
+          },
+          {
+            "attempt": 12,
+            "status": "completed",
+            "message": "Batch 12",
+            "started_at": "2026-10-18T00:00:11Z",
+            "completed_at": "2026-10-18T00:01:11Z",
+            "artifacts": [
+              {
+                "batch": 12
+              }
+            ],
+            "input_path": "in/12",
+            "output_path": "out/12"
+          },
+          {
+            "attempt": 13,
+            "status": "completed",
+            "message": "Batch 13",
+            "started_at": "2026-10-18T00:00:12Z",
+            "completed_at": "2026-10-18T00:01:12Z",
+            "artifacts": [
+              {
+                "batch": 13
+              }
+            ],
+            "input_path": "in/13",
+            "output_path": "out/13"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-14"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:13Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 14,
+        "message": "Page 14",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/14",
+        "artifacts": [
+          {
+            "page": 14
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 5,
+            "status": "completed",
+            "message": "Batch 5",
+            "started_at": "2026-10-18T00:00:04Z",
+            "completed_at": "2026-10-18T00:01:04Z",
+            "artifacts": [
+              {
+                "batch": 5
+              }
+            ],
+            "input_path": "in/5",
+            "output_path": "out/5"
+          },
+          {
+            "attempt": 6,
+            "status": "completed",
+            "message": "Batch 6",
+            "started_at": "2026-10-18T00:00:05Z",
+            "completed_at": "2026-10-18T00:01:05Z",
+            "artifacts": [
+              {
+                "batch": 6
+              }
+            ],
+            "input_path": "in/6",
+            "output_path": "out/6"
+          },
+          {
+            "attempt": 7,
+            "status": "completed",
+            "message": "Batch 7",
+            "started_at": "2026-10-18T00:00:06Z",
+            "completed_at": "2026-10-18T00:01:06Z",
+            "artifacts": [
+              {
+                "batch": 7
+              }
+            ],
+            "input_path": "in/7",
+            "output_path": "out/7"
+          },
+          {
+            "attempt": 8,
+            "status": "completed",
+            "message": "Batch 8",
+            "started_at": "2026-10-18T00:00:07Z",
+            "completed_at": "2026-10-18T00:01:07Z",
+            "artifacts": [
+              {
+                "batch": 8
+              }
+            ],
+            "input_path": "in/8",
+            "output_path": "out/8"
+          },
+          {
+            "attempt": 9,
+            "status": "completed",
+            "message": "Batch 9",
+            "started_at": "2026-10-18T00:00:08Z",
+            "completed_at": "2026-10-18T00:01:08Z",
+            "artifacts": [
+              {
+                "batch": 9
+              }
+            ],
+            "input_path": "in/9",
+            "output_path": "out/9"
+          },
+          {
+            "attempt": 10,
+            "status": "completed",
+            "message": "Batch 10",
+            "started_at": "2026-10-18T00:00:09Z",
+            "completed_at": "2026-10-18T00:01:09Z",
+            "artifacts": [
+              {
+                "batch": 10
+              }
+            ],
+            "input_path": "in/10",
+            "output_path": "out/10"
+          },
+          {
+            "attempt": 11,
+            "status": "completed",
+            "message": "Batch 11",
+            "started_at": "2026-10-18T00:00:10Z",
+            "completed_at": "2026-10-18T00:01:10Z",
+            "artifacts": [
+              {
+                "batch": 11
+              }
+            ],
+            "input_path": "in/11",
+            "output_path": "out/11"
+          },
+          {
+            "attempt": 12,
+            "status": "completed",
+            "message": "Batch 12",
+            "started_at": "2026-10-18T00:00:11Z",
+            "completed_at": "2026-10-18T00:01:11Z",
+            "artifacts": [
+              {
+                "batch": 12
+              }
+            ],
+            "input_path": "in/12",
+            "output_path": "out/12"
+          },
+          {
+            "attempt": 13,
+            "status": "completed",
+            "message": "Batch 13",
+            "started_at": "2026-10-18T00:00:12Z",
+            "completed_at": "2026-10-18T00:01:12Z",
+            "artifacts": [
+              {
+                "batch": 13
+              }
+            ],
+            "input_path": "in/13",
+            "output_path": "out/13"
+          },
+          {
+            "attempt": 14,
+            "status": "completed",
+            "message": "Batch 14",
+            "started_at": "2026-10-18T00:00:13Z",
+            "completed_at": "2026-10-18T00:01:13Z",
+            "artifacts": [
+              {
+                "batch": 14
+              }
+            ],
+            "input_path": "in/14",
+            "output_path": "out/14"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-15"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:14Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 15,
+        "message": "Page 15",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/15",
+        "artifacts": [
+          {
+            "page": 15
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 6,
+            "status": "completed",
+            "message": "Batch 6",
+            "started_at": "2026-10-18T00:00:05Z",
+            "completed_at": "2026-10-18T00:01:05Z",
+            "artifacts": [
+              {
+                "batch": 6
+              }
+            ],
+            "input_path": "in/6",
+            "output_path": "out/6"
+          },
+          {
+            "attempt": 7,
+            "status": "completed",
+            "message": "Batch 7",
+            "started_at": "2026-10-18T00:00:06Z",
+            "completed_at": "2026-10-18T00:01:06Z",
+            "artifacts": [
+              {
+                "batch": 7
+              }
+            ],
+            "input_path": "in/7",
+            "output_path": "out/7"
+          },
+          {
+            "attempt": 8,
+            "status": "completed",
+            "message": "Batch 8",
+            "started_at": "2026-10-18T00:00:07Z",
+            "completed_at": "2026-10-18T00:01:07Z",
+            "artifacts": [
+              {
+                "batch": 8
+              }
+            ],
+            "input_path": "in/8",
+            "output_path": "out/8"
+          },
+          {
+            "attempt": 9,
+            "status": "completed",
+            "message": "Batch 9",
+            "started_at": "2026-10-18T00:00:08Z",
+            "completed_at": "2026-10-18T00:01:08Z",
+            "artifacts": [
+              {
+                "batch": 9
+              }
+            ],
+            "input_path": "in/9",
+            "output_path": "out/9"
+          },
+          {
+            "attempt": 10,
+            "status": "completed",
+            "message": "Batch 10",
+            "started_at": "2026-10-18T00:00:09Z",
+            "completed_at": "2026-10-18T00:01:09Z",
+            "artifacts": [
+              {
+                "batch": 10
+              }
+            ],
+            "input_path": "in/10",
+            "output_path": "out/10"
+          },
+          {
+            "attempt": 11,
+            "status": "completed",
+            "message": "Batch 11",
+            "started_at": "2026-10-18T00:00:10Z",
+            "completed_at": "2026-10-18T00:01:10Z",
+            "artifacts": [
+              {
+                "batch": 11
+              }
+            ],
+            "input_path": "in/11",
+            "output_path": "out/11"
+          },
+          {
+            "attempt": 12,
+            "status": "completed",
+            "message": "Batch 12",
+            "started_at": "2026-10-18T00:00:11Z",
+            "completed_at": "2026-10-18T00:01:11Z",
+            "artifacts": [
+              {
+                "batch": 12
+              }
+            ],
+            "input_path": "in/12",
+            "output_path": "out/12"
+          },
+          {
+            "attempt": 13,
+            "status": "completed",
+            "message": "Batch 13",
+            "started_at": "2026-10-18T00:00:12Z",
+            "completed_at": "2026-10-18T00:01:12Z",
+            "artifacts": [
+              {
+                "batch": 13
+              }
+            ],
+            "input_path": "in/13",
+            "output_path": "out/13"
+          },
+          {
+            "attempt": 14,
+            "status": "completed",
+            "message": "Batch 14",
+            "started_at": "2026-10-18T00:00:13Z",
+            "completed_at": "2026-10-18T00:01:13Z",
+            "artifacts": [
+              {
+                "batch": 14
+              }
+            ],
+            "input_path": "in/14",
+            "output_path": "out/14"
+          },
+          {
+            "attempt": 15,
+            "status": "completed",
+            "message": "Batch 15",
+            "started_at": "2026-10-18T00:00:14Z",
+            "completed_at": "2026-10-18T00:01:14Z",
+            "artifacts": [
+              {
+                "batch": 15
+              }
+            ],
+            "input_path": "in/15",
+            "output_path": "out/15"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-16"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:15Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 16,
+        "message": "Page 16",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/16",
+        "artifacts": [
+          {
+            "page": 16
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 7,
+            "status": "completed",
+            "message": "Batch 7",
+            "started_at": "2026-10-18T00:00:06Z",
+            "completed_at": "2026-10-18T00:01:06Z",
+            "artifacts": [
+              {
+                "batch": 7
+              }
+            ],
+            "input_path": "in/7",
+            "output_path": "out/7"
+          },
+          {
+            "attempt": 8,
+            "status": "completed",
+            "message": "Batch 8",
+            "started_at": "2026-10-18T00:00:07Z",
+            "completed_at": "2026-10-18T00:01:07Z",
+            "artifacts": [
+              {
+                "batch": 8
+              }
+            ],
+            "input_path": "in/8",
+            "output_path": "out/8"
+          },
+          {
+            "attempt": 9,
+            "status": "completed",
+            "message": "Batch 9",
+            "started_at": "2026-10-18T00:00:08Z",
+            "completed_at": "2026-10-18T00:01:08Z",
+            "artifacts": [
+              {
+                "batch": 9
+              }
+            ],
+            "input_path": "in/9",
+            "output_path": "out/9"
+          },
+          {
+            "attempt": 10,
+            "status": "completed",
+            "message": "Batch 10",
+            "started_at": "2026-10-18T00:00:09Z",
+            "completed_at": "2026-10-18T00:01:09Z",
+            "artifacts": [
+              {
+                "batch": 10
+              }
+            ],
+            "input_path": "in/10",
+            "output_path": "out/10"
+          },
+          {
+            "attempt": 11,
+            "status": "completed",
+            "message": "Batch 11",
+            "started_at": "2026-10-18T00:00:10Z",
+            "completed_at": "2026-10-18T00:01:10Z",
+            "artifacts": [
+              {
+                "batch": 11
+              }
+            ],
+            "input_path": "in/11",
+            "output_path": "out/11"
+          },
+          {
+            "attempt": 12,
+            "status": "completed",
+            "message": "Batch 12",
+            "started_at": "2026-10-18T00:00:11Z",
+            "completed_at": "2026-10-18T00:01:11Z",
+            "artifacts": [
+              {
+                "batch": 12
+              }
+            ],
+            "input_path": "in/12",
+            "output_path": "out/12"
+          },
+          {
+            "attempt": 13,
+            "status": "completed",
+            "message": "Batch 13",
+            "started_at": "2026-10-18T00:00:12Z",
+            "completed_at": "2026-10-18T00:01:12Z",
+            "artifacts": [
+              {
+                "batch": 13
+              }
+            ],
+            "input_path": "in/13",
+            "output_path": "out/13"
+          },
+          {
+            "attempt": 14,
+            "status": "completed",
+            "message": "Batch 14",
+            "started_at": "2026-10-18T00:00:13Z",
+            "completed_at": "2026-10-18T00:01:13Z",
+            "artifacts": [
+              {
+                "batch": 14
+              }
+            ],
+            "input_path": "in/14",
+            "output_path": "out/14"
+          },
+          {
+            "attempt": 15,
+            "status": "completed",
+            "message": "Batch 15",
+            "started_at": "2026-10-18T00:00:14Z",
+            "completed_at": "2026-10-18T00:01:14Z",
+            "artifacts": [
+              {
+                "batch": 15
+              }
+            ],
+            "input_path": "in/15",
+            "output_path": "out/15"
+          },
+          {
+            "attempt": 16,
+            "status": "completed",
+            "message": "Batch 16",
+            "started_at": "2026-10-18T00:00:15Z",
+            "completed_at": "2026-10-18T00:01:15Z",
+            "artifacts": [
+              {
+                "batch": 16
+              }
+            ],
+            "input_path": "in/16",
+            "output_path": "out/16"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-17"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:16Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 17,
+        "message": "Page 17",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/17",
+        "artifacts": [
+          {
+            "page": 17
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 8,
+            "status": "completed",
+            "message": "Batch 8",
+            "started_at": "2026-10-18T00:00:07Z",
+            "completed_at": "2026-10-18T00:01:07Z",
+            "artifacts": [
+              {
+                "batch": 8
+              }
+            ],
+            "input_path": "in/8",
+            "output_path": "out/8"
+          },
+          {
+            "attempt": 9,
+            "status": "completed",
+            "message": "Batch 9",
+            "started_at": "2026-10-18T00:00:08Z",
+            "completed_at": "2026-10-18T00:01:08Z",
+            "artifacts": [
+              {
+                "batch": 9
+              }
+            ],
+            "input_path": "in/9",
+            "output_path": "out/9"
+          },
+          {
+            "attempt": 10,
+            "status": "completed",
+            "message": "Batch 10",
+            "started_at": "2026-10-18T00:00:09Z",
+            "completed_at": "2026-10-18T00:01:09Z",
+            "artifacts": [
+              {
+                "batch": 10
+              }
+            ],
+            "input_path": "in/10",
+            "output_path": "out/10"
+          },
+          {
+            "attempt": 11,
+            "status": "completed",
+            "message": "Batch 11",
+            "started_at": "2026-10-18T00:00:10Z",
+            "completed_at": "2026-10-18T00:01:10Z",
+            "artifacts": [
+              {
+                "batch": 11
+              }
+            ],
+            "input_path": "in/11",
+            "output_path": "out/11"
+          },
+          {
+            "attempt": 12,
+            "status": "completed",
+            "message": "Batch 12",
+            "started_at": "2026-10-18T00:00:11Z",
+            "completed_at": "2026-10-18T00:01:11Z",
+            "artifacts": [
+              {
+                "batch": 12
+              }
+            ],
+            "input_path": "in/12",
+            "output_path": "out/12"
+          },
+          {
+            "attempt": 13,
+            "status": "completed",
+            "message": "Batch 13",
+            "started_at": "2026-10-18T00:00:12Z",
+            "completed_at": "2026-10-18T00:01:12Z",
+            "artifacts": [
+              {
+                "batch": 13
+              }
+            ],
+            "input_path": "in/13",
+            "output_path": "out/13"
+          },
+          {
+            "attempt": 14,
+            "status": "completed",
+            "message": "Batch 14",
+            "started_at": "2026-10-18T00:00:13Z",
+            "completed_at": "2026-10-18T00:01:13Z",
+            "artifacts": [
+              {
+                "batch": 14
+              }
+            ],
+            "input_path": "in/14",
+            "output_path": "out/14"
+          },
+          {
+            "attempt": 15,
+            "status": "completed",
+            "message": "Batch 15",
+            "started_at": "2026-10-18T00:00:14Z",
+            "completed_at": "2026-10-18T00:01:14Z",
+            "artifacts": [
+              {
+                "batch": 15
+              }
+            ],
+            "input_path": "in/15",
+            "output_path": "out/15"
+          },
+          {
+            "attempt": 16,
+            "status": "completed",
+            "message": "Batch 16",
+            "started_at": "2026-10-18T00:00:15Z",
+            "completed_at": "2026-10-18T00:01:15Z",
+            "artifacts": [
+              {
+                "batch": 16
+              }
+            ],
+            "input_path": "in/16",
+            "output_path": "out/16"
+          },
+          {
+            "attempt": 17,
+            "status": "completed",
+            "message": "Batch 17",
+            "started_at": "2026-10-18T00:00:16Z",
+            "completed_at": "2026-10-18T00:01:16Z",
+            "artifacts": [
+              {
+                "batch": 17
+              }
+            ],
+            "input_path": "in/17",
+            "output_path": "out/17"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-18"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:17Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 18,
+        "message": "Page 18",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/18",
+        "artifacts": [
+          {
+            "page": 18
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 9,
+            "status": "completed",
+            "message": "Batch 9",
+            "started_at": "2026-10-18T00:00:08Z",
+            "completed_at": "2026-10-18T00:01:08Z",
+            "artifacts": [
+              {
+                "batch": 9
+              }
+            ],
+            "input_path": "in/9",
+            "output_path": "out/9"
+          },
+          {
+            "attempt": 10,
+            "status": "completed",
+            "message": "Batch 10",
+            "started_at": "2026-10-18T00:00:09Z",
+            "completed_at": "2026-10-18T00:01:09Z",
+            "artifacts": [
+              {
+                "batch": 10
+              }
+            ],
+            "input_path": "in/10",
+            "output_path": "out/10"
+          },
+          {
+            "attempt": 11,
+            "status": "completed",
+            "message": "Batch 11",
+            "started_at": "2026-10-18T00:00:10Z",
+            "completed_at": "2026-10-18T00:01:10Z",
+            "artifacts": [
+              {
+                "batch": 11
+              }
+            ],
+            "input_path": "in/11",
+            "output_path": "out/11"
+          },
+          {
+            "attempt": 12,
+            "status": "completed",
+            "message": "Batch 12",
+            "started_at": "2026-10-18T00:00:11Z",
+            "completed_at": "2026-10-18T00:01:11Z",
+            "artifacts": [
+              {
+                "batch": 12
+              }
+            ],
+            "input_path": "in/12",
+            "output_path": "out/12"
+          },
+          {
+            "attempt": 13,
+            "status": "completed",
+            "message": "Batch 13",
+            "started_at": "2026-10-18T00:00:12Z",
+            "completed_at": "2026-10-18T00:01:12Z",
+            "artifacts": [
+              {
+                "batch": 13
+              }
+            ],
+            "input_path": "in/13",
+            "output_path": "out/13"
+          },
+          {
+            "attempt": 14,
+            "status": "completed",
+            "message": "Batch 14",
+            "started_at": "2026-10-18T00:00:13Z",
+            "completed_at": "2026-10-18T00:01:13Z",
+            "artifacts": [
+              {
+                "batch": 14
+              }
+            ],
+            "input_path": "in/14",
+            "output_path": "out/14"
+          },
+          {
+            "attempt": 15,
+            "status": "completed",
+            "message": "Batch 15",
+            "started_at": "2026-10-18T00:00:14Z",
+            "completed_at": "2026-10-18T00:01:14Z",
+            "artifacts": [
+              {
+                "batch": 15
+              }
+            ],
+            "input_path": "in/15",
+            "output_path": "out/15"
+          },
+          {
+            "attempt": 16,
+            "status": "completed",
+            "message": "Batch 16",
+            "started_at": "2026-10-18T00:00:15Z",
+            "completed_at": "2026-10-18T00:01:15Z",
+            "artifacts": [
+              {
+                "batch": 16
+              }
+            ],
+            "input_path": "in/16",
+            "output_path": "out/16"
+          },
+          {
+            "attempt": 17,
+            "status": "completed",
+            "message": "Batch 17",
+            "started_at": "2026-10-18T00:00:16Z",
+            "completed_at": "2026-10-18T00:01:16Z",
+            "artifacts": [
+              {
+                "batch": 17
+              }
+            ],
+            "input_path": "in/17",
+            "output_path": "out/17"
+          },
+          {
+            "attempt": 18,
+            "status": "completed",
+            "message": "Batch 18",
+            "started_at": "2026-10-18T00:00:17Z",
+            "completed_at": "2026-10-18T00:01:17Z",
+            "artifacts": [
+              {
+                "batch": 18
+              }
+            ],
+            "input_path": "in/18",
+            "output_path": "out/18"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "gmail_backfill",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-19"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:18Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "running",
+        "attempts": 19,
+        "message": "Page 19",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": null,
+        "required": true,
+        "latest_attempt_path": "attempt/19",
+        "artifacts": [
+          {
+            "page": 19
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 10,
+            "status": "completed",
+            "message": "Batch 10",
+            "started_at": "2026-10-18T00:00:09Z",
+            "completed_at": "2026-10-18T00:01:09Z",
+            "artifacts": [
+              {
+                "batch": 10
+              }
+            ],
+            "input_path": "in/10",
+            "output_path": "out/10"
+          },
+          {
+            "attempt": 11,
+            "status": "completed",
+            "message": "Batch 11",
+            "started_at": "2026-10-18T00:00:10Z",
+            "completed_at": "2026-10-18T00:01:10Z",
+            "artifacts": [
+              {
+                "batch": 11
+              }
+            ],
+            "input_path": "in/11",
+            "output_path": "out/11"
+          },
+          {
+            "attempt": 12,
+            "status": "completed",
+            "message": "Batch 12",
+            "started_at": "2026-10-18T00:00:11Z",
+            "completed_at": "2026-10-18T00:01:11Z",
+            "artifacts": [
+              {
+                "batch": 12
+              }
+            ],
+            "input_path": "in/12",
+            "output_path": "out/12"
+          },
+          {
+            "attempt": 13,
+            "status": "completed",
+            "message": "Batch 13",
+            "started_at": "2026-10-18T00:00:12Z",
+            "completed_at": "2026-10-18T00:01:12Z",
+            "artifacts": [
+              {
+                "batch": 13
+              }
+            ],
+            "input_path": "in/13",
+            "output_path": "out/13"
+          },
+          {
+            "attempt": 14,
+            "status": "completed",
+            "message": "Batch 14",
+            "started_at": "2026-10-18T00:00:13Z",
+            "completed_at": "2026-10-18T00:01:13Z",
+            "artifacts": [
+              {
+                "batch": 14
+              }
+            ],
+            "input_path": "in/14",
+            "output_path": "out/14"
+          },
+          {
+            "attempt": 15,
+            "status": "completed",
+            "message": "Batch 15",
+            "started_at": "2026-10-18T00:00:14Z",
+            "completed_at": "2026-10-18T00:01:14Z",
+            "artifacts": [
+              {
+                "batch": 15
+              }
+            ],
+            "input_path": "in/15",
+            "output_path": "out/15"
+          },
+          {
+            "attempt": 16,
+            "status": "completed",
+            "message": "Batch 16",
+            "started_at": "2026-10-18T00:00:15Z",
+            "completed_at": "2026-10-18T00:01:15Z",
+            "artifacts": [
+              {
+                "batch": 16
+              }
+            ],
+            "input_path": "in/16",
+            "output_path": "out/16"
+          },
+          {
+            "attempt": 17,
+            "status": "completed",
+            "message": "Batch 17",
+            "started_at": "2026-10-18T00:00:16Z",
+            "completed_at": "2026-10-18T00:01:16Z",
+            "artifacts": [
+              {
+                "batch": 17
+              }
+            ],
+            "input_path": "in/17",
+            "output_path": "out/17"
+          },
+          {
+            "attempt": 18,
+            "status": "completed",
+            "message": "Batch 18",
+            "started_at": "2026-10-18T00:00:17Z",
+            "completed_at": "2026-10-18T00:01:17Z",
+            "artifacts": [
+              {
+                "batch": 18
+              }
+            ],
+            "input_path": "in/18",
+            "output_path": "out/18"
+          },
+          {
+            "attempt": 19,
+            "status": "completed",
+            "message": "Batch 19",
+            "started_at": "2026-10-18T00:00:18Z",
+            "completed_at": "2026-10-18T00:01:18Z",
+            "artifacts": [
+              {
+                "batch": 19
+              }
+            ],
+            "input_path": "in/19",
+            "output_path": "out/19"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  },
+  {
+    "workflow": "startup_monthly_update",
+    "domain": "pulse-sync.invalid",
+    "status": "running",
+    "current_step": "relevance_classification",
+    "step_order": [
+      "gmail_backfill",
+      "relevance_classification"
+    ],
+    "run_request": {
+      "startup_context": {
+        "notes": "Synthetic frozen profile"
+      },
+      "input_sources": [
+        "gmail"
+      ]
+    },
+    "result": {
+      "ingest": {
+        "next_page_token": "page-20"
+      },
+      "_valley_meta": {
+        "last_heartbeat_at": "2026-10-18T00:03:19Z"
+      }
+    },
+    "step_states": {
+      "gmail_backfill": {
+        "status": "completed",
+        "attempts": 20,
+        "message": "Page 20",
+        "started_at": "2026-10-18T00:00:00Z",
+        "completed_at": "2026-10-18T00:02:00Z",
+        "required": true,
+        "latest_attempt_path": "attempt/20",
+        "artifacts": [
+          {
+            "page": 20
+          }
+        ],
+        "attempt_history": [
+          {
+            "attempt": 11,
+            "status": "completed",
+            "message": "Batch 11",
+            "started_at": "2026-10-18T00:00:10Z",
+            "completed_at": "2026-10-18T00:01:10Z",
+            "artifacts": [
+              {
+                "batch": 11
+              }
+            ],
+            "input_path": "in/11",
+            "output_path": "out/11"
+          },
+          {
+            "attempt": 12,
+            "status": "completed",
+            "message": "Batch 12",
+            "started_at": "2026-10-18T00:00:11Z",
+            "completed_at": "2026-10-18T00:01:11Z",
+            "artifacts": [
+              {
+                "batch": 12
+              }
+            ],
+            "input_path": "in/12",
+            "output_path": "out/12"
+          },
+          {
+            "attempt": 13,
+            "status": "completed",
+            "message": "Batch 13",
+            "started_at": "2026-10-18T00:00:12Z",
+            "completed_at": "2026-10-18T00:01:12Z",
+            "artifacts": [
+              {
+                "batch": 13
+              }
+            ],
+            "input_path": "in/13",
+            "output_path": "out/13"
+          },
+          {
+            "attempt": 14,
+            "status": "completed",
+            "message": "Batch 14",
+            "started_at": "2026-10-18T00:00:13Z",
+            "completed_at": "2026-10-18T00:01:13Z",
+            "artifacts": [
+              {
+                "batch": 14
+              }
+            ],
+            "input_path": "in/14",
+            "output_path": "out/14"
+          },
+          {
+            "attempt": 15,
+            "status": "completed",
+            "message": "Batch 15",
+            "started_at": "2026-10-18T00:00:14Z",
+            "completed_at": "2026-10-18T00:01:14Z",
+            "artifacts": [
+              {
+                "batch": 15
+              }
+            ],
+            "input_path": "in/15",
+            "output_path": "out/15"
+          },
+          {
+            "attempt": 16,
+            "status": "completed",
+            "message": "Batch 16",
+            "started_at": "2026-10-18T00:00:15Z",
+            "completed_at": "2026-10-18T00:01:15Z",
+            "artifacts": [
+              {
+                "batch": 16
+              }
+            ],
+            "input_path": "in/16",
+            "output_path": "out/16"
+          },
+          {
+            "attempt": 17,
+            "status": "completed",
+            "message": "Batch 17",
+            "started_at": "2026-10-18T00:00:16Z",
+            "completed_at": "2026-10-18T00:01:16Z",
+            "artifacts": [
+              {
+                "batch": 17
+              }
+            ],
+            "input_path": "in/17",
+            "output_path": "out/17"
+          },
+          {
+            "attempt": 18,
+            "status": "completed",
+            "message": "Batch 18",
+            "started_at": "2026-10-18T00:00:17Z",
+            "completed_at": "2026-10-18T00:01:17Z",
+            "artifacts": [
+              {
+                "batch": 18
+              }
+            ],
+            "input_path": "in/18",
+            "output_path": "out/18"
+          },
+          {
+            "attempt": 19,
+            "status": "completed",
+            "message": "Batch 19",
+            "started_at": "2026-10-18T00:00:18Z",
+            "completed_at": "2026-10-18T00:01:18Z",
+            "artifacts": [
+              {
+                "batch": 19
+              }
+            ],
+            "input_path": "in/19",
+            "output_path": "out/19"
+          },
+          {
+            "attempt": 20,
+            "status": "completed",
+            "message": "Batch 20",
+            "started_at": "2026-10-18T00:00:19Z",
+            "completed_at": "2026-10-18T00:01:19Z",
+            "artifacts": [
+              {
+                "batch": 20
+              }
+            ],
+            "input_path": "in/20",
+            "output_path": "out/20"
+          }
+        ]
+      },
+      "relevance_classification": {
+        "status": "pending",
+        "attempts": 0,
+        "required": true
+      }
+    }
+  }
+]

@@ -53,20 +53,44 @@ class VibeRaisingApiTests(TestCase):
 
     def _create_founder_company(self, *, domain="acme.com", registered=True):
         profile = VibeRaisingProfile.objects.create(user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
+        organization = None
+        if domain:
+            organization, _ = Organization.objects.get_or_create(
+                domain=domain, defaults={"name": "Acme Inc."}
+            )
         # A registered company is, post-gate, a verified one — carry the ACN and
         # verification stamp so it can proceed to updates.
         company = VibeRaisingCompany.objects.create(
             profile=profile,
             name="Acme Inc.",
+            organization=organization,
             domain=domain,
             registered=registered,
             abn="89000000019" if registered else None,
             acn="000000019" if registered else None,
             abr_verified_at=timezone.now() if registered else None,
+            entity_type_code="PRV" if registered else "",
         )
         profile.active_company = company
         profile.save(update_fields=["active_company", "updated_at"])
         return profile, company
+
+    def _seed_imported_revenue(self, company, *, month=date(2026, 3, 1), value="50000"):
+        # An editor may retain imported revenue, but cannot create or change
+        # financial evidence with a browser-supplied metric.
+        startup_profile, _ = StartupProfile.objects.get_or_create(organization=company.organization)
+        StartupMetricObservation.objects.create(
+            organization=company.organization,
+            source_provider="xero",
+            metric_key="revenue",
+            metric_name="Revenue",
+            value_text=value,
+            value_number=Decimal(value),
+            unit=startup_profile.default_currency,
+            period_month=month,
+            confidence=1,
+            source_metadata={"source_metric": "xero_profit_and_loss_revenue"},
+        )
 
     def _create_google_connection(
         self,
@@ -329,6 +353,8 @@ class VibeRaisingApiTests(TestCase):
             "configured": True,
             "reachable": True,
             "found": True,
+            "active": True,
+            "abn": abn,
             "is_company": True,
             "acn": "000000019",
             "entity_type_code": "PRV",
@@ -376,7 +402,8 @@ class VibeRaisingApiTests(TestCase):
 
     def test_founder_can_save_monthly_update_for_active_company(self):
         self.client.force_authenticate(user=self.user)
-        self._create_founder_company(domain="acme.com", registered=True)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        self._seed_imported_revenue(company)
 
         response = self.client.post(
             "/api/v1/vibe-raising/updates/",
@@ -569,10 +596,11 @@ class VibeRaisingApiTests(TestCase):
 
         updates_response = self.client.get("/api/v1/vibe-raising/updates/")
         self.assertEqual(updates_response.status_code, 200)
-        self.assertEqual(updates_response.data["updates"][0]["audienceVisibility"], ["community"])
+        self.assertEqual(updates_response.data["updates"], [])
         drafts_response = self.client.get("/api/v1/vibe-raising/drafts/")
         self.assertEqual(drafts_response.status_code, 200)
         self.assertEqual(len(drafts_response.data["drafts"]), 1)
+        self.assertEqual(drafts_response.data["drafts"][0]["audienceVisibility"], ["community"])
 
         publish_response = self.client.post(f"/api/v1/vibe-raising/updates/{draft.id}/publish/", {"companyId": company.pk, "revisionId": response.data["update"]["revisionId"], "revisionHash": response.data["update"]["revisionHash"], "audienceVisibility": ["community"]}, format="json")
 
@@ -590,7 +618,9 @@ class VibeRaisingApiTests(TestCase):
     def test_publish_requires_founder_owner(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         company.organization = organization
         company.save(update_fields=["organization", "updated_at"])
         draft = MonthlyUpdateDraft.objects.create(
@@ -623,7 +653,7 @@ class VibeRaisingApiTests(TestCase):
 
         self.assertEqual(anonymous_response.status_code, 401)
         self.assertEqual(investor_response.status_code, 403)
-        self.assertEqual(non_owner_response.status_code, 404)
+        self.assertEqual(non_owner_response.status_code, 409)
         draft.refresh_from_db()
         self.assertIsNone(draft.published_at)
         self.assertEqual(draft.status, MonthlyUpdateDraftStatus.DRAFT)
@@ -632,7 +662,9 @@ class VibeRaisingApiTests(TestCase):
     def test_publish_is_idempotent_and_preserves_existing_visibility(self, mock_award):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         company.organization = organization
         company.save(update_fields=["organization", "updated_at"])
         draft = MonthlyUpdateDraft.objects.create(
@@ -664,7 +696,9 @@ class VibeRaisingApiTests(TestCase):
     def test_editing_published_update_preserves_publish_state_and_visibility_when_omitted(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         company.organization = organization
         company.save(update_fields=["organization", "updated_at"])
         published_at = timezone.now()
@@ -705,7 +739,9 @@ class VibeRaisingApiTests(TestCase):
     def test_drafts_endpoint_returns_only_unpublished_owner_rows(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         company.organization = organization
         company.save(update_fields=["organization", "updated_at"])
         MonthlyUpdateDraft.objects.create(
@@ -752,7 +788,9 @@ class VibeRaisingApiTests(TestCase):
         )
 
     def test_audience_visibility_filters_published_community_and_investor_surfaces(self):
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         now = timezone.now()
         community = MonthlyUpdateDraft.objects.create(
             organization=organization,
@@ -808,7 +846,9 @@ class VibeRaisingApiTests(TestCase):
     def test_monthly_updates_get_filters_audience_query_for_founder_preview(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         now = timezone.now()
         MonthlyUpdateDraft.objects.create(
             organization=organization,
@@ -851,7 +891,7 @@ class VibeRaisingApiTests(TestCase):
         invalid_response = self.client.get("/api/v1/vibe-raising/updates/?audience=just_me")
 
         self.assertEqual(founder_response.status_code, 200)
-        self.assertEqual(len(founder_response.data["updates"]), 5)
+        self.assertEqual(len(founder_response.data["updates"]), 4)
         self.assertEqual(community_response.status_code, 200)
         self.assertEqual(
             [update["isoMonth"] for update in community_response.data["updates"]],
@@ -868,7 +908,9 @@ class VibeRaisingApiTests(TestCase):
         from startup_updates.api_views import _serialize_draft
         from startup_updates.serializers import DraftResultsSerializer
 
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         published_at = timezone.now()
         draft = MonthlyUpdateDraft.objects.create(
             organization=organization,
@@ -1173,7 +1215,8 @@ class VibeRaisingApiTests(TestCase):
         other_profile.save(update_fields=["active_company", "updated_at"])
         self.client.force_authenticate(user=other_user)
         denied_response = self.client.get(f"/api/v1/vibe-raising/uploads/manual-documents/{document.id}/download/")
-        self.assertEqual(denied_response.status_code, 404)
+        self.assertEqual(denied_response.status_code, 409)
+        self.assertIn("domain", str(denied_response.data).lower())
 
         admin_user = User.objects.create_superuser(email="admin@example.com", password="password")
         self.client.force_authenticate(user=admin_user)
@@ -1211,14 +1254,13 @@ class VibeRaisingApiTests(TestCase):
         self.assertIsNone(run.run_request["google_connection_id"])
         self.assertEqual(run.run_request["manual_document_ids"], [str(document.id)])
         self.assertEqual(run.run_request["manual_summary"], "Founder-added investor memo.")
-        manual_context = run.run_request["external_context"]["manual_documents"]
-        self.assertEqual(manual_context["summary"], "Founder-added investor memo.")
-        self.assertEqual(manual_context["documents"][0]["filename"], "memo.txt")
-        self.assertIn("Pilot conversion improved", manual_context["documents"][0]["text_excerpt"])
+        self.assertNotIn("external_context", run.run_request)
+        self.assertEqual(run.run_request["source_preflight_version"], 1)
+        self.assertFalse(run.run_request.get("source_preflight_complete", False))
         mock_notify.assert_called_once_with(run.run_id)
 
     @patch("vibe_raising.views.notify_valley_run_created")
-    def test_email_draft_start_skips_gmail_when_scope_missing_and_other_sources_selected(self, mock_notify):
+    def test_email_draft_start_preserves_gmail_for_complete_source_checks(self, mock_notify):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
         document = self._create_manual_document(company=company)
@@ -1250,33 +1292,29 @@ class VibeRaisingApiTests(TestCase):
         self.assertFalse(response.data["hasGmailScope"])
         self.assertTrue(response.data["needsGmailReconnect"])
         run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
-        self.assertEqual(run.run_request["input_sources"], ["xero", "manual_documents"])
-        self.assertIsNone(run.run_request["google_connection_id"])
-        self.assertIn("xero", run.run_request["external_context"])
-        self.assertIn("manual_documents", run.run_request["external_context"])
-        self.assertEqual(
-            run.run_request["external_context"]["gmail"]["warnings"],
-            ["Reconnect Gmail to grant read access."],
-        )
+        self.assertEqual(run.run_request["input_sources"], ["gmail", "xero", "manual_documents"])
+        self.assertIsNotNone(run.run_request["google_connection_id"])
+        self.assertNotIn("external_context", run.run_request)
+        self.assertEqual(run.run_request["source_preflight_version"], 1)
         mock_notify.assert_called_once_with(run.run_id)
 
-    def test_email_draft_start_requires_reconnect_when_gmail_only_scope_missing(self):
+    @patch("vibe_raising.views.notify_valley_run_created")
+    def test_email_draft_start_defers_missing_gmail_scope_to_source_checks(self, notify):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
         self._create_google_connection(scope="openid https://www.googleapis.com/auth/userinfo.email")
-
-        response = self.client.post(
-            "/api/v1/vibe-raising/email-draft/start/",
-            {"inputSources": ["gmail"], "targetMonth": "2026-03-01"},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "auth_required")
+        response = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+            {"inputSources": ["gmail"], "targetMonth": "2026-03-01"}, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["state"], "queued")
         self.assertTrue(response.data["gmailConnected"])
         self.assertFalse(response.data["hasGmailScope"])
         self.assertTrue(response.data["needsGmailReconnect"])
-        self.assertFalse(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").exists())
+        run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(run.run_request["input_sources"], ["gmail"])
+        self.assertEqual(run.run_request["source_preflight_version"], 1)
+        notify.assert_called_once_with(run.run_id)
+
 
     @patch("vibe_raising.views.MAX_VIBE_RAISING_VIDEO_SIZE_BYTES", 1024)
     def test_signed_video_upload_session_rejects_oversized_video(self):
@@ -1383,7 +1421,9 @@ class VibeRaisingApiTests(TestCase):
     def test_founder_can_list_monthly_updates_for_active_company(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         MonthlyUpdateDraft.objects.create(
             organization=organization,
             month=date(2026, 2, 1),
@@ -1431,7 +1471,8 @@ class VibeRaisingApiTests(TestCase):
 
     def test_monthly_update_save_round_trips_display_config(self):
         self.client.force_authenticate(user=self.user)
-        self._create_founder_company(domain="acme.com", registered=True)
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        self._seed_imported_revenue(company)
 
         response = self.client.post(
             "/api/v1/vibe-raising/updates/",
@@ -1511,8 +1552,11 @@ class VibeRaisingApiTests(TestCase):
 
     def test_monthly_update_post_preserves_display_config_when_omitted(self):
         self.client.force_authenticate(user=self.user)
-        self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        _profile, company = self._create_founder_company(domain="acme.com", registered=True)
+        self._seed_imported_revenue(company)
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         MonthlyUpdateDraft.objects.create(
             organization=organization,
             month=date(2026, 3, 1),
@@ -1563,7 +1607,9 @@ class VibeRaisingApiTests(TestCase):
     def test_monthly_updates_get_returns_metric_history(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         MonthlyUpdateDraft.objects.create(
             organization=organization,
             month=date(2026, 1, 1),
@@ -1610,7 +1656,9 @@ class VibeRaisingApiTests(TestCase):
     def test_metric_history_uses_xero_value_number(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         MonthlyUpdateDraft.objects.create(
             organization=organization,
             month=date(2026, 4, 1),
@@ -1645,7 +1693,9 @@ class VibeRaisingApiTests(TestCase):
     def test_display_config_defaults_for_legacy_updates(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         MonthlyUpdateDraft.objects.create(
             organization=organization,
             month=date(2026, 2, 1),
@@ -1799,21 +1849,17 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(company.domain, "")
         self.assertEqual(company.organization.domain, f"startup-{company.pk}.invalid")
 
-    def test_startup_update_run_returns_needs_google_auth_until_connected(self):
+    @patch("vibe_raising.views.notify_valley_run_created")
+    def test_startup_update_run_queues_source_checks_without_google(self, notify):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
-
-        response = self.client.post(
-            "/api/v1/vibe-raising/startup-update/run/",
-            {},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "needs_google_auth")
+        response = self.client.post("/api/v1/vibe-raising/startup-update/run/", {}, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["state"], "processing")
         self.assertFalse(response.data["googleConnected"])
-        self.assertIsNone(response.data["run"])
         self.assertEqual(UserStartupBinding.objects.count(), 1)
+        notify.assert_called_once_with(response.data["run"]["runId"])
+
 
     def test_startup_update_run_creates_or_reuses_open_run(self):
         self.client.force_authenticate(user=self.user)
@@ -1873,31 +1919,19 @@ class VibeRaisingApiTests(TestCase):
         run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
         self.assertEqual(run.result["_valley_meta"]["dispatch_status"], "failed")
 
-    def test_startup_update_run_reconciles_active_run_when_slack_is_added(self):
+    def test_startup_update_run_rejects_changing_sources_on_an_active_run(self):
         self.client.force_authenticate(user=self.user)
         _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
-
-        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
-            response = self.client.post(
-                "/api/v1/vibe-raising/startup-update/run/",
-                {"inputSources": ["gmail", "xero", "slack"]},
-                format="json",
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["run"]["runId"], run.run_id)
-        mock_notify.assert_not_called()
-
+        original = dict(run.run_request)
+        with patch("vibe_raising.views.notify_valley_run_created") as notify:
+            response = self.client.post("/api/v1/vibe-raising/startup-update/run/",
+                {"inputSources": ["gmail", "xero", "slack"]}, format="json")
+        self.assertEqual(response.status_code, 409, response.data)
         run.refresh_from_db()
-        self.assertEqual(run.run_request["input_sources"], ["gmail", "xero", "slack"])
-        self.assertIn("slack_backfill", run.step_order)
-        self.assertLess(run.step_order.index("slack_relevance_classification"), run.step_order.index("slack_event_extraction"))
-        self.assertLess(run.step_order.index("slack_event_extraction"), run.step_order.index("timeline_merge"))
-        self.assertNotIn("xero", run.step_order)
-        self.assertEqual(run.current_step, "slack_backfill")
-        self.assertEqual(run.run_request["slack_channel_ids"], ["C123"])
-        self.assertEqual(run.run_request["external_context"]["slack"]["selected_channel_ids"], ["C123"])
-        self.assertIn("xero", run.run_request["external_context"])
+        self.assertEqual(run.run_request, original)
+        self.assertEqual(run.current_step, "timeline_merge")
+        notify.assert_not_called()
+
 
     def test_startup_update_run_maps_create_authority_error_to_connector_auth_response(self):
         self.client.force_authenticate(user=self.user)
@@ -1917,22 +1951,18 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.data, {"detail": "Slack authority was revoked"})
 
-    def test_startup_update_run_maps_refresh_authority_error_to_connector_auth_response(self):
+    def test_startup_update_run_keeps_active_authority_frozen(self):
         self.client.force_authenticate(user=self.user)
-        self._create_active_gmail_run_with_slack_selection()
+        _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
+        with patch("vibe_raising.views.refresh_startup_update_run_source_context",
+                side_effect=ConnectorOAuthError("Synthetic revoked authority")) as refresh, patch(
+                "vibe_raising.views.notify_valley_run_created") as notify:
+            response = self.client.post("/api/v1/vibe-raising/startup-update/run/",
+                {"inputSources": ["gmail"]}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        refresh.assert_not_called()
+        notify.assert_not_called()
 
-        with patch(
-            "vibe_raising.views.refresh_startup_update_run_source_context",
-            side_effect=ConnectorOAuthError("Slack authority changed"),
-        ):
-            response = self.client.post(
-                "/api/v1/vibe-raising/startup-update/run/",
-                {"inputSources": ["gmail", "xero", "slack"]},
-                format="json",
-            )
-
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.data, {"detail": "Slack authority changed"})
 
     def test_startup_update_status_returns_ready_with_form_shaped_draft(self):
         self.client.force_authenticate(user=self.user)
@@ -1943,7 +1973,9 @@ class VibeRaisingApiTests(TestCase):
             refresh_token="refresh-token",
             scope="https://www.googleapis.com/auth/gmail.readonly",
         )
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2009,21 +2041,19 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(len(response.data["draft"]["pastMonths"]), 2)
         self.assertEqual(response.data["draft"]["pastMonths"][0]["month"], "February 2026")
 
-    def test_email_draft_start_returns_auth_required_until_gmail_connected(self):
+    @patch("vibe_raising.views.notify_valley_run_created")
+    def test_email_draft_start_queues_source_checks_without_google(self, notify):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
-
-        response = self.client.post(
-            "/api/v1/vibe-raising/email-draft/start/",
-            {"targetMonth": "2026-03-01"},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "auth_required")
+        response = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+            {"targetMonth": "2026-03-01"}, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["state"], "queued")
         self.assertFalse(response.data["gmailConnected"])
         self.assertIn("/integrations/connect/google?next=", response.data["authUrl"])
         self.assertEqual(UserStartupBinding.objects.count(), 1)
+        notify.assert_called_once_with(response.data["runId"])
+
 
     def test_email_draft_status_returns_auth_required_until_gmail_connected(self):
         self.client.force_authenticate(user=self.user)
@@ -2037,6 +2067,36 @@ class VibeRaisingApiTests(TestCase):
         self.assertIn("/integrations/connect/google?next=", response.data["authUrl"])
         self.assertIsNone(response.data["runId"])
         self.assertEqual(response.data["pastMonths"], [])
+
+    @patch("vibe_raising.views.notify_valley_run_created")
+    def test_status_keeps_all_failed_source_checks_when_gmail_is_disconnected(self, notify):
+        self.client.force_authenticate(user=self.user)
+        self._create_founder_company()
+        started = self.client.post(
+            "/api/v1/vibe-raising/email-draft/start/",
+            {"inputSources": ["gmail", "slack"]},
+            format="json",
+        )
+        self.assertEqual(started.status_code, 201, started.data)
+        run = ContentFactoryRun.objects.get(run_id=started.data["runId"])
+        checks = [
+            {"source": "gmail", "status": "failed", "code": "not_connected"},
+            {"source": "slack", "status": "failed", "code": "not_connected"},
+        ]
+        run.status = ContentFactoryRunStatus.FAILED
+        run.error = "Connect Gmail and Slack before continuing."
+        run.result = {"source_preflight": {"checks": checks}}
+        run.save(update_fields=["status", "error", "result", "updated_at"])
+
+        for route in ("email-draft/status/", "startup-update/status/"):
+            with self.subTest(route=route):
+                response = self.client.get(f"/api/v1/vibe-raising/{route}")
+                self.assertEqual(response.status_code, 200, response.data)
+                self.assertEqual(response.data["state"], "failed")
+                self.assertEqual(response.data["error"], run.error)
+                self.assertFalse(response.data["hasGmailScope"])
+                payload = response.data.get("run") or response.data
+                self.assertEqual(payload["sourceChecks"], checks)
 
     def test_email_draft_start_creates_or_reuses_open_run(self):
         self.client.force_authenticate(user=self.user)
@@ -2058,9 +2118,9 @@ class VibeRaisingApiTests(TestCase):
 
         self.assertEqual(first.status_code, 201)
         self.assertEqual(first.data["state"], "queued")
-        self.assertFalse(first.data["reusedExistingRun"])
+        self.assertIsInstance(first.data['updateId'], int)
         self.assertEqual(second.status_code, 200)
-        self.assertTrue(second.data["reusedExistingRun"])
+        self.assertEqual(second.data['updateId'], first.data['updateId'])
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
         self.assertEqual(first.data["runId"], second.data["runId"])
         mock_notify.assert_called_once()
@@ -2106,7 +2166,7 @@ class VibeRaisingApiTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 201)
-        mock_refresh_linear_scope.assert_called_once_with(linear_connection)
+        mock_refresh_linear_scope.assert_not_called()
         mock_sync_sources.assert_not_called()
         mock_notify.assert_called_once_with(response.data["runId"])
         run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
@@ -2134,7 +2194,7 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(run.run_request["current_month"], "2026-04-01")
         self.assertEqual(run.run_request["draft_months"], ["2026-04-01"])
         self.assertEqual(run.run_request["backfill_window_start"], "2026-04-01T00:00:00+00:00")
-        self.assertEqual(run.run_request["backfill_window_end"], "2026-04-26T05:30:00+00:00")
+        self.assertEqual(run.run_request["backfill_window_end"], "2026-04-26T05:29:59.999999+00:00")
         mock_notify.assert_called_once_with(run.run_id)
 
     @patch("startup_updates.services.timezone.now")
@@ -2159,7 +2219,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2196,7 +2258,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2217,11 +2281,10 @@ class VibeRaisingApiTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.data["targetMonthConflict"])
-        self.assertEqual(response.data["requestedTargetMonth"], "2026-03-01")
-        self.assertEqual(response.data["activeTargetMonth"], "2026-04-01")
-        self.assertEqual(response.data["runId"], active_run.run_id)
+        self.assertEqual(response.status_code, 409)
+        active_run.refresh_from_db()
+        self.assertEqual(active_run.run_request['target_month'], '2026-04-01')
+        self.assertEqual(active_run.status, ContentFactoryRunStatus.QUEUED)
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
         mock_notify.assert_not_called()
 
@@ -2263,7 +2326,7 @@ class VibeRaisingApiTests(TestCase):
             )
 
         self.assertEqual(retry.status_code, 200)
-        self.assertTrue(retry.data["reusedExistingRun"])
+        self.assertIsInstance(retry.data['updateId'], int)
         self.assertEqual(retry.data["runId"], run.run_id)
         run.refresh_from_db()
         self.assertEqual(run.result["_valley_meta"]["dispatch_status"], "queued")
@@ -2305,62 +2368,26 @@ class VibeRaisingApiTests(TestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["state"], "queued")
-        self.assertFalse(response.data["reusedExistingRun"])
+        self.assertIsInstance(response.data['updateId'], int)
         self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 2)
         regenerated_run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
         self.assertEqual(regenerated_run.run_request["input_sources"], ["gmail", "xero"])
         self.assertNotEqual(regenerated_run.run_id, original_run.run_id)
         mock_notify.assert_called_once_with(regenerated_run.run_id)
 
-    def test_email_draft_start_reconciles_active_run_when_slack_is_added(self):
+    def test_email_draft_start_rejects_changing_sources_on_an_active_run(self):
         self.client.force_authenticate(user=self.user)
         _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
-
-        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
-            response = self.client.post(
-                "/api/v1/vibe-raising/email-draft/start/",
-                {"inputSources": ["gmail", "xero", "slack"]},
-                format="json",
-            )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.data["reusedExistingRun"])
-        self.assertEqual(response.data["runId"], run.run_id)
-        mock_notify.assert_not_called()
-
+        original = dict(run.run_request)
+        with patch("vibe_raising.views.notify_valley_run_created") as notify:
+            response = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail", "xero", "slack"]}, format="json")
+        self.assertEqual(response.status_code, 409, response.data)
         run.refresh_from_db()
-        expected_step_order = [
-            "profile_resolution",
-            "gmail_backfill",
-            "relevance_classification",
-            "thread_hydration",
-            "event_extraction",
-            "slack_backfill",
-            "slack_relevance_classification",
-            "slack_event_extraction",
-            "source_evidence_refresh",
-            "timeline_merge",
-            "reconciliation_enrichment",
-            "candidate_curation",
-            "founder_review",
-            "draft_generation",
-            "groundedness_review",
-        ]
-        self.assertEqual(run.run_request["input_sources"], ["gmail", "xero", "slack"])
-        self.assertEqual(run.step_order, expected_step_order)
-        self.assertNotIn("xero", run.step_order)
-        self.assertEqual(run.current_step, "slack_backfill")
-        self.assertEqual(run.run_request["slack_channel_ids"], ["C123"])
-        self.assertEqual(run.run_request["external_context"]["slack"]["selected_channel_ids"], ["C123"])
-        self.assertIn("xero", run.run_request["external_context"])
+        self.assertEqual(run.run_request, original)
+        self.assertEqual(run.current_step, "timeline_merge")
+        notify.assert_not_called()
 
-        steps_by_key = {step.step_key: step for step in run.steps.all()}
-        self.assertEqual(steps_by_key["slack_backfill"].status, ContentFactoryStepStatus.PENDING)
-        self.assertEqual(steps_by_key["slack_relevance_classification"].status, ContentFactoryStepStatus.PENDING)
-        self.assertEqual(steps_by_key["slack_event_extraction"].status, ContentFactoryStepStatus.PENDING)
-        for step_key in ["timeline_merge", "draft_generation", "groundedness_review"]:
-            self.assertEqual(steps_by_key[step_key].status, ContentFactoryStepStatus.PENDING)
-            self.assertEqual(steps_by_key[step_key].attempts, 0)
 
     def test_email_draft_start_maps_create_authority_error_to_connector_auth_response(self):
         self.client.force_authenticate(user=self.user)
@@ -2380,95 +2407,64 @@ class VibeRaisingApiTests(TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.data, {"detail": "Slack authority was revoked"})
 
-    def test_email_draft_start_maps_redispatch_refresh_authority_error_to_connector_auth_response(self):
+    def test_email_draft_start_redispatches_without_replacing_frozen_authority(self):
         self.client.force_authenticate(user=self.user)
         _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
         run.status = ContentFactoryRunStatus.QUEUED
         run.save(update_fields=["status", "updated_at"])
-        ContentFactoryRun.objects.filter(pk=run.pk).update(
-            updated_at=timezone.now() - timedelta(minutes=1)
-        )
+        ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=timezone.now()-timedelta(minutes=1))
+        with patch("vibe_raising.views.refresh_startup_update_run_source_context",
+                side_effect=ConnectorOAuthError("Synthetic revoked authority")) as refresh, patch(
+                "vibe_raising.views.notify_valley_run_created") as notify:
+            response = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail"]}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["runId"], run.run_id)
+        refresh.assert_not_called()
+        notify.assert_called_once_with(run.run_id)
 
-        with patch(
-            "vibe_raising.views.refresh_startup_update_run_source_context",
-            side_effect=ConnectorOAuthError("Slack redispatch authority changed"),
-        ):
-            response = self.client.post(
-                "/api/v1/vibe-raising/email-draft/start/",
-                {"inputSources": ["gmail", "xero", "slack"]},
-                format="json",
-            )
 
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(
-            response.data,
-            {"detail": "Slack redispatch authority changed"},
-        )
-
-    def test_email_draft_start_maps_active_refresh_authority_error_to_connector_auth_response(self):
+    def test_email_draft_start_keeps_active_authority_frozen(self):
         self.client.force_authenticate(user=self.user)
-        self._create_active_gmail_run_with_slack_selection()
+        _organization, _binding, run = self._create_active_gmail_run_with_slack_selection()
+        with patch("vibe_raising.views.refresh_startup_update_run_source_context",
+                side_effect=ConnectorOAuthError("Synthetic revoked authority")) as refresh, patch(
+                "vibe_raising.views.notify_valley_run_created") as notify:
+            response = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+                {"inputSources": ["gmail"]}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        refresh.assert_not_called()
+        notify.assert_not_called()
 
-        with patch(
-            "vibe_raising.views.refresh_startup_update_run_source_context",
-            side_effect=ConnectorOAuthError("Slack active-run authority changed"),
-        ):
-            response = self.client.post(
-                "/api/v1/vibe-raising/email-draft/start/",
-                {"inputSources": ["gmail", "xero", "slack"]},
-                format="json",
-            )
-
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(
-            response.data,
-            {"detail": "Slack active-run authority changed"},
-        )
 
     def test_email_draft_start_redispatches_stale_queued_run(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
-        google_connection = GoogleConnection.objects.create(
-            user=self.user,
-            google_email="founder@gmail.com",
-            refresh_token="refresh-token",
-            scope="https://www.googleapis.com/auth/gmail.readonly",
-        )
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
-        binding = UserStartupBinding.objects.create(
-            user=self.user,
-            organization=organization,
-            google_connection=google_connection,
-            role="founder",
-            is_default_for_gmail=True,
-        )
-        run = create_startup_update_run(
-            organization=organization,
-            binding=binding,
-        )
-        ContentFactoryRun.objects.filter(pk=run.pk).update(
-            updated_at=timezone.now() - timedelta(minutes=5),
-        )
-
-        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
-            with self.captureOnCommitCallbacks(execute=True):
-                response = self.client.post(
-                    "/api/v1/vibe-raising/email-draft/start/",
-                    {},
-                    format="json",
-                )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "queued")
-        self.assertEqual(response.data["runId"], run.run_id)
-        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
+        self._create_google_connection()
+        with patch("vibe_raising.views.notify_valley_run_created", return_value=ValleyHarnessResult(
+                ok=True, payload={"job_id": "queued-job", "status": "queued"})) as mock_notify:
+            first = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+                {"targetMonth": "2026-03-01"}, format="json")
+            self.assertEqual(first.status_code, 201, first.data)
+            run = ContentFactoryRun.objects.get(run_id=first.data['runId'])
+            self.assertEqual(run.run_request['update_id'], first.data['updateId'])
+            ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=timezone.now() - timedelta(minutes=5))
+            mock_notify.reset_mock()
+            response = self.client.post("/api/v1/vibe-raising/email-draft/start/",
+                {"targetMonth": "2026-03-01", "updateId": first.data['updateId']}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['state'], 'queued')
+        self.assertEqual(response.data['runId'], run.run_id)
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow='startup_monthly_update').count(), 1)
         mock_notify.assert_called_once_with(run.run_id)
 
-    def test_email_draft_start_supersedes_other_connection_open_run(self):
+    def test_email_draft_start_preserves_other_connection_open_run(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2509,14 +2505,12 @@ class VibeRaisingApiTests(TestCase):
                     format="json",
                 )
 
-        self.assertEqual(response.status_code, 201)
-        new_run = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(response.status_code, 409)
         other_run.refresh_from_db()
-        self.assertNotEqual(new_run.run_id, other_run.run_id)
-        self.assertEqual(new_run.run_request["google_connection_id"], google_connection.id)
-        self.assertEqual(other_run.status, ContentFactoryRunStatus.FAILED)
-        self.assertEqual(other_run.error, SUPERSEDED_GMAIL_CONNECTION_ERROR)
-        mock_notify.assert_called_once_with(new_run.run_id)
+        self.assertEqual(other_run.run_request['google_connection_id'], other_connection.id)
+        self.assertEqual(other_run.status, ContentFactoryRunStatus.QUEUED)
+        self.assertEqual(ContentFactoryRun.objects.filter(organization=organization).count(), 1)
+        mock_notify.assert_not_called()
 
     def test_email_draft_status_reports_queued_then_running_for_open_run(self):
         self.client.force_authenticate(user=self.user)
@@ -2527,7 +2521,9 @@ class VibeRaisingApiTests(TestCase):
             refresh_token="refresh-token",
             scope="https://www.googleapis.com/auth/gmail.readonly",
         )
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2567,7 +2563,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2616,7 +2614,9 @@ class VibeRaisingApiTests(TestCase):
             refresh_token="refresh-token",
             scope="https://www.googleapis.com/auth/gmail.readonly",
         )
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2696,7 +2696,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2737,7 +2739,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2811,7 +2815,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2909,7 +2915,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -2994,7 +3002,9 @@ class VibeRaisingApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -3035,10 +3045,12 @@ class VibeRaisingApiTests(TestCase):
         self.assertNotIn("asks", replaced.structured_memo)
         self.assertNotIn("Stale alpha", str(replaced.structured_memo))
 
-    def test_generated_monthly_update_defaults_to_company_visibility_and_preserves_existing(self):
+    def test_generated_monthly_update_uses_saved_run_visibility_and_preserves_existing(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         company.organization = organization
         company.default_audience_visibility = ["community", "investors"]
         company.save(update_fields=["organization", "default_audience_visibility", "updated_at"])
@@ -3050,7 +3062,8 @@ class VibeRaisingApiTests(TestCase):
             role="founder",
             is_default_for_gmail=True,
         )
-        run = create_startup_update_run(organization=organization, binding=binding)
+        run = create_startup_update_run(organization=organization, binding=binding,
+            target_month=date(2026, 5, 1), audience_visibility=["community"])
 
         draft = upsert_monthly_update_draft(
             organization=organization,
@@ -3060,9 +3073,9 @@ class VibeRaisingApiTests(TestCase):
             model_name="generated-model",
         )
 
-        self.assertEqual(draft.audience_visibility, ["community", "investors"])
+        self.assertEqual(draft.audience_visibility, ["community"])
 
-        company.default_audience_visibility = ["investors"]
+        company.default_audience_visibility = ["just_me"]
         company.save(update_fields=["default_audience_visibility", "updated_at"])
         replaced = upsert_monthly_update_draft(
             organization=organization,
@@ -3073,12 +3086,14 @@ class VibeRaisingApiTests(TestCase):
             replace=True,
         )
 
-        self.assertEqual(replaced.audience_visibility, ["community", "investors"])
+        self.assertEqual(replaced.audience_visibility, ["community"])
 
     def test_generated_monthly_update_accepts_explicit_audience_visibility(self):
         self.client.force_authenticate(user=self.user)
         _profile, company = self._create_founder_company(domain="acme.com", registered=True)
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         company.organization = organization
         company.default_audience_visibility = ["community"]
         company.save(update_fields=["organization", "default_audience_visibility", "updated_at"])
@@ -3139,68 +3154,47 @@ class VibeRaisingApiTests(TestCase):
         self.assertIn("Stale alpha", str(merged.structured_memo))
         self.assertIn("Fresh delta", str(merged.structured_memo))
 
-    def test_email_draft_start_reuses_completed_draft_without_creating_run(self):
+    def test_email_draft_start_regenerates_completed_draft_without_publishing_or_discarding_it(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
-        google_connection = GoogleConnection.objects.create(
-            user=self.user,
-            google_email="founder@gmail.com",
-            refresh_token="refresh-token",
-            scope="https://www.googleapis.com/auth/gmail.readonly",
-        )
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
-        UserStartupBinding.objects.create(
-            user=self.user,
-            organization=organization,
-            google_connection=google_connection,
-            role="founder",
-            is_default_for_gmail=True,
-        )
-        MonthlyUpdateDraft.objects.create(
-            organization=organization,
-            month=date(2026, 3, 1),
-            status="ready",
-            structured_memo={
-                "highlights": ["Closed two new pilots"],
-                "lowlights": ["Hiring is still slow"],
-                "asks": ["Customer intros"],
-                "kpi_snapshot": [{"metric_key": "revenue", "label": "Revenue", "value": "$45,000"}],
-            },
-            rendered_markdown="# March Update",
-        )
+        connection = self._create_google_connection()
+        organization = Organization.objects.get(domain='acme.com')
+        UserStartupBinding.objects.create(user=self.user, organization=organization,
+            google_connection=connection, role='founder', is_default_for_gmail=True)
+        memo = {'highlights': ['Closed two new pilots'], 'lowlights': ['Hiring is still slow'],
+            'asks': ['Customer intros'], '_month_sequence': 1}
+        draft = MonthlyUpdateDraft.objects.create(organization=organization, month=date(2026, 3, 1),
+            status='ready', structured_memo=memo, rendered_markdown='# March Update')
+        with patch('vibe_raising.views.notify_valley_run_created', return_value=ValleyHarnessResult(
+                ok=True, payload={'job_id': 'new-generation', 'status': 'queued'})) as notify:
+            response = self.client.post('/api/v1/vibe-raising/email-draft/start/',
+                {'targetMonth': '2026-03-01', 'updateId': draft.pk}, format='json')
+            self.assertEqual(response.status_code, 201, response.data)
+            self.assertEqual(response.data['state'], 'queued')
+            self.assertEqual(response.data['updateId'], draft.pk)
+            first_run = ContentFactoryRun.objects.get(run_id=response.data['runId'])
+            self.assertEqual(first_run.run_request['update_id'], draft.pk)
+            draft.refresh_from_db()
+            self.assertEqual(draft.structured_memo, memo)
+            self.assertIsNone(draft.published_at)
+            first_run.status = ContentFactoryRunStatus.COMPLETED
+            first_run.save(update_fields=['status'])
+            notify.reset_mock()
+            forced = self.client.post('/api/v1/vibe-raising/email-draft/start/',
+                {'targetMonth': '2026-03-01', 'updateId': draft.pk, 'forceRegenerate': True}, format='json')
+        self.assertEqual(forced.status_code, 201, forced.data)
+        self.assertEqual(forced.data['updateId'], draft.pk)
+        self.assertNotEqual(forced.data['runId'], first_run.run_id)
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow='startup_monthly_update').count(), 2)
+        notify.assert_called_once_with(forced.data['runId'])
 
-        response = self.client.post(
-            "/api/v1/vibe-raising/email-draft/start/",
-            {"targetMonth": "2026-03-01"},
-            format="json",
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "completed")
-        self.assertEqual(response.data["targetMonth"], "2026-03-01")
-        self.assertFalse(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").exists())
-        self.assertEqual(response.data["currentMonth"]["metrics"]["revenue"], "$45,000")
-
-        with patch("vibe_raising.views.notify_valley_run_created") as mock_notify:
-            with self.captureOnCommitCallbacks(execute=True):
-                forced_response = self.client.post(
-                    "/api/v1/vibe-raising/email-draft/start/",
-                    {"targetMonth": "2026-03-01", "forceRegenerate": True},
-                    format="json",
-                )
-
-        self.assertEqual(forced_response.status_code, 201)
-        self.assertEqual(forced_response.data["state"], "queued")
-        self.assertEqual(forced_response.data["targetMonth"], "2026-03-01")
-        forced_run = ContentFactoryRun.objects.get(run_id=forced_response.data["runId"])
-        self.assertEqual(forced_run.run_request["target_month"], "2026-03-01")
-        mock_notify.assert_called_once_with(forced_run.run_id)
-
-    def test_email_draft_start_refreshes_xero_metrics_when_reusing_completed_draft(self):
+    def test_email_draft_start_refreshes_xero_metrics_when_regenerating_completed_draft(self):
         self.client.force_authenticate(user=self.user)
         self._create_founder_company()
         google_connection = self._create_google_connection()
-        organization = Organization.objects.create(name="Acme Inc.", domain="acme.com")
+        organization, _ = Organization.objects.get_or_create(
+            domain="acme.com", defaults={"name": "Acme Inc."}
+        )
         binding = UserStartupBinding.objects.create(
             user=self.user,
             organization=organization,
@@ -3238,7 +3232,9 @@ class VibeRaisingApiTests(TestCase):
             rendered_markdown="# March Update",
         )
 
-        with patch("vibe_raising.views.publish_xero_metric_observations") as mock_publish:
+        with patch("startup_updates.services.publish_xero_metric_observations") as mock_publish, \
+             patch("vibe_raising.views.notify_valley_run_created", return_value=ValleyHarnessResult(
+                 ok=True, payload={"job_id": "refreshed-generation", "status": "queued"})) as notify:
             mock_publish.return_value = {"warnings": [], "published_metric_count": 0}
             response = self.client.post(
                 "/api/v1/vibe-raising/email-draft/start/",
@@ -3246,23 +3242,25 @@ class VibeRaisingApiTests(TestCase):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "completed")
-        self.assertFalse(response.data["reusedExistingRun"])
-        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 1)
-        mock_publish.assert_called_once()
-        self.assertEqual(mock_publish.call_args.kwargs["organization"], organization)
-        self.assertIsNone(mock_publish.call_args.kwargs["run"])
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["state"], "queued")
+        self.assertNotEqual(response.data["runId"], run.run_id)
+        notify.assert_called_once_with(response.data["runId"])
+        self.assertEqual(ContentFactoryRun.objects.filter(workflow="startup_monthly_update").count(), 2)
+        mock_publish.assert_not_called()
+        queued = ContentFactoryRun.objects.get(run_id=response.data["runId"])
+        self.assertEqual(queued.run_request["source_preflight_version"], 1)
+        self.assertFalse(queued.run_request.get("source_preflight_complete", False))
 
-    def test_email_draft_start_merges_existing_startup_profile_context(self):
+    @patch("vibe_raising.views.notify_valley_run_created")
+    def test_email_draft_start_merges_existing_startup_profile_context(self, notify):
         self.client.force_authenticate(user=self.user)
         _profile, _company = self._create_founder_company()
-        organization = Organization.objects.create(
-            name="Acme Legacy",
-            domain="acme.com",
-            competitors=[{"name": "CompeteCo", "domain": "compete.co"}],
-            seed_keywords=["workflow"],
-        )
+        organization = _company.organization
+        organization.name = "Acme Legacy"
+        organization.competitors = [{"name": "CompeteCo", "domain": "compete.co"}]
+        organization.seed_keywords = ["workflow"]
+        organization.save(update_fields=["name", "competitors", "seed_keywords"])
         OrganizationContentConfig.objects.create(
             organization=organization,
             brand_name="Acme AI",
@@ -3283,8 +3281,8 @@ class VibeRaisingApiTests(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["state"], "auth_required")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["state"], "queued")
         profile = StartupProfile.objects.get(organization=organization)
         organization.refresh_from_db()
         self.assertEqual(organization.name, "Acme Inc.")

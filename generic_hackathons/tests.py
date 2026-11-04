@@ -278,7 +278,7 @@ class GenericHackathonAnnouncementCreateTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(GenericHackathonAnnouncement.objects.filter(title='Lunch is served').exists())
 
-    @patch('integrations.services.slack.SlackService.get_user_profile', return_value=None)
+    @patch('integrations.services.slack.SlackService.get_user_profile_strict', return_value=None)
     def test_unknown_requester_is_forbidden(self, _mock_profile):
         response = self.client.post(
             self.url,

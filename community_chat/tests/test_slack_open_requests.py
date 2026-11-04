@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from integrations.services import slack_open_requests as opens
 from integrations.services import slack_owner_inventory_api as api
@@ -13,12 +13,14 @@ from integrations.services import slack_dm_mirror as dm
 from integrations.services.message_sync.scheduler import BudgetDeferred
 
 
+@override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
 class SlackOpenRequestsTests(SimpleTestCase):
     def setUp(self):
+        opens.cache.clear()
         self.now = 1900000000.0
         self.connection = SimpleNamespace(sync_cursor={}, save=MagicMock())
         self.grant = SimpleNamespace(
-            user=object(), connection=self.connection, save=MagicMock(),
+            pk=7, user=object(), connection=self.connection, save=MagicMock(),
             conversations=MagicMock(), owner_conversation_inventory=MagicMock(),
         )
         self.device = SimpleNamespace(pk=4, public_key="a" * 64, verified_at=None)
@@ -33,6 +35,8 @@ class SlackOpenRequestsTests(SimpleTestCase):
             ("integrations.services.slack_open_requests.time.time", {"return_value": self.now}),
             ("integrations.services.slack_owner_inventory.device_epoch", {"return_value": "epoch"}),
             ("integrations.services.slack_owner_inventory.state_for", {"return_value": {}}),
+            ("integrations.services.slack_owner_inventory_api.device_epoch", {"return_value": "epoch"}),
+            ("integrations.services.slack_owner_inventory_api.state_for", {"return_value": {}}),
             ("integrations.services.slack_owner_inventory_api.transaction.atomic", {"side_effect": lambda: nullcontext()}),
             ("integrations.services.slack_owner_inventory_api._authorized", {"return_value": (self.grant, self.authority, self.device, {})}),
             ("integrations.services.slack_owner_inventory_api._lock_slack_grant_api_authority", {"return_value": (self.grant, self.connection)}),
@@ -82,7 +86,7 @@ class SlackOpenRequestsTests(SimpleTestCase):
         self.assertEqual(len(self.connection.sync_cursor[opens.KEY]), 1)
 
     def test_cached_room_for_other_device_is_not_returned(self):
-        mirror = SimpleNamespace(participant_buzz_pubkeys=["b" * 64], mlai_channel_id=uuid4())
+        mirror = SimpleNamespace(status="live", slack_conversation_id=self.row.slack_conversation_id, participant_buzz_pubkeys=["b" * 64], mlai_channel_id=uuid4())
         with patch.object(api, "catalog_conversations") as catalog, patch.object(
             api, "ready_for_display", return_value=True,
         ) as readiness:
@@ -127,6 +131,74 @@ class SlackOpenRequestsTests(SimpleTestCase):
         self.enqueue()
         self.assertEqual(len(self.connection.sync_cursor[opens.KEY]), 1)
 
+    def test_progress_and_one_time_timeout_survive_another_enqueue(self):
+        from datetime import datetime, timezone
+        first = self.enqueue()
+        self.assertEqual(first["stage"], "queued")
+        self.assertEqual(first["device_access"], "none")
+        self.assertEqual(first["queue_position"], 0)
+        self.assertEqual(first["deadline_at"], datetime.fromtimestamp(self.now + 900, tz=timezone.utc).isoformat())
+        key, request = next(iter(self.connection.sync_cursor[opens.KEY].items()))
+        request["until"] = self.now - 10
+        self.row.slack_conversation_id = "DOTHER"
+        second = self.enqueue()
+        self.assertEqual(second["queue_position"], 0)
+        self.row.slack_conversation_id = "DCINDY"
+        with patch.object(api, "catalog_conversations") as catalog:
+            catalog.return_value.first.return_value = None
+            self.assertEqual(self.request(), (409, {"error": "open_timed_out"}))
+        self.assertIn("timeout_reported_at", self.connection.sync_cursor[opens.KEY][key])
+        retry = self.enqueue()
+        self.assertNotEqual(retry["request_id"], first["request_id"])
+
+    def test_importing_and_old_expired_requests_reenqueue_without_timeout(self):
+        self.enqueue()
+        key, request = next(iter(self.connection.sync_cursor[opens.KEY].items()))
+        for state, expired in (("importing", 10), ("pending", 121)):
+            self.connection.sync_cursor[opens.KEY][key] = {**request, "state": state, "until": self.now - expired}
+            self.assertEqual(self.enqueue()["state"], "importing")
+
+    def test_device_gap_reports_adding_device_and_cache_failure_is_nonfatal(self):
+        mirror = SimpleNamespace(status="live", slack_conversation_id="DCINDY", participant_buzz_pubkeys=["other"], mlai_channel_id=uuid4())
+        with patch.object(api, "catalog_conversations") as catalog, patch.object(opens.cache, "set", side_effect=RuntimeError), self.assertLogs(opens.logger, "WARNING"):
+            catalog.return_value.first.return_value = mirror
+            status, result = self.request()
+        self.assertEqual((status, result["stage"], result["device_access"]), (202, "adding_device", "pending"))
+        self.assertTrue(next(iter(self.connection.sync_cursor[opens.KEY].values()))["device_only"])
+
+    def test_due_source_can_pass_cooling_queued_source_but_not_in_flight(self):
+        self.enqueue()
+        old_key, old = next(iter(self.connection.sync_cursor[opens.KEY].items()))
+        old["due"] = self.now + 30
+        self.connection.sync_cursor[opens.KEY]["second"] = {**old, "id": "new", "source_id": "DERICA", "stage": "queued", "due": self.now, "requested_at": self.now + 1}
+        with patch.object(opens, "_update") as update, patch.object(opens, "_validated_source", return_value=({}, 0)), patch.object(dm, "_discover_conversation", return_value=None):
+            opens.process_next_open(self.grant, self.authority)
+        self.assertEqual(update.call_args.args[1], "second")
+        for stage in ("validating", "provisioning"):
+            old["stage"] = stage
+            with self.assertRaises(BudgetDeferred):
+                opens.process_next_open(self.grant, self.authority)
+
+    @override_settings(MESSAGE_SYNC_ENABLED=True, MESSAGE_SYNC_STABLE_PRIVATE_ROOMS=True, MESSAGE_SYNC_DEVICE_FANOUT_BATCH=10)
+    def test_device_only_im_skips_source_validation_and_falls_back_if_ineligible(self):
+        self.enqueue()
+        request = next(iter(self.connection.sync_cursor[opens.KEY].values()))
+        request["device_only"] = True
+        mirror = SimpleNamespace(pk=12)
+        self.grant.conversations.filter.return_value.first.return_value = mirror
+        with patch('integrations.services.message_sync.device_recovery.device_only_row_eligible', return_value=True), patch.object(dm, '_provision_owner_conversation') as provision, patch.object(api, '_validate_open_source') as validate, patch.object(opens, '_update'):
+            self.assertTrue(opens.process_next_open(self.grant, self.authority))
+        validate.assert_not_called()
+        provision.assert_called_once_with(mirror, required_owner_public_key=self.device.public_key, device_only_statuses=frozenset({'live'}))
+        with patch('integrations.services.message_sync.device_recovery.device_only_row_eligible', return_value=True), patch.object(dm, '_provision_owner_conversation', side_effect=dm.SlackDmDeviceOnlyIneligible('changed')), patch.object(api, '_validate_open_source', return_value=({}, 0)) as validate, patch.object(dm, '_discover_conversation', return_value=None), patch.object(opens, '_update'):
+            opens.process_next_open(self.grant, self.authority)
+        validate.assert_called_once()
+        self.row.kind = 'private_channel'
+        with patch.object(dm, '_provision_owner_conversation') as provision, patch.object(api, '_validate_open_source', return_value=({}, 0)) as validate, patch.object(dm, '_discover_conversation', return_value=None), patch.object(opens, '_update'):
+            opens.process_next_open(self.grant, self.authority)
+        provision.assert_not_called()
+        validate.assert_called_once()
+
     def run_worker(self, *, source_error=None, import_error=None, changed_epoch=False):
         self.enqueue()
         if changed_epoch:
@@ -148,7 +220,7 @@ class SlackOpenRequestsTests(SimpleTestCase):
         self.assertFalse(discover.call_args.kwargs["force_backfill"])
         self.assertFalse(discover.call_args.kwargs["reset_history"])
         prioritize.assert_called_once()
-        self.assertEqual(update.call_args.kwargs, {"state": "importing"})
+        self.assertEqual(update.call_args.kwargs, {"state": "importing", "stage": "importing_history"})
 
     def test_worker_defers_budget_without_provisioning(self):
         _, discover, prioritize, update = self.run_worker(
@@ -165,7 +237,7 @@ class SlackOpenRequestsTests(SimpleTestCase):
 
     def test_backoff_begins_after_slow_source_work(self):
         self.enqueue()
-        with patch.object(opens.time, "time", side_effect=[self.now, self.now, self.now + 8]), patch.object(
+        with patch.object(opens.cache, "get_many", return_value={}), patch.object(opens.time, "time", side_effect=[self.now, self.now, self.now + 8]), patch.object(
             api, "_validate_open_source", side_effect=BudgetDeferred(60),
         ), patch.object(opens, "_update") as update:
             opens.process_next_open(self.grant, self.authority)
@@ -177,7 +249,7 @@ class SlackOpenRequestsTests(SimpleTestCase):
         source, discover, _, update = self.run_worker()
         source.assert_not_called()
         discover.assert_called_once()
-        self.assertEqual(update.call_args.kwargs, {"state": "importing"})
+        self.assertEqual(update.call_args.kwargs, {"state": "importing", "stage": "importing_history"})
 
     def test_source_checkpoint_does_not_persist_provider_message_payloads(self):
         details = {
@@ -229,14 +301,16 @@ class SlackOpenRequestsTests(SimpleTestCase):
         self.enqueue()
         request = next(iter(self.connection.sync_cursor[opens.KEY].values()))
         request["due"] = self.now + 18
+        request["stage"] = "validating"
         # A second tap must not overwrite the first source's resumable metadata.
         self.connection.sync_cursor[opens.KEY]["second"] = {
-            **request, "id": "second", "source_id": "DERICA",
+            **request, "id": "second", "source_id": "DERICA", "stage": "queued",
             "requested_at": self.now + 1, "due": self.now,
         }
         with patch.object(api, "_validate_open_source") as source, self.assertRaises(BudgetDeferred) as deferred:
             opens.process_next_open(self.grant, self.authority)
         self.assertEqual(deferred.exception.retry_after, 18)
+        self.assertTrue(deferred.exception.discovery_admission_deferred)
         source.assert_not_called()
 
     def test_open_queued_during_directory_scan_keeps_discovery_due(self):
@@ -263,7 +337,7 @@ class SlackOpenRequestsTests(SimpleTestCase):
             source, discover, _, update = self.run_worker()
         source.assert_not_called()
         discover.assert_not_called()
-        self.assertEqual(update.call_args.kwargs, {"state": "importing"})
+        self.assertEqual(update.call_args.kwargs, {"state": "importing", "stage": "importing_history"})
 
     def test_old_receipt_pages_advance_without_revalidating_source(self):
         with patch("integrations.services.message_sync.presentation.recover_presentation", return_value=(False, 41)):
@@ -304,3 +378,103 @@ class SlackOpenRequestsTests(SimpleTestCase):
         self.assertEqual(current, {**previous, "state": "pending"})
         self.assertEqual(payload["retry_after_seconds"], 37)
         self.assertEqual(self.connection.sync_cursor[KEY]["token"], "lease")
+
+
+    def test_enqueue_sets_open_marker_preserving_served(self):
+        from integrations.services.message_sync.discovery import KEY
+        self.connection.sync_cursor[KEY] = {"served": self.now - 60, "token": "leased"}
+        self.enqueue()
+        marker = self.connection.sync_cursor[KEY]
+        self.assertEqual(marker["open_requested_at"], self.now)
+        self.assertEqual(marker["served"], self.now - 60)
+        self.assertEqual(marker["token"], "leased")
+
+    def test_admission_deferral_returns_turn(self):
+        self.enqueue()
+        denied = BudgetDeferred(19, before_request_method="conversations.info")
+        with patch.object(dm, "_discover_conversation", side_effect=denied), patch.object(api, "_validate_open_source", return_value=({"id": "DCINDY"}, int(self.now))), patch.object(opens, "_update") as update:
+            with self.assertRaises(BudgetDeferred) as caught:
+                opens.process_next_open(self.grant, self.authority)
+        self.assertIs(caught.exception, denied)
+        self.assertTrue(denied.discovery_admission_deferred)
+        self.assertEqual(update.call_args.kwargs, {"due": self.now + 19})
+
+    def test_successful_provisioning_logs_request_latency_without_source(self):
+        with patch.object(opens.telemetry, "record_latency") as latency, self.assertLogs(opens.logger) as logs:
+            self.run_worker()
+        self.assertEqual(latency.call_args.args[0], "open_provisioned")
+        self.assertNotIn("DCINDY", str(logs.output))
+
+
+    def provisional_fixture(self):
+        from datetime import datetime, timezone
+        self.grant.consented_at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        self.enqueue()
+        request = next(iter(self.connection.sync_cursor[opens.KEY].values()))
+        request.update(state="importing", receipt_recovery_complete=True)
+        mirror = SimpleNamespace(status="live", slack_conversation_id=self.row.slack_conversation_id, participant_buzz_pubkeys=[self.device.public_key], mlai_channel_id=uuid4(), participant_hash="current", participant_slack_ids=["OWNER", "OTHER"])
+        registration = SimpleNamespace(status="completed", metadata={
+            "legacy": False, "registration_state": "active", "channel_id": str(mirror.mlai_channel_id),
+            "consent_generation": self.grant.consented_at.isoformat(), "participant_hash": "current",
+            "participant_slack_ids": ["OWNER", "OTHER"], "participant_pubkeys": [self.device.public_key],
+        })
+        return request, mirror, registration
+
+    def test_current_registered_import_returns_additive_provisional_field(self):
+        from integrations.models import SlackDmMirrorDelivery
+        _, mirror, registration = self.provisional_fixture()
+        with patch.object(api, "catalog_conversations") as catalog, patch.object(api, "ready_for_display", return_value=False), patch.object(SlackDmMirrorDelivery.objects, "filter") as registrations, patch.object(dm, "_ensure_current_registration_row_locked", side_effect=AssertionError("must not mint legacy row")):
+            registrations.return_value.order_by.return_value = [registration]
+            catalog.return_value.first.return_value = mirror
+            status, payload = self.request()
+        self.assertEqual(status, 202)
+        self.assertIsNone(payload["mlai_channel_id"])
+        self.assertEqual(payload["provisional_channel_id"], str(mirror.mlai_channel_id))
+
+    def test_provisional_audience_fences_fail_closed(self):
+        from integrations.models import SlackDmMirrorDelivery
+        mutations = [
+            ("request", "epoch", "stale"), ("request", "public_key", "b" * 64),
+            ("request", "state", "pending"), ("request", "until", self.now - 1),
+            ("registration", "legacy", True), ("registration", "registration_state", "cleanup_pending"),
+            ("registration", "consent_generation", "old"), ("registration", "participant_hash", "old"),
+            ("registration", "participant_slack_ids", ["OWNER"]), ("registration", "participant_pubkeys", ["b" * 64]),
+            ("registration", "channel_id", str(uuid4())),
+        ]
+        for target, field, value in mutations:
+            request, mirror, registration = self.provisional_fixture()
+            (request if target == "request" else registration.metadata)[field] = value
+            with self.subTest(target=target, field=field), patch.object(SlackDmMirrorDelivery.objects, "filter") as registrations:
+                registrations.return_value.order_by.return_value = [registration]
+                self.assertIsNone(api._provisional_channel_id(self.grant, self.connection, self.authority, self.device, mirror))
+        request, mirror, registration = self.provisional_fixture()
+        cleanup = SimpleNamespace(status="pending", metadata={"registration_state": "cleanup_pending"})
+        with patch.object(SlackDmMirrorDelivery.objects, "filter") as registrations:
+            registrations.return_value.order_by.return_value = [registration, cleanup]
+            self.assertIsNone(api._provisional_channel_id(self.grant, self.connection, self.authority, self.device, mirror))
+
+
+    @override_settings(MESSAGE_SYNC_OPEN_PRIORITY_ENABLED=False)
+    def test_open_priority_disabled_cooldown_keeps_legacy_turn_penalty(self):
+        self.enqueue()
+        request = next(iter(self.connection.sync_cursor[opens.KEY].values()))
+        request["due"] = self.now + 18
+        with self.assertRaises(BudgetDeferred) as caught:
+            opens.process_next_open(self.grant, self.authority)
+        self.assertEqual(caught.exception.retry_after, 18)
+        self.assertFalse(getattr(caught.exception, "discovery_admission_deferred", False))
+
+    @override_settings(MESSAGE_SYNC_OPEN_PRIORITY_ENABLED=False)
+    def test_open_priority_disabled_admission_deferrals_keep_legacy_turn_penalty(self):
+        for wrapped in (False, True):
+            deferred = BudgetDeferred(19, before_request_method="conversations.info")
+            self.progress.value = {}
+            with self.subTest(wrapped=wrapped):
+                if wrapped:
+                    error = api.InventoryError("inventory_rate_limited", 429, retry_after_seconds=19)
+                    error.__cause__ = deferred
+                    _, _, _, update = self.run_worker(source_error=error)
+                else:
+                    _, _, _, update = self.run_worker(import_error=deferred)
+                self.assertFalse(getattr(deferred, "discovery_admission_deferred", False))
+                self.assertEqual(update.call_args.kwargs, {"due": self.now + 19})

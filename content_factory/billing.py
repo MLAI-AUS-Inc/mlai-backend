@@ -4,7 +4,7 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 
-CONTENT_FACTORY_ARTICLE_COST_POINTS = 6
+CONTENT_FACTORY_ARTICLE_COST_POINTS = 12
 CONTENT_FACTORY_CONTENT_ISLAND_TOPIC_COST_POINTS = 1
 CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS = 6
 FREE_CONTENT_FACTORY_DOMAINS = {"mlai.au"}
@@ -12,6 +12,146 @@ INSUFFICIENT_ROO_POINTS_ERROR_CODE = "INSUFFICIENT_ROO_POINTS"
 CONTENT_FACTORY_ACTION_ARTICLE_GENERATION = "article_generation"
 CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION = "content_island_topic_generation"
 FREE_SETUP_ACTIONS = frozenset({"prepare", "repo_scan", "content_factory_scan", "article_system_setup", "website_verify"})
+# Startup research a new founder needs before any article. Free only behind
+# ARTICLES_FREE_SETUP_RESEARCH_ENABLED, and capped per account per day.
+FREE_SETUP_RESEARCH_ACTIONS = frozenset({"startup_autofill", "website_baseline"})
+FREE_SETUP_RESEARCH_CAP_SETTINGS = {
+    "startup_autofill": "ARTICLES_FREE_SETUP_AUTOFILL_DAILY_CAP",
+    "website_baseline": "ARTICLES_FREE_SETUP_BASELINE_DAILY_CAP",
+}
+FREE_SETUP_RESEARCH_WINDOW_SECONDS = 24 * 60 * 60
+
+
+def free_setup_actions() -> frozenset:
+    """Return the AI actions that skip the 6-point balance floor.
+
+    Setup work is always free. Startup autofill and the website baseline join
+    it only while ARTICLES_FREE_SETUP_RESEARCH_ENABLED is on, because Content
+    Factory refuses a 'free' authorization for them until it accepts one.
+    """
+    from django.conf import settings
+
+    if getattr(settings, "ARTICLES_FREE_SETUP_RESEARCH_ENABLED", False):
+        return FREE_SETUP_ACTIONS | FREE_SETUP_RESEARCH_ACTIONS
+    return FREE_SETUP_ACTIONS
+
+
+def normalized_account_key(user) -> str:
+    """Key per-account limits on the account email, or the user id without one."""
+    email = str(getattr(user, "email", "") or "").strip().casefold()
+    return f"email:{email}" if email else f"user:{getattr(user, 'pk', '')}"
+
+
+def _free_setup_uses(user, action: str, now: Optional[float], *, include_reservations=True):
+    """Return (cap, cache key, current time, uses in the rolling window) for an account."""
+    import hashlib
+    import time
+
+    from django.conf import settings
+    from django.core.cache import cache
+
+    setting = FREE_SETUP_RESEARCH_CAP_SETTINGS.get(action)
+    cap = int(getattr(settings, setting, 0) or 0) if setting else 0
+    current = time.time() if now is None else float(now)
+    digest = hashlib.sha256(normalized_account_key(user).encode("utf-8")).hexdigest()
+    key = f"content_factory:free_setup:{action}:{digest}"
+    window = FREE_SETUP_RESEARCH_WINDOW_SECONDS
+    recent = sorted(stamp for stamp in (cache.get(key) or []) if isinstance(stamp, (int, float)) and current - stamp < window)
+    if include_reservations:
+        recent = sorted([*recent, *_free_setup_reservations(key, current).values()])
+    return cap, key, current, recent
+
+
+def _free_setup_reservations(key, current):
+    from django.core.cache import cache
+    value = cache.get(key+':reserved')
+    return {identity: at for identity, at in (value.items() if isinstance(value, dict) else [])
+            if isinstance(identity, str) and isinstance(at, (int, float))
+            and current-at < FREE_SETUP_RESEARCH_WINDOW_SECONDS}
+
+
+def _lock_free_setup_quota(user, action, now, *, cache_key=None):
+    """Hold the account and normalized-account quota lock inside a short transaction."""
+    import hashlib
+    from django.contrib.auth import get_user_model
+    from django.db import connection
+    current_user = get_user_model().objects.select_for_update().get(pk=user.pk)
+    key = cache_key or _free_setup_uses(current_user, action, now, include_reservations=False)[1]
+    if connection.vendor == 'postgresql':
+        lock_id = int.from_bytes(hashlib.blake2b(('free-setup:'+key).encode(), digest_size=8).digest(), 'big', signed=True)
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT pg_advisory_xact_lock(%s)', [lock_id])
+    return current_user, key
+
+
+def reserve_free_setup_use(user, action: str, identity: str, *, now: Optional[float] = None):
+    """Reserve one original free action before HTTP, idempotently by dispatch identity.
+
+    Count reservations alongside historic timestamp uses. The opaque handle is
+    internal only; a confirmed no-work manual start can release its own slot.
+    No payment or ledger row is created, and no transaction spans remote work.
+    """
+    from django.core.cache import cache
+    from django.db import transaction
+    from rest_framework.exceptions import Throttled
+    if not isinstance(identity, str) or not 0 < len(identity) <= 200:
+        raise ValueError('A bounded original free-action identity is required.')
+    with transaction.atomic():
+        current_user, key = _lock_free_setup_quota(user, action, now)
+        cap, _, current, recent = _free_setup_uses(current_user, action, now)
+        if cap <= 0:
+            return None
+        reserved = _free_setup_reservations(key, current)
+        if identity in reserved:
+            return key, identity
+        if len(recent) >= cap:
+            raise Throttled(wait=max(1, int(recent[len(recent)-cap]+FREE_SETUP_RESEARCH_WINDOW_SECONDS-current)+1))
+        cache.set(key+':reserved', {**reserved, identity: current}, timeout=FREE_SETUP_RESEARCH_WINDOW_SECONDS)
+        return key, identity
+
+
+def release_free_setup_use(user, action: str, handle) -> None:
+    """Release only this internal reservation after a confirmed no-work result."""
+    from django.core.cache import cache
+    from django.db import transaction
+    if not handle:
+        return
+    key, identity = handle
+    with transaction.atomic():
+        _lock_free_setup_quota(user, action, None, cache_key=key)
+        value = cache.get(key+':reserved')
+        if isinstance(value, dict) and identity in value:
+            cache.set(key+':reserved', {k: v for k, v in value.items() if k != identity}, timeout=FREE_SETUP_RESEARCH_WINDOW_SECONDS)
+
+
+def check_free_setup_daily_cap(user, action: str, *, now: Optional[float] = None) -> None:
+    """Refuse a free setup research action once the account used its N per rolling 24 hours.
+
+    Checking records nothing: a request that never starts research (a reused
+    run, a confirmation 409, a validation error, a queue failure) costs no use.
+    A cap of 0 turns the limit off. Over the cap this raises DRF ``Throttled``
+    (429 + Retry-After), so no new failure code is introduced.
+    """
+    from rest_framework.exceptions import Throttled
+
+    cap, _key, current, recent = _free_setup_uses(user, action, now)
+    if cap > 0 and len(recent) >= cap:
+        raise Throttled(wait=max(1, int(recent[len(recent) - cap] + FREE_SETUP_RESEARCH_WINDOW_SECONDS - current) + 1))
+
+
+def record_free_setup_use(user, action: str, *, now: Optional[float] = None) -> None:
+    """Remember one free setup research run for the account's rolling 24 hour cap."""
+    from django.core.cache import cache
+
+    cap, key, current, recent = _free_setup_uses(user, action, now, include_reservations=False)
+    if cap > 0:
+        cache.set(key, [*recent, current], timeout=FREE_SETUP_RESEARCH_WINDOW_SECONDS)
+
+
+def enforce_free_setup_daily_cap(user, action: str, *, now: Optional[float] = None) -> None:
+    """Check the cap and record one use (a run that is certain to start)."""
+    check_free_setup_daily_cap(user, action, now=now)
+    record_free_setup_use(user, action, now=now)
 
 
 def get_content_factory_setup_cost_points(domain: Optional[str]) -> int:
@@ -43,9 +183,13 @@ def is_free_content_factory_domain(domain: Optional[str]) -> bool:
     return normalize_content_factory_domain(domain) in FREE_CONTENT_FACTORY_DOMAINS
 
 
-def get_content_factory_article_cost_points(domain: Optional[str]) -> int:
-    if is_free_content_factory_domain(domain):
-        return 0
+def get_content_factory_article_cost_points(domain: Optional[str], *, user=None) -> int:
+    """Quote every article at 12 points, halved by the existing founder benefit."""
+    if user is not None:
+        from startup_updates.benefits import has_monthly_update_discount
+
+        if has_monthly_update_discount(user):
+            return CONTENT_FACTORY_ARTICLE_COST_POINTS // 2
     return CONTENT_FACTORY_ARTICLE_COST_POINTS
 
 
@@ -70,6 +214,10 @@ def get_content_factory_ai_agent_required_points(domain: Optional[str]) -> int:
     return CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS
 
 
+def _points(count: int) -> str:
+    return "point" if count == 1 else "points"
+
+
 def build_roo_points_payload(
     *,
     domain: Optional[str],
@@ -92,16 +240,19 @@ def build_roo_points_payload(
         if cost_points is not None
         else get_content_factory_article_cost_points(normalized_domain)
     )
+    if required_points is None and action == CONTENT_FACTORY_ACTION_ARTICLE_GENERATION:
+        required = cost
     balance = int(current_balance or 0)
     account = mask_billing_email(account_email)
     payer = mask_billing_email(billing_email) if billing_email else account
+    # Founder copy names the numbers only. The masked account and payer stay
+    # in their own keys for older clients and are never part of the sentence.
     if cost > 0 and action == CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION:
-        plural = "point" if cost == 1 else "points"
-        message = f"Researching topics costs {cost} Roo {plural}. {payer} has {balance} Roo points."
+        message = f"Finding topics uses {cost} {_points(cost)}. You have {balance}."
     elif cost > 0:
-        message = f"Creating an article costs {cost} Roo points. {payer} has {balance} Roo points."
+        message = f"This article uses {cost} {_points(cost)}. You have {balance}."
     else:
-        message = f"This AI action requires at least {required} Roo points. {payer} has {balance} Roo points."
+        message = f"This needs {required} {_points(required)}. You have {balance}."
     if other_founder_has_points:
         message += " Another founder has enough points and can opt in as the company billing founder."
     return {
@@ -112,7 +263,7 @@ def build_roo_points_payload(
         "required_points": required,
         "current_balance": balance,
         "cost_points": cost,
-        "free_domain": is_free_content_factory_domain(normalized_domain),
+        "free_domain": action != CONTENT_FACTORY_ACTION_ARTICLE_GENERATION and is_free_content_factory_domain(normalized_domain),
         "domain": normalized_domain,
         "action": action,
         "retryable": False,
@@ -131,7 +282,13 @@ def build_roo_points_authorization_payload(
     current_balance: Optional[int] = None,
     billing_status: str,
     ledger_id: Optional[object] = None,
+    entitlement: Optional[str] = None,
 ) -> dict:
+    """Build the run_request billing stamp Content Factory checks before AI work.
+
+    ``entitlement`` names the free grant behind an 'entitled' stamp (for now
+    only 'first_article'); its ledger id is the zero-point entitlement row.
+    """
     payload = {
         "roo_points_authorized": True,
         "roo_points_action": action,
@@ -139,24 +296,29 @@ def build_roo_points_authorization_payload(
         "roo_points_required": int(
             required_points
             if required_points is not None
+            else cost_points if action == CONTENT_FACTORY_ACTION_ARTICLE_GENERATION
             else get_content_factory_ai_agent_required_points(domain)
         ),
         "roo_points_billing_status": str(billing_status or "").strip(),
-        "free_domain": is_free_content_factory_domain(domain),
+        "free_domain": action != CONTENT_FACTORY_ACTION_ARTICLE_GENERATION and is_free_content_factory_domain(domain),
     }
     if current_balance is not None:
         payload["roo_points_balance"] = int(current_balance)
     if ledger_id not in (None, ""):
         payload["roo_points_ledger_id"] = str(ledger_id)
+    if entitlement:
+        payload["roo_points_entitlement"] = str(entitlement)
     return payload
 
 
 def public_run_billing_receipt(run_request: dict, result: dict) -> dict:
     """Expose backend billing state for polling without payer or ledger identities."""
     billing_status = str(run_request.get("roo_points_billing_status") or "").strip()
-    if billing_status not in {"charged", "reused", "free", "gated", "refunded"}:
+    if billing_status not in {"charged", "reused", "free", "gated", "refunded", "entitled"}:
         billing_status = "unknown"
-    pending = bool(
+    # A free first article owes no refund. While its release waits for the
+    # worker's stop it is still not a refund on the way.
+    pending = billing_status != "entitled" and bool(
         run_request.get("pending_billing_refund") and not result.get("dispatch_refund_processed")
         or result.get("reconciliation_refund_pending")
     )
