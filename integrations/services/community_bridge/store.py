@@ -706,16 +706,16 @@ def mark_delivery_retry(*, delivery_id: int, error_text: str, permanent: bool = 
     delivery.save(update_fields=["status", "available_at", "locked_at", "lease_token", "lease_expires_at", "last_error", "updated_at"])
 
 
-_HOLD_REASON = re.compile(r"[a-z][a-z0-9_]{0,63}")
-
-
 def defer_delivery(*, delivery_id: int, retry_after: int, reason: str = "provider_budget_deferred") -> None:
     """Quota waits do not consume a provider failure or lose a queued message.
 
     `reason` is the closed hold code (for example a missing bot reader or a
-    legacy hold); only a real provider budget wait keeps the default.
+    legacy hold); only a real provider budget wait keeps the default. The
+    allowlist is shared with the send log so stored and logged codes match.
     """
-    if type(reason) is not str or not _HOLD_REASON.fullmatch(reason):
+    from .observability import HOLD_REASONS
+
+    if reason not in HOLD_REASONS:
         reason = "provider_budget_deferred"
     with transaction.atomic():
         from integrations.services.message_sync.delivery import refund_current_delivery_turn

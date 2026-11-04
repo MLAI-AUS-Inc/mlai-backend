@@ -12,8 +12,9 @@ from django.db import DEFAULT_DB_ALIAS, connections
 logger = logging.getLogger(__name__)
 _route = ContextVar("public_bridge_log_route", default=None)
 _ID = re.compile(r"[TC][A-Z0-9]{1,23}")
-# Closed hold codes a deferred send may report; they mirror the held row's
-# `last_error`. Unknown codes collapse to the generic hold reason.
+# Closed hold codes, shared with `store.defer_delivery`: a held row's
+# `last_error` and a deferred send log use the same allowlist. Unknown codes
+# are stored as provider_budget_deferred and logged as the generic hold.
 HOLD_REASONS = frozenset({
     "provider_budget_deferred", "member_delivery_deferred", "legacy_community_send_unproven",
     "community_bot_reader_unavailable", "community_bot_reader_scope_unavailable",

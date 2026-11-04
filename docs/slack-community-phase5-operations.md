@@ -116,30 +116,42 @@ provider attempt. Its `last_error` is a fixed code that says why it is held:
 | `member_membership_unproven` | The author has a linked grant, but their channel membership could not be confirmed yet. |
 | `member_delivery_deferred` | Any other member-path hold that has no specific code. |
 
+A reply whose parent has no Slack message yet is a separate dependency wait:
+its row status is `waiting_parent`, not `pending`, until the parent is mapped.
+
 Permanent eligibility failures still make the row `dead`, and `last_error`
 keeps the exception text (for example `PublicBridgeConsentRequired: Current AI
 sharing permission is required`).
 
-Each send attempt that gets past its room-mapping check writes one
-`slack_member_send` log line with the `delivery_id`, an `outcome` and a
-`reason`. This includes failures during actor selection, before any Slack call.
-The line has `poster=member|bot` only after a poster was chosen. A legacy hold
-or a mapping change found during that first check has no log line; read it from
-the row's `last_error`. Outcomes:
+The delivery row (`status`, `last_error`, `available_at`, `attempts`) is the
+source of persisted state. The `slack_member_send` log line is a best-effort
+classification of one attempt, written before the worker saves the row's new
+status. Logging can be skipped (for example with a closed database connection,
+or a transaction that does not commit) and logging failures are ignored, so a
+missing line does not prove that no attempt ran.
 
-- `settled`: posted.
-- `deferred`: held. `reason` is the same code as the row's `last_error`, or
-  `parent_mapping_pending` for a reply whose parent has no Slack message yet.
-- `dropped`: permanent and the row is `dead`. `reason` is `consent_required`
+When a line is written, it carries the `delivery_id`, an `outcome` and a
+`reason`. This covers failures during actor selection, before any Slack call.
+The line has `poster=member|bot` only after a poster was chosen. A legacy hold
+or a mapping change found during the first room-mapping check has no log line;
+read it from the row's `last_error`. Outcomes, and the row state they usually
+lead to:
+
+- `settled`: posted; the row becomes `completed`.
+- `deferred`: held. `reason` is the same code the row's `last_error` records,
+  or `parent_mapping_pending` for the `waiting_parent` dependency wait above.
+- `dropped`: permanent; the row becomes `dead`. `reason` is `consent_required`
   (no current AI-sharing consent), `device_unverified` (the signing device is
   not a current verified device of an active account), `account_unverified`, or
   `permanent_failure`.
-- `unavailable`: permanent `MemberDeliveryUnavailable`, and the row is `dead`.
-- `retry`: provider outcome uncertain, and the row is `failed` with backoff.
+- `unavailable`: permanent `MemberDeliveryUnavailable`; the row becomes `dead`.
+- `retry`: provider outcome uncertain. With durable sync (`MESSAGE_SYNC_ENABLED`)
+  the row becomes `failed` with backoff. Without it, the row becomes `dead` once
+  it reaches its attempt limit.
 
-So one query by `delivery_id` on the delivery row, or on these log lines, shows
-whether a missing Chat-to-Slack post was dropped or held, and why. Log lines
-never contain message text, names or tokens.
+Read the delivery row by `delivery_id` first, and use these log lines to see
+why a missing Chat-to-Slack post was dropped or held. Log lines never contain
+message text, names or tokens.
 
 ## Validation and later gates
 

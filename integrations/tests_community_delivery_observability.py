@@ -71,6 +71,10 @@ class HoldReasonTests(SimpleTestCase):
         self.assertEqual(self._defer().last_error, "provider_budget_deferred")
         self.assertEqual(self._defer(reason=SECRET_TEXT).last_error, "provider_budget_deferred")
         self.assertEqual(self._defer(reason=None).last_error, "provider_budget_deferred")
+        # A well-formed but unlisted code must not reach the row either.
+        self.assertEqual(self._defer(reason="unknown_code").last_error, "provider_budget_deferred")
+        for reason in observability.HOLD_REASONS:
+            self.assertEqual(self._defer(reason=reason).last_error, reason)
 
     def test_worker_passes_the_hold_reason_to_the_row(self):
         fake = SimpleNamespace(_process_delivery=AsyncMock(side_effect=community.CommunityLegacyHold()))
