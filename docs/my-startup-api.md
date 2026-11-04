@@ -16,6 +16,21 @@ path and storage errors in the opaque-origin sandbox. The sandbox continues to
 allow scripts without granting same-origin access. Text updates and approval
 still require the separate authenticated owner operations.
 
+The canonical article client's ZIP URL is
+`GET /api/v1/my-startup/runs/<run-id>/article/download/` (also accepted without
+the final slash). It uses the same Chat account adapter and normal draft-tool
+view as `/api/v1/my-startup/vibe-marketing/runs/<run-id>/article/download/`.
+It still requires the selected owned company, enabled draft-tool/new-journey
+gates and a current ready export; it grants no approval, publishing or charge.
+The existing URL remains available.
+
+Only `mlai.settings_staging_founder` uses the exact
+`https://founder-staging.mlai.au` preview frame parent. Its fixed environment,
+activation and frontend settings must agree; it keeps the opaque sandbox,
+signature and run/company authorization. Production and the existing pilot
+retain the prior frame policy byte for byte. These source changes do not prove
+a hosted iframe render or actual live ZIP download.
+
 ## Additional endpoints
 
 ### Request budgets

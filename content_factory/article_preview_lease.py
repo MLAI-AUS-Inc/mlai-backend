@@ -6,6 +6,8 @@ import re
 from bs4 import BeautifulSoup
 
 from django.core import signing
+from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpResponse
 from django.utils.decorators import method_decorator
 from django.views.decorators.clickjacking import xframe_options_exempt
@@ -21,6 +23,17 @@ from .website_contract import evidence_digest
 
 SALT = "article-preview-read-only-v1"
 LIFETIME = 900
+
+
+def _frame_policy():
+    ancestors = "'self' https://chat.mlai.au https://mlai.au https://www.mlai.au tauri: http://tauri.localhost https://tauri.localhost"
+    if getattr(settings, "SETTINGS_MODULE", "") == "mlai.settings_staging_founder":
+        if (getattr(settings, "APP_ENV", "") != "chat-staging"
+                or getattr(settings, "FOUNDER_STAGING_ENABLED", False) is not True
+                or settings.COMMUNITY_CHAT_FRONTEND_URL != "https://founder-staging.mlai.au"):
+            raise ImproperlyConfigured("The founder preview parent is outside its fixed scope")
+        ancestors = "'self' https://founder-staging.mlai.au"
+    return f"frame-ancestors {ancestors}; object-src 'none'; base-uri 'self'; sandbox allow-scripts"
 
 
 def read_only_article_document(body):
@@ -152,7 +165,7 @@ class ArticlePreviewLeaseProxyView(views.VibeMarketingRunLivePreviewProxyView):
             response["Cache-Control"] = "private, no-store"
             response["Access-Control-Allow-Origin"] = "*"
             response["Cross-Origin-Resource-Policy"] = "cross-origin"
-            response["Content-Security-Policy"] = "frame-ancestors 'self' https://chat.mlai.au https://mlai.au https://www.mlai.au tauri: http://tauri.localhost https://tauri.localhost; object-src 'none'; base-uri 'self'; sandbox allow-scripts"
+            response["Content-Security-Policy"] = _frame_policy()
             for header in ("Set-Cookie", "Location", "Content-Length"):
                 if header in response:
                     del response[header]

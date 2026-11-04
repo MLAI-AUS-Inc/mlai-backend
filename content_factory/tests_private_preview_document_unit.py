@@ -5,12 +5,32 @@ from urllib.parse import urlparse, parse_qs
 
 from bs4 import BeautifulSoup
 from django.http import HttpResponse
-from django.test import RequestFactory, SimpleTestCase
+from django.test import RequestFactory, SimpleTestCase, override_settings
 
 from .article_preview_lease import ArticlePreviewLeaseProxyView, ArticlePreviewLeaseView, read_only_article_document
 
 
 class PrivatePreviewDocumentTests(SimpleTestCase):
+    @patch.object(ArticlePreviewLeaseProxyView, '_proxy')
+    def test_fixture_parent_is_exact_and_production_policy_is_unchanged(self, proxy):
+        from django.core.exceptions import ImproperlyConfigured
+        original = "frame-ancestors 'self' https://chat.mlai.au https://mlai.au https://www.mlai.au tauri: http://tauri.localhost https://tauri.localhost; object-src 'none'; base-uri 'self'; sandbox allow-scripts"
+        for profile in ("mlai.settings", "mlai.settings_staging_chat"):
+            proxy.return_value = HttpResponse(self.article(), content_type='text/html')
+            with override_settings(SETTINGS_MODULE=profile):
+                response = ArticlePreviewLeaseProxyView().get(RequestFactory().get('/preview'), 'draft-1', token='synthetic-grant')
+            self.assertEqual(response['Content-Security-Policy'], original)
+        with override_settings(SETTINGS_MODULE="mlai.settings_staging_founder", APP_ENV="chat-staging",
+                               FOUNDER_STAGING_ENABLED=True, COMMUNITY_CHAT_FRONTEND_URL="https://founder-staging.mlai.au"):
+            proxy.return_value = HttpResponse(self.article(), content_type='text/html')
+            response = ArticlePreviewLeaseProxyView().get(RequestFactory().get('/preview'), 'draft-1', token='synthetic-grant')
+            self.assertEqual(response['Content-Security-Policy'], "frame-ancestors 'self' https://founder-staging.mlai.au; object-src 'none'; base-uri 'self'; sandbox allow-scripts")
+            self.assertNotIn('allow-same-origin', response['Content-Security-Policy'])
+            with override_settings(SETTINGS_MODULE="mlai.settings_staging_founder", COMMUNITY_CHAT_FRONTEND_URL="https://outside.example"):
+                proxy.return_value = HttpResponse(self.article(), content_type='text/html')
+                with self.assertRaises(ImproperlyConfigured):
+                    ArticlePreviewLeaseProxyView().get(RequestFactory().get('/preview'), 'draft-1', token='synthetic-grant')
+
     def article(self):
         return b'''<!doctype html><html><head>
           <link rel="stylesheet" href="/assets/article.css">

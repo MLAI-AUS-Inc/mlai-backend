@@ -154,8 +154,10 @@ because iframe navigation has no cookie-binding headers. The existing view
 must still validate its expiring run-bound signature and normal domain/member
 authority in the separate database. No broad My startup or anonymous website
 exemption is used. Normal copy/download handlers retain their current-export,
-revision and ownership guards. The canonical download URL discrepancy still
-needs its focused route fix and real export qualification. No actual fresh
+revision and ownership guards. The canonical shorter download URL now aliases
+that same normal view. Preview CSP admits only the fixed founder parent in
+this dedicated profile; the production policy remains unchanged. Actual
+hosted rendering and export still need live qualification. No actual fresh
 signup, relay enrollment, preview, ZIP or provider result is proved here.
 
 Run `python -m unittest mlai.test_founder_staging_environment -v` for the

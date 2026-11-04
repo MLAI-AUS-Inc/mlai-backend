@@ -43,6 +43,16 @@ ARTICLE_SENTENCES = (
 
 
 class RoutingTests(SimpleTestCase):
+    def test_canonical_download_url_keeps_the_same_chat_account_owner_adapter(self):
+        from founder_tools.my_startup.api import MyStartupAuthentication, MyStartupViewMixin
+        for suffix in ("", "/"):
+            match = resolve(f"/api/v1/my-startup/runs/run-abc/article/download{suffix}")
+            view = match.func.view_class
+            self.assertTrue(issubclass(view, tools.FounderDraftDownloadView))
+            self.assertTrue(issubclass(view, MyStartupViewMixin))
+            self.assertEqual(view.authentication_classes, (MyStartupAuthentication,))
+            self.assertEqual(match.kwargs, {"run_id": "run-abc"})
+
     def test_new_routes_resolve_to_the_draft_tools_on_both_prefixes(self):
         expected = {"copied": tools.FounderDraftCopiedView, "posted-link": tools.FounderDraftPostedLinkView,
                     "article/download": tools.FounderDraftDownloadView}
@@ -317,6 +327,32 @@ class DraftToolTests(TestCase):
                 self.assertEqual(link["check"], expected)
 
     # -- zip ----------------------------------------------------------------
+
+    @override_settings(**FLAGS)
+    def test_canonical_zip_url_uses_current_export_and_never_grants_foreign_ownership(self, _latest):
+        review = _review(self.run.run_id, media=[])
+        before_request = deepcopy(self.run.run_request)
+        ledger_count = Ledger.objects.count()
+        response = self.call("get", "article/download", review=review, prefix="/api/v1/my-startup/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/zip")
+        archive = zipfile.ZipFile(io.BytesIO(response.content))
+        self.assertEqual(archive.read("article.md").decode(), review["articleExport"]["markdown"])
+        self.assertEqual(set(archive.namelist()), {"article.md", "article.html"})
+        stranger = make_new_journey_org()
+        refused = self.call("get", "article/download", user=stranger.owner, review=review, prefix="/api/v1/my-startup/")
+        existing = self.call("get", "article/download", user=stranger.owner, review=review, prefix="/api/v1/my-startup/vibe-marketing/")
+        self.assertEqual(existing.status_code, 400)
+        self.assertEqual((refused.status_code, refused.data), (existing.status_code, existing.data))
+        self.assertEqual(refused.remote_calls, 0)
+        self.assertEqual(existing.remote_calls, 0)
+        unready = deepcopy(review)
+        unready["articleExport"]["status"] = "unavailable"
+        self.assertEqual(self.call("get", "article/download", review=unready, prefix="/api/v1/my-startup/").status_code, 409)
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.run_request, before_request)
+        self.assertEqual(Ledger.objects.count(), ledger_count)
+
 
     @override_settings(**FLAGS)
     def test_zip_holds_the_article_and_allowed_images_and_lists_the_rest(self, _latest):
