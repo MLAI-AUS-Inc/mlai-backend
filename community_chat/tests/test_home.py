@@ -56,6 +56,12 @@ class CommunityHomeTests(APITestCase):
             microroo_initialized=True,
         )
 
+    @override_settings(MENTOR_BOOKING_ENABLED=True)
+    def test_home_exposes_enabled_mentor_booking(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["feature_flags"]["mentor_booking"])
+
     @override_settings(COMMUNITY_CHAT_ROO_PUBLIC_KEY="AB" * 32)
     def test_home_returns_only_configured_roo_public_identity(self):
         response = self.client.get(self.url)
@@ -200,6 +206,7 @@ class CommunityHomeTests(APITestCase):
                 "meeting_rooms": True,
                 "coworking_booking": False,
                 "event_discounts": False,
+                "mentor_booking": False,
             },
         )
 

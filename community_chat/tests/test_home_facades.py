@@ -191,6 +191,7 @@ class CommunityChatHomeFacadeTests(TestCase):
                 "meeting_rooms": True,
                 "coworking_booking": False,
                 "event_discounts": False,
+                "mentor_booking": False,
             },
         )
         self.assertNotIn("email", response.data["points"])
