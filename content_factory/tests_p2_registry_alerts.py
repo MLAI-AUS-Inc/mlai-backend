@@ -47,6 +47,10 @@ P2_REASONS = {
     "merge_rejected_twice": "GitHub rejected an MLAI merge twice",
     "join_request_unanswered": "A team join request has waited 72 hours",
 }
+HOSTED_QUALITY_REASONS = {
+    "article_safety_review_required": "An article needs staff review of safety guidance",
+    "article_quality_review_required": "An article's automatic quality repair needs staff review",
+}
 PRIVATE_DETAILS = {
     "owner_email": "founder@example.test", "founder_name": "Ada", "article_title": "Secret", "contact": "a@b.test",
     "link": "https://example.test/admin/1", "path_hint": "/my-startup/runs/1", "note": "Free text with spaces",
@@ -64,13 +68,17 @@ class AlertReasonTests(SimpleTestCase):
         for reason, label in P2_REASONS.items():
             self.assertIn(reason, alerts.ALERT_REASONS)
             self.assertEqual(alerts.REASON_LABELS[reason], label)
-        self.assertEqual(alerts.ALERT_REASONS, frozenset(TODAY_REASONS) | frozenset(P2_REASONS))
+        for reason, label in HOSTED_QUALITY_REASONS.items():
+            self.assertIn(reason, alerts.ALERT_REASONS)
+            self.assertEqual(alerts.REASON_LABELS[reason], label)
+        self.assertEqual(alerts.ALERT_REASONS,
+                         frozenset(TODAY_REASONS) | frozenset(P2_REASONS) | frozenset(HOSTED_QUALITY_REASONS))
         self.assertEqual(set(alerts.REASON_LABELS), set(alerts.ALERT_REASONS))
         self.assertEqual(alerts.DETECTED_REASONS,
                          ("run_terminal", "run_blocked", "startup_autofill_blocked", "your_turn_72h", "no_draft_24h"))
 
     def test_labels_carry_no_dashes(self):
-        for label in P2_REASONS.values():
+        for label in {**P2_REASONS, **HOSTED_QUALITY_REASONS}.values():
             self.assertNotRegex(label, "[\u2013\u2014]")
             self.assertNotIn(" - ", label)
 
