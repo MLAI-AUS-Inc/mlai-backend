@@ -6,13 +6,78 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from community_chat.models import CommunityChatDevice
-from integrations.models import CommunityBridgeDelivery, CommunityBridgeMessageLink
+from integrations.models import CommunityBridgeDelivery, CommunityBridgeMessageLink, SlackDmMirrorConversation, SlackDmMirrorDelivery
 from integrations.services import slack_dm_mirror as dm
 from integrations.services.community_bridge.member_attempts import command_hash
 from integrations.services.community_bridge.member_delivery import _binding
 from integrations.services.community_bridge.native_mentions import native_mention_bindings, native_recipient_targets
 from integrations.services.community_bridge.roo_actor import BridgeActorError, resolve_roo_actor
+from integrations.services.community_bridge.private_roo_actor import resolve_roo_dm_actor, roo_dm_receipt
 from integrations.tests_slack_member_access import MemberAccessFixture
+
+
+@override_settings(
+    MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID="TTEST", COMMUNITY_CHAT_RELAY_URL="https://chat.mlai.au",
+    COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TTEST", COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
+    COMMUNITY_CHAT_AI_CONSENT_REQUIRED=False,
+    CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
+)
+class PrivateRooActorDatabaseTests(MemberAccessFixture, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.grant.connection.scopes = sorted(dm.DIRECT_DM_SCOPES | {"chat:write"})
+        self.grant.connection.save(update_fields=("scopes",))
+        self.conversation = SlackDmMirrorConversation.objects.create(
+            grant=self.grant, slack_workspace_id="TTEST", slack_conversation_id="DROO",
+            participant_slack_ids=[self.grant.slack_user_id, "UROO"],
+            participant_buzz_pubkeys=[self.device.public_key, "f" * 64],
+            participant_identity_map={self.grant.slack_user_id: self.device.public_key, "UROO": "f" * 64},
+            participant_hash="1" * 64, mlai_channel_id="00000000-0000-4000-8000-000000000007", status="live",
+        )
+        self.delivery = SlackDmMirrorDelivery.objects.create(
+            conversation=self.conversation, source_platform="buzz", source_message_id="e" * 64,
+            source_author_id=self.device.public_key, operation="create", status="completed",
+            available_at=timezone.now(), completed_at=timezone.now(), metadata={
+                "slack_ts": "1793786540.585259", "thread_ts": "", "source_event_id": "e" * 64,
+                "participant_hash": self.conversation.participant_hash,
+            },
+        )
+        self.delivery.metadata.update(roo_dm_receipt(self.delivery, "give <@UTARGET> 100 points for helping"))
+        self.delivery.save(update_fields=("metadata",))
+        self.context = dict(workspace_id="TTEST", channel_id="DROO", message_id="1793786540.585259",
+                            thread_ts="1793786540.585259", bridge_user_id=self.grant.slack_user_id)
+
+    def test_real_private_rows_resolve_canonical_owner_without_public_mapping_or_provider(self):
+        result = resolve_roo_dm_actor(**self.context)
+        self.assertEqual(result["actor_profile_id"], str(self.grant.user.community_chat_profile_id))
+        self.assertEqual(result["source_event_id"], "e" * 64)
+        self.assertNotIn("text", result)
+        self.provider.assert_not_called()
+
+    def test_json_source_deletion_invalidates_the_original_create(self):
+        SlackDmMirrorDelivery.objects.create(
+            conversation=self.conversation, source_platform="buzz", source_message_id="buzz-event:" + "d" * 64,
+            source_author_id=self.device.public_key, operation="delete", status="pending", available_at=timezone.now(),
+            metadata={"target_source_message_id": "e" * 64},
+        )
+        with self.assertRaises(BridgeActorError) as error:
+            resolve_roo_dm_actor(**self.context)
+        self.assertEqual(error.exception.code, "bridge_context_revoked")
+
+    def test_real_reconsent_invalidates_the_receipt(self):
+        self.grant.consented_at = timezone.now()
+        self.grant.save(update_fields=("consented_at",))
+        with self.assertRaises(BridgeActorError) as error:
+            resolve_roo_dm_actor(**self.context)
+        self.assertEqual(error.exception.code, "bridge_actor_unverified")
+
+    def test_uncommitted_create_keeps_the_callback_retryable(self):
+        self.delivery.status = "processing"
+        self.delivery.metadata.pop("slack_ts")
+        self.delivery.save(update_fields=("status", "metadata"))
+        with self.assertRaises(BridgeActorError) as error:
+            resolve_roo_dm_actor(**self.context)
+        self.assertEqual((error.exception.code, error.exception.status), ("bridge_delivery_pending", 409))
 
 
 @override_settings(
