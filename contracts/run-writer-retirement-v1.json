@@ -5798,9 +5798,10 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "apply",
-      "function_sha256": "945a21d859b5f912f6740c5c09ad9e9397bd6f2d336497ab59e417572174fc0c",
-      "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
+      "function_sha256": "f2945748568cebbe3456a977c08510ae0bc1e4b67ad61c396ec70ba7b3f7e792",
+      "reason": "Private policy metadata writes use the already locked fresh Run, retain event-owner refusal and unrelated result fields, preserve the worker clock, and keep every original authority and decision check in apply. All five apply call sites and the lock-acquiring compatibility wrapper were manually reviewed.",
       "test_refs": [
+        "content_factory/tests_p2_policy.py",
         "content_factory/tests_run_policy_retirement.py"
       ]
     },
@@ -5816,9 +5817,10 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_write_run",
-      "function_sha256": "3184d163733b51f3e9284a1aeb207b40450b8314bc8b896678810e4e6587b4ad",
-      "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
+      "function_sha256": "980a2a8a5fa73242d40acca94229682ff46f70f881ee0ad691b7397baf529266",
+      "reason": "Private policy metadata writes use the already locked fresh Run, retain event-owner refusal and unrelated result fields, preserve the worker clock, and keep every original authority and decision check in apply. All five apply call sites and the lock-acquiring compatibility wrapper were manually reviewed.",
       "test_refs": [
+        "content_factory/tests_p2_policy.py",
         "content_factory/tests_run_policy_retirement.py"
       ]
     },
@@ -6963,6 +6965,16 @@
         "content_factory/tests_founder_review_commands.py",
         "content_factory/tests_article_review_update_unit.py",
         "content_factory/tests_run_review_metadata_clocks.py"
+      ]
+    },
+    {
+      "path": "content_factory/failure_policy_engine.py",
+      "function": "_write_locked_run",
+      "function_sha256": "2af7ac3280be074eab4c552905bbba0b91a78d5537af4f1e52f27057ea6df4a5",
+      "reason": "Private policy metadata writes use the already locked fresh Run, retain event-owner refusal and unrelated result fields, preserve the worker clock, and keep every original authority and decision check in apply. All five apply call sites and the lock-acquiring compatibility wrapper were manually reviewed. Atomic context is required but is not itself a row-lock proof; the exact caller review is part of this control context.",
+      "test_refs": [
+        "content_factory/tests_p2_policy.py",
+        "content_factory/tests_run_policy_retirement.py"
       ]
     }
   ],

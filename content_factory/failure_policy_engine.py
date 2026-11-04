@@ -235,14 +235,23 @@ def _fresh_owned_run(run):
         return event_owned(current)
 
 
-def _write_run(run, receipt):
+def _write_locked_run(run, receipt):
+    """Merge metadata into the fresh Run row the caller already holds locked."""
     from .website_run_authority import event_owned
+    if not transaction.get_connection().in_atomic_block:
+        raise RuntimeError('Policy metadata requires the current Run row lock')
+    if event_owned(run):
+        return
+    result = {**mapping(run.result), 'self_heal_v1': receipt}
+    ContentFactoryRun.objects.filter(pk=run.pk).update(result=result)
+    run.result = result
+
+
+def _write_run(run, receipt):
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
-        if event_owned(current):
-            return
-        ContentFactoryRun.objects.filter(pk=run.pk).update(result={**mapping(run.result), 'self_heal_v1': receipt})
-        run.result = {**mapping(run.result), 'self_heal_v1': receipt}
+        _write_locked_run(current, receipt)
+        run.result = current.result
 
 
 def _save_daily(config, day):
@@ -466,7 +475,7 @@ def apply(subject, decision, *, now=None):
             'rung': _rung(mapping(current.result), request),
             'source_sha': old.get('source_sha') or request.get('expected_source_sha'), 'history': list(old.get('history') or [])[-10:]}
         if decision.at and decision.at > now:
-            _write_run(current, receipt)
+            _write_locked_run(current, receipt)
             return receipt
         if decision.action in {'observe', 'await_owner', 'none', 'wait'}:
             receipt.update(last_action=decision.action, next_at=(now + timedelta(hours=1)).isoformat()
@@ -474,7 +483,7 @@ def apply(subject, decision, *, now=None):
             if decision.action == 'await_owner':
                 receipt['next_at'] = ((stamp(receipt['first_failed_at']) or now)
                                       + timedelta(hours=registry_policy.limits()['wall_hours'])).isoformat()
-            _write_run(current, receipt)
+            _write_locked_run(current, receipt)
             return receipt
         # Fresh limits are read while holding the same org row as every writer.
         if decision.action == 'advance_rung' and not retransmit and not request.get('operation_id') and not request.get('first_article_goal_operation_id'):
@@ -494,7 +503,7 @@ def apply(subject, decision, *, now=None):
             receipt['pending_action'] = {'state': 'reserved', 'claim': lease_claim, 'action': decision.action, 'attempt': decision.attempt,
                                          'cap': decision.cap, 'reason': decision.reason,
                                          'lease_until': (now + timedelta(minutes=2)).isoformat()}
-        _write_run(current, receipt)
+        _write_locked_run(current, receipt)
     # A setup resume may create a PR. Owner-click continuations bypass this
     # reservation in their own services, but are still counted on ingest.
     explicit_publish = mapping(mapping(current.result).get('article_approval_v1')).get('source') == 'publish_reviewed'
@@ -509,7 +518,7 @@ def apply(subject, decision, *, now=None):
                 receipt['attempts'] = max(0, decision.attempt - 1)
                 receipt['history'] = [row for row in receipt.get('history', []) if row.get('attempt') != decision.attempt]
                 receipt.pop('pending_action', None)
-                _write_run(locked, receipt)
+                _write_locked_run(locked, receipt)
             return receipt
     try:
         outcome = _execute_run(current, decision, now=now)
@@ -526,7 +535,7 @@ def apply(subject, decision, *, now=None):
             pending = mapping(receipt.get('pending_action'))
             if pending.get('attempt') == decision.attempt and pending.get('claim') == lease_claim:
                 receipt['pending_action'] = {**pending, 'state': 'uncertain' if uncertain else 'accepted'}
-                _write_run(locked, receipt)
+                _write_locked_run(locked, receipt)
     return receipt
 
 

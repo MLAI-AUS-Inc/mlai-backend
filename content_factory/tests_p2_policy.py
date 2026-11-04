@@ -337,3 +337,38 @@ class PolicyTests(TransactionTestCase):
             engine.apply(run, engine.decide(run, now=self.now), now=self.now)
         self.assertEqual(specialized, [run.run_id])
         generic.assert_not_called()
+
+
+class LockedPolicyMetadataTests(TransactionTestCase):
+    """Metadata preserves fresh callback fields without repeated row locking."""
+
+    def test_locked_metadata_uses_one_update_and_preserves_worker_clock_and_fields(self):
+        from django.db import connection, transaction
+        from django.test.utils import CaptureQueriesContext
+        fixture = make_p2_org()
+        run = make_run(fixture.organization, result={"callback": {"kept": True}})
+        clock = run.updated_at
+        with transaction.atomic():
+            current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+            with CaptureQueriesContext(connection) as queries:
+                engine._write_locked_run(current, {"attempts": 1})
+        self.assertEqual(len(queries), 1)
+        self.assertTrue(queries[0]["sql"].lstrip().upper().startswith("UPDATE"))
+        run.refresh_from_db()
+        self.assertEqual(run.result, {"callback": {"kept": True}, "self_heal_v1": {"attempts": 1}})
+        self.assertEqual(run.updated_at, clock)
+
+    def test_unlocked_compatibility_writer_merges_fresh_callback_data(self):
+        fixture = make_p2_org()
+        stale = make_run(fixture.organization, result={"original": True})
+        ContentFactoryRun.objects.filter(pk=stale.pk).update(result={"original": True, "late_callback": {"kept": True}})
+        engine._write_run(stale, {"attempts": 2})
+        stale.refresh_from_db()
+        self.assertEqual(stale.result["late_callback"], {"kept": True})
+        self.assertEqual(stale.result["self_heal_v1"], {"attempts": 2})
+
+    def test_locked_writer_refuses_without_a_transaction(self):
+        fixture = make_p2_org()
+        run = make_run(fixture.organization)
+        with self.assertRaisesRegex(RuntimeError, "current Run row lock"):
+            engine._write_locked_run(run, {"attempts": 1})
