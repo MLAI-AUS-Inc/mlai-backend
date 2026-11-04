@@ -5808,10 +5808,11 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_fresh_owned_run",
-      "function_sha256": "07e2f6c122d68ce70f6f4a04375d2f5f3457b602177f776afe55abc3bbcb3065",
-      "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
+      "function_sha256": "2f2059dbaef861a56845921bd0acae5e790fdf5f4380052a1e81033c29746056",
+      "reason": "Fresh event ownership is read from the current Run.result under the unchanged self-row lock and transaction. Unrelated request inputs and the unused organisation join are not hydrated; the event_owned predicate, missing-row behavior and pre-dispatch refusal are unchanged. No cached receipt or weaker execution authority is introduced.",
       "test_refs": [
-        "content_factory/tests_run_policy_retirement.py"
+        "content_factory/tests_run_policy_retirement.py",
+        "content_factory/tests_p2_policy.py"
       ]
     },
     {

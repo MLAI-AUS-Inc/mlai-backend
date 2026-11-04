@@ -231,7 +231,9 @@ def _fresh_owned_run(run):
         return False
     from .website_run_authority import event_owned
     with transaction.atomic():
-        current = ContentFactoryRun.objects.select_for_update(of=('self',)).select_related('organization').get(pk=run.pk)
+        # Ownership depends only on the fresh backend receipt. Keep its row
+        # lock without hydrating article inputs or joining the organisation.
+        current = ContentFactoryRun.objects.select_for_update(of=('self',)).only('result').get(pk=run.pk)
         return event_owned(current)
 
 
