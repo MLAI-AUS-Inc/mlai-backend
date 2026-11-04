@@ -163,6 +163,19 @@ def _raw_marker(config):
     return marker if isinstance(marker, dict) else None
 
 
+def _marker_for(organization, config=None):
+    """Re-read only the live marker; repository payloads are unrelated to cohort."""
+    if config is not None:
+        return _raw_marker(config)
+    if organization is None or not getattr(organization, "pk", None):
+        return None
+    from .models import OrganizationContentConfig
+    # Never use the organisation's relation cache for a live eligibility read.
+    marker = OrganizationContentConfig.objects.filter(organization_id=organization.pk).values_list(
+        f"pillar_strategy__{MARKER_KEY}", flat=True).first()
+    return marker if isinstance(marker, dict) else None
+
+
 def _valid(marker) -> bool:
     return (isinstance(marker, dict) and type(marker.get("version")) is int
             and marker.get("version") == MARKER_VERSION and marker.get("cohort") in COHORTS)
@@ -175,7 +188,7 @@ def read_marker(organization, config=None):
     ``ownerClickRequired`` survives either. It does not validate the marker;
     :func:`cohort` ignores a malformed one.
     """
-    marker = _raw_marker(_config_for(organization, config))
+    marker = _marker_for(organization, config)
     return deepcopy(marker) if marker is not None else None
 
 
@@ -254,7 +267,7 @@ def cohort(organization, config=None) -> str:
     """
     if organization is None or is_disabled(organization):
         return LEGACY
-    marker = _raw_marker(_config_for(organization, config))
+    marker = _marker_for(organization, config)
     if _valid(marker):
         return marker["cohort"]
     return NEW_JOURNEY if _created_after_launch(organization) else LEGACY
