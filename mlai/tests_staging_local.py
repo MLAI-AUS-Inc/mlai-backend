@@ -15,6 +15,11 @@ LOCAL=dict(SETTINGS_MODULE='mlai.settings_staging_local',APP_ENV='staging-local'
 @override_settings(**LOCAL)
 class LocalTokenTests(TestCase):
     def setUp(self):
+        from django.db import connection
+        self.assertEqual(connection.vendor,'postgresql')
+        name=str(connection.settings_dict['NAME'])
+        self.assertTrue(name.startswith('test_'))
+        self.enterContext(override_settings(STAGING_LOCAL_DB_NAME=name))
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.output=Path(self.temp.name)/'token'
     def issue(self,create=False):

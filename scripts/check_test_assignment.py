@@ -43,7 +43,16 @@ def selected_labels(workflow):
     pattern = r"python(?:3)? (?:manage\.py test|-m unittest|scripts/test_without_database\.py|scripts/test_event_discounts\.py) ([^\n]+)"
     labels = set()
     for command in re.findall(pattern, logical):
+        option_value = False
         for token in shlex.split(command):
+            if option_value:
+                option_value = False
+                continue
+            if token in {"--exclude-tag", "--tag", "--verbosity", "--pattern", "-p",
+                         "--settings", "--testrunner", "--top-level-directory", "-t",
+                         "--start-directory", "-s"}:
+                option_value = True
+                continue
             # unittest imports dotted labels with importlib, which also accepts
             # existing namespace directories such as ops/staging-chat.
             if re.fullmatch(r"[A-Za-z_]\w*(?:-\w+)*(?:\.[A-Za-z_]\w*(?:-\w+)*)*", token):

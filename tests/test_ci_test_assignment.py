@@ -30,3 +30,9 @@ class TestAssignmentLabels(unittest.TestCase):
             selected_labels("python -m unittest tests.test_ci_test_assignment -v ../other.py '$OTHER' --failfast"),
             {"tests.test_ci_test_assignment"},
         )
+
+    def test_django_option_values_are_not_imported_as_modules(self):
+        self.assertEqual(
+            selected_labels("python manage.py test roo.tests_staging_points_flows --exclude-tag postgres-only --tag integration --verbosity 2"),
+            {"roo.tests_staging_points_flows"},
+        )
