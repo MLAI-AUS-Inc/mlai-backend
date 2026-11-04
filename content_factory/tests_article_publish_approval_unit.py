@@ -221,7 +221,7 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
         self.assertFalse(_article_publish_retry_authorized(run))
 
     def test_receipt_rejects_regressed_quality_status_with_unchanged_hash(self):
-        for status in ("blocking_findings", "queued"):
+        for status in ("blocking_findings", "queued", "self_healing"):
             with self.subTest(status=status):
                 run = _review_run()
                 receipt = make_article_publish_approval_receipt(run, actor_id="founder-1")
@@ -301,7 +301,7 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
         self.assertFalse(_article_publish_retry_authorized(run))
         run.approval_state = "approved"
         self.assertTrue(_article_publish_retry_authorized(run))
-        for status in ("blocking_findings", "queued"):
+        for status in ("blocking_findings", "queued", "self_healing"):
             run.result["article_preview_quality"]["status"] = status
             self.assertTrue(_article_publish_retry_authorized(run))
         del run.result["publish_child_run_id"]
@@ -333,3 +333,51 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
         self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
         run.result.pop("article_preview_quality")
         self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
+
+
+class HostedQualityPublishStateTests(SimpleTestCase):
+    def test_self_healing_locks_publishing_and_clears_local_and_remote_stale_blockers(self):
+        from content_factory.hosted_quality_state import preview_quality_publish_notice
+        from content_factory.vibe_marketing_views import _merge_django_owned_article_result
+        quality = {"status": "self_healing", "self_heal_attempt": 1}
+        self.assertEqual(preview_quality_publish_notice(quality),
+                         ("locked", "We're fixing a few things in the preview automatically."))
+        merged = _merge_django_owned_article_result(
+            {"approval_blocker": {"message": "An earlier rejection"}},
+            {"article_preview_quality": quality, "approval_blocker": {"message": "A stale remote rejection"}})
+        self.assertNotIn("approval_blocker", merged)
+        self.assertEqual(merged["article_preview_quality"], quality)
+        run = _review_run()
+        run.result["article_preview_quality"] = quality
+        self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
+
+    def test_exhausted_safety_uses_staff_copy_and_never_projects_raw_claims(self):
+        from content_factory.hosted_quality_state import SAFETY_MESSAGE, preview_quality_publish_notice
+        from content_factory.hosted_quality_issues import public_hosted_quality_issues
+        from content_factory.tests_hosted_quality_issues_unit import sixth_shaped_report
+        quality, preview, manifest = sixth_shaped_report()
+        quality.update(self_heal_exhausted=True, escalation="safety_review", founder_message="Raw safety details")
+        self.assertEqual(preview_quality_publish_notice(quality), ("blocked", SAFETY_MESSAGE))
+        self.assertEqual(public_hosted_quality_issues(quality, preview, manifest), [])
+
+    def test_specific_terminal_message_precedes_the_legacy_neutral_fallback(self):
+        from content_factory.hosted_quality_state import FALLBACK_MESSAGE, preview_quality_publish_notice
+        quality = {"status": "blocking_findings", "self_heal_exhausted": True,
+                   "founder_message": "The preview is missing part of the article."}
+        self.assertEqual(preview_quality_publish_notice(quality), ("blocked", quality["founder_message"]))
+        quality.pop("founder_message")
+        self.assertEqual(preview_quality_publish_notice(quality), ("blocked", FALLBACK_MESSAGE))
+
+    def test_staff_rules_detect_exhausted_quality_on_an_awaiting_approval_run(self):
+        from django.utils import timezone
+        from content_factory.staff_alert_rules import _run_reasons
+        from content_factory.founder_journey_alerts import ALERT_REASONS
+        for escalation, reason in (("safety_review", "article_safety_review_required"),
+                                   ("quality_review", "article_quality_review_required")):
+            run = SimpleNamespace(result={"article_preview_quality": {"status": "blocking_findings",
+                                  "self_heal_exhausted": True, "escalation": escalation}},
+                                  status="awaiting_approval", run_request={})
+            self.assertIn(reason, _run_reasons(run, timezone.now()))
+            self.assertIn(reason, ALERT_REASONS)
+            run.result["article_preview_quality"]["status"] = "self_healing"
+            self.assertNotIn(reason, _run_reasons(run, timezone.now()))

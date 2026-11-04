@@ -481,6 +481,18 @@ Content-only delivery is a draft review surface. Exact website preview and publi
 
 ### Article publish approval and retry
 
+Hosted quality repair is owned by Content Factory. While its bounded repair runs,
+`article_preview_quality.status=self_healing` locks publishing, clears an older
+approval blocker during status merge, and explains that the preview is being fixed
+automatically. A terminal block uses the worker's specific `founder_message`.
+Exhausted safety checks show a staff-review message without raw safety findings;
+the staff sweep raises `article_safety_review_required` or
+`article_quality_review_required`, including for runs still awaiting approval.
+These states never count as accepted hosted quality for approval or promotion.
+Internal worker repairs do not create founder approval receipts or charge a
+founder revision. Existing organisation, billing and explicit approval boundaries
+remain in force.
+
 For founder Vibe Marketing runs, `POST /api/v1/vibe-marketing/runs/{run_id}/approve` is the initial article approval action. The backend rejects an older source run if a newer review-ready revision exists, including one reached through a failed intermediate revision. New article approvals require an exact hosted render, preview URL and valid commit SHA in `livePreview.proof`; a top-level commit field is insufficient. The passed, passed-without-baseline, or advisory hosted quality result must name the same preview URL and resume generation and include its input SHA-256 hash. After Content Factory accepts the approval, the backend stores a receipt in the source run's `run_request` with that exact review identity, authenticated founder actor, and server approval time. It also binds the top-level Content Factory run generation when provided; this is separate from the hosted preview's resume generation. A failed approval does not create or replace a receipt. Existing publish-child approval remains a separate PR evidence step and does not require article preview proof.
 
 `promote-bundle` and `publish-pr` are retry actions. Before contacting Content Factory, they require the selected newest revision's matching receipt, approved state, exact hosted render, and current hosted quality status of `passed`, `passed_no_baseline`, or `advisory_findings`. Before a new source approval is sent to Content Factory, the backend saves a receipt-required marker. If the reviewed identity changes before the postapproval receipt is saved, the approve action returns a conflict; the marker prevents a recorded child from entering the older receipt-free retry path. An older approved run with an already recorded publish child and no marker may retry without a local receipt for compatibility; that path cannot initiate a fresh child. A changed run, run generation, preview URL, commit SHA, preview resume generation or quality input hash, or a regressed quality status, invalidates receipt-based promotion and requires a fresh review and approval. Content Factory still checks its hosted review evidence and source bundle at its own boundary. The frontend compares the visible review identity before it sends `approve`; the backend receipt records the server's saved review identity and explicit approve action, not a claim that the browser rendered the page.
