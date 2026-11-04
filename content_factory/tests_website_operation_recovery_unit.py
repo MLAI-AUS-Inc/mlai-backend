@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from rest_framework.response import Response
 
 from workflow_runs.models import ContentFactoryRun
@@ -38,7 +38,7 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
                 self.run.status = status
                 self.website.operations.select_for_update.return_value.filter.return_value = [self.op]
                 runs.return_value.filter.return_value.first.return_value = self.run
-                fresh = SimpleNamespace(pk=uuid4(), generation=3, state="running", payload={"attempt": 1,
+                fresh = SimpleNamespace(pk=uuid4(), generation=3, state="running", receipt={}, save=Mock(), payload={"attempt": 1,
                     "workflow": "article_system_setup", "request_digest": operations.evidence_digest({"domain": "fixture.test"})})
                 create.return_value = (fresh, True)
                 payload = {"client_request_id": "new-request", "domain": "fixture.test"}
@@ -63,7 +63,8 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
             operations.reserve_workflow_operation(self.website, workflow="article_system_setup", payload=payload)
             self.assertEqual(payload["client_request_id"], "old-request")
             self.assertEqual(create.call_args.kwargs["idempotency_key"], "old-key")
-            self.op.save.assert_not_called()
+        self.op.save.assert_called_once_with(update_fields=["receipt", "updated_at"])
+        self.assertEqual(self.op.receipt["dispatch_outcome"], "replayed")
 
     def test_reconciliation_does_not_trust_a_different_saved_attempt(self):
         self.run.run_request["operation_attempt"] = 1
@@ -76,6 +77,49 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
                     payload={"client_request_id": "fresh", "domain": "fixture.test"})
             self.assertEqual(error.exception.code, "website_operation_changed")
             self.op.save.assert_not_called()
+
+    @override_settings(CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=True,
+                       CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS=["42"],
+                       CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED=True)
+    def test_reflected_formatting_marker_does_not_change_execution_or_upgrade_historical_absence(self):
+        self.website.organization = SimpleNamespace(domain="fixture.test")
+        self.website.github_repo = "fixture/site"
+        self.run.status = "running"
+        self.op.payload["request_digest"] = operations.evidence_digest({"domain": "fixture.test"})
+        with patch.object(authority, "authority_guard", side_effect=lambda *a, **k: nullcontext()), \
+                patch.object(authority, "extend_owner_operation_contract"), \
+                patch.object(ContentFactoryRun.objects, "select_for_update") as runs, \
+                patch.object(operations.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)) as create:
+            self.website.operations.select_for_update.return_value.filter.return_value = [self.op]
+            runs.return_value.filter.return_value.first.return_value = self.run
+            payload = {"client_request_id": "replacement-key", "domain": "fixture.test", "workflow_order_v1": {"version": 1}}
+            result = operations.reserve_workflow_operation(self.website, workflow="article_system_setup", payload=payload)
+        self.assertIs(result, self.op)
+        self.assertEqual(create.call_args.kwargs["idempotency_key"], "old-key")
+        self.assertEqual(self.op.payload["request_digest"], operations.evidence_digest({"domain": "fixture.test"}))
+        self.assertNotIn("workflow_order_v1", payload)
+        self.assertNotIn("workflow_order_v1", self.op.payload["setup_delivery_request"])
+
+    @override_settings(CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=True,
+                       CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS=["42"])
+    def test_enrolled_duplicate_saves_original_scope_with_dispatch_receipt(self):
+        self.website.organization = SimpleNamespace(domain="fixture.test")
+        self.website.github_repo = "fixture/site"
+        self.run.status = "running"
+        self.op.payload["request_digest"] = operations.evidence_digest({"domain": "fixture.test"})
+        with patch.object(authority, "authority_guard", side_effect=lambda *a, **k: nullcontext()), \
+                patch.object(authority, "extend_owner_operation_contract"), \
+                patch.object(ContentFactoryRun.objects, "select_for_update") as runs, \
+                patch.object(operations.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)):
+            self.website.operations.select_for_update.return_value.filter.return_value = [self.op]
+            runs.return_value.filter.return_value.first.return_value = self.run
+            payload = {"client_request_id": "replacement-key", "domain": "fixture.test"}
+            operations.reserve_workflow_operation(self.website, workflow="article_system_setup", payload=payload)
+        self.op.save.assert_called_once_with(update_fields=["payload", "receipt", "updated_at"])
+        self.assertEqual(self.op.payload["setup_delivery_scope"]["client_request_id"], "old-request")
+        self.assertEqual(self.op.payload["setup_delivery_scope"]["operation_id"], str(self.op.pk))
+        self.assertEqual(self.op.payload["setup_delivery_request"]["setup_delivery_v1"], {"schema_version": 1})
+        self.assertEqual(self.op.receipt["dispatch_outcome"], "replayed")
 
     def test_cancelled_request_identity_cannot_be_reused(self):
         self.op.state = "cancelled"
@@ -112,7 +156,8 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
         from .website_models import WebsiteConnection
         self.run.pk, self.run.status, self.run.resume_available, self.run.error = 7, "running", True, "Old progress"
         self.run.save = Mock()
-        completed = SimpleNamespace(status="completed", resume_available=False, error="", result={"article": "Saved"})
+        completed = SimpleNamespace(**{**vars(self.run), "workflow": "article_system_setup",
+            "status": "completed", "resume_available": False, "error": "", "result": {"article": "Saved"}})
         with patch.object(authority, "authority_guard", side_effect=WebsiteAuthorityError("website_connection_changed", "Changed")), \
                 patch.object(authority, "contract_for", return_value=self.binding), \
                 patch.object(operations.transaction, "atomic", side_effect=lambda: nullcontext()), \
@@ -184,7 +229,9 @@ class WebsiteOperationRecoveryTests(SimpleTestCase):
         payload = {**self.binding, "status": "cancelled", "publish_targets": []}
         request = SimpleNamespace(method="PUT", data=payload)
         with patch("content_factory.service_views._apply_cancellation_receipt", return_value=Response({"status": "cancelled"})) as receipt, \
-                patch.object(authority, "authority_guard") as grant:
+                patch.object(authority, "authority_guard") as grant, \
+                patch("workflow_runs.models.ContentFactoryRun.objects.filter") as saved_runs:
+            saved_runs.return_value.first.return_value = self.run
             response = wrapped(None, request, run_id=self.run.run_id)
         self.assertEqual(response.status_code, 200)
         receipt.assert_called_once_with(self.run.run_id, {**payload, "run_id": self.run.run_id})

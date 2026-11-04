@@ -17,6 +17,30 @@ def validate(env):
         raise ValueError("SLACK_OWNER_INVENTORY_ENABLED must be true or false")
     if inventory_enabled == "true" and enabled != "true":
         raise ValueError("SLACK_OWNER_INVENTORY_ENABLED requires MESSAGE_SYNC_ENABLED=true")
+    member_ids = env.get("SLACK_MEMBER_CHANNEL_ALLOWED_IDS", "")
+    if (not isinstance(member_ids, str) or len(member_ids) > 25000
+            or re.fullmatch(r"[A-Z0-9, \t]*", member_ids) is None
+            or member_ids and (len(member_ids.split(",")) > 1000 or not all(
+                re.fullmatch(r"C[A-Z0-9]{2,23}", value.strip()) for value in member_ids.split(",")
+            ))):
+        raise ValueError("SLACK_MEMBER_CHANNEL_ALLOWED_IDS must be empty or a bounded comma-separated channel list")
+    for key, default in (("MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", "true"), ("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED", "false"), ("MESSAGE_SYNC_RECENT_HISTORY_ENABLED", "false"), ("MESSAGE_SYNC_TARGETED_STAGED_ROUTING", "false")):
+        if env.get(key, default).lower() not in {"true", "false"}:
+            raise ValueError(f"{key} must be true or false")
+    cap = env.get("MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR", "6")
+    if not re.fullmatch(r"[1-9][0-9]{0,2}", cap) or int(cap) > 256:
+        raise ValueError("MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR must be an integer from 1 to 256")
+    if env.get("MESSAGE_SYNC_RECENT_HISTORY_ENABLED", "false").lower() == "true" and enabled != "true":
+        raise ValueError("MESSAGE_SYNC_RECENT_HISTORY_ENABLED requires MESSAGE_SYNC_ENABLED=true")
+    if env.get("MESSAGE_SYNC_TARGETED_STAGED_ROUTING", "false").lower() == "true" and enabled != "true":
+        raise ValueError("MESSAGE_SYNC_TARGETED_STAGED_ROUTING requires MESSAGE_SYNC_ENABLED=true")
+    if env.get("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED", "false").lower() == "true" and (enabled != "true" or inventory_enabled != "true"):
+        raise ValueError("MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED requires MESSAGE_SYNC_ENABLED=true and SLACK_OWNER_INVENTORY_ENABLED=true")
+    fanout = env.get("MESSAGE_SYNC_DEVICE_FANOUT_BATCH", "0")
+    if not re.fullmatch(r"0|[1-9][0-9]?", fanout) or int(fanout) > 50:
+        raise ValueError("MESSAGE_SYNC_DEVICE_FANOUT_BATCH must be an integer from 0 to 50")
+    if int(fanout) > 0 and enabled != "true":
+        raise ValueError("MESSAGE_SYNC_DEVICE_FANOUT_BATCH requires MESSAGE_SYNC_ENABLED=true")
     user_app = env.get("MESSAGE_SYNC_SLACK_USER_APP_ID", "")
     if user_app:
         if not re.fullmatch(r"A[A-Z0-9]+", user_app) or not re.fullmatch(r"[0-9a-f]{32}", env.get("MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET", "")):

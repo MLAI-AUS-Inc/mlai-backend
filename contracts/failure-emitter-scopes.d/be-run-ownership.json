@@ -1,0 +1,174 @@
+{
+  "dynamic_adapters": [
+    {
+      "path": "content_factory/founder_journey_contract.py",
+      "function": "enrich_journey",
+      "field": "code",
+      "expression": "code if isinstance(code, str) and code in known else 'UNREGISTERED_FAILURE_CODE'",
+      "site_sha256": "5952a8fed622db9c0dddceec30554c4fea2b94d9e5062f685c30fbfcd70f766c",
+      "adapter": "validated_v1_projection",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Read-only presentation admits only exact membership in the server-owned registry view; any unknown retained observation becomes UNREGISTERED_FAILURE_CODE. It cannot authorize work.",
+      "test": "content_factory.tests_founder_article_contract"
+    },
+    {
+      "path": "content_factory/founder_article_review_contract.py",
+      "function": "candidate_failures",
+      "field": "code",
+      "expression": "candidate.get('reasonCode')",
+      "site_sha256": "5d5ea535b62a29b6db708d3d9c4d672be720c0c1aed92a1af440ce348b943a51",
+      "adapter": "authority_registry_boundary",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "The actual failed candidate reasonCode is passed only to article_error_envelope, whose closed registry and server copy catalog map any unknown or absent code to UNREGISTERED_FAILURE_CODE. Raw provider errors never enter candidateFailures. Presentation only; no execution authority.",
+      "test": "content_factory.tests_founder_article_review_contract"
+    }
+  ],
+  "nonfailure_sites": [
+    {
+      "path": "content_factory/article_review_views.py",
+      "function": "remote_review",
+      "field": "error_code",
+      "expression": "'review_source_changed'",
+      "site_sha256": "4da1eaee105ff128599af3b89a475c2f8777963841d231c9c70a8f20cbc84383",
+      "adapter": "nonfailure_category",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "A saved admitted child differs from the requested parent. This is a local command refusal before remote review writes; it is never a producer failure envelope.",
+      "test": "content_factory.tests_r3_revision_child_admission"
+    },
+    {
+      "path": "content_factory/run_review_source.py",
+      "function": "_denied",
+      "field": "error_code",
+      "expression": "'review_source_changed'",
+      "site_sha256": "34f8c736e7283d63d12eb14871d1709e91b5ff7eacc87828ca0205dd4f258a3d",
+      "adapter": "nonfailure_category",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Current saved review source differs from the exact independently verified branch proof. Closed backend command conflict; no worker lifecycle or failure assertion.",
+      "test": "content_factory.tests_r3_publish_child_admission"
+    },
+    {
+      "path": "content_factory/run_review_source.py",
+      "function": "verify_review_ref",
+      "field": "error_code",
+      "expression": "'review_source_unavailable'",
+      "site_sha256": "c261fbbb426f5bda1f8b919f45e1a80dd80d104532bed49c32a2359a495ac0ad",
+      "adapter": "nonfailure_category",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "The exact reviewed ref cannot be independently read. Closed retryable backend command conflict before effects; it cannot grant continuation or declare a producer failure.",
+      "test": "content_factory.tests_r3_revision_child_admission"
+    },
+    {
+      "path": "content_factory/service_views.py",
+      "function": "post",
+      "field": "code",
+      "expression": "'owned_execution_requires_typed_observation'",
+      "site_sha256": "fb29e46ab5f52f3c9c85fc39732531ed2d90332e4ea5edf3ed30197e1cb5f6a1",
+      "adapter": "nonfailure_category",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Closed 409 compatibility refusal for a retained event owner reaching a retired observation or service-control route. The typed journal and explicit authenticated user command remain authoritative.",
+      "test": "content_factory.tests_run_retired_writers"
+    },
+    {
+      "path": "content_factory/service_views.py",
+      "function": "post",
+      "field": "code",
+      "expression": "'owned_run_requires_user_control'",
+      "site_sha256": "c31f9b5bbb04610740bb000cdbd6f93626424d150c18a431dfd2b2fca035e350",
+      "adapter": "nonfailure_category",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Closed 409 compatibility refusal for a retained event owner reaching a retired observation or service-control route. The typed journal and explicit authenticated user command remain authoritative.",
+      "test": "content_factory.tests_run_retired_writers"
+    },
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "_call_content_factory_run_action",
+      "field": "code",
+      "expression": "getattr(exc, 'reason', 'execution_resume_refused')",
+      "site_sha256": "88220ab365c97f26914ac3c1748aa1577cd7314e99e19c3d41973578d65c718e",
+      "adapter": "nonfailure_category",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Only the local RunOwnershipConflict from user_resume_payload is read here. Its reason names a backend principal, consent, ticket, budget or settled-obligation refusal; plain ownership errors use the fixed execution_resume_refused fallback. This is a command result, not a worker failure envelope.",
+      "test": "content_factory.tests_r3_user_resume"
+    },
+    {
+      "path": "content_factory/website_connections.py",
+      "function": "require_run_not_stopped",
+      "field": "error_code",
+      "expression": "'run_execution_closed'",
+      "site_sha256": "7219eba0e6d0bd830c8d51185639b352a5db96c3df2b44d2e97ebb821ebe0916",
+      "adapter": "nonfailure_category",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Finite local stop or settled-obligation conflicts deny new provider effects and credentials under fresh authority checks. They never infer producer lifecycle or grant money effects.",
+      "test": "content_factory.tests_run_closed_execution_authority"
+    },
+    {
+      "path": "content_factory/website_connections.py",
+      "function": "require_run_not_stopped",
+      "field": "error_code",
+      "expression": "'run_stop_requested'",
+      "site_sha256": "64b04e6bba1634b401ca0d39a1079ce80cf89d921e8ab71a1223c3a6e3fd3af1",
+      "adapter": "nonfailure_category",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Finite local stop or settled-obligation conflicts deny new provider effects and credentials under fresh authority checks. They never infer producer lifecycle or grant money effects.",
+      "test": "content_factory.tests_run_closed_execution_authority"
+    },
+    {
+      "path": "content_factory/website_connections.py",
+      "function": "guarded_service_write.decorate.wrapped",
+      "field": "code",
+      "expression": "'owned_execution_requires_typed_observation'",
+      "site_sha256": "5ebde0748360b54808a1202a33c92f6d86373c82eb6126fd8b89bf26b0c024a0",
+      "adapter": "nonfailure_category",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "A retained event owner reaching a legacy mutable service route is refused before the old worker method, side effects or lifecycle projection. Local transport compatibility result only.",
+      "test": "content_factory.tests_run_retired_writers"
+    },
+    {
+      "path": "content_factory/website_prepare.py",
+      "function": "_resume_prepare_child",
+      "field": "error_code",
+      "expression": "'run_execution_owned'",
+      "site_sha256": "9ddc79e62af46300623f06075fe5cfa4fce3df14598055bc78663e620429bfaf",
+      "adapter": "nonfailure_category",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Legacy website coordination cannot implicitly continue a retained event-owned execution. The explicit user and typed ticket controllers own any continuation.",
+      "test": "content_factory.tests_run_goal_authority"
+    },
+    {
+      "path": "content_factory/website_run_authority.py",
+      "function": "wait_for_execution",
+      "field": "reason_code",
+      "expression": "'run_execution_owned'",
+      "site_sha256": "aec3590deb33547cb3cb6626a28ba16e6cea5b88745fa6fc2d867d6b86a169c2",
+      "adapter": "nonfailure_category",
+      "owner": "backend.run_ownership",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Local goal coordination reports its saved child owner and an inspect-only next action. This does not alter execution lifecycle, create a retry, or classify a producer failure.",
+      "test": "content_factory.tests_run_goal_authority"
+    },
+    {
+      "path": "content_factory/founder_article_errors.py",
+      "function": "article_error_envelope",
+      "field": "code",
+      "expression": "code",
+      "site_sha256": "f25b91a45c459d0502b719b0c911557f6700e0d3f7f065ac319258f67a3ca0ce",
+      "adapter": "nonfailure_category",
+      "owner": "backend.founder_article_contract",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Additive scoped article error presentation selects only canonical registry membership or the closed server COMMAND_COPY catalogue, otherwise UNREGISTERED_FAILURE_CODE. Local command conflicts are not CF failure classifications; the original response and validated producer failure envelope stay unchanged. Remote detail text never supplies founder copy.",
+      "test": "content_factory.tests_founder_article_contract"
+    }
+  ]
+}

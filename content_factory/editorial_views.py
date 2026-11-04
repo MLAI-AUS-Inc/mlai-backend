@@ -44,6 +44,7 @@ def _lock_catalog_owner(context, user_id, organization):
 
 def mutate_catalog_response(
     organization_lookup, payload, *, owner_context=None, owner_user_id=None, approving=False,
+    command_key=None, command_body=None,
 ):
     """Lock and reread before validation; failures cannot partially save policy."""
     try:
@@ -53,8 +54,20 @@ def mutate_catalog_response(
             org = Organization.objects.select_for_update().get(**organization_lookup)
             if owner_context is not None:
                 _lock_catalog_owner(owner_context, owner_user_id, org)
-            config = OrganizationContentConfig.objects.filter(organization=org).first()
+            configs = OrganizationContentConfig.objects
+            if owner_context is not None and command_key is not None:
+                configs = configs.select_for_update()
+            config = configs.filter(organization=org).first()
             strategy = config.pillar_strategy if config else {}
+            from .catalog_commands import prepare_command, record_command
+            command = prepare_command(strategy=strategy, organization=org, context=owner_context,
+                user_id=owner_user_id, key=command_key, body=command_body,
+                action="approve" if approving else "edit")
+            if command is not None and command.replay:
+                current = review_payload(strategy)
+                current[OFFER_PAGE_CHECKS_KEY] = offer_page_check_payload(strategy)
+                return Response(current, headers={"Idempotent-Replayed": "true",
+                    "X-Catalog-Command-Revision": str(command.previous["catalog_version"])})
             if not approving:
                 payload = dict(payload)
                 activating = "activate_entries" in payload
@@ -78,6 +91,8 @@ def mutate_catalog_response(
                 )
             # Validate the exact response before making any persistent change.
             response = review_payload(updated)
+            updated = record_command(original=strategy, updated=updated, body=command_body,
+                command=command, response=response)
             # Advisory only: scheduling cannot fail the save, and page/model IO
             # starts after commit, outside these locks.
             updated, pending_checks = prepare_offer_page_checks(
@@ -163,6 +178,7 @@ class EditorialCatalogView(APIView):
         return mutate_catalog_response(
             {"pk": context.organization.pk}, payload,
             owner_context=context, owner_user_id=request.user.pk, approving=approving,
+            command_key=request.headers.get("Idempotency-Key"), command_body=dict(request.data),
         )
 
 
@@ -171,6 +187,28 @@ class EditorialCatalogApprovalView(EditorialCatalogView):
 
     def post(self, request):
         return self._mutate(request, approving=True)
+
+
+class EditorialFirstAudienceView(EditorialCatalogView):
+    """Save the founder's one-sentence customer profile as an approved audience.
+
+    Called only from the "Write my first article" press, which is the owner's
+    approval (see editorial_first_audience). Served to Chat through the
+    My startup alias, which applies the my_startup_write account budget.
+    """
+
+    http_method_names = ["post", "options"]
+
+    def post(self, request):
+        from .editorial_first_audience import first_audience_response
+        if not isinstance(request.data, dict):
+            return Response({"error": "Expected a JSON object"}, status=400)
+        context, error = self._context(request)
+        if error is not None:
+            return error
+        payload = {key: value for key, value in request.data.items() if key != "company_id"}
+        return first_audience_response(context, request.user.pk, payload,
+            command_key=request.headers.get("Idempotency-Key"), command_body=dict(request.data))
 
 
 from rest_framework.throttling import UserRateThrottle
@@ -198,6 +236,11 @@ class EditorialBriefSuggestionView(EditorialCatalogView):
         if not isinstance(topic, str) or not 3 <= len(topic.strip()) <= 500 or not isinstance(country, str) or len(country) != 2 or type(version) is not int:
             return Response({"error": "Supply a topic, country and current catalogue revision"}, status=400)
         remote = _content_factory_remote_config()
+        from .catalog_brief_commands import suggestion_response
+        keyed = suggestion_response(context, request.user.pk, dict(request.data),
+            key=request.headers.get("Idempotency-Key"), remote=remote, headers=_content_factory_headers())
+        if keyed is not None:
+            return keyed
         if not remote["enabled"]:
             return Response({"error": "Brief suggestions are unavailable; you can enter the brief manually"}, status=503)
         try:

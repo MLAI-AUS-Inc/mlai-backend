@@ -8,6 +8,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from startup_updates.models import SlackChannelSelection, SlackThreadArtifact
+from integrations.services.slack_source_privacy import is_members_source, slack_source_queryset
 
 from .artifact_utils import (
     bounded_text,
@@ -86,7 +87,7 @@ def _selected_scope_map(configuration, selected_scopes=None):
     )
     selections = {
         row.channel_id: row
-        for row in SlackChannelSelection.objects.filter(
+        for row in slack_source_queryset(SlackChannelSelection).filter(
             connection=configuration.connection,
             channel_id__in=[str(scope.external_id or "") for scope in scopes],
         )
@@ -96,6 +97,8 @@ def _selected_scope_map(configuration, selected_scopes=None):
         channel_id = str(scope.external_id or "").strip()
         if scope.scope_type != "channel" or not channel_id:
             raise ValueError("Slack memory supports selected channel scopes only.")
+        if is_members_source(configuration.connection.external_account_id, channel_id):
+            raise ValueError("Members Slack sources are excluded from memory.")
         selection = selections.get(channel_id)
         if (
             is_slack_dm_scope(channel_id)
@@ -111,7 +114,7 @@ def _selected_scope_map(configuration, selected_scopes=None):
 
 
 def _all_threads(configuration, scopes):
-    queryset = SlackThreadArtifact.objects.filter(
+    queryset = slack_source_queryset(SlackThreadArtifact).filter(
         organization=configuration.organization,
         connection=configuration.connection,
         channel_id__in=tuple(scopes),
@@ -270,7 +273,8 @@ def _thread_chunks(thread):
 
 def _record_for(configuration, thread, scopes):
     scope = scopes.get(str(thread.channel_id))
-    if scope is None or is_slack_dm_scope(thread.channel_id):
+    if (scope is None or is_slack_dm_scope(thread.channel_id)
+            or is_members_source(configuration.connection.external_account_id, thread.channel_id)):
         return None
     chunks = _thread_chunks(thread)
     full_text = "\n\n".join(chunk["text"] for chunk in chunks)
@@ -354,14 +358,14 @@ class SlackArtifactMemoryConnector:
                     "legacy_selected": bool(row.selected),
                 },
             )
-            for row in SlackChannelSelection.objects.filter(
+            for row in slack_source_queryset(SlackChannelSelection).filter(
                 connection=configuration.connection,
             ).order_by("channel_name", "channel_id")
             if not _selection_is_dm(row)
         ]
         if not descriptors:
             seen = set()
-            for row in SlackThreadArtifact.objects.filter(
+            for row in slack_source_queryset(SlackThreadArtifact).filter(
                 organization=configuration.organization,
                 connection=configuration.connection,
             ).order_by("channel_name", "channel_id"):

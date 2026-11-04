@@ -40,11 +40,22 @@ def test_modules(root=ROOT):
 
 def selected_labels(workflow):
     logical = workflow.replace("\\\n", " ")
-    pattern = r"python(?:3)? (?:manage\.py test|-m unittest|scripts/test_without_database\.py) ([^\n]+)"
+    pattern = r"python(?:3)? (?:manage\.py test|-m unittest|scripts/test_without_database\.py|scripts/test_event_discounts\.py) ([^\n]+)"
     labels = set()
     for command in re.findall(pattern, logical):
+        option_value = False
         for token in shlex.split(command):
-            if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", token):
+            if option_value:
+                option_value = False
+                continue
+            if token in {"--exclude-tag", "--tag", "--verbosity", "--pattern", "-p",
+                         "--settings", "--testrunner", "--top-level-directory", "-t",
+                         "--start-directory", "-s"}:
+                option_value = True
+                continue
+            # unittest imports dotted labels with importlib, which also accepts
+            # existing namespace directories such as ops/staging-chat.
+            if re.fullmatch(r"[A-Za-z_]\w*(?:-\w+)*(?:\.[A-Za-z_]\w*(?:-\w+)*)*", token):
                 labels.add(token)
     return labels
 
@@ -66,9 +77,9 @@ def main():
     labels = selected_labels((ROOT / ".github/workflows/deploy.yml").read_text())
     complete, partial, absent = classify(modules, labels)
     baseline = json.loads(BASELINE.read_text())
-    if date.today() > date.fromisoformat(baseline["review_by"]):
-        raise SystemExit("Existing CI selection debt is due for review; assign suites before extending the baseline.")
     allowed = set(baseline["unassigned_modules"])
+    if allowed and date.today() > date.fromisoformat(baseline["review_by"]):
+        raise SystemExit("Existing CI selection debt is due for review; assign suites before extending the baseline.")
     new = absent - allowed
     print(
         f"CI test-module assignment: {len(complete)} fully selected, "

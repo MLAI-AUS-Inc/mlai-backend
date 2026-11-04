@@ -112,7 +112,9 @@ def sync_luma_connection(connection: ExternalServiceConnection) -> dict[str, Any
         # Drop Luma rows that are no longer part of the freshly-computed set
         # (deselected metrics, or months no longer returned by Luma).
         kept_ids = [metric.id for metric in metrics]
+        from .source_accounts import metric_account_filter
         StartupMetricObservation.objects.filter(
+            metric_account_filter(organization, LUMA_METRIC_SOURCE, connection.pk),
             organization=organization,
             source_provider=LUMA_METRIC_SOURCE,
             run__isnull=True,
@@ -207,6 +209,13 @@ def publish_luma_event_metrics(
     ``LumaAttendeeReportService.collect_ended_event_attendance``). ``selected_metrics``
     defaults to all Luma metric keys.
     """
+    from .source_accounts import metric_account_filter
+    if connection_id is None:
+        ids = list(ExternalServiceConnection.objects.filter(organization=organization,
+            provider=ExternalServiceProvider.LUMA).values_list("pk", flat=True)[:2])
+        if len(ids) > 1:
+            raise LumaConfigurationError("Choose one Luma calendar before publishing metrics.")
+        connection_id = ids[0] if ids else None
     observed_at = observed_at or timezone.now()
     metric_keys = [key for key in (selected_metrics or LUMA_METRIC_KEYS) if key in LUMA_METRIC_KEYS]
     if not metric_keys:
@@ -259,7 +268,9 @@ def publish_luma_event_metrics(
 
         for metric_key in metric_keys:
             value_number, value_text, unit = computed[metric_key]
-            metric, _created = StartupMetricObservation.objects.update_or_create(
+            metric, _created = StartupMetricObservation.objects.filter(
+                metric_account_filter(organization, LUMA_METRIC_SOURCE, connection_id)
+            ).update_or_create(
                 organization=organization,
                 run=None,
                 metric_key=metric_key,

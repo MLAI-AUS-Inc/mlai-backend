@@ -107,7 +107,9 @@ class StartupProfileDraftUnitTests(unittest.TestCase):
             "get_or_create_founder_profile": Mock(return_value=self.profile),
             "normalize_company_domain": lambda value: str(value or "").strip(),
             "domain_is_available_to": Mock(return_value=True),
-            "DomainOwnershipError": type("DomainOwnershipError", (Exception,), {}),
+            "CompanyDomainClaimedError": type("CompanyDomainClaimedError", (Exception,), {}),
+            "claimed_organization": Mock(return_value=None),
+            "queue_domain_claim_alert": Mock(),
             "DuplicateCompanyDomainError": type("DuplicateCompanyDomainError", (Exception,), {}),
             "_require_roo_points_for_ai_agent": self.gate,
             "VibeRaisingCompany": SimpleNamespace(DoesNotExist=type("CompanyMissing", (Exception,), {})),
@@ -121,6 +123,7 @@ class StartupProfileDraftUnitTests(unittest.TestCase):
             "_camel_list": lambda value: list(value or []),
             "CONTENT_FACTORY_REQUEST_SOURCE": "founder_tools",
             "_mark_roo_points_gate_authorized": Mock(),
+            "_record_free_setup_research": Mock(),
             "_queue_content_factory_run": self.queue,
             "logger": Mock(),
         })

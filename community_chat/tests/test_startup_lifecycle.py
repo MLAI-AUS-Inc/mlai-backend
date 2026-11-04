@@ -98,7 +98,7 @@ class ConnectionActionsTests(SimpleTestCase):
     def test_disconnect_cannot_touch_a_sibling_startup(self):
         view = connections.DisconnectView()
         view.company = Obj(organization=Obj(pk="owned"))
-        request = Obj(user=Obj(pk=7))
+        request = Obj(user=Obj(pk=7), data={})
         with patch.object(connections.ExternalServiceConnection, "objects") as manager, patch.object(connections, "disconnect_external_connection") as disconnect:
             manager.filter.return_value.exclude.return_value.values_list.return_value = [12]
             response = view.delete(request, "slack")

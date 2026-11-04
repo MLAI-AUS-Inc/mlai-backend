@@ -229,7 +229,7 @@ class AppleConcurrencyTests(TransactionTestCase):
                 receipt = replace(purchase, revoked_at=later, signed_at=later) if refund else purchase
                 deliver_purchase(user=user, purchase=receipt)
             finally:
-                close_old_connections()
+                connection.close()
         with ThreadPoolExecutor(max_workers=2) as pool:
             list(pool.map(deliver, (False, True)))
         account = PointsAccount.objects.get(user=user)
@@ -255,7 +255,7 @@ class AppleConcurrencyTests(TransactionTestCase):
                 except IdempotencyConflictError:
                     return "conflict"
             finally:
-                close_old_connections()
+                connection.close()
         with ThreadPoolExecutor(max_workers=2) as pool:
             self.assertCountEqual(list(pool.map(spend, users)), ["spent", "conflict"])
         self.assertEqual(sum(PointsAccount.objects.values_list("digital_balance_microroo", flat=True)), 19_000_000)
@@ -276,7 +276,7 @@ class AppleConcurrencyTests(TransactionTestCase):
                 else:
                     deliver_purchase(user=user, purchase=purchase)
             finally:
-                close_old_connections()
+                connection.close()
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(deliver, range(4)))
         self.assertEqual(PointsAccount.objects.get(user=user).digital_balance_microroo, 10_000_000)

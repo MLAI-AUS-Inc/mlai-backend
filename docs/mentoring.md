@@ -1,9 +1,9 @@
 # Vibe Mentoring (pilot)
 
-Status: pilot, built on the branch `mentoring/pilot`. Not in `main`.
-The initial migration `mentoring/migrations/0001_initial.py` is proposed and ready for
-review (field list and checksum in `docs/migration-proposals/mentoring-0001.md`). It has not
-been applied to any shared database.
+Status: opt-in pilot promoted from staging. `MENTOR_BOOKING_ENABLED` and
+`MENTORING_GOOGLE_ENABLED` default to false. Source presence does not show whether
+any environment has been deployed or enabled. Before merging or deploying the
+backend, review [the main rollout and exact migration inventory](mentoring-main-rollout.md).
 
 ## What it is
 
@@ -15,7 +15,7 @@ HTTP layer is `community_chat/mentoring_views.py`.
 ## Rules
 
 - A mentor is a user with an active `MentorProfile`. Only an admin can set
-  `is_active` (Django admin, "Vibe Mentoring"). Mentors cannot activate
+  `is_active` through Mentoring admin or Django admin ("Vibe Mentoring"). Mentors cannot activate
   themselves. An admin can also change a mentor's price.
 - Mentors set their own weekly availability (windows per weekday in their own
   timezone), their own session length (15 to 120 minutes, multiples of 5), their
@@ -221,9 +221,10 @@ Open questions that need a live test before the pilot relies on them:
 
 ## Rollout order
 
-1. The migration `mentoring/migrations/0001_initial.py` is generated and ready for
-   review. Review it against the proposal.
-2. Run the database-backed tests (not yet written) on a disposable database.
+1. Review both existing mentoring migrations and the exact target plan against
+   [the main rollout](mentoring-main-rollout.md); approval is environment-specific.
+2. Run `mentoring.tests.test_booking_database` against an approved disposable
+   PostgreSQL database.
 3. Apply the migration before or with the code (the app's tables must exist before
    any user deletion or admin page touches them). The deployer sets
    `APPROVED_MIGRATION_PLAN_SHA256` on the host (see the proposal for the exact value
@@ -246,18 +247,21 @@ Open questions that need a live test before the pilot relies on them:
 
 No-database suites, registered in `.github/workflows/deploy.yml`:
 `python scripts/test_without_database.py mentoring.tests.test_scheduling_unit mentoring.tests.test_google_unit mentoring.tests.test_service_unit mentoring.tests.test_dst_unit community_chat.tests.test_mentoring_views_unit`.
-Locking, constraints and real ledger rows need database tests after migration approval.
+The PostgreSQL suite `mentoring.tests.test_booking_database` exercises real ledger
+charges, refunds and payouts, replayed actions, low-balance requests, lazy
+completion, competing founders and simultaneous retries. It runs in the existing
+PostgreSQL CI lane. Migration execution requires approval for that environment.
 
 ## Becoming a mentor (invite only)
 
-Nobody can apply without an invite. Staff add a Mentor invite in Django admin for an
+Nobody can apply without an invite. Staff issue an invite through Mentoring admin or add a Mentor invite in Django admin for an
 existing user; the single-use link (`<chat url>/mentoring/apply?invite=<token>`) is
 shown once and only its SHA-256 is stored. It expires after 14 days by default and can
 be revoked from the list. The invited user, signed in as that user, fills the form
 (headline, bio, topics, price 1 to 1000 Roo default 40, session length, location,
 weekly availability, optional booking questions). Submitting creates or updates their
-profile with `is_active` false and uses up the invite. MLAI staff approve by ticking
-`is_active` on the Mentor profile in admin. Until then the applicant sees "submitted,
+profile with `is_active` false and uses up the invite. MLAI staff approve through Mentoring admin or by ticking
+`is_active` on the Mentor profile in Django admin. Until then the applicant sees "submitted,
 MLAI will review" and no Mentor hub. An applicant cannot edit after submitting; staff
 issue a new invite if they need to resubmit.
 

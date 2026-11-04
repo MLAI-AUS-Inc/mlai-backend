@@ -113,6 +113,24 @@ def is_research_workspace(company):
     return isinstance(profile, dict) and profile.get("researchDraft") is True
 
 
+def clear_research_draft(organization):
+    """Drop the org's provisional research marker once a real startup owns it.
+
+    The marker is per organisation, so this makes every company bound to the
+    org visible; callers release other founders' workspaces first.
+    """
+    from content_factory.models import OrganizationContentConfig
+
+    config = OrganizationContentConfig.objects.select_for_update().filter(organization=organization).first()
+    strategy = deepcopy(config.pillar_strategy) if config and isinstance(config.pillar_strategy, dict) else {}
+    details = strategy.get(PROFILE_KEY)
+    if not isinstance(details, dict) or "researchDraft" not in details:
+        return
+    details.pop("researchDraft")
+    config.pillar_strategy = strategy
+    config.save(update_fields=["pillar_strategy", "updated_at"])
+
+
 def lock_research_profile(profile):
     """Serialize provisional workspace admission within the caller's transaction."""
     from founder_tools.models import VibeRaisingProfile

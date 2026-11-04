@@ -14,7 +14,15 @@ class AppleReadinessMigrationTests(TransactionTestCase):
         before = [(app, previous.get(app, name)) for app, name in after]
         executor.migrate(before)
         try:
-            old = executor.loader.project_state(before).apps
+            # Rolling Roo back also unwinds dependent apps such as mentoring.
+            # Requested leaf targets can therefore include migrations that are
+            # no longer applied. Build the historical models from actual state.
+            executor = MigrationExecutor(connection)
+            applied = [
+                node for node in executor.loader.applied_migrations
+                if node in executor.loader.graph.nodes
+            ]
+            old = executor.loader.project_state(applied).apps
             user = old.get_model(settings.AUTH_USER_MODEL).objects.create(email="migration-iap@example.com")
             old.get_model("roo", "PointsAccount").objects.create(
                 user_id=user.pk, balance=12, earned_balance=10, purchased_topup_balance=2,

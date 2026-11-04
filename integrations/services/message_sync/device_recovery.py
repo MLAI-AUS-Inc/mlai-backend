@@ -3,7 +3,9 @@
 A revoked device correctly fences its old private room. The account's source
 inventory survives that fence, so recovery must not wait for users.conversations
 to rediscover thousands of old rooms. Every repair still obtains fresh Slack
-membership and runs the existing registration/consent authority checks.
+membership and runs the existing registration/consent authority checks. Flag-gated
+IM device-only audience changes reuse immutable IM membership without provider I/O;
+private channels and MPIMs still revalidate their source.
 """
 from datetime import timedelta
 
@@ -124,6 +126,150 @@ def _update_device_hint(authority, public_key, *, failed_conversation=None):
             cursor[DEVICE_AUDIENCE_HINT] = hint
         connection.sync_cursor = cursor
         connection.save(update_fields=["sync_cursor", "updated_at"])
+
+
+DEVICE_FANOUT_MAX_PER_MINUTE = 20
+DEVICE_FANOUT_KEY = "message_sync_device_fanout_v1"
+
+
+def fanout_batch():
+    """Return a bounded repair batch only with durable sync and stable rooms."""
+    from .device_audience import enabled
+    if not getattr(settings, "MESSAGE_SYNC_ENABLED", False) or not enabled():
+        return 0
+    return max(0, min(50, int(getattr(settings, "MESSAGE_SYNC_DEVICE_FANOUT_BATCH", 0) or 0)))
+
+
+def device_only_row_eligible(grant, row):
+    """Use current owner inventory as an in-window eligibility gate for IM repair."""
+    from integrations.services import slack_dm_mirror as dm
+    days = dm._grant_history_days(grant)
+    if row.eligibility != "eligible" or row.source_is_open is False or (days and row.source_archived is True):
+        return False
+    activity = dm._slack_conversation_activity_seconds({"latest": row.source_activity_ts})
+    return not days or (activity is not None and activity >= timezone.now().timestamp() - days * 86400)
+
+
+def device_only_candidates(grant, authority, public_key, *, statuses=("live",)):
+    """Select eligible IM audiences in Python, prioritizing known unread rooms."""
+    from django.core.cache import cache
+    from integrations.services import slack_dm_mirror as dm
+    from integrations.services.slack_chat_read_state import ReadTarget, _cache_key
+    now = timezone.now().timestamp()
+    hint = (grant.connection.sync_cursor or {}).get(DEVICE_AUDIENCE_HINT) or {}
+    query = recent_conversations(SlackDmMirrorConversation.objects.filter(
+        grant=grant, status__in=statuses, mlai_channel_id__isnull=False), include_owner_inventory=True)
+    candidates = list(query)
+    inventory = {row.slack_conversation_id: row for row in grant.owner_conversation_inventory.filter(
+        slack_conversation_id__in=[room.slack_conversation_id for room in candidates])}
+    rooms = []
+    for room in candidates:
+        room.grant = grant
+        kind = conversation_kind(room)
+        row = inventory.get(room.slack_conversation_id)
+        preserved = room.status == "provisioning" and room.history_backfilled_at is not None
+        if (kind not in dm.DEVICE_ONLY_AUDIENCE_KINDS
+                or (room.status == "provisioning" and not preserved)
+                or (room.status == "live" and (not public_key or public_key in (room.participant_buzz_pubkeys or [])))
+                or not dm._history_required_scopes(room.slack_conversation_id, kind=kind).issubset(set(grant.connection.scopes or []))
+                or (hint.get("retry_after") or {}).get(str(room.pk), 0) > now
+                or row is None or not device_only_row_eligible(grant, row)):
+            continue
+        rooms.append(room)
+    keys = {room.pk: _cache_key(authority, ReadTarget(room.slack_conversation_id, room.slack_conversation_id, conversation_kind(room))) for room in rooms}
+    try:
+        snapshots = cache.get_many(list(keys.values()))
+    except Exception:
+        snapshots = {}
+    return sorted(rooms, key=lambda room: ((snapshots.get(keys[room.pk]) or {}).get("is_unread") is not True,
+                                           -float(room.coverage_activity), room.pk))
+
+
+def _fanout_failure(grant, authority, room, key, exc):
+    from integrations.services import slack_dm_mirror as dm
+    with transaction.atomic():
+        dm._lock_slack_grant_api_authority(authority, required_scopes=dm.DIRECT_DM_SCOPES)
+        SlackDmMirrorConversation.objects.filter(pk=room.pk, grant=grant, status__in=["provisioning", "error"]).update(
+            status="error", last_error=f"Device recovery: {type(exc).__name__}", updated_at=timezone.now())
+    if key:
+        _update_device_hint(authority, key, failed_conversation=room.pk)
+
+
+def _propagating_recovery_error(exc):
+    from integrations.services import slack_dm_mirror as dm
+    return (isinstance(exc, (BudgetDeferred, LeaseLost, dm.SlackDmMirrorAuthorizationError, dm.SlackDmMirrorRateLimited))
+            or dm._is_slack_auth_error(exc) or dm._slack_retry_after_seconds(exc))
+
+
+def fan_out_device_audience(grant, authority, *, limit):
+    """Repair a bounded IM audience batch without Slack I/O, preserving relay rooms."""
+    from integrations.services import slack_dm_mirror as dm
+    limit = min(limit, fanout_batch())
+    hint = (grant.connection.sync_cursor or {}).get(DEVICE_AUDIENCE_HINT) or {}
+    key = str(hint.get("public_key") or "")
+    if limit <= 0:
+        return 0
+    if key and dm._active_verified_device(grant.user_id, key) is None:
+        _update_device_hint(authority, key)
+        return 0
+    now = timezone.now().timestamp()
+    recent = [at for at in ((grant.connection.sync_cursor or {}).get(DEVICE_FANOUT_KEY) or {}).get("at", [])
+              if type(at) in (int, float) and now - 60 < at <= now][-64:]
+    limit = max(0, min(limit, DEVICE_FANOUT_MAX_PER_MINUTE - len(recent)))
+    if limit <= 0:
+        return 0
+    repaired = 0
+    try:
+        statuses = ("live", "provisioning") if key else ("provisioning",)
+        for room in device_only_candidates(grant, authority, key, statuses=statuses)[:limit]:
+            room.grant = grant
+            try:
+                dm._provision_owner_conversation(room, required_owner_public_key=key or None, device_only_statuses=frozenset({"live", "provisioning"}))
+                repaired += 1
+            except dm.SlackDmDeviceOnlyIneligible:
+                continue
+            except Exception as exc:
+                if _propagating_recovery_error(exc):
+                    raise
+                _fanout_failure(grant, authority, room, key, exc)
+    finally:
+        if repaired:
+            with transaction.atomic():
+                _, connection = dm._lock_slack_grant_api_authority(authority, required_scopes=dm.DIRECT_DM_SCOPES)
+                current = timezone.now().timestamp()
+                cursor = dict(connection.sync_cursor or {})
+                previous = [at for at in (cursor.get(DEVICE_FANOUT_KEY) or {}).get("at", [])
+                            if type(at) in (int, float) and current - 60 < at <= current]
+                cursor[DEVICE_FANOUT_KEY] = {"at": (previous + [current] * repaired)[-64:]}
+                connection.sync_cursor = cursor
+                connection.save(update_fields=["sync_cursor", "updated_at"])
+    return repaired
+
+
+def device_audience_summary(grant, public_key):
+    """Report pending audience work only for the device targeted by enrollment."""
+    from .device_audience import enabled
+    from integrations.services import slack_dm_mirror as dm
+    if grant is None or grant.status != "active" or grant.revoked_at is not None or not public_key or not enabled():
+        return None
+    query = grant.conversations.filter(status="live", mlai_channel_id__isnull=False)
+    hint = (grant.connection.sync_cursor or {}).get(DEVICE_AUDIENCE_HINT) or {}
+    if hint.get("public_key") != public_key:
+        return {"pending": 0, "total": query.count()}
+    query = grant.conversations.filter(mlai_channel_id__isnull=False).filter(
+        Q(status="live") | Q(status="provisioning", history_backfilled_at__isnull=False))
+    now = timezone.now().timestamp()
+    rooms = []
+    for room in recent_conversations(query, include_owner_inventory=True):
+        room.grant = grant
+        kind = conversation_kind(room)
+        if (kind == "private_channel" and not private_channels_enabled(grant)):
+            continue
+        if (not dm._history_required_scopes(room.slack_conversation_id, kind=kind).issubset(set(grant.connection.scopes or []))
+                or (hint.get("retry_after") or {}).get(str(room.pk), 0) > now):
+            continue
+        rooms.append(room)
+    return {"pending": sum(room.status == "provisioning" or public_key not in (room.participant_buzz_pubkeys or []) for room in rooms), "total": len(rooms)}
 
 
 def recover_recent_conversation(grant, authority, *, profile_cache, cycle_started_at):

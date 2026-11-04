@@ -143,6 +143,17 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
         )
         self.assertNotIn("result", payload["latestRunsByWorkflow"]["auto_discovery"])
 
+        # The real bootstrap caller defers to its live overlay. Direct run and
+        # standalone payload callers above retain their complete projections.
+        progress.reset_mock()
+        with ExitStack() as stack:
+            for name, value in stubs.items():
+                stack.enter_context(patch.object(views, name, value if callable(value) else Mock(return_value=value)))
+            deferred = views._compute_bootstrap_payload(context, view="summary", defer_workflow_progress=True)
+        progress.assert_not_called()
+        self.assertIsNone(deferred["workflowProgress"])
+        self.assertTrue(all(item["workflowProgress"] is None for item in deferred["latestRuns"]))
+
     def test_workflow_index_keeps_run_state_without_reserializing_article_artifacts(self):
         serialized_run = {
             "runId": "review-1", "workflow": "article_revision", "status": "awaiting_approval",

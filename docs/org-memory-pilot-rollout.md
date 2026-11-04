@@ -152,8 +152,9 @@ Missing learned-selector labels are a warning, not a blocker for the rules-
 
 ## 2. Merge and deploy production
 
-Every push to `main` runs the official tests before the backend deploy. The
-production deploy then hard-sets this runtime shape:
+Every push to `main` runs the official tests before the backend deploy.
+`ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED` defaults to false. An opted-in deployment
+attempts this reviewed runtime shape:
 
 ```dotenv
 ORG_MEMORY_QUERY_API_ENABLED=true
@@ -195,6 +196,35 @@ contexts, and the Public Roo surface must fail. Public channels must also fail
 unless the manifest contains `public_channels:pilot_admins`.
 Its JSON output contains only aggregate expected/pass counts and content-free
 blocker codes; it never emits actor or channel identifiers.
+
+A nonzero staging attempt leaves `ORG_MEMORY_QUERY_API_ENABLED=false` and
+warns while the application deployment continues. This includes degraded work
+queues, governance/evidence blockers and malformed staging output. No activation
+or post-binding gate is attempted after failed staging. The readiness checks
+themselves retain their strict requirements.
+
+### Activate after readiness recovers
+
+The separate **Activate Admin Brain** workflow is manual and main-only. After
+the owner resolves the underlying work item and confirms readiness, they can
+set the existing `ORG_MEMORY_PRODUCTION_DEPLOY_ENABLED` repository variable to
+true, select the full running release SHA and confirm activation in that
+workflow. It shares the production deployment concurrency lock. No repository
+variable, private approval or operator file is changed by the workflow.
+
+The existing protected `pilot-approval.json` and distinct `pilot-operators`
+entries must already be installed under `/root/mlai-backend-operations`, with
+the reviewed allowlist key configured. The script verifies the running
+`APP_RELEASE` and migration-disabled Compose configuration before changes.
+It stages and activates the same approval-bound row, then runs the release,
+effectiveness and access-matrix gates. Only after they pass does it enable the
+query switch, recreate web using its existing image, and recheck the gate in
+that running container. It does not run a schema migration or queue recovery.
+
+Activation failure re-disables the query switch and refreshes web. Failure to
+confirm that disabled runtime is reported as an operational failure. All local
+validation uses synthetic files and a fake Docker CLI; rollout and recovery
+remain owner operations.
 
 ## Strong-grounding automatic activation
 
@@ -251,9 +281,10 @@ response contains only a schema version, `ready`, and a stable code. The Roo
 runner checks expected 200 and 401/403 outcomes using aggregate counters and
 never sends a query body.
 
-The deploy fails and restores the prior web service if any approval,
-connection, evidence, evaluation, reconciliation, principal, actor, private
-context, active-binding, or non-shadow invariant fails. An active row grants
+The activation gates require approval, connection, evidence, evaluation,
+reconciliation, principal, actor, private-context, active-binding and non-shadow
+invariants. Failed staging keeps retrieval off while the app deploy continues;
+the separate activation workflow fails until its strict gates pass. An active row grants
 access only when the signed Admin Roo assertion contains an approved Slack
 actor and an exact approved private channel, a DM for that same approved actor,
 or an approved pilot admin in a public channel when the manifest contains

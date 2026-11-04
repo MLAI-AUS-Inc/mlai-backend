@@ -51,9 +51,11 @@ class VolunteerConcurrencyTests(TransactionTestCase):
             is_superuser=True,
         )
         for user, key in ((self.member, "d"), (self.reviewer, "e")):
-            CommunityChatDevice.objects.create(
-                user=user, public_key=key * 64, status="verified"
+            enrolled = timezone.now() - timedelta(minutes=2)
+            device = CommunityChatDevice.objects.create(
+                user=user, public_key=key * 64, status="verified", verified_at=enrolled,
             )
+            CommunityChatDevice.objects.filter(pk=device.pk).update(created_at=enrolled)
         VolunteerAttendance.objects.create(
             community="volunteer-concurrency-tests",
             user=self.member,
@@ -299,10 +301,22 @@ class VolunteerConcurrencyTests(TransactionTestCase):
         def award(company_id):
             def perform(user, reviewer):
                 company = VibeRaisingCompany.objects.get(pk=company_id)
-                from startup_updates.models import MonthlyUpdateDraft
+                from startup_updates.models import (
+                    MonthlyUpdateApproval, MonthlyUpdateDraft, MonthlyUpdateRevision, MonthlyEvidenceSnapshot,
+                )
+                from uuid import uuid4
                 now = timezone.now()
                 draft = MonthlyUpdateDraft.objects.create(organization=company.organization, month=month,
                     published_at=now, first_published_at=now, ready_at=now)
+                digest = uuid4().hex * 2
+                snapshot = MonthlyEvidenceSnapshot.objects.create(organization=company.organization,
+                    month=month, content_hash=digest, payload={})
+                revision = MonthlyUpdateRevision.objects.create(draft=draft, snapshot=snapshot,
+                    number=1, audience="community", content_hash=digest)
+                MonthlyUpdateApproval.objects.create(revision=revision, actor=user,
+                    content_hash=digest, audience_visibility=["community"])
+                draft.current_revision = draft.published_revision = revision
+                draft.save(update_fields=["current_revision", "published_revision"])
                 return StartupUpdateRewardService.award_monthly_update_completion(
                     user, company, month, draft, newly_approved=True, strict=True
                 )

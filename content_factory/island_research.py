@@ -34,13 +34,19 @@ def research_request_key(organization_id, user_id, nonce, brief):
 
 def refund_empty_or_failed_research(run):
     """Refund the recorded payer once, including when the browser has closed."""
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        # Typed failure/cancelled/completed events are never no-effect proof.
+        # Exact original dispatch settlement is owned by reconciliation.
+        return
     request = run.run_request if isinstance(run.run_request, dict) else {}
     result = run.result if isinstance(run.result, dict) else {}
     if not request.get("island_research_brief") or request.get("dispatch_pending_resolution"):
         return
     if result.get("island_research_refunded"):
         return
-    failed = run.status in {"failed", "cancelled", "blocked"}
+    # A worker refusal ("denied") never researched anything, so it is refunded too.
+    failed = run.status in {"failed", "cancelled", "blocked", "denied"}
     empty = run.status == "completed" and result.get("island_research") and not result.get("suggested_islands")
     if not (failed or empty):
         return
@@ -110,8 +116,8 @@ def adopt_researched_island(organization, run, proposal, *, merge_evidence=False
         if existing and existing.keyword_count > 0 and not merge_evidence:
             if existing.status != "visible":
                 existing.status, existing.promoted_at = "visible", now
-                existing.archived_at = None
-                existing.save(update_fields=["status", "promoted_at", "archived_at", "updated_at"])
+                existing.archived_at = existing.removed_at = None
+                existing.save(update_fields=["status", "promoted_at", "archived_at", "removed_at", "updated_at"])
             return existing, False
         scope = {**brief, "focus": brief.get("focus") or f"{brief['intent'].capitalize()} search intent"}
         defaults = {
@@ -133,7 +139,7 @@ def adopt_researched_island(organization, run, proposal, *, merge_evidence=False
                 return island, False
             for field in ("status", "promoted_at", "last_matched_at", "last_refreshed_at", "centroid_embedding", *proposal["metrics"]):
                 setattr(island, field, defaults[field])
-            island.archived_at = None
+            island.archived_at = island.removed_at = None
             island.save()
         members = {m["keyword_normalized"]: m for m in proposal["members"]}
         for row in proposal["keywords"]:

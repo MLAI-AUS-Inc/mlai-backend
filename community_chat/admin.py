@@ -1,4 +1,5 @@
 from django.contrib import admin
+from community_chat.admin_authority import MemberAudienceAuthorityAdminMixin
 from . import onboarding_admin  # noqa: F401 -- register the private review queue
 
 from .models import (
@@ -91,12 +92,13 @@ class ModeratorAdmin(admin.ModelAdmin):
 
 
 @admin.register(CommunityChatDevice)
-class CommunityChatDeviceAdmin(admin.ModelAdmin):
+class CommunityChatDeviceAdmin(MemberAudienceAuthorityAdminMixin, admin.ModelAdmin):
     list_display = ("user_id", "name", "platform", "public_key_prefix", "status", "verified_at", "revoked_at")
     list_filter = ("status", "client_id", "platform")
     search_fields = ("user__email", "public_key", "installation_id", "name")
     readonly_fields = (
         "id",
+        "user", "public_key", "status",
         "created_at",
         "updated_at",
         "verified_at",
@@ -104,6 +106,10 @@ class CommunityChatDeviceAdmin(admin.ModelAdmin):
         "last_seen_at",
         "revoked_at",
     )
+
+    def has_add_permission(self, request):
+        """Verified devices are enrolled through the account's relay flow."""
+        return False
 
     @admin.display(description="Public key")
     def public_key_prefix(self, obj):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import date
 
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 
 from content_analytics.models import (
     AnalyticsSite,
@@ -34,6 +34,26 @@ REPORT_SETTINGS = {
 }
 
 REPORT_DATE = date(2026, 7, 21)
+
+
+class ArticleSearchQueryTests(SimpleTestCase):
+    def test_weighted_position_resolves_raw_impressions_before_aggregation(self):
+        from unittest.mock import patch
+        from django.db.models.query import QuerySet
+        from content_analytics.services.reports import _per_article_search
+        queries = []
+        def inspect_without_sql(queryset):
+            queries.append(queryset.query)
+            return iter([])
+        with patch('content_analytics.services.reports.AnalyticsSyncState.objects.filter') as state, \
+             patch.object(QuerySet, '__iter__', autospec=True, side_effect=inspect_without_sql):
+            state.return_value.first.return_value = None
+            result, _ = _per_article_search(Organization(pk=1), report_windows(REPORT_DATE), connected=True)
+        self.assertEqual(result, {})
+        expression = queries[0].annotations['position_weight'].get_source_expressions()[0]
+        self.assertEqual(expression.lhs.target.name, 'position')
+        self.assertEqual(expression.rhs.target.name, 'impressions')
+        self.assertFalse(expression.contains_aggregate)
 
 
 @override_settings(**REPORT_SETTINGS)
@@ -253,6 +273,13 @@ class ArticlePerformanceReportTests(TestCase):
         self.assertEqual(payload["search"]["searchImpressions"], 200.0)
         self.assertEqual(payload["search"]["searchCtr"], 0.05)
         self.assertEqual(payload["search"]["dataThrough"], "2026-07-15")
+        ArticleSearchDaily.objects.create(organization=self.organization, article=article,
+            date=date(2026, 7, 16), clicks=30, impressions=600, position=8)
+        from content_analytics.services.reports import _per_article_search
+        rows, _ = _per_article_search(self.organization, report_windows(REPORT_DATE), connected=True)
+        self.assertEqual(rows[article.pk]['searchClicks'], 40)
+        self.assertEqual(rows[article.pk]['searchImpressions'], 800)
+        self.assertEqual(rows[article.pk]['averagePosition'], 7)
 
     def test_data_through_from_sync_state_adds_note(self):
         article = self._article("lagging")

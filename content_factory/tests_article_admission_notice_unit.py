@@ -50,7 +50,8 @@ class AdmissionNoticeReceiverTests(unittest.TestCase):
         queryset = SimpleNamespace(first=first)
         self.filter = Mock(return_value=queryset)
         self.select = Mock(return_value=SimpleNamespace(filter=self.filter))
-        self.ns = {"transaction": SimpleNamespace(atomic=atomic), "status": status, "Response": Response,
+        self.ns = {"__name__": __name__, "__package__": __package__,
+                   "transaction": SimpleNamespace(atomic=atomic), "status": status, "Response": Response,
                    "ContentFactoryRun": SimpleNamespace(objects=SimpleNamespace(select_for_update=self.select)),
                    "_callback_event_emitted_at": lambda data: datetime.fromisoformat(data["emitted_at"])}
         tree = ast.parse((Path(__file__).parent / "service_views.py").read_text())
@@ -149,7 +150,7 @@ class AdmissionNoticeReceiverTests(unittest.TestCase):
         constants = {"PUBLISH_MERGE_EVIDENCE_RESULT_KEYS", "DJANGO_OWNED_ARTICLE_RESULT_KEYS", "DJANGO_OWNED_ARTICLE_RESULT_PREFIXES"}
         nodes = [node for node in tree.body if (isinstance(node, ast.FunctionDef) and node.name in functions)
                  or (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in constants for t in node.targets))]
-        scope = {}
+        scope = {"__name__": __name__, "__package__": __package__}
         exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), "actual-dashboard-merge", "exec"), scope)
         self.handle(payload())
         updated = scope["_merge_django_owned_article_result"](self.run.result, {"status": "running"})

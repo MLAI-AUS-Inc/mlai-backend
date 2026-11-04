@@ -17,15 +17,18 @@ from .serializers import (
 )
 from .services import (
     CompanyDomainChangeBlocked,
-    DomainOwnershipError,
+    CompanyDomainClaimedError,
     DuplicateCompanyDomainError,
     apply_company_domain_change,
     apply_shared_startup_details,
     assert_company_domain_available,
+    claimed_organization,
     domain_is_available_to,
     ensure_company_organization,
     get_or_create_founder_profile,
     offboard_company,
+    queue_domain_claim_alert,
+    seed_new_company_founder_and_author,
     set_active_company,
 )
 from vibe_raising.registration import (
@@ -74,8 +77,15 @@ class FounderToolsBootstrapView(APIView):
 
 class FounderToolsProfileView(APIView):
     def get(self, request):
+        from content_factory.founder_journey_cohort import account_payload
+
         profile = get_or_create_founder_profile(request.user)
-        return Response(FounderProfileSerializer(profile).data, status=status.HTTP_200_OK)
+        payload = FounderProfileSerializer(profile).data
+        # P1 (IF-P1-02): additive, present only while V2 is on.
+        founder_journey = account_payload(request.user)
+        if founder_journey is not None:
+            payload = {**payload, "founderJourney": founder_journey}
+        return Response(payload, status=status.HTTP_200_OK)
 
     def put(self, request):
         return self._upsert(request)
@@ -84,6 +94,31 @@ class FounderToolsProfileView(APIView):
         return self._upsert(request)
 
     def _upsert(self, request):
+        from django.conf import settings
+        from . import idempotency
+        key = request.headers.get("Idempotency-Key")
+        if not getattr(settings, "MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED", False) or not key:
+            return self._save_profile(request)
+        if not idempotency.valid_key(key):
+            return Response({"detail": "Couldn't save just now. Try again.", "reason": "invalid_idempotency_key"}, status=400)
+        scope, digest = ("profile_save", request.user.pk), idempotency.request_sha256(request.data)
+        decision, replay = idempotency.begin(scope, key, digest)
+        if decision == idempotency.REPLAY:
+            response = Response(replay["body"], status=replay["status"])
+            response[idempotency.REPLAY_HEADER] = "true"
+            return response
+        if decision != idempotency.NEW:
+            return Response({"detail": "Couldn't save just now. Trying again.",
+                             "reason": idempotency.CONFLICT_REASON}, status=409)
+        try:
+            response = self._save_profile(request)
+            idempotency.finish(scope, key, digest, status=response.status_code, body=dict(response.data))
+            return response
+        except Exception:
+            idempotency.abandon(scope, key, digest)
+            raise
+
+    def _save_profile(self, request):
         serializer = FounderProfileUpsertSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         profile = get_or_create_founder_profile(request.user)
@@ -100,8 +135,81 @@ class FounderToolsCompanyView(APIView):
         companies = visible_companies(profile.companies.select_related("organization").all())
         return Response(FounderCompanySerializer(companies, many=True).data, status=status.HTTP_200_OK)
 
-    @transaction.atomic
     def post(self, request):
+        from .one_field_start import one_field_create_requested
+        if one_field_create_requested(request.data):
+            return self._one_field_create(request)
+        # The claim check can fail after company rows were written (binding to
+        # an existing organisation), so the save runs in its own transaction and
+        # the ops alert is queued only once that transaction has rolled back.
+        try:
+            with transaction.atomic():
+                return self._save_company(request)
+        except CompanyDomainClaimedError as exc:
+            queue_domain_claim_alert(organization=exc.organization, claimant_user_id=request.user.id)
+            return exc.response()
+
+    def _one_field_create(self, request):
+        """P1.5 (IF-P1-06): create a new-journey startup from one field, once per Idempotency-Key."""
+        from content_factory.founder_journey_cohort import NEW_JOURNEY, assign_on_create, read_marker
+        from content_factory.startup_first_profile import record_create, seed_no_website_keywords
+        from . import one_field_start
+
+        body, error, derived_name = one_field_start.prepare_body(request.data)
+        if error is not None:
+            return Response(error, status=status.HTTP_400_BAD_REQUEST)
+        key_sha = one_field_start.create_key_sha256(request)
+        locked = False
+        if key_sha:
+            locked = one_field_start.acquire_create_lock(request.user.pk, key_sha)
+            if not locked:
+                outcome, company = one_field_start.wait_for_replay(
+                    get_or_create_founder_profile(request.user), request.user.pk, key_sha)
+                if outcome == "replay":
+                    return self._one_field_response(company, status_code=status.HTTP_200_OK)
+                if outcome == "busy":
+                    return Response(one_field_start.CREATE_IN_PROGRESS, status=status.HTTP_409_CONFLICT)
+                locked = True
+        try:
+            with transaction.atomic():
+                profile = get_or_create_founder_profile(request.user)
+                profile = VibeRaisingProfile.objects.select_for_update().get(pk=profile.pk)
+                if key_sha:
+                    existing = one_field_start.find_created_company(profile, request.user.pk, key_sha)
+                    if existing is not None:
+                        return self._one_field_response(existing, status_code=status.HTTP_200_OK)
+                response = self._save_company(request, data=body)
+                if response.status_code != status.HTTP_200_OK:
+                    return response
+                company = VibeRaisingCompany.objects.select_related("organization").get(pk=response.data["id"])
+                cohort = assign_on_create(company.organization, company_id=company.pk, create_key_sha256=key_sha)
+                if cohort == NEW_JOURNEY:
+                    record_create(company.organization, derived_name=derived_name)
+                    seed_no_website_keywords(company.organization, name=company.name,
+                                             description=body.get("shortDescription"))
+                if key_sha and (read_marker(company.organization) or {}).get("createKeySha256") != key_sha:
+                    # No marker holds this key (the create bound to an older,
+                    # legacy organisation), so remember it for the replay. A
+                    # rolled-back create leaves an id no lookup finds.
+                    one_field_start.remember_create(request.user.pk, key_sha, company.pk)
+                return self._one_field_response(company, status_code=status.HTTP_201_CREATED, cohort=cohort)
+        except CompanyDomainClaimedError as exc:
+            queue_domain_claim_alert(organization=exc.organization, claimant_user_id=request.user.id)
+            return exc.response()
+        finally:
+            if locked:
+                one_field_start.release_create_lock(request.user.pk, key_sha)
+
+    @staticmethod
+    def _one_field_response(company, *, status_code, cohort=None):
+        from content_factory.founder_journey_cohort import cohort as raw_cohort
+
+        company.refresh_from_db()
+        payload = dict(FounderCompanySerializer(company).data)
+        payload["founderJourney"] = {"version": 1, "cohort": cohort or raw_cohort(company.organization)}
+        return Response(payload, status=status_code)
+
+    def _save_company(self, request, data=None):
         profile = get_or_create_founder_profile(request.user)
         profile = VibeRaisingProfile.objects.select_for_update().get(pk=profile.pk)
         if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
@@ -109,7 +217,7 @@ class FounderToolsCompanyView(APIView):
             profile.organization_name = None
             profile.save(update_fields=["role", "organization_name", "updated_at"])
 
-        serializer = FounderCompanyUpsertSerializer(data=request.data)
+        serializer = FounderCompanyUpsertSerializer(data=request.data if data is None else data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         company_id = data.pop("companyId", None)
@@ -121,6 +229,8 @@ class FounderToolsCompanyView(APIView):
             if key in data
         }
 
+        # A new company, or the first save of an unsaved research workspace.
+        first_save = False
         try:
             if company_id:
                 company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
@@ -128,12 +238,13 @@ class FounderToolsCompanyView(APIView):
                 from .profile_fields import is_research_workspace
                 from .services import find_company_with_domain
                 provisional = find_company_with_domain(profile, plain_fields.get("domain"))
-                company = (provisional if provisional and is_research_workspace(provisional)
-                           else VibeRaisingCompany(profile=profile))
+                reuse = bool(provisional and is_research_workspace(provisional))
+                company = provisional if reuse else VibeRaisingCompany(profile=profile)
+                first_save = True
             else:
-                company = profile.companies.filter(name__iexact=data["name"]).first() or VibeRaisingCompany(
-                    profile=profile
-                )
+                company = profile.companies.filter(name__iexact=data["name"]).first()
+                first_save = company is None
+                company = company or VibeRaisingCompany(profile=profile)
 
             if "domain" in plain_fields:
                 assert_company_domain_available(
@@ -150,7 +261,7 @@ class FounderToolsCompanyView(APIView):
                     and not is_admin
                     and not domain_is_available_to(request.user, plain_fields["domain"])
                 ):
-                    raise DomainOwnershipError()
+                    raise CompanyDomainClaimedError(claimed_organization(plain_fields["domain"]))
                 if plain_fields["domain"]:
                     # Rename the org in place when safe; otherwise a re-point
                     # strands the old org's data and needs confirmation.
@@ -200,6 +311,8 @@ class FounderToolsCompanyView(APIView):
 
         ensure_company_organization(company)
         apply_shared_startup_details(user=request.user, company=company, data=data)
+        if first_save:
+            seed_new_company_founder_and_author(user=request.user, company=company)
         if profile.active_company_id is None:
             set_active_company(profile, company)
         company.refresh_from_db()

@@ -288,3 +288,100 @@ class InboxObservationTests(SimpleTestCase):
         self.assertEqual(row['delivered_ts'], '102.499999')
         self.assertNotIn('pending', row)
         self.assertNotIn('pending_raw_ts', row)
+
+    def rooms(self, count=3):
+        target, authority, connection, grant = self.fixtures()
+        rows, targets = {}, []
+        for index in range(2, count + 2):
+            context = {**self.context(), 'channel_id': str(uuid.UUID(int=index)), 'source_id': f'D{index}', 'authority': f'scope-{index}'}
+            rows, _ = obs.coalesce(rows, context, '12', observed_at=1000, now=1000)
+            targets.append(reads.ReadTarget(context['channel_id'], context['source_id'], 'im'))
+        connection.sync_cursor = {obs.KEY: rows}
+        return targets, authority, connection, grant
+
+    def flush_rooms(self, fixture, *, now=1001, responses=None, error=None):
+        targets, authority, connection, grant = fixture
+        with patch.object(obs.transaction, 'atomic', side_effect=lambda: nullcontext()), patch.object(
+            reads, '_lock_slack_grant_api_authority', return_value=(grant, connection)), patch.object(
+            reads, '_targets_for_keys', return_value=targets), patch.object(reads, '_cache_key', side_effect=lambda authority, target: f'scope-{uuid.UUID(target.channel_id).int}'), patch.object(
+            obs.time, 'time', return_value=now), patch.object(BuzzBridgeClient, 'push_inbox_cursors', return_value=responses, side_effect=error) as push:
+            obs.flush(authority, grant, {'verified'})
+        return push
+
+    def test_item_results_deliver_cool_down_and_back_off_independently(self):
+        fixture = self.rooms()
+        with patch.object(obs, 'schedule_locked') as schedule:
+            self.flush_rooms(fixture, responses=[{'accepted': True, 'message': 'revision:5'},
+                {'accepted': False, 'code': 'forbidden', 'status': 403, 'retryable': False},
+                {'accepted': False, 'code': 'error', 'status': 500, 'retryable': True}])
+        rows = list(fixture[2].sync_cursor[obs.KEY].values())
+        self.assertEqual(rows[0]['delivered_ts'], '12.000000')
+        self.assertNotIn('pending', rows[1])
+        self.assertEqual(rows[1]['cooldown_until'], 2801)
+        self.assertEqual(rows[1]['rejected']['code'], 'forbidden')
+        self.assertEqual(rows[2]['due'], 1031)
+        schedule.assert_not_called()
+        self.flush_rooms(fixture, now=1032, responses=[{'accepted': False, 'message': 'legacy rejection'}])
+        self.assertEqual(rows[2]['due'], 1092)
+
+    def test_unknown_account_and_aged_timestamp_reprobe_at_most_every_five_minutes(self):
+        fixture = self.rooms(1)
+        connection = fixture[2]
+        key = next(iter(connection.sync_cursor[obs.KEY]))
+        context = {name: connection.sync_cursor[obs.KEY][key][name] for name in self.context()}
+        with patch.object(obs, 'schedule_locked') as schedule:
+            for now, calls in ((1001, 1), (1100, 1), (1400, 2)):
+                rows, _ = obs.coalesce(connection.sync_cursor[obs.KEY], context, '12', observed_at=now, now=now)
+                connection.sync_cursor[obs.KEY] = rows
+                self.flush_rooms(fixture, now=now, responses=[{'accepted': True, 'message': 'ignored:unknown_account:revision:5'}])
+                self.assertEqual(schedule.call_count, calls)
+                self.assertNotIn('pending', connection.sync_cursor[obs.KEY][key])
+        fixture = self.rooms(1)
+        with patch.object(obs, 'schedule_locked') as schedule:
+            self.flush_rooms(fixture, responses=[{'accepted': False, 'code': 'invalid', 'message': 'invalid: inbox source timestamp expired'}])
+        row = next(iter(fixture[2].sync_cursor[obs.KEY].values()))
+        self.assertNotIn('pending', row)
+        self.assertNotIn('cooldown_until', row)
+        schedule.assert_called_once()
+
+    def test_disabled_inbox_and_transport_errors_back_off_without_cooldown(self):
+        from integrations.services.community_bridge.buzz import BuzzBridgePermanentError
+        fixture = self.rooms(1)
+        self.flush_rooms(fixture, responses=[{'accepted': False, 'code': 'forbidden', 'retryable': False, 'message': 'restricted: inbox disabled'}])
+        row = next(iter(fixture[2].sync_cursor[obs.KEY].values()))
+        self.assertEqual(row['due'], 1031)
+        self.assertNotIn('cooldown_until', row)
+        for error, level in ((BuzzBridgeError('offline'), 'WARNING'), (RuntimeError('offline'), 'ERROR'), (BuzzBridgePermanentError('invalid'), 'ERROR')):
+            fixture = self.rooms(1)
+            with self.assertLogs(obs.logger, level):
+                self.flush_rooms(fixture, error=error)
+            row = next(iter(fixture[2].sync_cursor[obs.KEY].values()))
+            self.assertEqual(row['due'], 1031)
+
+    def test_cooldown_blocks_observations_and_candidates_are_due_sorted_and_capped(self):
+        fixture = self.rooms(205)
+        rows = fixture[2].sync_cursor[obs.KEY]
+        for index, row in enumerate(rows.values()):
+            row['due'] = 900 + index / 1000
+        push = self.flush_rooms(fixture, responses=[{'accepted': True}] * 200)
+        self.assertEqual(len(push.call_args.args[0]), 200)
+        self.assertEqual(sum('pending' in row for row in rows.values()), 5)
+        fixture = self.rooms(1)
+        connection = fixture[2]
+        row = next(iter(connection.sync_cursor[obs.KEY].values()))
+        row['cooldown_until'] = 2000
+        self.flush_rooms(fixture)
+        self.assertNotIn('pending', row)
+        context = {name: row[name] for name in self.context()}
+        with patch.object(obs.time, 'time', return_value=1500):
+            obs.observe_locked(connection, context, '13', observed_at=1500)
+        self.assertNotIn('pending', next(iter(connection.sync_cursor[obs.KEY].values())))
+
+    def test_push_returns_rejected_rows_without_raising(self):
+        for rows in ([{'accepted': False, 'message': 'invalid: x'}], [], ['invalid']):
+            with patch.object(BuzzBridgeClient, '_post_adapter', return_value={'cursors': rows}):
+                if len(rows) == 1 and isinstance(rows[0], dict):
+                    self.assertEqual(BuzzBridgeClient.push_inbox_cursors([{}]), rows)
+                else:
+                    with self.assertRaises(BuzzBridgeError):
+                        BuzzBridgeClient.push_inbox_cursors([{}])

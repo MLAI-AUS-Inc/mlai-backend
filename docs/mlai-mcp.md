@@ -14,6 +14,11 @@ remain `startup:brief:read` and `startup:draft:write`. Its tokens cannot authent
 at `/mcp/mlai`, and refresh cannot change audience or permissions. Existing
 connections never gain Article or Community authority through an upgrade.
 
+Personal Dot permissions are an additional explicit opt-in on this same
+connection. They begin unchecked, require a signed owned installation, and do
+not expand earlier grants or refresh tokens. See [Personal Dot on MLAI MCP](mlai-mcp-native-dot.md)
+for invocation-bound events, replies and disabled-by-default rollout.
+
 The unified resource uses the same public PKCE S256 authorization server and
 rotating refresh family, with an explicit resource indicator on authorization
 and token exchange. A new consent requires a nonempty, explicit `scopes` list

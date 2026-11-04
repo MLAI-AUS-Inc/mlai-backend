@@ -1,0 +1,2 @@
+# Workflow contract tests only; excluded from runtime images.
+PyYAML==6.0.3

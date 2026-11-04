@@ -31,9 +31,11 @@ from roo.staging_fixtures import EMAILS, seed_user
 from roo.models import Ledger, PointsAccount
 from founder_tools.models import VibeRaisingCompany
 from startup_updates.models import MonthlyUpdateDraft
-@override_settings(**PILOT,STAGING_FIXTURE_DATABASE='staging_points_tests',COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED=True,COMMUNITY_CHAT_VOLUNTEER_COMMUNITY=HOST)
+@override_settings(**PILOT,COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED=True,COMMUNITY_CHAT_VOLUNTEER_COMMUNITY=HOST)
 class FeatureDatabaseTests(TestCase):
     def setUp(self):
+        from tests.staging_fixture_database import bind_disposable_fixture_database
+        bind_disposable_fixture_database(self)
         self.network=patch('requests.sessions.Session.request',side_effect=AssertionError('External provider invoked'));self.network.start();self.addCleanup(self.network.stop)
         self.users=[]
         for email in EMAILS:

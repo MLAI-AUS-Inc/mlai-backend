@@ -193,6 +193,25 @@ class TeamProjectionTests(unittest.TestCase):
 
 
 class TestAssignmentTests(unittest.TestCase):
+    def test_retired_baseline_cannot_block_complete_assignment_or_allow_new_omissions(self):
+        import json
+        import io
+        from contextlib import redirect_stdout
+        from scripts import check_test_assignment as assignment
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);workflow=root/".github/workflows/deploy.yml"
+            workflow.parent.mkdir(parents=True);workflow.write_text("python manage.py test assigned.tests\n")
+            baseline=root/"baseline.json"
+            baseline.write_text(json.dumps({"review_by":"1900-01-01","unassigned_modules":[]}))
+            with patch.object(assignment,"ROOT",root),patch.object(assignment,"BASELINE",baseline), \
+                patch.object(assignment,"test_modules",return_value={"assigned.tests"}) as inventory, \
+                redirect_stdout(io.StringIO()):
+                self.assertEqual(assignment.main(),0)
+                inventory.return_value={"assigned.tests","new.tests"}
+                self.assertEqual(assignment.main(),1)
+                baseline.write_text(json.dumps({"review_by":"1900-01-01","unassigned_modules":["new.tests"]}))
+                with self.assertRaisesRegex(SystemExit,"due for review"):assignment.main()
+
     def test_multiline_commands_include_both_test_runners(self):
         workflow = "python manage.py test app.tests \\\n other.tests --verbosity 2\npython scripts/test_without_database.py pure.tests\n"
         self.assertEqual(selected_labels(workflow), {"app.tests", "other.tests", "pure.tests"})

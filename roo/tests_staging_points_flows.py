@@ -6,11 +6,28 @@ from community_chat.tests.test_staging_password import PILOT
 from roo.models import PointsAccount,Ledger
 from roo.services import PointsService
 
-@override_settings(**PILOT,STAGING_FIXTURE_DATABASE='staging_points_tests')
+@override_settings(**PILOT)
 class FixtureTests(TestCase):
     def setUp(self):
+        from tests.staging_fixture_database import bind_disposable_fixture_database
+        bind_disposable_fixture_database(self)
         self.user=get_user_model().objects.create_user(email='ashwin@staging.mlai.au',password='Private-synthetic-424!')
         CommunityMemberProfile.objects.create(user=self.user,status='approved',review_reasons=['synthetic_staging_pilot'])
+    def test_fixture_refuses_a_different_configured_database(self):
+        from roo.staging_fixtures import seed_user
+        with override_settings(SETTINGS_MODULE=PILOT['SETTINGS_MODULE'],STAGING_FIXTURE_DATABASE='different_fixture_database'):
+            with self.assertRaisesRegex(ValueError,'Unexpected fixture database'):
+                seed_user(self.user)
+        self.assertFalse(Ledger.objects.filter(user=self.user).exists())
+    def test_fixture_refuses_a_different_connected_database(self):
+        from django.conf import settings
+        from unittest.mock import patch
+        from roo.staging_fixtures import seed_user
+        with patch.dict(settings.DATABASES['default'],NAME='different_fixture_database'), \
+                override_settings(SETTINGS_MODULE=PILOT['SETTINGS_MODULE'],STAGING_FIXTURE_DATABASE='different_fixture_database'):
+            with self.assertRaisesRegex(ValueError,'Unexpected connected fixture database'):
+                seed_user(self.user)
+        self.assertFalse(Ledger.objects.filter(user=self.user).exists())
     def test_seed_repeat_preserves_spend_and_profile(self):
         from roo.staging_fixtures import seed_user,seed_catalogue
         seed_user(self.user);seed_catalogue()

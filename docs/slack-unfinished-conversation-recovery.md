@@ -63,3 +63,20 @@ The runner forbids database/network access and applies no migrations. Coverage
 includes dry-run fences, device revocation, queue routing, exact owner/source
 query correlation, current source validation, backoff and checkpoint reuse.
 Query compilation is not evidence of production recovery or load performance.
+
+## Unrepresentable private deliveries
+
+Owner approval required; never run during a deploy. First inspect
+`python manage.py resolve_unrepresentable_slack_dm_deliveries --stuck` (or
+repeat `--delivery-id ID`). This read-only report contains no author ids or
+message content. Review each verdict and its `plan` fingerprint, then, only
+with approval, repeat the selection with `--apply --expected-plan SHA256`.
+A changed selection or authority requires another dry run.
+
+`mark_undeliverable` erases an unrepresentable body and leaves a content-free
+completed tombstone. `request_identity_refresh` records the first request for
+new membership evidence. `keep_retrying` preserves missing participant identity
+work. `none` already resolves. `skip_authority` and
+`skip_participants_changed` preserve the revocation owner's authority.
+`identity_stale` rows never become tombstones: re-provision them only through
+the existing owner-approved `recover_slack_conversation_open` workflow.

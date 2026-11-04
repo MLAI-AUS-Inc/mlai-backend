@@ -46,6 +46,9 @@ def catalogue(principal):
             value["securitySchemes"] = security
             value.setdefault("_meta", {})["securitySchemes"] = deepcopy(security)
             result.append(value)
+    if principal.grant["resource"] == mlai_url():
+        from .native_agents import available_tools
+        result.extend(available_tools(principal))
     return result
 
 
@@ -53,6 +56,10 @@ def call(principal, name, arguments):
     """Dispatch only within the token audience and recheck grants in the adapter."""
     if not isinstance(name, str):
         raise ValidationError("Use a supported tool name.")
+    if principal.grant["resource"] == mlai_url():
+        from . import native_agents
+        if name in native_agents.TOOL_SCOPES:
+            return native_agents.call_tool(principal, name, arguments)
     for module in modules(principal.grant["resource"]):
         mapping = scopes_for(module)
         if name in mapping:
@@ -68,6 +75,10 @@ def required_scopes(resource, name):
     """Expose a tool's requested scopes for standards-based step-up challenges."""
     if not isinstance(name, str):
         return []
+    if resource == mlai_url():
+        from .native_agents import TOOL_SCOPES
+        if name in TOOL_SCOPES:
+            return sorted(TOOL_SCOPES[name])
     for module in modules(resource):
         scope = scopes_for(module).get(name)
         if scope:

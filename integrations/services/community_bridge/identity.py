@@ -1,9 +1,70 @@
 from typing import Optional
+from datetime import datetime, timedelta, timezone as datetime_timezone
 
-from django.db.models import F
+from django.db.models import F, Q
 
 from community_chat.models import CommunityChatDevice, DeviceBindingStatus
 from integrations.models import CommunityBridgeIdentityLink
+
+
+def community_account_for_key(*, slack_workspace_id: str, buzz_pubkey: str) -> Optional[dict]:
+    """Resolve a Community signer without requiring a Slack link or key rank."""
+    from django.conf import settings
+    import re
+
+    key = str(buzz_pubkey or "").strip().lower()
+    workspace = str(slack_workspace_id or "").strip()
+    if (not re.fullmatch(r"[0-9a-f]{64}", key)
+            or not workspace
+            or workspace != getattr(settings, "MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID", "")):
+        return None
+    device = CommunityChatDevice.objects.select_related("user").filter(
+        public_key=key, status=DeviceBindingStatus.VERIFIED,
+        revoked_at__isnull=True, user__is_active=True,
+    ).first()
+    if device is None:
+        return None
+    return {
+        "user_id": device.user_id,
+        "device_id": device.pk,
+        "public_key": key,
+        "user_profile_id": str(device.user.community_chat_profile_id),
+        "display_name": device.user.full_name or "MLAI member",
+        "slack_user_id": device.user.slack_id or "",
+    }
+
+
+def community_account_for_key_at(*, slack_workspace_id: str, buzz_pubkey: str, source_created_at) -> Optional[dict]:
+    """Resolve the account that owned a verified key at a signed event's time.
+
+    Source timestamps have second precision. A whole second may contain a
+    verification or revocation; conflicting owners in that second are unknown.
+    Historical revoked rows remain evidence and never confer current access.
+    """
+    from django.conf import settings
+    import re
+
+    if (not isinstance(buzz_pubkey, str) or not re.fullmatch(r"[0-9a-f]{64}", buzz_pubkey)
+            or slack_workspace_id != getattr(settings, "MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID", "")
+            or not slack_workspace_id or type(source_created_at) is not int or source_created_at <= 0):
+        return None
+    try:
+        start = datetime.fromtimestamp(source_created_at, tz=datetime_timezone.utc)
+        end = start + timedelta(seconds=1)
+    except (ValueError, OverflowError, OSError):
+        return None
+    owners = list(CommunityChatDevice.objects.filter(
+        public_key=buzz_pubkey, status__in=(DeviceBindingStatus.VERIFIED, DeviceBindingStatus.REVOKED),
+        created_at__lt=end, verified_at__lt=end,
+    ).filter(Q(revoked_at__isnull=True) | Q(revoked_at__gte=start)).order_by().values(
+        "user_id", "user__community_chat_profile_id",
+    ).distinct()[:2])
+    if len(owners) != 1:
+        return None
+    return {
+        "user_id": owners[0]["user_id"],
+        "user_profile_id": str(owners[0]["user__community_chat_profile_id"]),
+    }
 
 
 def verified_identity_for_slack(

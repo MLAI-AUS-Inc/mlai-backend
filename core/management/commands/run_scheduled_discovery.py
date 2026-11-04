@@ -10,10 +10,21 @@ from core.slack_founder_link_retention import (
     run_scheduled_slack_founder_link_request_cleanup,
 )
 from content_analytics.services.report_scheduler import run_daily_article_report_scheduler
+from content_factory.founder_journey_alerts import run_founder_journey_alert_sweep
+from content_factory.founder_journey_sweeps import scheduled_founder_journey_sweeps
+from content_factory.founder_website_checks import scheduled_founder_website_checks
+from content_factory.self_heal_sweeps import scheduled_self_heal_sweeps
 from content_factory.reconciliation import run_content_factory_reconciliation_sweep
+from content_factory.run_reconciliation import run_authoritative_reconciliation_sweep
+from content_factory.run_terminal_settlement import run_terminal_settlement_sweep
 from content_factory.website_reconciliation import process_website_connection_operations
 from content_factory.dispatch_outbox import process_dispatch_outbox
 from content_factory.services.island_refresh_scheduler import run_island_refresh_scheduler
+from crm.blasts import run_blast_dispatch_scheduler
+from crm.listmonk_sync import run_listmonk_sync_scheduler
+from crm.luma_sync import run_luma_guest_sync_scheduler
+from crm.warmup import run_warmup_scheduler
+from crm.engagement_refresh import run_engagement_refresh_scheduler
 from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
     run_daily_discovery_scheduler,
@@ -28,6 +39,8 @@ from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
 from roo.coding import reconcile_coding_reservations
 from roo.models import ScheduledDiscoveryHeartbeat
 from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
+
+from content_factory.website_consistency import run_website_consistency_sweep
 
 logger = logging.getLogger(__name__)
 
@@ -92,14 +105,33 @@ class Command(BaseCommand):
             # Closes runs whose content-factory callbacks were permanently
             # lost (outbox retries exhaust after ~2h) and dispatch ghosts.
             # Self-throttling per run, so it is safe to tick every loop.
+            # Explicit backend event admission owns every workflow and
+            # nonterminal status, even after new admission is switched off.
+            ("authoritative_run_reconciliation", run_authoritative_reconciliation_sweep),
+            ("authoritative_terminal_settlement", run_terminal_settlement_sweep),
             ("content_factory_reconciliation", run_content_factory_reconciliation_sweep),
+            # Tells ops once per stuck founder (run stopped or blocked, no
+            # draft 24 h after a startup is created, Your turn for 72 h), for
+            # every org. Gated by ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED and
+            # bounded by ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK.
+            ("founder_journey_alerts", run_founder_journey_alert_sweep),
+            # P1 founder-journey sweeps (first profile, draft-ready outbox).
+            # Runs only while MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED is on;
+            # each sweep checks its own flag and never raises.
+            ("founder_journey_sweeps", scheduled_founder_journey_sweeps),
+            ("founder_website_checks", scheduled_founder_website_checks),
             # Prunes stale GitHub App installations (founder uninstalled the
             # App) from the founder registry so dead rows stop poisoning the
             # "registry exists" guards. Self-throttling (min-age + probe
             # interval + batch cap), so it is safe to tick every loop.
             ("github_installation_reconciliation", run_github_installation_reconciliation_sweep),
             ("website_connection_operations", process_website_connection_operations),
+            ("website_consistency", run_website_consistency_sweep),
             ("article_dispatch_outbox", process_dispatch_outbox),
+            # P2 self-heal sweeps (policy, refunds, merge worker, notifications,
+            # alert rules). Not gated by the founder-journey switch: each sweep
+            # checks its own flag, and a missing or failing one never stops the next.
+            ("self_heal_sweeps", scheduled_self_heal_sweeps),
             # Refreshes the durable Stripe payout ledger once per local day.
             # This never posts to Xero; posting always requires admin approval.
             ("stripe_payout_reconciliation", run_daily_payout_reconciliation),
@@ -127,6 +159,23 @@ class Command(BaseCommand):
             # Feature-gated, scheduled in Melbourne time, and idempotent per
             # recipient/reminder/date so the minute loop cannot double-send.
             ("monthly_update_reminders", run_monthly_update_reminder_scheduler),
+            # Copies MLAI Luma guests into crm contacts. Feature-gated,
+            # cache-throttled to one pass per CRM_LUMA_SYNC_INTERVAL_SECONDS,
+            # and paced under the calendar key's shared rate limit. A pass
+            # starts no new event after crm.luma_sync.PASS_SECONDS and leaves
+            # the rest to the next tick, so it cannot stall this one.
+            ("crm_luma_guest_sync", run_luma_guest_sync_scheduler),
+            # Sends queued crm blasts: email through listmonk, SMS and WhatsApp
+            # through Twilio. Off unless a blast channel is enabled, and
+            # cache-throttled to CRM_BLAST_DISPATCH_INTERVAL_SECONDS.
+            ("crm_warmup", run_warmup_scheduler),
+            ("crm_blast_dispatch", run_blast_dispatch_scheduler),
+            # Polls listmonk for campaign progress, opens, clicks, bounces and
+            # unsubscribes. Runs whenever listmonk is configured, throttled to
+            # CRM_LISTMONK_SYNC_INTERVAL_SECONDS (about five minutes).
+            ("crm_listmonk_sync", run_listmonk_sync_scheduler),
+            # Activity-only daily ratings. No consent or messaging side effects.
+            ("crm_engagement_refresh", run_engagement_refresh_scheduler),
             # Releases expired, undispatched MLAI Coding reservations and
             # resolves calls whose provider usage could not be confirmed.
             # Authenticated request paths only reconcile their own account;

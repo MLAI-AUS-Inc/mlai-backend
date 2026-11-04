@@ -46,7 +46,7 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                 run.save = MagicMock()
                 run.refresh_from_db = MagicMock()
                 child = SimpleNamespace(run_id="publish-child-1")
-                request = SimpleNamespace(data={}, user=SimpleNamespace(pk=1))
+                request = SimpleNamespace(data={}, headers={}, user=SimpleNamespace(pk=1))
 
                 def remote_approve(**kwargs):
                     # Model the observed 31-second acknowledgement without a
@@ -131,7 +131,7 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                 current.workflow = "article_generation"
                 current.save = MagicMock()
                 current.refresh_from_db = MagicMock()
-                request = SimpleNamespace(data={}, user=SimpleNamespace(pk=1))
+                request = SimpleNamespace(data={}, headers={}, user=SimpleNamespace(pk=1))
 
                 def remote_approve(**_kwargs):
                     self.assertTrue(current.run_request[RECEIPT_REQUIRED_KEY])

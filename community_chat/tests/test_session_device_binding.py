@@ -113,3 +113,37 @@ class SessionDeviceBindingTests(SimpleTestCase):
                 self.assertEqual(response.status_code, 401)
                 payload.assert_not_called()
                 resume.assert_not_called()
+
+    @override_settings(COMMUNITY_CHAT_ALLOWED_ORIGINS=["https://chat.mlai.au"])
+    def test_late_foreign_cookie_cannot_read_or_mutate_with_current_local_key(self):
+        self.session.origin = "https://chat.mlai.au"
+        self.session.installation_id = "synthetic-installation"
+        self.session.client_id = "mlai-chat-web"
+        self.session.platform = "web"
+        self.session.name = "Chrome"
+        self.session.user.is_authenticated = True
+        factory = APIRequestFactory()
+        for method in ("get", "patch"):
+            with self.subTest(method=method), patch(
+                "community_chat.onboarding.require_community_access"
+            ) as community_access, patch(
+                "community_chat.slack_views.status_payload", return_value={"state": "active"}
+            ) as payload, patch(
+                "community_chat.slack_views.resume_grant", return_value={"state": "active"}
+            ) as resume, patch.object(SlackDmMirrorView, "get_throttles", return_value=[]):
+                request = getattr(factory, method)(
+                    "/api/v1/community-chat/slack/",
+                    {"action": "resume"} if method == "patch" else {},
+                    format="json",
+                    HTTP_COOKIE="mlai_chat_access=" + ACCESS_TOKEN_PREFIX + "synthetic",
+                    HTTP_ORIGIN=self.session.origin,
+                    HTTP_X_MLAI_PUBLIC_KEY="b" * 64,
+                )
+                response = SlackDmMirrorView.as_view(
+                    authentication_classes=(CommunityChatAccountAuthentication,),
+                    throttle_classes=(),
+                )(request)
+                self.assertEqual(response.status_code, 401)
+                community_access.assert_not_called()
+                payload.assert_not_called()
+                resume.assert_not_called()

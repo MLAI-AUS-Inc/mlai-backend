@@ -12,7 +12,7 @@ from integrations.services import slack_owner_inventory_api as api
 
 
 class SlackInventoryOpenableTests(SimpleTestCase):
-    def item(self, *, ready=False, mirror=False, mapped=False, open_error=None, mirror_status="live", **changes):
+    def item(self, *, ready=False, mirror=False, mapped=False, open_error=None, mirror_status="live", pubkeys=None, profiles=None, people=None, linked=frozenset(), participant_slack_ids=None, owner="", **changes):
         row = SimpleNamespace(
             slack_conversation_id="DTEST", kind="im", eligibility="eligible",
             source_activity_ts="1900000000", source_name="", display_name="Person",
@@ -22,7 +22,8 @@ class SlackInventoryOpenableTests(SimpleTestCase):
         for field, value in changes.items():
             setattr(row, field, value)
         conversation = SimpleNamespace(
-            participant_profiles={}, participant_buzz_pubkeys=["owner"],
+            participant_profiles=profiles or {}, participant_buzz_pubkeys=["owner"] if pubkeys is None else pubkeys,
+            participant_slack_ids=participant_slack_ids or [],
             mlai_channel_id="room", status=mirror_status,
         ) if mirror else None
         with patch("integrations.services.slack_owner_inventory_api.time.time", return_value=1900000060), patch("integrations.services.slack_owner_inventory_api.ready_for_display", return_value=ready), patch(
@@ -31,8 +32,22 @@ class SlackInventoryOpenableTests(SimpleTestCase):
             return _item(
                 row, mirror=conversation, public_map={"DTEST": "room"} if mapped else {},
                 public_key="owner", state={}, read_state={"is_unread": True},
-                oldest=1899000000, open_error=open_error,
+                oldest=1899000000, open_error=open_error, people=people, linked=linked, owner_slack_user_id=owner,
             )
+
+    def test_inventory_presentation_is_device_scoped_and_avatar_allowlisted(self):
+        self.assertEqual(self.item(mirror=True)["device_access"], "member")
+        self.assertEqual(self.item(mirror=True, pubkeys=[])["device_access"], "pending")
+        self.assertEqual(self.item()["device_access"], "none")
+        self.assertEqual(self.item(mirror=True, eligibility="unsupported")["device_access"], "none")
+        for url in ("http://avatars.slack-edge.com/test", "https://untrusted.example/test"):
+            self.assertIsNone(self.item(mirror=True, profiles={"UTEST": {"avatar_url": url}})["avatar_url"])
+        good = "https://avatars.slack-edge.com/test.png"
+        self.assertEqual(self.item(mirror=True, profiles={"UTEST": {"avatar_url": ""}}, people={"UTEST": {"avatar_url": good}})["avatar_url"], good)
+        self.assertTrue(self.item(linked={"UTEST"})["counterpart_has_mlai_account"])
+        participants = self.item(kind="mpim", mirror=True, participant_slack_ids=["OWNER", "U1", "U1"] + [f"U{i}" for i in range(2, 12)], owner="OWNER")["participants"]
+        self.assertEqual(len(participants), 8)
+        self.assertEqual(participants[0]["slack_user_id"], "U1")
 
     def test_eligible_private_imports_and_ready_rooms_can_open(self):
         for kind in ("im", "mpim", "private_channel"):
@@ -76,7 +91,7 @@ class SlackInventoryOpenableTests(SimpleTestCase):
             last_seen_at=datetime.now(timezone.utc),
         ) for index in range(1, 5)]
         connection = SimpleNamespace(sync_cursor={})
-        grant = SimpleNamespace(pk=1, connection=connection, owner_conversation_inventory=MagicMock(), conversations=MagicMock())
+        grant = SimpleNamespace(pk=1, slack_user_id="UOWNER", connection=connection, owner_conversation_inventory=MagicMock(), conversations=MagicMock())
         grant.owner_conversation_inventory.order_by.return_value = rows
         device = SimpleNamespace(pk=7, public_key="owner")
         state = {"revision": 1}
@@ -93,6 +108,8 @@ class SlackInventoryOpenableTests(SimpleTestCase):
                 ("time.time", {"return_value": 1900000060}),
                 ("catalog_conversations", {"return_value": []}),
                 ("CommunityBridgeChannel.objects.filter", {"return_value": []}),
+                ("CommunityBridgeIdentityLink.objects", {}),
+                ("cached_workspace_users", {"return_value": []}),
                 ("_grant_history_days", {"return_value": 30}),
                 ("source_read_targets", {"return_value": []}),
                 ("transaction.atomic", {"side_effect": lambda: nullcontext()}),

@@ -190,6 +190,7 @@
     "canRead": true,
     "canScan": true,
     "canPrepare": false,
+    "repositoryWriteVerified": false,
     "canPreview": false,
     "canGeneratePortableDraft": true,
     "canGenerateArticle": false,
@@ -305,6 +306,7 @@
     }
   ],
   "nextAction": null,
+  "setupPullRequest": null,
   "discovery": {
     "version": 1,
     "complete": true,

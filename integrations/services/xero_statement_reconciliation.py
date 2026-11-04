@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from integrations.services.slack_source_privacy import slack_source_queryset
+
 import hashlib
 import json
 import re
@@ -491,7 +493,7 @@ def _candidate_context_evidence(
     for term in terms:
         slack_term_query |= Q(text__icontains=term) | Q(cleaned_text__icontains=term)
     if slack_rows is None:
-        slack_rows = list(SlackMessageArtifact.objects.filter(
+        slack_rows = list(slack_source_queryset(SlackMessageArtifact).filter(
             Q(organization=organization)
             & Q(posted_at__date__gte=start)
             & Q(posted_at__date__lt=end)
@@ -719,7 +721,7 @@ def _candidate_event_project_evidence(
         }))
 
     if slack_rows is None:
-        slack_rows = list(SlackMessageArtifact.objects.filter(
+        slack_rows = list(slack_source_queryset(SlackMessageArtifact).filter(
             organization=organization,
             posted_at__date__gte=start,
             posted_at__date__lt=end,
@@ -2198,7 +2200,7 @@ def build_statement_reconciliation_context(
             ).order_by("-internal_date")[:10000]
         )
         prefetched_slack = list(
-            SlackMessageArtifact.objects.filter(
+            slack_source_queryset(SlackMessageArtifact).filter(
                 organization=organization,
                 posted_at__date__gte=evidence_start,
                 posted_at__date__lt=evidence_end,

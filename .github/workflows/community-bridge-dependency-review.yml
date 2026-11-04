@@ -1,0 +1,40 @@
+name: Review community bridge dependencies
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: Content-free read-only review
+        required: true
+        type: choice
+        options:
+          - resolve_community_bridge_dependencies
+          - resolve_unrepresentable_slack_dm_deliveries
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.DO_SSH_KEY }}
+      - name: Add known host
+        run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
+      - name: Review selected backlog
+        env:
+          REVIEW_COMMAND: ${{ inputs.command }}
+        run: |
+          case "$REVIEW_COMMAND" in
+            resolve_community_bridge_dependencies)
+              ssh root@209.38.85.60 "cd /root/mlai-backend && docker compose exec -T web python manage.py resolve_community_bridge_dependencies --include-dead-reaction-adds"
+              ;;
+            resolve_unrepresentable_slack_dm_deliveries)
+              ssh root@209.38.85.60 "cd /root/mlai-backend && docker compose exec -T web python manage.py resolve_unrepresentable_slack_dm_deliveries --stuck"
+              ;;
+            *) exit 64 ;;
+          esac

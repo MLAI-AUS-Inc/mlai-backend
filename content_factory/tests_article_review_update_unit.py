@@ -72,6 +72,11 @@ class ArticleReviewUpdateTests(SimpleTestCase):
                 self.remote = result
             if target == "_revision_authorization":
                 self.authorization = result
+        # These synthetic legacy storage tests have no receipt database.
+        # The real HTTP/PG suite covers retained-key authority separately.
+        retained = patch("content_factory.founder_review_commands._retains_identity", return_value=False)
+        retained.start()
+        self.addCleanup(retained.stop)
         for context in (
             patch.object(review.views.VibeMarketingComponentComment, "objects", self.storage),
             patch.object(review.transaction, "atomic", nullcontext),
@@ -112,6 +117,20 @@ class ArticleReviewUpdateTests(SimpleTestCase):
         self.assertEqual(payload["comments"], [])
         self.assertEqual(self.storage.queries, [])
         self.assertEqual(self.run.result["article_review_updates"]["operation-1"]["status"], "accepted")
+
+    def test_only_a_reserved_comment_revision_fence_is_forwarded_as_a_child(self):
+        source = {"website_connection_id": str(uuid4()), "connection_generation": 2, "repository_id": 3,
+                  "run_id": self.run.run_id, "operation_id": "source-fence", "operation_attempt": 1, "deletion_epoch": 0}
+        self.run.workflow, self.run.run_request = "confirmed_topic", source
+        self.comment.source_section_id = "intro"
+        with patch.object(review, "_review_dispatch_contract", return_value={**source, "operation_id": "child-fence"}):
+            self.assertEqual(self.post(self.body(commentIds=[str(self.comment.id)])).status_code, 202)
+        self.assertIs(self.remote.call_args.kwargs["child_operation"], True)
+        self.assertEqual(self.remote.call_args.kwargs["payload"]["operation_id"], "child-fence")
+        self.run.result = {}
+        with patch.object(review, "_review_dispatch_contract", return_value=source):
+            self.assertEqual(self.post(self.body(operationId="operation-2")).status_code, 202)
+        self.assertIs(self.remote.call_args.kwargs["child_operation"], False)
 
     def test_combined_update_uses_saved_comment_body_and_claims_same_run_only(self):
         result = self.post(self.body(commentIds=[str(self.comment.id)], comments=[{"body": "Forged"}]))
@@ -159,7 +178,7 @@ class ArticleReviewUpdateTests(SimpleTestCase):
     def test_dispatch_is_recorded_first_and_retry_uses_frozen_comment_context(self):
         body = self.body(commentIds=[str(self.comment.id)])
         captured = []
-        def dispatch(run, *, payload):
+        def dispatch(run, *, payload, child_operation=False):
             ledger = run.result["article_review_updates"]["operation-1"]
             self.assertEqual(ledger["status"], "submitted")
             self.assertEqual(run.result["component_feedback_latest_batch"]["status"], "submitted")
@@ -256,7 +275,7 @@ class ArticleReviewUpdateTests(SimpleTestCase):
 
     def test_setup_get_returns_fields_and_private_cache(self):
         with patch.object(review.views, "_component_feedback_from_run", return_value={"comments": []}):
-            response = self.view.get(SimpleNamespace(), self.run.run_id)
+            response = self.view.get(SimpleNamespace(user=SimpleNamespace(pk=9)), self.run.run_id)
         self.assertEqual(response.data["revision"], "after")
         self.assertEqual(response.data["fields"], [])
         self.assertEqual(response["Cache-Control"], "private, no-store")

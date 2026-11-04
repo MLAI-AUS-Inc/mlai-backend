@@ -1,8 +1,13 @@
+from django.conf import settings
+from .slack_emoji_views import SlackEmojiDirectoryView
 from django.urls import include, path
 from .apple_iap_views import AppleIapView, AppleIapTransactionView, AppleIapNotificationView
 from .privacy_views import AccountDeletionView, AiConsentView
-from .onboarding_views import MemberOnboardingView
+from .device_management_views import AccountDevicesView, AccountDeviceView
+from .onboarding_views import InviteResolveView, MemberOnboardingView
 from .account_ban_views import AccountBanView
+from .client_events import ClientEventsView
+from .admin_views import AdminAccessView
 from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView, ChatAdminView
 
 from .views import (
@@ -13,6 +18,7 @@ from .views import (
     ConfirmView,
     DeviceAuthAuthorizeView,
     DeviceAuthExchangeView,
+    DeviceAuthRenewView,
     DeviceAuthStartView,
     EmailCodeRequestView,
     EmailCodeVerifyView,
@@ -33,9 +39,6 @@ from .coding_views import (
     CodingTurnFinalizeView,
     CodingTurnTicketRefreshView,
 )
-from .home_views import CommunityHomeView
-from .insight_views import TokenInsightsView
-from .coworking_views import CoworkingTodayView
 from .mentoring_views import (
     MentorApplicationCheckView,
     MentorApplicationView,
@@ -61,6 +64,18 @@ from .mentoring_views import (
     MentoringAdminMentorsView,
     MentoringAdminSessionsView,
 )
+from .home_views import CommunityHomeView
+from .event_discount_views import MyEventDiscountsView
+from .member_perks_views import MemberPerksView
+from .insight_views import TokenInsightsView
+from .coworking_views import CoworkingTodayView
+from .meeting_room_views import (
+    MeetingRoomAvailabilityView,
+    MeetingRoomBookView,
+    MeetingRoomCancelView,
+    MeetingRoomListView,
+    MyMeetingRoomBookingsView,
+)
 from .slack_action_views import SlackMessageActionView
 from .slack_views import SlackDmMirrorView, SlackDmStartView, SlackOwnerConversationOpenView, SlackOwnerConversationView, SlackUserDirectoryView
 from .usage_views import (
@@ -77,7 +92,9 @@ from .staff_admin_views import (
 )
 
 urlpatterns = [
-    path('admin/access/', StaffAdminAccessView.as_view()),
+    path("admin/access/",
+         StaffAdminAccessView.as_view() if getattr(settings, "STAFF_ADMIN_PANEL_ENABLED", False) else AdminAccessView.as_view(),
+         name="community_chat_admin_access"),
     path('admin/overview/', StaffAdminOverviewView.as_view()),
     path('admin/members/', StaffAdminMembersView.as_view()),
     path('admin/members/<int:member_id>/', StaffAdminMemberView.as_view()),
@@ -85,25 +102,6 @@ urlpatterns = [
     path('admin/startups/', StaffAdminStartupsView.as_view()),
     path('admin/roles/', StaffAdminRolesView.as_view()),
     path("federation/", include("community_chat.federation_urls")),
-    path("usage/insights/", TokenInsightsView.as_view(), name="community_chat_token_insights"),
-    path("account-bans/", AccountBanView.as_view(), name="community_chat_account_bans"),
-    path("account-bans/<int:ban_id>/", AccountBanView.as_view(), name="community_chat_account_ban"),
-    path("apple-iap/", AppleIapView.as_view(), name="community_chat_apple_iap"),
-    path("apple-iap/transactions/", AppleIapTransactionView.as_view(), name="community_chat_apple_transaction"),
-    path("apple-iap/notifications/production/", AppleIapNotificationView.as_view(), {"environment": "production"}),
-    path("apple-iap/notifications/sandbox/", AppleIapNotificationView.as_view(), {"environment": "sandbox"}),
-    path("account/onboarding/", MemberOnboardingView.as_view(), name="community_chat_onboarding"),
-    path("account/deletion/", AccountDeletionView.as_view(), name="community_chat_account_deletion"),
-    path("account/ai-consent/", AiConsentView.as_view(), name="community_chat_ai_consent"),
-    path("startups/", include("community_chat.startups.urls")),
-    path("permissions/", ChatPermissionsView.as_view(), name="community_chat_permissions"),
-    path("admins/<str:public_key>/", ChatAdminView.as_view(), name="community_chat_admin"),
-    path("member-roles/", ChatMemberRolesView.as_view(), name="community_chat_member_roles"),
-    path("moderators/<str:public_key>/", ChatModeratorView.as_view(), name="community_chat_moderator"),
-    path("relay-roles/<str:public_key>/", RelayChatRoleView.as_view(), name="community_chat_relay_role"),
-    path("volunteer/", include("community_chat.volunteer.urls")),
-    path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
-    path("coworking/today/", CoworkingTodayView.as_view(), name="community_chat_coworking_today"),
     path("mentors/", MentorListView.as_view(), name="community_chat_mentors"),
     path("mentors/<int:mentor_id>/availability/", MentorAvailabilityView.as_view(), name="community_chat_mentor_availability"),
     path("mentor/profile/", MyMentorProfileView.as_view(), name="community_chat_mentor_profile"),
@@ -127,6 +125,36 @@ urlpatterns = [
     path("mentor/admin/mentors/<int:profile_id>/pause/", MentoringAdminMentorPauseView.as_view(), name="community_chat_mentor_admin_mentor_pause"),
     path("mentor/admin/mentors/<int:profile_id>/unpause/", MentoringAdminMentorUnpauseView.as_view(), name="community_chat_mentor_admin_mentor_unpause"),
     path("mentor/admin/sessions/", MentoringAdminSessionsView.as_view(), name="community_chat_mentor_admin_sessions"),
+    path("event-discounts/events/<str:event_id>/", MemberPerksView.as_view(), name="community_chat_member_perks"),
+    path("event-discounts/", MyEventDiscountsView.as_view(), name="community_chat_event_discounts"),
+    path("usage/insights/", TokenInsightsView.as_view(), name="community_chat_token_insights"),
+    path("account-bans/", AccountBanView.as_view(), name="community_chat_account_bans"),
+    path("account-bans/<int:ban_id>/", AccountBanView.as_view(), name="community_chat_account_ban"),
+    path("apple-iap/", AppleIapView.as_view(), name="community_chat_apple_iap"),
+    path("apple-iap/transactions/", AppleIapTransactionView.as_view(), name="community_chat_apple_transaction"),
+    path("apple-iap/notifications/production/", AppleIapNotificationView.as_view(), {"environment": "production"}),
+    path("apple-iap/notifications/sandbox/", AppleIapNotificationView.as_view(), {"environment": "sandbox"}),
+    path("account/onboarding/", MemberOnboardingView.as_view(), name="community_chat_onboarding"),
+    path("account/invite/resolve/", InviteResolveView.as_view(), name="community_chat_invite_resolve"),
+    path("account/deletion/", AccountDeletionView.as_view(), name="community_chat_account_deletion"),
+    path("account/ai-consent/", AiConsentView.as_view(), name="community_chat_ai_consent"),
+    path("startups/", include("community_chat.startups.urls")),
+    path("permissions/", ChatPermissionsView.as_view(), name="community_chat_permissions"),
+    path("admins/<str:public_key>/", ChatAdminView.as_view(), name="community_chat_admin"),
+    path("member-roles/", ChatMemberRolesView.as_view(), name="community_chat_member_roles"),
+    path("moderators/<str:public_key>/", ChatModeratorView.as_view(), name="community_chat_moderator"),
+    path("relay-roles/<str:public_key>/", RelayChatRoleView.as_view(), name="community_chat_relay_role"),
+    path("volunteer/", include("community_chat.volunteer.urls")),
+    path("crm/", include("community_chat.crm.urls")),
+    # MLAI Chat's Admin area; not Django's /admin/ site or the relay's /api/admin/v1.
+    path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
+    path("coworking/today/", CoworkingTodayView.as_view(), name="community_chat_coworking_today"),
+    path("meeting-rooms/rooms/", MeetingRoomListView.as_view(), name="community_chat_meeting_room_list"),
+    path("meeting-rooms/availability/", MeetingRoomAvailabilityView.as_view(), name="community_chat_meeting_room_availability"),
+    path("meeting-rooms/book/", MeetingRoomBookView.as_view(), name="community_chat_meeting_room_book"),
+    path("meeting-rooms/my-bookings/", MyMeetingRoomBookingsView.as_view(), name="community_chat_meeting_room_my_bookings"),
+    path("meeting-rooms/cancel/", MeetingRoomCancelView.as_view(), name="community_chat_meeting_room_cancel"),
+    path("slack/emoji/", SlackEmojiDirectoryView.as_view(), name="community_chat_slack_emoji"),
     path("slack/message/", SlackMessageActionView.as_view(), name="community_chat_slack_message"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
     path("slack/conversations/", SlackOwnerConversationView.as_view(), name="community_chat_slack_conversations"),
@@ -163,6 +191,8 @@ urlpatterns = [
         name="community_chat_coding_turn_finalize",
     ),
     path("account/", AccountView.as_view(), name="community_chat_account"),
+    path("account/devices/", AccountDevicesView.as_view(), name="community_chat_account_devices"),
+    path("account/devices/<uuid:device_id>/", AccountDeviceView.as_view(), name="community_chat_account_device"),
     path(
         "upcoming-events/",
         UpcomingEventsView.as_view(),
@@ -195,7 +225,13 @@ urlpatterns = [
         DeviceAuthExchangeView.as_view(),
         name="community_chat_auth_exchange",
     ),
+    path(
+        "auth/device/renew/",
+        DeviceAuthRenewView.as_view(),
+        name="community_chat_auth_renew",
+    ),
     path("session/", SessionView.as_view(), name="community_chat_session"),
+    path("client-events/", ClientEventsView.as_view(), name="community_chat_client_events"),
     path(
         "messages/delete-slack-origin/",
         SlackOriginMessageDeleteView.as_view(),
@@ -217,4 +253,20 @@ urlpatterns = [
         TokenUsageLeaderboardView.as_view(),
         name="token_usage_leaderboard",
     ),
+]
+
+# P2 (IF-P2-25): the staff console routes, next to admin/access/. Each answers
+# 404 until the staff console package ships its views.
+from content_factory.lazy_views import lazy_view  # noqa: E402
+
+_admin_access = next(index for index, pattern in enumerate(urlpatterns) if str(pattern.pattern) == "admin/access/")
+urlpatterns[_admin_access + 1:_admin_access + 1] = [
+    path(route, lazy_view("community_chat.staff_console_views", view)) for route, view in (
+        ("admin/startups/", "StartupListView"),
+        ("admin/startups/funnel/", "FounderFunnelView"),
+        ("admin/startups/<int:organization_id>/", "StartupDetailView"),
+        ("admin/startups/<int:organization_id>/actions/", "StartupActionView"),
+        ("admin/alerts/", "AlertListView"),
+        ("admin/alerts/<str:alert_id>/ack/", "AlertAckView"),
+    )
 ]

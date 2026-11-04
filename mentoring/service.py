@@ -1128,4 +1128,3 @@ class MentoringService:
         session.status = MentorSession.STATUS_COMPLETED
         session.completed_at = now
         session.save()
-

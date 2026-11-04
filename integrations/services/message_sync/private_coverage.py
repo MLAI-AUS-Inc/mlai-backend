@@ -58,7 +58,9 @@ def recent_conversations(query, *, now=None, include_owner_inventory=False):
 
         # A newly observed unread can precede both delivery and legacy catalog
         # hydration. This is only a recovery scheduling hint: the recovery
-        # worker still validates current Slack membership before provisioning.
+        # worker revalidates Slack membership. Flag-gated IM device-only
+        # audience updates can reuse immutable IM membership; private channels
+        # always revalidate.
         inventory = SlackOwnerConversationInventory.objects.filter(
             grant_id=OuterRef('grant_id'),
             slack_conversation_id=OuterRef('slack_conversation_id'),

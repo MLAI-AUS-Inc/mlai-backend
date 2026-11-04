@@ -1,0 +1,10 @@
+{
+  "files": {
+    "contracts/failure-codes.json": "f0dd5b24c2a34b94e8517ab5cb0e791ee996cc6a298886331b057f287d94a8b7",
+    "contracts/failure-envelope-v1.schema.json": "1fa188a6cac3732108a4d59c15f3107fc02dd4d1890c5ec6bceef4c908322971",
+    "contracts/setup-delivery-v1.schema.json": "6a604e610716ba45c6c1e8491daae94cc51ece99e8e3d6c693ac378674581069"
+  },
+  "schema_version": 1,
+  "source_repository": "drsamdonegan/content-factory",
+  "source_revision": "faabf66f2515e22f8e8a424516e0bba0eb07c5b1"
+}

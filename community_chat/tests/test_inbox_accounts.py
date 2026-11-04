@@ -115,6 +115,13 @@ class InboxVerificationBoundaryTests(SimpleTestCase):
             if bind_error:
                 raise bind_error
 
+        def wake_member_audiences(user_id, *, reason, reduction):
+            self.assertTrue(in_transaction)
+            self.assertEqual((user_id, reason, reduction), (42, "device_verified", True))
+            self.assertEqual(device.status, DeviceBindingStatus.VERIFIED)
+            device.save.assert_called_once()
+            recovery.assert_called_once()
+
         with ExitStack() as stack:
             for name in ("_require_eligible", "_require_token_key", "_request_origin",
                          "enforce_bootstrap_limits", "_require_current_chat_credential_locked"):
@@ -132,28 +139,35 @@ class InboxVerificationBoundaryTests(SimpleTestCase):
             stack.enter_context(patch.object(views, "public_chat_profile", return_value={}))
             stack.enter_context(patch("integrations.services.message_sync.device_recovery.lock_enrollment_recovery_grants", return_value=[]))
             recovery = stack.enter_context(patch("integrations.services.message_sync.device_recovery.schedule_enrollment_recovery"))
+            audiences = stack.enter_context(patch(
+                "integrations.services.community_bridge.member_channels.schedule_member_authority_change",
+                side_effect=wake_member_audiences,
+            ))
             response = views.ConfirmView().post(request)
         binding.assert_called_once()
-        return response, device, recovery
+        return response, device, recovery, audiences
 
     def test_binding_precedes_verified_commit_under_authority_locks(self):
-        response, device, recovery = self.confirm()
+        response, device, recovery, audiences = self.confirm()
         self.assertEqual(response.status_code, 200)
         device.save.assert_called_once()
         recovery.assert_called_once()
+        audiences.assert_called_once_with(42, reason="device_verified", reduction=True)
 
     def test_binding_conflict_does_not_verify_or_schedule_recovery(self):
-        response, device, recovery = self.confirm(MembershipAdapterConflict("account_generation_conflict"))
+        response, device, recovery, audiences = self.confirm(MembershipAdapterConflict("account_generation_conflict"))
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data, {"error": "device_authority_changed"})
         device.save.assert_not_called()
         recovery.assert_not_called()
+        audiences.assert_not_called()
 
     def test_binding_failure_keeps_verification_pending(self):
-        response, device, recovery = self.confirm(MembershipAdapterUnavailable("adapter_unavailable"))
+        response, device, recovery, audiences = self.confirm(MembershipAdapterUnavailable("adapter_unavailable"))
         self.assertEqual(response.status_code, 503)
         device.save.assert_not_called()
         recovery.assert_not_called()
+        audiences.assert_not_called()
 
 
 class InboxBindingCommandTests(SimpleTestCase):

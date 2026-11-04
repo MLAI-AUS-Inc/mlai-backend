@@ -1,7 +1,7 @@
 """Database-free research spend/outbox, delivery and original-price refund fences."""
 from contextlib import contextmanager
 from types import SimpleNamespace as Obj
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase
 
@@ -10,8 +10,23 @@ from content_factory.website_contract import WebsiteAuthorityError
 from integrations.services import article_generation as billing
 
 
+def _empty_canonical_runs(test):
+    """Model absent admitted rows, keeping actual boundary predicates active."""
+    from workflow_runs.models import ContentFactoryRun
+    rows = MagicMock(name="unadmitted_research_runs")
+    rows.filter.return_value = rows.order_by.return_value = rows.select_for_update.return_value = rows
+    rows.__getitem__.return_value = rows
+    rows.first.return_value = None
+    rows.iterator.return_value = iter(())
+    rows.__iter__.return_value = iter(())
+    canonical = patch.object(ContentFactoryRun, "objects", rows)
+    canonical.start()
+    test.addCleanup(canonical.stop)
+
+
 class ResearchDispatchTests(SimpleTestCase):
     def setUp(self):
+        _empty_canonical_runs(self)
         self.user = Obj(pk=7, id=7)
         self.company = Obj(pk="company-1")
         self.org = Obj(pk=9, id=9, domain="synthetic.example.test")
@@ -50,6 +65,7 @@ class ResearchDispatchTests(SimpleTestCase):
             self.assertEqual(saved["mcp_request_hash"], "a" * 64)
             self.assertEqual(saved["custom_topic_title"], "Original topic")
             self.assertEqual(saved["roo_points_ledger_id"], "123")
+            self.assertEqual(saved["roo_points_required"], 3)
             if reserve_failure:
                 raise RuntimeError("Synthetic receipt failure")
         with patch.object(views, "_quoted_price_response", return_value=None), \
@@ -87,7 +103,7 @@ class ResearchDispatchTests(SimpleTestCase):
         row = self.row()
         response = Obj(status_code=202, json=lambda: {"run_id": "research-1"})
         with patch.object(views, "_content_factory_remote_config", return_value={"enabled": True, "base_url": "https://worker.example.test"}), \
-             patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("absent", {})), \
+             patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("not_received", {})), \
              patch.object(views, "_content_factory_headers", return_value={}), \
              patch.object(get_user_model().objects, "get", return_value=self.user), \
              patch.object(VibeRaisingCompany.objects, "filter") as companies, \
@@ -116,7 +132,7 @@ class ResearchDispatchTests(SimpleTestCase):
                 row.payload["request"]["domain"] = "old.example.test"
             with self.subTest(changed=changed), \
                  patch.object(views, "_content_factory_remote_config", return_value={"enabled": True}), \
-                 patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("absent", {})), \
+                 patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("not_received", {})), \
                  patch.object(get_user_model().objects, "get", return_value=self.user), \
                  patch.object(VibeRaisingCompany.objects, "filter") as companies, \
                  patch.object(http_client, "post") as post:
@@ -143,7 +159,7 @@ class ResearchDispatchTests(SimpleTestCase):
         row = self.row()
         row.payload["request"]["research_audience"] = {"id": "audience-1", "version": 1}
         with patch.object(views, "_content_factory_remote_config", return_value={"enabled": True}), \
-             patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("absent", {})), \
+             patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("not_received", {})), \
              patch.object(get_user_model().objects, "get", return_value=self.user), \
              patch.object(VibeRaisingCompany.objects, "filter") as companies, \
              patch.object(views, "_get_config", return_value=Obj(pillar_strategy={})), \
@@ -156,6 +172,9 @@ class ResearchDispatchTests(SimpleTestCase):
 
 
 class OriginalResearchRefundTests(SimpleTestCase):
+    def setUp(self):
+        _empty_canonical_runs(self)
+
     def test_paid_to_free_and_free_to_paid_price_changes_use_original_charge(self):
         from roo.models import Ledger
         from roo.services import PointsService

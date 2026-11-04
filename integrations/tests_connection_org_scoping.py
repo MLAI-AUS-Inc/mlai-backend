@@ -8,6 +8,7 @@ from integrations.models import (
 )
 from integrations.services.external_connectors import (
     _upsert_connection,
+    ConnectorConfigurationError,
     active_organization_for_user,
     serialize_source_status,
 )
@@ -46,7 +47,7 @@ class ConnectionOrgScopingTests(TestCase):
         self.profile.active_company = company
         self.profile.save(update_fields=["active_company", "updated_at"])
 
-    def _connect_notion(self, organization, token):
+    def _connect_notion(self, organization, token, account="workspace-a"):
         return _upsert_connection(
             user=self.user,
             provider=ExternalServiceProvider.NOTION,
@@ -56,10 +57,36 @@ class ConnectionOrgScopingTests(TestCase):
             token_type="bearer",
             token_expires_at=None,
             scopes=[],
-            external_account_id="",
+            external_account_id=account,
             account_label=organization.name,
             provider_metadata={},
         )
+
+    def test_two_accounts_in_one_startup_keep_separate_credentials(self):
+        first = self._connect_notion(self.org_a, "token-a", "workspace-a")
+        first.refresh_token = "refresh-a"
+        first.provider_metadata = {"selected_pages": ["page-a"]}
+        first.save()
+        second = self._connect_notion(self.org_a, "token-b", "workspace-b")
+        first.refresh_from_db()
+        self.assertNotEqual(first.pk, second.pk)
+        self.assertEqual(first.access_token, "token-a")
+        self.assertEqual(second.access_token, "token-b")
+        self.assertEqual(second.refresh_token, "")
+        reconnected = self._connect_notion(self.org_a, "token-a-new", "workspace-a")
+        self.assertEqual(reconnected.pk, first.pk)
+        self.assertEqual(reconnected.refresh_token, "refresh-a")
+        self.assertEqual(reconnected.provider_metadata["selected_pages"], ["page-a"])
+        second.refresh_from_db()
+        self.assertEqual(second.access_token, "token-b")
+
+    def test_missing_provider_identity_cannot_replace_an_account(self):
+        first = self._connect_notion(self.org_a, "token-a")
+        with self.assertRaises(ConnectorConfigurationError):
+            self._connect_notion(self.org_a, "bad-token", "")
+        first.refresh_from_db()
+        self.assertEqual(first.access_token, "token-a")
+        self.assertEqual(ExternalServiceConnection.objects.count(), 1)
 
     def test_active_organization_follows_active_company(self):
         self.assertEqual(active_organization_for_user(self.user), self.org_a)
@@ -117,5 +144,5 @@ class ConnectionOrgScopingTests(TestCase):
                     user=self.user,
                     provider=ExternalServiceProvider.NOTION,
                     organization=self.org_a,
-                    external_account_id="",
+                    external_account_id="workspace-a",
                 )

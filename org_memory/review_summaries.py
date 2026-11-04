@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import exclude_members_claims, exclude_members_evidence
+
 import hashlib
 import json
 from collections import defaultdict
@@ -157,7 +159,7 @@ def _content_type(instance):
 
 
 def eligible_evidence_queryset(*, organization):
-    return MemoryEvidence.objects.filter(
+    return exclude_members_evidence(MemoryEvidence.objects.filter(
         claim__organization=organization,
         claim__classification__in=tuple(
             value
@@ -169,7 +171,7 @@ def eligible_evidence_queryset(*, organization):
         source_version__tombstoned_at__isnull=True,
         source_version__acl_snapshot__is_accessible=True,
         source_version__acl_snapshot__revoked_at__isnull=True,
-    ).exclude(
+    ), source_path='source').exclude(
         source_version__classification=MemoryClassification.NO_AGENT,
     ).exclude(
         chunk__classification=MemoryClassification.NO_AGENT,
@@ -178,11 +180,11 @@ def eligible_evidence_queryset(*, organization):
 
 def eligible_claims_queryset(*, organization):
     return (
-        MemoryClaim.objects.filter(
+        exclude_members_claims(MemoryClaim.objects.filter(
             organization=organization,
             status=MemoryClaimStatus.ACTIVE,
             evidence__in=eligible_evidence_queryset(organization=organization),
-        )
+        ))
         .exclude(classification="no_agent")
         .distinct()
     )

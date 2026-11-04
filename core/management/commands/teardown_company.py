@@ -328,6 +328,10 @@ class Command(BaseCommand):
             return
 
         # ---------------- apply ----------------
+        from workflow_runs.models import ContentFactoryRun
+        from content_factory.run_ownership import owns_backend_facts
+        if any(owns_backend_facts(run) for run in ContentFactoryRun.objects.filter(organization=org).only("result")):
+            raise CommandError("Admitted execution history requires its explicit cleanup protocol; no teardown actions were started.")
         self.stdout.write("")
         self.stdout.write("Applying:")
 

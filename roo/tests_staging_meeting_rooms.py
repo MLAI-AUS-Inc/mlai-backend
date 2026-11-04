@@ -9,9 +9,11 @@ from community_chat.tests import test_staging_password as fixtures
 from roo.models import PointsAccount,MeetingRoomBooking
 from roo.services import PointsService
 ROOT='/api/v1/points/meeting-rooms/'
-@override_settings(**fixtures.PILOT,STAGING_FIXTURE_DATABASE='staging_points_tests',MEETING_ROOM_BOOKING_ENABLED=True)
+@override_settings(**fixtures.PILOT,MEETING_ROOM_BOOKING_ENABLED=True)
 class MemberRoomTests(TestCase):
     def setUp(self):
+        from tests.staging_fixture_database import bind_disposable_fixture_database
+        bind_disposable_fixture_database(self)
         fixtures.StagingPasswordTests.setUp(self)
         from community_chat.models import CommunityMemberProfile
         CommunityMemberProfile.objects.create(user=self.user,status='approved',review_reasons=['synthetic_staging_pilot'])

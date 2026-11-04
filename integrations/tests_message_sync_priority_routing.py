@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from integrations.services import slack_chat_read_state as reads, slack_dm_mirror as dm, slack_open_requests
 from integrations.services.message_sync import discovery, read_priority, read_state, runner
@@ -97,6 +97,12 @@ class ReadPriorityRoutingTests(SimpleTestCase):
                 self._dispatch(target, {"available": True, "is_unread": unread,
                                         "fetched_at": self.now - 90, "latest_ts": str(self.now - 100)},
                                expected="background")
+
+    @override_settings(MESSAGE_SYNC_TARGETED_READ_POLLING=True)
+    def test_targeted_possibly_unread_reprobe_is_background(self):
+        self._dispatch(reads.ReadTarget("room", "D1", "im", source_activity_ts=str(self.now - 100)),
+                       {"available": True, "is_unread": True, "fetched_at": self.now - 90, "last_read": "0"},
+                       expected="background")
 
     def test_visible_and_durable_activity_hints_remain_foreground(self):
         target = reads.ReadTarget("room", "D1", "im")
@@ -191,7 +197,20 @@ class HistoryPriorityRoutingTests(SimpleTestCase):
                     "integrations.services.slack_chat_refresh.prioritize_open_conversations", return_value=rows
                 ), patch.object(runner, "private_page", side_effect=lambda *_args: seen.append(current_priority())), patch.object(
                     runner, "fail_job"
-                ) as failure:
+                ) as failure, patch("integrations.services.message_sync.presentation.awaiting_presentation", return_value=False):
                     self.assertEqual(runner.process_history_once(seed=False), 1)
                 self.assertEqual(seen, [expected])
                 failure.assert_not_called()
+
+
+    @override_settings(MESSAGE_SYNC_OPEN_PRIORITY_ENABLED=True)
+    def test_open_archive_is_foreground_only_while_awaiting_presentation(self):
+        for awaiting, expected in ((True, "foreground"), (False, "background")):
+            state = SimpleNamespace(private_conversation_id=1, foreground_refresh=True)
+            lease = SimpleNamespace(state_id=1, kind="archive")
+            rows = Mock()
+            rows.select_related.return_value.get.return_value = state
+            seen = []
+            with patch.object(runner, "enabled", return_value=True), patch.object(runner, "claim_job", return_value=lease), patch.object(runner.BridgeSyncState.objects, "all", return_value=rows), patch("integrations.services.slack_chat_refresh.prioritize_open_conversations", return_value=rows), patch("integrations.services.message_sync.presentation.awaiting_presentation", return_value=awaiting), patch.object(runner, "private_page", side_effect=lambda *_: seen.append(current_priority())):
+                self.assertEqual(runner.process_history_once(seed=False), 1)
+            self.assertEqual(seen, [expected])

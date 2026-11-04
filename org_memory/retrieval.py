@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import exclude_members_claims, exclude_members_evidence
+
 import re
 from dataclasses import dataclass
 from datetime import timedelta
@@ -448,19 +450,19 @@ def plan_memory_query(
 
 
 def eligible_evidence_queryset():
-    return MemoryEvidence.objects.filter(
+    return exclude_members_evidence(MemoryEvidence.objects.filter(
         source__lifecycle_state=MemorySourceLifecycle.ACTIVE,
         source__access_revoked_at__isnull=True,
         source_version__tombstoned_at__isnull=True,
         source_version__acl_snapshot__is_accessible=True,
         source_version__acl_snapshot__revoked_at__isnull=True,
-    ).select_related("source", "source__configuration", "source_version", "chunk")
+    ), source_path='source').select_related("source", "source__configuration", "source_version", "chunk")
 
 
 def _claim_queryset(*, organization, plan: QueryPlan, classifications):
     if plan.mode == MemoryQueryMode.TIMELINE:
         claims = (
-            MemoryClaim.objects.filter(
+            exclude_members_claims(MemoryClaim.objects.filter(
                 organization=organization,
                 status__in=(
                     MemoryClaimStatus.ACTIVE,
@@ -474,7 +476,7 @@ def _claim_queryset(*, organization, plan: QueryPlan, classifications):
                 evidence__source_version__acl_snapshot__is_accessible=True,
                 evidence__source_version__acl_snapshot__revoked_at__isnull=True,
                 evidence__source_version__tombstoned_at__isnull=True,
-            )
+            ))
             .exclude(classification=MemoryClassification.NO_AGENT)
             .distinct()
         )
@@ -501,7 +503,7 @@ def _claim_queryset(*, organization, plan: QueryPlan, classifications):
         claims = claims.filter(
             Q(observed_at__isnull=True) | Q(observed_at__lt=plan.time_end)
         ).filter(Q(valid_from__isnull=True) | Q(valid_from__lt=plan.time_end))
-    return claims.distinct()
+    return exclude_members_claims(claims).distinct()
 
 
 def _text_relevance(text: str, terms: Iterable[str]) -> float:
@@ -821,7 +823,7 @@ def select_memory(
     eligible_claim_id_set = set(claim_ids)
     chunk_ids = [hit.chunk.pk for hit in chunk_result.hits]
     chunk_claim_map = {}
-    for chunk_id, mapped_claim_id in MemoryEvidence.objects.filter(
+    for chunk_id, mapped_claim_id in exclude_members_evidence(MemoryEvidence.objects.filter(
         chunk_id__in=chunk_ids,
         claim_id__in=eligible_claim_id_set,
         source__lifecycle_state=MemorySourceLifecycle.ACTIVE,
@@ -829,7 +831,7 @@ def select_memory(
         source_version__acl_snapshot__is_accessible=True,
         source_version__acl_snapshot__revoked_at__isnull=True,
         source_version__tombstoned_at__isnull=True,
-    ).values_list("chunk_id", "claim_id"):
+    ), source_path='source').values_list("chunk_id", "claim_id"):
         chunk_claim_map.setdefault(chunk_id, mapped_claim_id)
 
     scores = {}
@@ -868,20 +870,20 @@ def select_memory(
     )
     claim_map = {
         str(claim.pk): claim
-        for claim in MemoryClaim.objects.filter(
+        for claim in exclude_members_claims(MemoryClaim.objects.filter(
             pk__in=claim_keys,
             organization=organization,
             classification__in=classifications,
-        )
+        ))
         .select_related("subject_entity", "object_entity")
         .prefetch_related(evidence_prefetch)
     }
     allowed_chunk_ids = set(chunk_keys) & {str(hit.chunk.pk) for hit in chunk_result.hits}
     chunk_map = {
         str(chunk.pk): chunk
-        for chunk in MemoryChunk.objects.filter(
+        for chunk in exclude_members_evidence(MemoryChunk.objects.filter(
             pk__in=allowed_chunk_ids,
-        ).select_related("source_version__source__configuration", "source_version")
+        ), source_path='source_version__source').select_related("source_version__source__configuration", "source_version")
     }
     candidates = []
     current_id_set = {str(value) for value in current_ids}

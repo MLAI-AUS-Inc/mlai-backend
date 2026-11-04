@@ -236,10 +236,12 @@ class WebsiteReliabilityLifecycleTests(WebsiteDatabaseFixture, TestCase):
         self.assertEqual(live_data["operation_id"], evidence["operation_id"])
         self.assertEqual(live_data["operation_attempt"], 1)
         bad = [(b"", {"x-mlai-artifact-digest": "e" * 64}), (b"", {"x-mlai-artifact-digest": "f" * 64})]
+        deployments_before = self.website.operations.filter(action="deployment-verify").count()
         with patch("content_factory.website_live_fetch.fetch_live_route", side_effect=bad):
             with self.assertRaises(WebsiteAuthorityError) as detail:
                 verify_live_deployment(self.config, data=live_data)
-        self.assertEqual(detail.exception.code, "deployment_source_unverified")
+        self.assertEqual(detail.exception.code, "live_route_unavailable")
+        self.assertEqual(self.website.operations.filter(action="deployment-verify").count(), deployments_before)
         with patch("content_factory.website_live_fetch.fetch_live_route", return_value=(b"", {"x-mlai-artifact-digest": "e" * 64})) as live:
             verify_live_deployment(self.config, data=live_data)
         self.assertEqual(live.call_count, 3)

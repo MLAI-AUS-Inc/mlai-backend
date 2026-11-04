@@ -194,3 +194,63 @@ class ChartEvidenceTests(unittest.TestCase):
         self.assertTrue(_verified_chart_observation(metric))
         metric.metric_key='monthlyCosts';self.assertFalse(_verified_chart_observation(metric))
         metric.metric_key='revenue';metadata.pop('definition_version');self.assertFalse(_verified_chart_observation(metric))
+
+
+RUN_REQUEST = {
+    'start_date': '2026-10-01', 'end_date': '2026-10-18',
+    'backfill_window_start': '2026-10-01T00:00:00+10:00',
+    'backfill_window_end': '2026-10-18T12:00:00+11:00',
+    'draft_months': ['2026-10-01'], 'reporting_timezone': 'Australia/Melbourne',
+    'startup_context': {'company_name': 'Synthetic 🦘', 'notes': 'Founder notes with 漢字.'},
+}
+BUNDLE = {'cleaned_text': 'The pilot shipped.', 'message_payloads': [{'message_id': 'message-1', 'cleaned_text': 'The pilot shipped.'}],
+    'attachments': [{'id': 7, 'filename': 'report.pdf', 'raw_content_base64': 'c3ludGhldGlj',
+        'extracted_text': 'Pilot evidence.', 'extraction_status': 'processed', 'parse_notes': '', 'last_error': '', 'metadata': {'parser': 1}}]}
+
+
+class HoistedStartupContextTests(unittest.TestCase):
+    def test_golden_fingerprint_retains_main_contract(self):
+        import copy
+        from startup_updates.evidence_contract import content_hash
+        original = copy.deepcopy(BUNDLE)
+        run = SimpleNamespace(run_request=RUN_REQUEST)
+        receipt = source_receipt(run, "gmail", "thread-1", BUNDLE)
+        # Computed on origin/main 6bbe177f before changing source_receipt.
+        self.assertEqual(receipt["fingerprint"], "82d8b38cdfe55d624e5c5709b755be805158325c790ce4af0f29ea41970345bd")
+        self.assertNotIn("startup_context", receipt)
+        self.assertEqual(receipt["startup_context_hash"], content_hash(RUN_REQUEST["startup_context"]))
+        self.assertEqual(BUNDLE, original)
+        self.assertEqual(run.run_request, RUN_REQUEST)
+
+    def test_legacy_context_is_hoisted_without_mutating_receipts(self):
+        import copy
+        from startup_updates.source_evidence import hoist_startup_context
+        from startup_updates.evidence_contract import content_hash
+        receipts = {"gmail:1": {"startup_context": {"notes": "Frozen 🦘"}, "fingerprint": "one"},
+            "gmail:2": {"startup_context": {"notes": "Frozen 🦘"}, "fingerprint": "two"}}
+        original = copy.deepcopy(receipts)
+        normalized, context = hoist_startup_context(receipts, fallback={"notes": "Live profile"})
+        self.assertEqual(context, {"notes": "Frozen 🦘"})
+        self.assertEqual(receipts, original)
+        for key, receipt in normalized.items():
+            self.assertNotIn("startup_context", receipt)
+            self.assertEqual(receipt["startup_context_hash"], content_hash(context))
+            self.assertEqual(receipt["fingerprint"], original[key]["fingerprint"])
+
+    def test_distinct_legacy_contexts_are_retained_in_full(self):
+        from startup_updates.source_evidence import hoist_startup_context
+        receipts = {"one": {"startup_context": {"notes": "First"}},
+            "two": {"startup_context": {"notes": "Different"}}}
+        normalized, context = hoist_startup_context(receipts, fallback={"notes": "Live"})
+        self.assertEqual(normalized, receipts)
+        self.assertIsNone(context)
+
+    def test_modern_receipts_use_frozen_run_context_fallback(self):
+        from startup_updates.source_evidence import hoist_startup_context
+        context = {"notes": "Frozen"}
+        receipt = source_receipt(SimpleNamespace(run_request={"startup_context": context}), "gmail", "1", {})
+        normalized, hoisted = hoist_startup_context({"gmail:1": receipt}, fallback=context)
+        self.assertEqual(normalized, {"gmail:1": receipt})
+        self.assertEqual(hoisted, context)
+        hoisted["notes"] = "Mutated"
+        self.assertEqual(context["notes"], "Frozen")

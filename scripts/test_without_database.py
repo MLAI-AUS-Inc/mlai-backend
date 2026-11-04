@@ -1,7 +1,7 @@
 """Run explicitly selected unittest/SimpleTestCase suites without DB or network.
 
 This does not use Django's test runner and never constructs a test database.
-Database-backed suites are rejected before execution. Environment credentials
+Database-backed suites may be collected but are rejected before execution. Environment credentials
 and dotenv loading are excluded even when run from a configured checkout.
 """
 
@@ -27,6 +27,16 @@ def main(labels):
     if not labels:
         raise SystemExit("Supply explicit unittest or SimpleTestCase labels.")
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    collect_only = labels[0] == "--collect-only"
+    if collect_only:
+        labels = labels[1:]
+        if not labels:
+            raise SystemExit("Supply explicit test labels to collect.")
+    elif labels == ["--collect-ci-selection"]:
+        from scripts.check_test_assignment import ROOT, selected_labels
+
+        labels = sorted(selected_labels((ROOT / ".github/workflows/deploy.yml").read_text()))
+        collect_only = True
     safe_environment = {
         "PATH": os.defpath,
         "APP_ENV": "test",
@@ -77,7 +87,14 @@ def main(labels):
             }, indent=2))
             return 0
         from django.test import TransactionTestCase
-        suite = unittest.defaultTestLoader.loadTestsFromNames(labels)
+        loader = unittest.TestLoader()
+        suite = loader.loadTestsFromNames(labels)
+        if collect_only:
+            if loader.errors:
+                print("\n".join(loader.errors), file=sys.stderr)
+                return 1
+            print(f"Collected {suite.countTestCases()} tests without database access or execution.")
+            return 0
         for test in iter_tests(suite):
             if isinstance(test, TransactionTestCase):
                 raise SystemExit(f"Database-backed test requires separate migration approval: {test.id()}")

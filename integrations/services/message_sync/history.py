@@ -4,13 +4,14 @@ import json
 import time
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
-from integrations.models import BridgeSyncState, CommunityBridgeChannel, SlackDmMirrorConversation
-from integrations.services.community_bridge.slack import SlackBridgeClient
+from integrations.models import BridgeSyncJob, BridgeSyncState, CommunityBridgeChannel, SlackDmMirrorConversation
 from integrations.services.community_bridge.store import ingest_slack_event
 from .coverage import record_page
 from .history_policy import history_page_limit
+from . import recent_history
 from .head_repair import finish_head, head_scope, observe_head, prepare_head
 from .scheduler import locked_job, schedule_job, finish_job
 
@@ -34,6 +35,14 @@ def ensure_state(owner):
 
 def seed_states(limit=100):
     """Incrementally discover every eligible mapping without relying on login."""
+    if not recent_history.enabled():
+        # Rollback resumes the saved archive rather than waiting for its idle
+        # timer. Never steal an active page or shorten a provider cooldown.
+        now = timezone.now()
+        BridgeSyncJob.objects.filter(
+            kind="archive", checkpoint__phase="recent_paused", due_at__gt=now,
+            backoff_seconds=0, last_error_code="",
+        ).filter(Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now)).update(due_at=now)
     public = CommunityBridgeChannel.objects.filter(
         enabled=True, destination_platform="buzz", sync_state__isnull=True,
     ).order_by("id")[:limit]
@@ -92,24 +101,50 @@ def next_checkpoint(checkpoint, response, *, thread=False):
 
 
 def public_page(lease, state):
+    from . import member_history
+    return member_history.run_page(lease, state, _public_page)
+
+
+def _public_page(lease, state, *, client=None, member_authority=None):
     channel = state.public_channel
+    from .member_history import guard_page
+    guard_page(channel)
     checkpoint = dict(lease.checkpoint)
+    scope = head_scope(state) + (":" + member_authority if member_authority else "")
+    if lease.kind == "archive" and recent_history.enabled():
+        if checkpoint.get("authority_generation") not in (None, scope):
+            checkpoint = {}
+        checkpoint["authority_generation"] = scope
     # Each sweep fixes its upper bound so an active channel cannot keep a scan
     # perpetually open. New arrivals are covered by callbacks and the next head.
     checkpoint.setdefault("upper_bound", f"{int(time.time())}.999999")
     upper_seconds = timestamp(checkpoint["upper_bound"])[0]
     scan_floor = max(0, upper_seconds - PUBLIC_HISTORY_DAYS * 86400)
     if lease.kind == "head":
+        imported = recent_history.imported_floor(state, scan_floor, scope=scope)
+        if imported is None:
+            finish_job(lease, checkpoint=lease.checkpoint, delay_seconds=60)
+            return
+        scan_floor = imported
         checkpoint = prepare_head(state, checkpoint, now=time.time(), consent_floor=scan_floor,
-                                  scope=head_scope(state))
+                                  scope=scope)
+    if member_authority:
+        checkpoint["member_authority"] = member_authority
     checkpoint.setdefault("oldest", f"{scan_floor}.000000")
     if timestamp(checkpoint["oldest"])[0] < scan_floor:
         # Old deployments saved unbounded public archive cursors. Restart that
         # query with the supported window instead of following it into years of
         # history. An already bounded cursor remains stable as time passes.
-        checkpoint = {"upper_bound": checkpoint["upper_bound"], "oldest": f"{scan_floor}.000000"}
+        checkpoint = {"upper_bound": checkpoint["upper_bound"], "oldest": f"{scan_floor}.000000",
+                      **({"member_authority": member_authority} if member_authority else {})}
     floor = max(timestamp(checkpoint["oldest"])[0], int(time.time()) - PUBLIC_HISTORY_DAYS * 86400)
-    kwargs = dict(channel=channel.slack_channel_id, limit=history_page_limit(), inclusive=False,
+    limit = history_page_limit()
+    if lease.kind == "archive" and recent_history.enabled():
+        if checkpoint.get("timeline_complete") or recent_history.page_limit(checkpoint, limit) == 0:
+            finish_job(lease, checkpoint=checkpoint, delay_seconds=recent_history.IDLE_SECONDS)
+            return
+        limit = recent_history.page_limit(checkpoint, limit)
+    kwargs = dict(channel=channel.slack_channel_id, limit=limit, inclusive=False,
                   latest=checkpoint.get("latest", checkpoint["upper_bound"]))
     # Slack rejects an explicit decimal-zero oldest timestamp. Its documented
     # unbounded request omits oldest; the durable range retains its zero marker.
@@ -117,7 +152,8 @@ def public_page(lease, state):
         kwargs["oldest"] = checkpoint["oldest"]
     if checkpoint.get("cursor"):
         kwargs["cursor"] = checkpoint["cursor"]
-    client = SlackBridgeClient.get_client()
+    if client is None or not member_authority:
+        raise RuntimeError("member_history_authority_required")
     read_started_at = timezone.now()
     if lease.kind == "thread":
         kwargs["ts"] = lease.source_object_key
@@ -127,6 +163,8 @@ def public_page(lease, state):
     if not response.get("ok"):
         raise RuntimeError("slack_history_response_failed")
     messages = page_messages(response)
+    if lease.kind == "archive" and recent_history.enabled() and len(messages) > limit:
+        raise ValueError("slack_history_page_oversized")
     updated, complete = next_checkpoint(checkpoint, response, thread=lease.kind == "thread")
     if lease.kind != "thread" and any(
         isinstance(message, dict) and message.get("ts") and timestamp(message["ts"])[0] < floor
@@ -143,7 +181,10 @@ def public_page(lease, state):
         if (not mapped.enabled or mapped.slack_channel_id != channel.slack_channel_id
                 or mapped.slack_workspace_id != channel.slack_workspace_id
                 or mapped.destination_channel_id != channel.destination_channel_id
-                or mapped.destination_workspace_id != channel.destination_workspace_id):
+                or mapped.destination_workspace_id != channel.destination_workspace_id
+                or mapped.audience != channel.audience
+                or channel.audience == "community" and (SlackDmMirrorConversation.objects.filter(slack_workspace_id=mapped.slack_workspace_id,
+                        slack_conversation_id=mapped.slack_channel_id).exists())):
             raise RuntimeError("sync_mapping_changed")
         floor = max(floor, int(time.time()) - PUBLIC_HISTORY_DAYS * 86400)
         observed = []
@@ -191,13 +232,22 @@ def public_page(lease, state):
                 schedule_job(current, "thread", source_object_key=root)
         updated = record_page(current, lease.kind, updated,
                               {"messages": observed, "is_limited": response.get("is_limited")}, complete=complete)
+        if lease.kind == "archive" and recent_history.enabled():
+            updated = recent_history.advance(updated, observed)
+            if messages:
+                updated["frontier"] = min((m["ts"] for m in messages), key=timestamp)
+            updated["timeline_complete"] = complete
         from .read_activity import advance_public_activity
         advance_public_activity(current, observed)
         delay = {"head": 60, "thread": 3600, "archive": 86400}[lease.kind]
         if lease.kind == "head":
             updated = observe_head(updated, observed)
-            delay = finish_head(current, updated, complete=complete, now=time.time(), scope=head_scope(current))
+            delay = finish_head(current, updated, complete=complete, now=time.time(), scope=scope)
         if lease.kind == "thread" and timestamp(lease.source_object_key)[0] < floor and not updated["observed_messages"]:
             delay = 86400
-        finish_job(lease, checkpoint={} if complete else updated,
-                   delay_seconds=delay if complete else 0, complete=complete)
+        progressive = lease.kind == "archive" and recent_history.enabled()
+        paused = progressive and (complete or recent_history.page_limit(updated, history_page_limit()) == 0)
+        if progressive:
+            updated["phase"] = "recent_paused" if paused else "recent_import"
+        finish_job(lease, checkpoint=updated if progressive or not complete else {},
+                   delay_seconds=recent_history.IDLE_SECONDS if paused else delay if complete else 0, complete=complete)

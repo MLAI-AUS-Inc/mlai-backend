@@ -739,7 +739,7 @@ class ContentAnalyticsContractTests(TestCase):
         queue.side_effect = fake_queue
         response = self.client.post(
             "/api/v1/vibe-marketing/article/",
-            {**self._connected_website_request(), "customTitle": "A new tracked article", "targetKeyword": "new tracked keyword"},
+            {"expectedCostPoints": 12, **self._connected_website_request(), "customTitle": "A new tracked article", "targetKeyword": "new tracked keyword"},
             format="json",
         )
 

@@ -4,6 +4,7 @@ Lock order matches consent revocation: user, all grants, connection. No Slack
 request runs while claiming; every later provider call/write checks this lease.
 """
 import math
+from itertools import count
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -13,7 +14,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import F, FloatField, Max, Q
+from django.db.models import Case, F, FloatField, Max, Q, Value, When
 from django.db.models.functions import Cast
 from django.utils import timezone
 
@@ -24,6 +25,7 @@ from .request_priority import request_priority
 KEY = "message_sync_discovery"
 DURABLE_POLL_SECONDS = 1.0
 LEGACY_POLL_SECONDS = 5.0
+_turns = count()
 _claim = ContextVar("message_sync_discovery_claim", default=None)
 
 
@@ -39,6 +41,8 @@ class DiscoveryLease:
     user_id: int
     token: str
     previous_served: float | None = None
+    event_channel_id: str = ""
+    event_generation: str = ""
 
 
 @contextmanager
@@ -55,10 +59,18 @@ def guard_discovery(grant, connection):
     lease = _claim.get()
     if lease is None:
         return
+    if lease.event_channel_id:
+        from .event_routing import enabled
+        if not enabled():
+            raise LeaseLost("event_routing_disabled")
     value = (connection.sync_cursor or {}).get(KEY) or {}
-    if (grant.pk != lease.grant_id or connection.pk != lease.connection_id
+    if not isinstance(value, dict):
+        raise LeaseLost("discovery_lease_lost")
+    expires = value.get("expires")
+    if (type(expires) not in (int, float) or not math.isfinite(expires)
+            or grant.pk != lease.grant_id or connection.pk != lease.connection_id
             or value.get("token") != lease.token
-            or float(value.get("expires") or 0) <= timezone.now().timestamp()):
+            or expires <= timezone.now().timestamp()):
         raise LeaseLost("discovery_lease_lost")
 
 
@@ -78,26 +90,41 @@ def _lock(lease, *, skip_locked=False):
     return grant, connection
 
 
-def claim_discovery(interval_seconds, *, lease_seconds=120):
-    """One list page per turn; incomplete first-page grants cannot starve others."""
-    now = timezone.now()
+def due_discovery_grants(interval_seconds, *, now=None):
+    """Share the exact active, due and unleased discovery criteria with status."""
+    now = now or timezone.now()
     clock = now.timestamp()
     active = SlackDmMirrorGrant.objects.filter(status="active", revoked_at__isnull=True, connection__isnull=False)
     due = active.filter(Q(last_discovery_at__isnull=True) | Q(last_discovery_at__lt=now - timedelta(seconds=interval_seconds)))
     for field in ("due", "expires"):
         path = f"connection__sync_cursor__{KEY}__{field}"
         due = due.filter(Q(**{f"{path}__isnull": True}) | Q(**{f"{path}__lte": clock}))
+    return due
+
+
+def claim_discovery(interval_seconds, *, lease_seconds=120, prefer_opens=False):
+    """One list page per turn; optional open preference preserves owner rotation."""
+    now = timezone.now()
+    clock = now.timestamp()
+    active = SlackDmMirrorGrant.objects.filter(status="active", revoked_at__isnull=True, connection__isnull=False)
+    due = due_discovery_grants(interval_seconds, now=now)
+    open_path = f"connection__sync_cursor__{KEY}__open_requested_at"
     served = f"connection__sync_cursor__{KEY}__served"
     workspaces = active.filter(slack_workspace_id__in=due.values("slack_workspace_id")).values(
         "slack_workspace_id",
     ).annotate(served=Max(Cast(served, FloatField()))).order_by(F("served").asc(nulls_first=True), "slack_workspace_id")
+    workspaces = list(workspaces)
+    if prefer_opens:
+        open_workspaces = set(due.filter(**{f"{open_path}__isnull": False}).values_list("slack_workspace_id", flat=True))
+        workspaces.sort(key=lambda workspace: workspace["slack_workspace_id"] not in open_workspaces)
     for workspace in workspaces:
         # Materialize only opaque candidate IDs before starting lock transactions.
         # A server-side cursor held across those transactions can deadlock its
         # connection while being finalized after an early successful return.
-        candidates = due.filter(slack_workspace_id=workspace["slack_workspace_id"]).order_by(
-            F(served).asc(nulls_first=True), "id",
-        ).values_list("pk", "connection_id", "user_id")
+        order = [F(served).asc(nulls_first=True), "id"]
+        if prefer_opens:
+            order.insert(0, Case(When(**{f"{open_path}__isnull": False}, then=Value(0)), default=Value(1)))
+        candidates = due.filter(slack_workspace_id=workspace["slack_workspace_id"]).order_by(*order).values_list("pk", "connection_id", "user_id")
         for grant_id, connection_id, user_id in candidates:
             lease = DiscoveryLease(grant_id, connection_id, user_id, uuid.uuid4().hex)
             with transaction.atomic():
@@ -105,6 +132,8 @@ def claim_discovery(interval_seconds, *, lease_seconds=120):
                 if connection is None:
                     continue
                 previous = (connection.sync_cursor or {}).get(KEY) or {}
+                if not isinstance(previous, dict):
+                    continue
                 if max(float(previous.get("due") or 0), float(previous.get("expires") or 0)) > clock:
                     continue
                 if grant.last_discovery_at is not None and grant.last_discovery_at >= now - timedelta(seconds=interval_seconds):
@@ -113,6 +142,7 @@ def claim_discovery(interval_seconds, *, lease_seconds=120):
                 connection.sync_cursor = {**(connection.sync_cursor or {}), KEY: {
                     "token": lease.token, "expires": clock + lease_seconds,
                     "served": clock, "due": clock,
+                    **({"open_requested_at": previous["open_requested_at"]} if "open_requested_at" in previous else {}),
                 }}
                 connection.save(update_fields=["sync_cursor", "updated_at"])
                 return lease
@@ -121,7 +151,9 @@ def claim_discovery(interval_seconds, *, lease_seconds=120):
 
 def finish_discovery(lease, *, delay_seconds=DURABLE_POLL_SECONDS, error_code="", return_turn=False):
     """Release only this claim; preserve list cursor and other integration state."""
-    with transaction.atomic(), discovery_context(lease):
+    # Turning off event routing fences provider work immediately, but releasing
+    # this still-current token must not strand the ordinary sweep for 120s.
+    with transaction.atomic(), discovery_context(replace(lease, event_channel_id="")):
         grant, connection = _lock(lease)
         if connection is None:
             return
@@ -136,6 +168,9 @@ def finish_discovery(lease, *, delay_seconds=DURABLE_POLL_SECONDS, error_code=""
                 value.pop("served", None)
             else:
                 value["served"] = lease.previous_served
+        from integrations.services.slack_open_requests import has_pending_opens
+        if not has_pending_opens(connection.sync_cursor):
+            value.pop("open_requested_at", None)
         connection.sync_cursor = {**(connection.sync_cursor or {}), KEY: value}
         connection.save(update_fields=["sync_cursor", "updated_at"])
 
@@ -178,19 +213,43 @@ def discovery_request_priority(connection):
     ) else "background"
 
 
+@dataclass(frozen=True)
+class DiscoveryOutcome:
+    """Content-free per-turn outcome; admission delays are not failures."""
+    completed: int = 0
+    failed: int = 0
+    error_code: str = ""
+
+    def __bool__(self):
+        return bool(self.completed)
+
+
 def discover_once(interval_seconds):
     """Run one resumable discovery page under a durable generation fence."""
     from integrations.services import slack_dm_mirror as dm
-    lease = claim_discovery(interval_seconds)
+    from . import event_routing
+    turn = next(_turns)
+    prefer_opens = getattr(settings, "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED", True) and turn % 4 != 3
+    # Event claims skip the directory interval, not its lease, provider delays
+    # or privacy checks. Reserve the fourth turn for existing opens/sweep work.
+    lease = event_routing.claim_event_routing(interval_seconds) if event_routing.enabled() and turn % 4 != 3 else None
     if lease is None:
-        return False
+        lease = claim_discovery(interval_seconds, prefer_opens=prefer_opens)
+    if lease is None:
+        return None
     delay, error, return_turn = DURABLE_POLL_SECONDS, "", False
     try:
         grant = SlackDmMirrorGrant.objects.select_related("connection").get(pk=lease.grant_id)
         with discovery_context(lease), request_priority(discovery_request_priority(grant.connection)):
-            dm.discover_conversations(grant)
+            if lease.event_channel_id:
+                _, repaired, _ = dm.ensure_owner_identity(grant, allow_preferred_fallback=True)
+                grant = SlackDmMirrorGrant.objects.select_related("connection").get(pk=lease.grant_id)
+                authority = dm._capture_slack_grant_api_authority(grant)
+                event_routing.route_event_claim(grant, authority, lease, reset_history=repaired)
+            else:
+                dm.discover_conversations(grant)
     except LeaseLost:
-        return False
+        return DiscoveryOutcome(error_code="LeaseLost")
     except BudgetDeferred as exc:
         # Local admission pacing is not a provider failure. Keep the exact
         # shared-budget delay instead of adding thirty seconds to every page.
@@ -211,4 +270,4 @@ def discover_once(interval_seconds):
             finish_discovery(lease, delay_seconds=delay, error_code=error, return_turn=return_turn)
         except LeaseLost:
             pass
-    return not error
+    return DiscoveryOutcome(completed=int(not error), failed=int(bool(error) and error != "BudgetDeferred"), error_code=error)

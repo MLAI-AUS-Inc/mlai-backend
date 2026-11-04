@@ -12,15 +12,21 @@ import uuid
 from django.core import signing
 from django.core.cache import cache
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from slack_sdk.errors import SlackApiError
 
 from community_chat.models import CommunityChatDevice
-from integrations.models import CommunityBridgeChannel, CommunityBridgePlatform, SlackDmMirrorGrant
+from integrations.models import CommunityBridgeIdentityLink, CommunityBridgeChannel, CommunityBridgePlatform, SlackDmMirrorGrant
+from integrations.services.community_bridge.formatting import approved_slack_avatar_url
+from integrations.services.slack_workspace_users import cached_workspace_users
 from integrations.services.slack_chat_catalog import (
     catalog_conversations,
     conversation_activity_at,
     ready_for_display,
+    member_channel_room_id,
+    public_channels_enabled,
+    supported_catalog_kinds,
 )
 from integrations.services.slack_chat_read_state import ReadTarget, _cache_key
 from integrations.services.message_sync.read_priority import hint_pending
@@ -180,7 +186,19 @@ def _cursor(cursor, *, binding):
     return tuple(last)
 
 
-def _item(row, *, mirror, public_map, public_key, state, read_state, oldest, open_error=None):
+def _avatar(sid, profiles, people):
+    return (approved_slack_avatar_url(((profiles or {}).get(sid) or {}).get("avatar_url"))
+            or approved_slack_avatar_url(((people or {}).get(sid) or {}).get("avatar_url")) or None)
+
+
+def _person(sid, profiles, people):
+    return {"slack_user_id": sid,
+            "display_name": str(((profiles or {}).get(sid) or {}).get("display_name")
+                                or ((people or {}).get(sid) or {}).get("display_name") or sid)[:255],
+            "avatar_url": _avatar(sid, profiles, people)}
+
+
+def _item(row, *, mirror, public_map, public_key, state, read_state, oldest, open_error=None, people=None, linked=frozenset(), owner_slack_user_id="", member_public_openable=frozenset(), member_public_mapped=frozenset()):
     source_activity = _timestamp_iso(row.source_activity_ts)
     mirror_activity = conversation_activity_at(mirror) if mirror is not None else None
     activity = source_activity or mirror_activity
@@ -224,7 +242,19 @@ def _item(row, *, mirror, public_map, public_key, state, read_state, oldest, ope
         or (row.kind in {"im", "mpim", "private_channel"}
             and status in {"source_only", "importing"}
             and row.source_is_open is not False and not open_error)
+        or (row.kind == "public_channel" and row.slack_conversation_id in member_public_openable)
     )
+    member = bool(mirror is not None and public_key in (mirror.participant_buzz_pubkeys or []) and mirror.mlai_channel_id)
+    profiles = mirror.participant_profiles if mirror is not None else {}
+    device_access = "none"
+    if row.kind == "public_channel" and row.slack_conversation_id in member_public_mapped:
+        device_access = "member"
+    if row.kind != "public_channel":
+        if member and row.eligibility == "eligible":
+            device_access = "member"
+        elif mirror is not None and mirror.status == "live" and mirror.mlai_channel_id and not member:
+            device_access = "pending"
+    participants = (list(dict.fromkeys(getattr(mirror, "participant_slack_ids", None) or [])) if mirror is not None else [])
     return {
         "slack_conversation_id": row.slack_conversation_id,
         "kind": row.kind,
@@ -238,10 +268,32 @@ def _item(row, *, mirror, public_map, public_key, state, read_state, oldest, ope
         "openable": openable,
         "mlai_channel_id": channel_id,
         "read_state": read_state,
+        "device_access": device_access,
+        "avatar_url": _avatar(row.counterpart_slack_user_id, profiles, people) if row.kind == "im" else None,
+        "participants": [_person(sid, profiles, people) for sid in participants if sid != owner_slack_user_id][:8] if row.kind == "mpim" else [],
+        "counterpart_has_mlai_account": row.counterpart_slack_user_id in linked if row.kind == "im" else None,
     }
 
 
-def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=False):
+def _member_public_open_allowed(grant, public_key, source_id, *, catalog_kinds=None):
+    from integrations.services import slack_member_access as access
+    from integrations.services.slack_channel_membership import consenting_members
+    from integrations.services.community_bridge.member_channels import member_channel_in_scope
+    from integrations.services.community_bridge.member_audiences import current_audience_keys
+    from integrations.services.slack_member_devices import member_device_key_allowed
+
+    if not ("public_channel" in supported_catalog_kinds(catalog_kinds) and access.enabled()
+            and member_channel_in_scope(grant.slack_workspace_id, source_id)
+            and public_channels_enabled(grant)
+            and member_device_key_allowed(grant.user_id, public_key)
+            and any(member.pk == grant.pk and member.user_id == grant.user_id
+                    for member in consenting_members(grant.slack_workspace_id, source_id))):
+        return False
+    keys = current_audience_keys(grant.slack_workspace_id, source_id)
+    return keys is not None and public_key in keys
+
+
+def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=False, catalog_kinds=None):
     """Return one signed, owner-scoped source page without calling Slack."""
     try:
         limit = int(limit)
@@ -256,7 +308,8 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
     revision = int(state.get("revision") or 0)
     read_cursor = (grant.connection.sync_cursor or {}).get("message_sync_read_snapshot_v1") or {}
     read_revision = int(read_cursor.get("content_revision", read_cursor.get("revision")) or 0)
-    binding = [grant.pk, str(device.pk), epoch, revision, read_revision if unread_only else None, unread_only]
+    binding = [grant.pk, str(device.pk), epoch, revision, read_revision if unread_only else None, unread_only,
+               sorted(supported_catalog_kinds(catalog_kinds))]
     after = _cursor(cursor, binding=binding)
     rows = list(grant.owner_conversation_inventory.order_by("kind", "id"))
     targets = [ReadTarget(row.slack_conversation_id, row.slack_conversation_id, row.kind) for row in rows]
@@ -326,15 +379,25 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
     }
     for mirror in mirrors.values():
         mirror.grant = grant
-    public_map = {
-        bridge.slack_channel_id: _valid_uuid(bridge.destination_channel_id)
-        for bridge in CommunityBridgeChannel.objects.filter(
+    public_map, member_public_mapped = {}, set()
+    member_public_openable = {
+        row.slack_conversation_id for row in described.values() if row.kind == "public_channel"
+        and row.eligibility == "eligible" and _member_public_open_allowed(
+            grant, device.public_key, row.slack_conversation_id, catalog_kinds=catalog_kinds,
+        )
+    }
+    for bridge in CommunityBridgeChannel.objects.filter(
             slack_workspace_id=authority.workspace_id,
             slack_channel_id__in=selected_ids,
             destination_platform=CommunityBridgePlatform.BUZZ,
             enabled=True,
-        ) if _valid_uuid(bridge.destination_channel_id)
-    }
+    ):
+        channel_id = (_valid_uuid(bridge.destination_channel_id) if bridge.audience == "community"
+                      else member_channel_room_id(grant, device.public_key, bridge, catalog_kinds=catalog_kinds))
+        if channel_id is not None:
+            public_map[bridge.slack_channel_id] = channel_id
+            if bridge.audience == "members":
+                member_public_mapped.add(bridge.slack_channel_id)
     days = _grant_history_days(grant)
     oldest = time.time() - days * 86400 if days else None
     from integrations.services.slack_open_requests import _live_requests
@@ -343,11 +406,17 @@ def conversation_page(user, *, public_key, limit=50, cursor="", unread_only=Fals
     def open_error(row):
         request = requests.get(f"{device.pk}:{row.slack_conversation_id}") or {}
         return request.get("error") if request.get("epoch") == epoch else None
+    people = {u.get("slack_user_id"): u for u in (cached_workspace_users(authority.workspace_id) or []) if isinstance(u, dict)}
+    counterpart_ids = [row.counterpart_slack_user_id for row in described.values() if row.kind == "im" and row.counterpart_slack_user_id]
+    linked = set(CommunityBridgeIdentityLink.objects.filter(
+        slack_workspace_id=authority.workspace_id, revoked_at__isnull=True, slack_user_id__in=counterpart_ids,
+    ).filter(Q(user__isnull=True) | Q(user__is_active=True)).values_list("slack_user_id", flat=True)) if counterpart_ids else set()
     described_items = {
         row.pk: _item(
             row, mirror=mirrors.get(row.slack_conversation_id), public_map=public_map,
             public_key=device.public_key, state=state, read_state=states[row.pk],
-            oldest=oldest, open_error=open_error(row),
+            oldest=oldest, open_error=open_error(row), people=people, linked=linked, owner_slack_user_id=grant.slack_user_id,
+            member_public_openable=member_public_openable, member_public_mapped=member_public_mapped,
         ) for row in described.values()
     }
     for name, availability in (("fresh_unread_count", "available"), ("provisional_unread_count", "stale")):
@@ -549,9 +618,9 @@ def _validate_open_source(grant, authority, row):
     return details, activity
 
 
-def request_open(user, *, public_key, slack_conversation_id):
+def request_open(user, *, public_key, slack_conversation_id, catalog_kinds=None):
     """Resolve a ready mirror or queue one bounded owner/device-scoped import."""
-    from integrations.services.slack_open_requests import complete_open_locked, enqueue_open_locked
+    from integrations.services.slack_open_requests import KEY as OPEN_KEY, complete_open_locked, enqueue_open_locked, log_open_latency
 
     grant, authority, device, _ = _authorized(user, public_key)
     source_id = str(slack_conversation_id or "").strip()
@@ -577,10 +646,20 @@ def request_open(user, *, public_key, slack_conversation_id):
                 slack_workspace_id=authority.workspace_id, slack_channel_id=source_id,
                 destination_platform=CommunityBridgePlatform.BUZZ, enabled=True,
             ).first()
-            channel_id = _valid_uuid(bridge.destination_channel_id) if bridge is not None else None
-            if channel_id is None:
+            if bridge is not None and bridge.audience == "community":
+                channel_id = _valid_uuid(bridge.destination_channel_id)
+                if channel_id is not None:
+                    return 200, {"state": "ready", "mlai_channel_id": channel_id}
                 raise InventoryError("public_mapping_required", 409)
-            return 200, {"state": "ready", "mlai_channel_id": channel_id}
+            if not _member_public_open_allowed(grant, device.public_key, source_id, catalog_kinds=catalog_kinds):
+                raise InventoryError("public_mapping_required", 409)
+            channel_id = (member_channel_room_id(grant, device.public_key, bridge, catalog_kinds=catalog_kinds)
+                          if bridge is not None else None)
+            if channel_id is not None:
+                return 200, {"state": "ready", "mlai_channel_id": channel_id}
+            from integrations.services.community_bridge.member_channels import queue_refresh
+            queue_refresh(authority.workspace_id, source_id, reason="owner_open_priority")
+            return 202, {"state": "provisioning", "stage": "provisioning"}
         mirror = catalog_conversations(grant.conversations.filter(
             slack_conversation_id=source_id,
         )).first()
@@ -589,9 +668,59 @@ def request_open(user, *, public_key, slack_conversation_id):
             if (device.public_key in (mirror.participant_buzz_pubkeys or [])
                     and mirror.mlai_channel_id
                     and ready_for_display(mirror, public_key=device.public_key)):
+                request = ((connection.sync_cursor or {}).get(OPEN_KEY) or {}).get(f"{device.pk}:{source_id}")
+                if request and request.get("until", 0) > time.time():
+                    log_open_latency("open_ready", request, grant.pk)
                 complete_open_locked(connection, device, source_id)
                 return 200, {"state": "ready", "mlai_channel_id": str(mirror.mlai_channel_id)}
         if _grant_history_days(grant) and row.source_archived is True:
             raise InventoryError("inventory_history_consent_required", 409)
-        payload = enqueue_open_locked(grant, connection, authority, device, row)
+        device_gap = bool(mirror is not None and mirror.status == "live" and mirror.mlai_channel_id
+                          and device.public_key not in (mirror.participant_buzz_pubkeys or []))
+        payload = enqueue_open_locked(grant, connection, authority, device, row, device_only=device_gap)
+        if payload.get("state") == "failed":
+            return 409, {"error": payload["error"]}
+        provisional = _provisional_channel_id(grant, connection, authority, device, mirror)
+        if provisional is not None:
+            payload["provisional_channel_id"] = provisional
     return 202, payload
+
+
+def _provisional_channel_id(grant, connection, authority, device, mirror):
+    """Return an importing room only from a current nonlegacy adapter audience."""
+    from integrations.models import SlackDmMirrorDelivery
+    from integrations.services.slack_open_requests import KEY as OPEN_KEY
+    from integrations.services.slack_dm_registration_ledger import (
+        REGISTRATION_STATE_PREFIX, REGISTRATION_STATE_ACTIVE,
+        REGISTRATION_STATE_CLEANUP_PENDING, REGISTRATION_STATE_CLEANUP_PROCESSING,
+        grant_consent_generation, registration_channel_id, registration_generation,
+        registration_participant_hash, registration_slack_participant_ids, registration_state,
+    )
+    if mirror is None or mirror.status != "live" or not mirror.mlai_channel_id:
+        return None
+    request = ((connection.sync_cursor or {}).get(OPEN_KEY) or {}).get(f"{device.pk}:{mirror.slack_conversation_id}")
+    if (not isinstance(request, dict) or request.get("state") != "importing"
+            or request.get("until", 0) <= time.time()
+            or request.get("epoch") != device_epoch(grant, authority, device, state=state_for(connection, authority))
+            or request.get("public_key") != device.public_key
+            or device.public_key not in (mirror.participant_buzz_pubkeys or [])):
+        return None
+    rows = list(SlackDmMirrorDelivery.objects.filter(
+        conversation=mirror, source_platform="buzz",
+        source_message_id__startswith=REGISTRATION_STATE_PREFIX, operation="create",
+    ).order_by("id"))
+    if any(row.status in {"pending", "processing"} or registration_state(row) in {
+        REGISTRATION_STATE_CLEANUP_PENDING, REGISTRATION_STATE_CLEANUP_PROCESSING,
+    } for row in rows):
+        return None
+    for row in reversed(rows):
+        metadata = row.metadata or {}
+        if (row.status == "completed" and metadata.get("legacy") is False
+                and registration_state(row) == REGISTRATION_STATE_ACTIVE
+                and registration_channel_id(row) == str(mirror.mlai_channel_id)
+                and registration_generation(row) == grant_consent_generation(grant)
+                and registration_participant_hash(row) == mirror.participant_hash
+                and registration_slack_participant_ids(row) == sorted(mirror.participant_slack_ids or [])
+                and device.public_key in (metadata.get("participant_pubkeys") or [])):
+            return str(mirror.mlai_channel_id)
+    return None

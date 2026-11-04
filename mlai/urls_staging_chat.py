@@ -1,9 +1,12 @@
 """Environment auth overrides followed by the authoritative normal route tree."""
 from django.http import JsonResponse
 from django.urls import include,path
+from django.db import transaction
 
 
+@transaction.non_atomic_requests
 def live(request):
+    """Keep staging process liveness independent of its request transaction."""
     return JsonResponse({'status':'ok','environment':'chat-staging'})
 
 

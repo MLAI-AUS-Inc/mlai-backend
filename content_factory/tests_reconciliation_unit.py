@@ -18,6 +18,7 @@ class SplitRunRecoveryTests(SimpleTestCase):
         run.domain, run.workflow = "fixture.test", "article_generation"
         query = Mock()
         query.filter.return_value = query
+        query.exclude.return_value = query
         query.order_by.return_value = query
         query.__getitem__ = Mock(return_value=[run])
         with patch.object(reconciliation.ContentFactoryRun.objects, "filter", return_value=query), \
@@ -119,7 +120,7 @@ class SplitRunRecoveryTests(SimpleTestCase):
             self.assertFalse(reconciliation.worker_recovery_supported(base_url="https://fixture.test", headers={}))
 
     def fake_run(self):
-        return SimpleNamespace(run_id="fixture-run", result={}, run_request={}, status="running",
+        return SimpleNamespace(run_id="fixture-run", workflow="repo_scan", result={}, run_request={}, status="running",
             updated_at=timezone.now() - timedelta(minutes=12), organization_id=7, save=Mock())
 
     def test_fresh_worker_heartbeat_never_recovers(self):
@@ -142,6 +143,15 @@ class SplitRunRecoveryTests(SimpleTestCase):
         self.assertTrue(post.call_args.args[0].endswith("/recover"))
         self.assertTrue(record.call_args.kwargs["accepted"])
 
+    def test_nonarticle_recovery_keeps_its_existing_cancel_contract(self):
+        run, now = self.fake_run(), timezone.now()
+        run.workflow = "discovery"
+        run.result["reconciliation_recovery"] = {"requested_at": (now - timedelta(minutes=10)).isoformat()}
+        with patch.object(reconciliation.requests, "post") as post, \
+                patch.object(reconciliation, "_finalize_run_failure", return_value=True):
+            self.assertEqual(reconciliation.recover_stalled_run(run, base_url="https://fixture.test", headers={}, now=now), "failed_stalled")
+        self.assertEqual(post.call_args.kwargs["json"], {"reason": "worker_heartbeat_lost"})
+
     def test_blocked_code_requires_confirmed_fixed_version(self):
         self.assertFalse(reconciliation.fixed_failure_can_redrive("website_configuration_changed", "2.0.0"))
         self.assertTrue(reconciliation.fixed_failure_can_redrive("website_configuration_changed", "2.1.0"))
@@ -151,8 +161,10 @@ class SplitRunRecoveryTests(SimpleTestCase):
         run = self.fake_run()
         run.pk, run.domain = 1, "fixture.test"
         run.result = {"reconciliation_refund_pending": True}
-        latest = SimpleNamespace(result={"reconciliation_refund_pending": True, "worker_receipt": "later"}, save=Mock())
+        latest = SimpleNamespace(result={"reconciliation_refund_pending": True, "worker_receipt": "later"},
+            run_request={}, save=Mock())
         with patch.object(reconciliation.transaction, "atomic", side_effect=lambda: nullcontext()), \
+                patch("organizations.models.Organization.objects.select_for_update"), \
                 patch("content_factory.billing_lineage.original_article_spend_for_run", return_value=None), \
                 patch.object(reconciliation.ContentFactoryRun.objects, "select_for_update") as runs:
             runs.return_value.filter.return_value.first.return_value = latest
@@ -188,12 +200,12 @@ class SplitRunRecoveryTests(SimpleTestCase):
     def test_orphan_receipt_uses_dispatch_key_lookup(self):
         op = SimpleNamespace(payload={"client_request_id": "saved-key"})
         with patch("content_factory.vibe_marketing_views._content_factory_remote_config", return_value={"enabled": True}) as config, \
-                patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("dispatched", {"run_id": "actual-child"})) as lookup:
-            self.assertEqual(reconciliation._lookup_orphan_child(op), ("dispatched", {"run_id": "actual-child"}))
+                patch("content_factory.vibe_marketing_views._lookup_content_factory_dispatch_by_key", return_value=("started", {"run_id": "actual-child"})) as lookup:
+            self.assertEqual(reconciliation._lookup_orphan_child(op), ("started", {"run_id": "actual-child"}))
         lookup.assert_called_once_with(config.return_value, "saved-key")
 
     def test_restart_no_child_releases_only_confirmed_rejected_reuse(self):
-        self.assertEqual(reconciliation.restart_receipt_resolution("absent"), "failed")
+        self.assertEqual(reconciliation.restart_receipt_resolution("not_received"), "failed")
         self.assertEqual(reconciliation.restart_receipt_resolution("rejected"), "failed")
-        self.assertEqual(reconciliation.restart_receipt_resolution("dispatched"), "completed")
+        self.assertEqual(reconciliation.restart_receipt_resolution("started"), "completed")
         self.assertEqual(reconciliation.restart_receipt_resolution("unknown"), "pending")

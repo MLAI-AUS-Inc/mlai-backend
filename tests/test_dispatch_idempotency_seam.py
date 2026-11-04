@@ -32,6 +32,7 @@ from content_factory.vibe_marketing_views import (
 )
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
+from tests.website_fixtures import bind_config_fixture
 
 User = get_user_model()
 
@@ -75,7 +76,10 @@ class QueueDispatchIdempotencyTest(TestCase):
             profile=SimpleNamespace(user=self.user),
             organization=self.org,
         )
-        self.config = SimpleNamespace(github_repo="acme/site")
+        self.config = OrganizationContentConfig.objects.create(
+            organization=self.org, github_repo="acme/site"
+        )
+        bind_config_fixture(self.config)
 
     def _queue(self, *, payload, endpoint="article", workflow="article_generation", billing=True):
         billing_refund_context = None
@@ -176,13 +180,15 @@ class QueueDispatchIdempotencyTest(TestCase):
         self.assertEqual(stash["charged_user_id"], self.user.pk)
         self.assertNotIn("vibe-marketing-", run.run_id)
 
-    def test_definitive_rejection_refunds_immediately(self):
+    def test_keyed_rejection_receipt_refunds_immediately(self):
         key = "vibe-article:1:rejected"
         payload = {"client_request_id": key, "domain": "example.com", "target_keyword": "kw"}
 
         with patch(
             "content_factory.vibe_marketing_views.http_client.post",
-            return_value=_Response(status_code=422, payload={"detail": "A topic or custom_title is required."}),
+            return_value=_Response(status_code=422, payload={
+                "detail": {"code": "dispatch_rejected", "backend_code": "invalid_topic"}
+            }),
         ) as post, patch(
             "content_factory.vibe_marketing_views.http_client.get"
         ) as lookup, patch(
@@ -194,7 +200,21 @@ class QueueDispatchIdempotencyTest(TestCase):
         self.assertEqual(post.call_count, 1)  # 4xx is deterministic — no retry
         lookup.assert_not_called()
         self.assertFalse(_run_pending_remote_dispatch(run))
-        self.assertEqual(run.status, ContentFactoryRunStatus.BLOCKED)
+        self.assertEqual(run.status, ContentFactoryRunStatus.FAILED)
+
+    def test_generic_http_refusal_does_not_prove_no_work(self):
+        key = "vibe-article:1:unproven-refusal"
+        with patch(
+            "content_factory.vibe_marketing_views.http_client.post",
+            return_value=_Response(status_code=422, payload={"detail": "Invalid request"}),
+        ), patch(
+            "content_factory.vibe_marketing_views._refund_roo_points_for_article_start"
+        ) as refund:
+            run = self._queue(payload={"client_request_id": key, "domain": "example.com", "target_keyword": "kw"})
+
+        refund.assert_not_called()
+        self.assertTrue(_run_pending_remote_dispatch(run))
+        self.assertEqual(run.run_request["pending_billing_refund"]["charged_user_id"], self.user.pk)
 
     def test_unkeyed_scan_dispatch_stays_single_attempt(self):
         payload = {"domain": "example.com", "github_repo": "acme/site"}
@@ -275,7 +295,7 @@ class DispatchTokenBindingTest(TestCase):
             failed = _resolve_dispatch_token_run(self.run)
             # A second poll must not double-refund (result flag guards it,
             # independent of the ledger idempotency backstop).
-            _fail_unconfirmed_dispatch_run(failed)
+            _fail_unconfirmed_dispatch_run(failed, outcome="not_received")
 
         self.assertEqual(failed.status, ContentFactoryRunStatus.FAILED)
         self.assertTrue(failed.result.get("dispatch_confirmed_absent"))
@@ -362,20 +382,20 @@ class DispatchLookupClassificationTest(TestCase):
 
     def test_dispatched(self):
         outcome, payload = self._lookup(_lookup_response("dispatched", run_id="r1"))
-        self.assertEqual(outcome, "dispatched")
+        self.assertEqual(outcome, "started")
         self.assertEqual(payload["run_id"], "r1")
 
-    def test_recorded_failure_is_absent(self):
+    def test_recorded_failure_was_received_but_not_started(self):
         outcome, _ = self._lookup(_lookup_response("failed"))
-        self.assertEqual(outcome, "absent")
+        self.assertEqual(outcome, "received_not_started")
 
     def test_claimed_is_unknown(self):
         outcome, _ = self._lookup(_lookup_response("claimed", run_id="r1"))
         self.assertEqual(outcome, "unknown")
 
-    def test_lookup_endpoint_404_is_absent(self):
+    def test_lookup_endpoint_404_was_not_received(self):
         outcome, _ = self._lookup(_absent_404())
-        self.assertEqual(outcome, "absent")
+        self.assertEqual(outcome, "not_received")
 
     def test_legacy_run_not_found_404_is_unknown(self):
         """A content-factory WITHOUT the lookup endpoint routes the path to

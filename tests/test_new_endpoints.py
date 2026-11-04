@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.core import signing
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
@@ -633,6 +633,13 @@ class ContentGenerateAutoWriteTests(TestCase):
             name="MLAI",
             domain="mlai.au",
         )
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        profile = VibeRaisingProfile.objects.create(user=self.user, role="founder")
+        company = VibeRaisingCompany.objects.create(
+            profile=profile, organization=self.organization, name="MLAI", domain="mlai.au"
+        )
+        profile.active_company = company
+        profile.save(update_fields=["active_company"])
         OrganizationContentConfig.objects.create(
             organization=self.organization,
             github_repo="owner/repo",
@@ -653,6 +660,8 @@ class ContentGenerateAutoWriteTests(TestCase):
             "user_avatar_url": "https://avatar.test/auto.png",
         }
         data.update(overrides)
+        if data.get("topic") and "expectedCostPoints" not in data:
+            data.setdefault("expected_cost_points", 12)
         return data
 
     def _mock_response(self, status_code, body):
@@ -665,6 +674,7 @@ class ContentGenerateAutoWriteTests(TestCase):
     def test_generate_auto_write_uses_discovery_endpoint_after_scan(self):
         url = reverse('content_generate')
         data = self._generate_request_data(topic=None)
+        self.assertNotIn("expected_cost_points", data)
 
         with patch('integrations.services.article_generation.http_requests.post') as mock_post:
             mock_post.side_effect = [
@@ -688,7 +698,7 @@ class ContentGenerateAutoWriteTests(TestCase):
         self.assertEqual(generate_payload.get('slack_user_id'), self.integration.slack_user_id)
         self.assertEqual(generate_payload.get('request_source'), 'roo_slackbot')
 
-    def test_generate_with_topic_omits_delivery_mode_when_no_preference_exists(self):
+    def test_generate_with_topic_requires_delivery_consent_without_verified_integration(self):
         url = reverse('content_generate')
         data = self._generate_request_data(topic="best ai coding agents")
 
@@ -696,10 +706,8 @@ class ContentGenerateAutoWriteTests(TestCase):
             mock_post.return_value = self._mock_response(202, {"job_id": "job-article-456"})
             response = self.client.post(url, data, format='json')
 
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-        payload = mock_post.call_args.kwargs.get('json') or {}
-        self.assertIsNone(payload.get('delivery_mode'))
-        self.assertIsNone(payload.get('delivery_mode_confirmed'))
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        mock_post.assert_not_called()
 
     def test_generate_with_topic_allows_repo_less_domain_without_scan_summary(self):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
@@ -717,17 +725,25 @@ class ContentGenerateAutoWriteTests(TestCase):
         )
 
         url = reverse('content_generate')
-        data = self._generate_request_data(topic="best ai coding agents")
+        data = self._generate_request_data(
+            topic="best ai coding agents",
+            delivery_mode="content_only",
+            delivery_mode_confirmed=True,
+        )
 
         with patch('integrations.services.article_generation.http_requests.post') as mock_post:
             mock_post.return_value = self._mock_response(202, {"job_id": "job-article-repo-less-456"})
             response = self.client.post(url, data, format='json')
 
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED, response.data)
         payload = mock_post.call_args.kwargs.get('json') or {}
         self.assertEqual(payload.get('delivery_mode'), 'content_only')
-        self.assertFalse(payload.get('delivery_mode_confirmed'))
-        self.assertIsNone(payload.get('github_repo'))
+        self.assertTrue(payload.get('delivery_mode_confirmed'))
+        self.assertEqual(payload.get('github_repo'), '')
+        self.assertEqual(payload.get('roo_points_cost'), 12)
+        mock_post.assert_called_once()
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 8)
 
     @patch('content_factory.content_views.trigger_article_generation')
     def test_generate_passes_slack_thread_context_to_service(self, mock_trigger):
@@ -762,12 +778,13 @@ class ContentGenerateAutoWriteTests(TestCase):
                 "user_first_name": "Auto",
                 "user_last_name": "Writer",
                 "user_avatar_url": "https://avatar.test/auto.png",
+                "expected_cost_points": 12,
             },
         )
 
     @patch('integrations.services.article_generation.get_github_credentials_for_domain')
     @patch('integrations.services.article_generation.http_requests.post')
-    def test_generate_with_topic_uses_scan_summary_article_system_fallback(self, mock_post, mock_get_credentials):
+    def test_scan_summary_does_not_replace_generation_admission(self, mock_post, mock_get_credentials):
         config = OrganizationContentConfig.objects.get(organization=self.organization)
         config.scan_summary = {
             "articles_status": {
@@ -792,8 +809,8 @@ class ContentGenerateAutoWriteTests(TestCase):
 
         response = self.client.post(url, data, format='json')
 
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
-        self.assertEqual(response.data['job_id'], 'job-article-123')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.data)
+        mock_post.assert_not_called()
 
     def test_generate_rejects_missing_request_source(self):
         response = self.client.post(
@@ -923,6 +940,31 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             idempotency_key=f"content_factory:charge:{request_id}",
             reference_type="CONTENT_FACTORY", reference_id=request_id,
         )[0]
+
+    def _record_no_value_stop(self, job_id):
+        """Seed a scoped worker stop, not just the old refundable failure hint."""
+        from content_factory.article_publication_evidence import original_scope
+        from content_factory.website_goal import digest
+        from roo.models import Ledger
+        job = ContentFactoryJob.objects.get(job_id=job_id)
+        charge = Ledger.objects.get(idempotency_key=f"content_factory:charge:{job.client_request_id}")
+        job.billing_ledger = charge
+        job.save(update_fields=["billing_ledger"])
+        binding = self.client._bound_payload({"run_id": job_id, "domain": job.domain})
+        request = {**binding, "client_request_id": job.client_request_id,
+            "roo_points_ledger_id": str(charge.pk), "roo_points_billing_user_id": charge.user_id}
+        run = ContentFactoryRun.objects.create(run_id=job_id, workflow="direct_generate", domain=job.domain,
+            organization=self.client.website_fixture.organization, github_repo=self.client.website_fixture.github_repo,
+            status="failed", run_request=request)
+        scope = original_scope(run)
+        proof = {"version": 1, "purpose": "article_cancellation", "run_id": run.run_id, "goal_id": None,
+            "scope": scope, "generation": 0, "state_version": 5, "outcome": "no_article_effect", "cancelled": True,
+            "delivered_value": False, "watermark": {"operation_id": scope.get("operation_id"),
+                "attempt": scope.get("operation_attempt"), "cancelled": True}}
+        proof["receipt_id"] = digest(proof)
+        run.result = {"article_cancellation_v1": proof}
+        run.save(update_fields=["result"])
+        return run
 
     @patch("integrations.services.github.refresh_github_token", side_effect=Exception("no stored token"))
     @patch("content_factory.service_views.ContentFactoryCallbackView._send_auth_required_notification")
@@ -2812,6 +2854,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             },
         )
 
+        self._record_no_value_stop("publish-target-run-1")
         response = self.client.post(
             reverse('content_factory_callback'),
             {
@@ -2861,6 +2904,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             },
         )
 
+        self._record_no_value_stop("research-shortfall-run-1")
         payload = {
             "event_type": "generation_failed",
             "job_id": "research-shortfall-run-1",
@@ -2977,6 +3021,7 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             job_id="changed-price", domain="example.com", slack_user_id=user.slack_id,
             client_request_id="changed-price", billing_amount=6, billing_status="charged",
         )
+        self._record_no_value_stop(job.job_id)
         self.assertEqual(maybe_auto_refund_terminal_failure(
             job, error_code="PUBLISH_TARGET_ACTION_REQUIRED", error_message="No delivery",
         ), (True, 6))
@@ -3007,8 +3052,9 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             },
         )
 
-        # A code NOT in AUTO_REFUND_ERROR_CODES still refunds when content-factory
-        # flags the failure refundable explicitly.
+        self._record_no_value_stop(job.job_id)
+        # An explicit hint selects settlement outside the code allowlist, but
+        # credit still requires the original payment and a no-value stop proof.
         refunded, points = maybe_auto_refund_terminal_failure(
             job,
             error_code="SOME_FUTURE_NO_VALUE_CODE",
@@ -4090,6 +4136,39 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             slack_thread_ts="123.456",
             slack_root_message_ts="123.456",
         )
+
+    @override_settings(ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED=True)
+    @patch('integrations.services.slack.SlackService.update_message')
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_ignored_progress_preserves_job_and_mirrored_run(self, send, update):
+        for event in ("article_progress", "discovery_progress", "scan_progress"):
+            for reason in ("duplicate_progress_id", "stale_milestone"):
+                with self.subTest(event=event, reason=reason):
+                    job_id = f"ignored-{event}-{reason}"
+                    run = ContentFactoryRun.objects.create(
+                        run_id=job_id, workflow="direct_generate", domain="mlai.au", status="running",
+                    )
+                    job = ContentFactoryJob.objects.create(
+                        job_id=job_id, domain="mlai.au", slack_user_id="U123", status="cancelled",
+                        slack_channel_id="C123", slack_thread_ts="123.456",
+                        posted_progress_ids=["already-posted"], last_progress_milestone_index=2,
+                        last_progress_milestone_key="cancelled", last_progress_updated_at=timezone.now(),
+                    )
+                    payload = self.client._bound_payload({
+                        "event_type": event, "job_id": job_id, "domain": "mlai.au",
+                        "slack_user_id": "U-LATE-CALLBACK", "requested_by_slack_user_id": "U-LATE-CALLBACK",
+                        "progress_id": "already-posted" if reason == "duplicate_progress_id" else "older-milestone",
+                        "milestone_key": "research_started", "milestone_index": 1,
+                    })
+                    before_job = ContentFactoryJob.objects.filter(pk=job.pk).values().get()
+                    before_run = ContentFactoryRun.objects.filter(pk=run.pk).values().get()
+                    response = self.client.post(reverse('content_factory_callback'), payload, format="json")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.data["reason"], reason)
+                    self.assertEqual(ContentFactoryJob.objects.filter(pk=job.pk).values().get(), before_job)
+                    self.assertEqual(ContentFactoryRun.objects.filter(pk=run.pk).values().get(), before_run)
+        send.assert_not_called()
+        update.assert_not_called()
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_article_progress_callback_posts_thread_reply_and_records_progress(self, mock_send_message):

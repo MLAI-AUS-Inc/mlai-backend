@@ -49,8 +49,19 @@ class ComponentReuseRoundTripTests(TestCase):
 
     def test_scan_artifact_cache_round_trips(self):
         cache = {"context_fingerprint": "abc123", "artifact_reuse": {"components": "refreshed"}}
-        response = self._put({"domain": "acme.com", "scan_artifact_cache": cache})
-        self.assertEqual(response.status_code, 200)
+        # Cached repository artifacts require the same current website/source
+        # authority as other scan writes, even though they grant no readiness.
+        from .website_models import WebsiteConnection
+        from .website_connections import contract_for
+        denied=self._put({"domain":"acme.com","scan_artifact_cache":cache})
+        self.assertEqual(denied.status_code,409)
+        self.config.refresh_from_db();self.assertEqual(self.config.scan_artifact_cache,{})
+        website=WebsiteConnection.objects.create(organization=self.org,github_repo="acme/site",
+            repository_id=123,installation_id="45",branch="main",verified_sha="a"*40)
+        self.config.website_connection=website;self.config.save(update_fields=["website_connection"])
+        response = self._put({"domain": "acme.com", "scan_artifact_cache": cache,
+            **contract_for(website),"source_sha":"a"*40})
+        self.assertEqual(response.status_code, 200,response.data)
 
         fetched = self._get(domain="acme.com")
         self.assertEqual(fetched.status_code, 200)

@@ -28,6 +28,27 @@ class IntegrationTests(SimpleTestCase):
     def test_production_boundary_unchanged(self):
         from mlai.staging_integrations import require_staging_capability
         with override_settings(SETTINGS_MODULE='mlai.settings',APP_ENV='production'):require_staging_capability('email')
+    def test_disabled_dispatch_stops_before_transaction_or_reservation(self):
+        from content_factory.dispatch_outbox import reserve_dispatch
+        from mlai.staging_integrations import StagingIntegrationUnavailable
+        with patch('content_factory.dispatch_outbox.transaction.get_connection') as connection, \
+                patch('content_factory.dispatch_outbox.ContentFactoryDispatchOutbox.objects.get_or_create') as reserve, \
+                self.assertRaises(StagingIntegrationUnavailable) as raised:
+            reserve_dispatch(organization=object(),payload={})
+        self.assertEqual(raised.exception.detail['capability'],'background_queue')
+        connection.assert_not_called()
+        reserve.assert_not_called()
+    def test_permitted_dispatch_retains_atomic_debit_requirement(self):
+        from content_factory.dispatch_outbox import reserve_dispatch
+        from types import SimpleNamespace
+        for environment in ({'SETTINGS_MODULE':'mlai.settings','APP_ENV':'production'},
+                {'STAGING_CAPABILITIES':{'background_queue':'local'}}):
+            with self.subTest(environment=environment),override_settings(**environment), \
+                    patch('content_factory.dispatch_outbox.transaction.get_connection',return_value=SimpleNamespace(in_atomic_block=False)), \
+                    patch('content_factory.dispatch_outbox.ContentFactoryDispatchOutbox.objects.get_or_create') as reserve, \
+                    self.assertRaisesRegex(RuntimeError,'Article dispatch and its Roo charge must share a transaction'):
+                reserve_dispatch(organization=object(),payload={})
+            reserve.assert_not_called()
     def test_tokenmaxer_is_unavailable_before_any_provider_or_cache_success(self):
         from mlai.staging_integrations import StagingIntegrationUnavailable
         from community_chat.tokenmaxer_federation import fetch_public_tokenmaxer_entries

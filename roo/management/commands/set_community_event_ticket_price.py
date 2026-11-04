@@ -4,10 +4,11 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from roo.models import RewardsCatalog
+from roo.event_ticket_policy import EVENT_TICKET_POINTS
 
 
 class Command(BaseCommand):
-    help = "Preview or apply the community event ticket price of 15 Roo Points."
+    help = f"Preview or apply the community event ticket price of {EVENT_TICKET_POINTS} Roo Points."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -24,18 +25,20 @@ class Command(BaseCommand):
             if reward is None:
                 raise CommandError("EVENT_TICKET is missing; no reward was changed.")
             previous = reward.cost_points
-            if previous == 15:
-                self.stdout.write("EVENT_TICKET already costs 15 Roo Points.")
+            if previous == EVENT_TICKET_POINTS:
+                self.stdout.write(
+                    f"EVENT_TICKET already costs {EVENT_TICKET_POINTS} Roo Points."
+                )
                 return
             if not options["apply"]:
                 self.stdout.write(
-                    f"Preview: EVENT_TICKET {previous} -> 15 Roo Points. Run with --apply to save."
+                    f"Preview: EVENT_TICKET {previous} -> {EVENT_TICKET_POINTS} Roo Points. Run with --apply to save."
                 )
                 return
-            reward.cost_points = 15
+            reward.cost_points = EVENT_TICKET_POINTS
             reward.save(update_fields=["cost_points"])
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"EVENT_TICKET price changed: {previous} -> 15 Roo Points."
+                    f"EVENT_TICKET price changed: {previous} -> {EVENT_TICKET_POINTS} Roo Points."
                 )
             )

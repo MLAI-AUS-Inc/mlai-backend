@@ -79,6 +79,7 @@ def summarize_one_click(*, article_rows, prepare_rows):
         "refusals": refusals, "sweepRepairs": repairs,
         "durationSeconds": {"p50": _percentile(durations, .5), "p90": _percentile(durations, .9),
             "sample": len(durations), "method": "creation_to_terminal_observation"},
+        "goals": summarize_goals(prepare_rows),
         "reviewCalls": {"mean": round(sum(review_calls) / len(review_calls), 3) if review_calls else None,
             "p50": _percentile(review_calls, .5), "p90": _percentile(review_calls, .9), "sample": len(review_calls)}}
 
@@ -94,6 +95,44 @@ def one_click_outcomes(*, since, domain=None, row_limit=2000):
         articles = articles.filter(organization__domain=domain)
         prepares = prepares.filter(connection__organization__domain=domain)
     article_rows = list(articles.order_by("-created_at").values("run_id", "organization_id", "workflow", "run_request", "status", "result", "created_at", "updated_at")[:row_limit + 1])
-    prepare_rows = list(prepares.order_by("-created_at").values("state", "payload", "receipt")[:row_limit + 1])
+    prepare_rows = list(prepares.order_by("-created_at").values("state", "payload", "receipt", "created_at", "updated_at")[:row_limit + 1])
     return {**summarize_one_click(article_rows=article_rows[:row_limit], prepare_rows=prepare_rows[:row_limit]),
         "sampleLimit": row_limit, "truncated": len(article_rows) > row_limit or len(prepare_rows) > row_limit}
+
+
+def summarize_goals(rows):
+    """Report bounded causal counts and actual observations, with unknown cost samples."""
+    from collections import Counter
+    from . import website_goal as goals
+    from .website_doctor import safe_code, number
+    steps,reasons,classes=Counter(),Counter(),Counter()
+    durations={name:[] for name in goals.MILESTONES}
+    unknown={name:0 for name in goals.MILESTONES}
+    costs,unknown_costs,observed=[],0,0
+    for row in rows:
+        receipt=goals.mapping(row.get("receipt"));goal=goals.mapping(receipt.get("goal"))
+        if not goals.valid_goal(goal,goal.get("scope")):
+            continue
+        observed+=1
+        step=receipt.get("current_step")
+        if isinstance(step,str) and step in (*goals.MILESTONES,"setup","scan","merge","verify","verify-access","ci-attestation","permissions","ready"):
+            steps[step]+=1
+        code=safe_code(receipt.get("reason_code"))
+        if code:reasons[code]+=1
+        for name,value in goal["attempts_by_class"].items():
+            if name in goals.CLASSES and type(value) is int and value>=0:classes[name]+=value
+        start=goals.stamp(goal.get("started_at"))
+        for item in goal["milestones"]:
+            if not item["required"]:continue
+            at=goals.stamp(item.get("observed_at"))
+            if item.get("state")=="passed" and start and at and at>=start:
+                durations[item["name"]].append((at-start).total_seconds())
+            else:unknown[item["name"]]+=1
+        cost=number(goals.mapping(goal.get("budget_used")).get("model_cost"))
+        if cost is None:unknown_costs+=1
+        else:costs.append(cost)
+    return {"sample":observed,"stepCounts":dict(sorted(steps.items())),"reasonCounts":dict(sorted(reasons.items())),
+        "classMix":{name:classes[name] for name in goals.CLASSES},
+        "milestoneSeconds":{name:{"p50":_percentile(values,.5),"p90":_percentile(values,.9),"sample":len(values),"unknown":unknown[name]} for name,values in durations.items()},
+        "milestoneMethod":"goal_start_to_milestone_observation",
+        "modelUsd":{"totalUpperBound":round(sum(costs),6) if costs else None,"meanUpperBound":round(sum(costs)/len(costs),6) if costs else None,"sample":len(costs),"unknown":unknown_costs}}

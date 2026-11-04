@@ -77,12 +77,23 @@ cookies.txt
 /*.md
 /docs/*.md
 /docs/**/*.md
+!/docs/studio-report-source.md
+!/docs/crm.md
+!/docs/roo-event-discounts.md
+!/docs/roo-event-discount-migration-proposal.md
+/output/event-discount-verification/
+!/docs/mlai-community-agent.md
 !/docs/startup-monthly-groups.md
+!/docs/pulse-generation-reliability.md
 !/docs/backend-api-web-handoff.md
 !/docs/apple-iap-and-deletion-migrations.md
 !/docs/apple-app-review-operations.md
 !/docs/content-islands.md
 !/docs/content-factory-editorial-contract.md
+!/docs/articles-b1-implementation-2026-10-14.md
+!/docs/articles-b5-implementation-2026-10-14.md
+!/docs/articles-e2-build-recovery-2026-10-16.md
+!/docs/articles-g6-preview-cleanup-2026-10-16.md
 !/docs/mlai-coding-billing-contract.md
 !/docs/coworking-booking.md
 !/docs/mentoring.md
@@ -98,8 +109,11 @@ cookies.txt
 !/docs/org-memory-review-summaries-digests.md
 !/docs/mlai-chat-bridge-contract.md
 !/docs/slack-unfinished-conversation-recovery.md
+!/docs/slack-event-routing-phase8.md
+!/docs/slack-community-phase6-operations.md
 !/docs/message-sync-schema-proposal.md
 !/docs/community-chat-home.md
+!/docs/community-chat-dependency-signals.md
 !/docs/community-chat-administration.md
 !/docs/volunteer-schema-proposal.md
 !/docs/volunteer-api.md
@@ -254,6 +268,7 @@ medhack_backend/hospital/Eval_Labels.csv
 
 !/docs/valley-mcp.md
 !/docs/website-connections.md
+!/docs/articles-setup-merge-policy-2026-10-13.md
 !/docs/backend-refactor-migration-proposal-2026-09-26.md
 !/docs/backend-refactor-release-2026-09-26.md
 
@@ -266,3 +281,6 @@ medhack_backend/hospital/Eval_Labels.csv
 /staticfiles/
 
 !/docs/community-chat-staging-federation.md
+# Maintained Roo purchase tax contract.
+!/docs/roo-points-gst.md
+!/docs/shared-update-benefits.md

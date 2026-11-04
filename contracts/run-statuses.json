@@ -1,7 +1,7 @@
 {
   "_meta": {
     "name": "mlai-backend <-> content-factory run/setup status contract",
-    "version": 3,
+    "version": 4,
     "repos": [
       "MLAI-AUS-Inc/mlai-backend  -> contracts/run-statuses.json",
       "drsamdonegan/content-factory -> contracts/run-statuses.json"
@@ -10,7 +10,8 @@
       "This file is vendored byte-identically in both repos; it is the single source of truth for every status string that crosses the service seam.",
       "Each repo's CI runs a contract test asserting its own enums/constants match this file, so a status added or removed on one side fails that side's CI until this file is updated, and fails the other side's CI as soon as the updated file is synced.",
       "Change procedure: bump _meta.version, update the vocabulary here, land the change in BOTH repos in lockstep with cross-referenced PRs. Never edit one copy without the other.",
-      "Scope v2: run/step/approval enums, the GET /api/runs external status dialect, and the article-system-setup status axis. Typed payload contracts and the article-system scan-state axis (existing/detected/registry_driven_seo_ready/...) are deliberately out of scope."
+      "Scope v2: run/step/approval enums, the GET /api/runs external status dialect, and the article-system-setup status axis. Typed payload contracts and the article-system scan-state axis (existing/detected/registry_driven_seo_ready/...) are deliberately out of scope.",
+      "Scope v4: run_status_lifecycle puts each of run_statuses and run_status_platform_extensions in exactly one group: active (the worker owns progress), awaiting (paused until the owner acts) or terminal (stopped; only an explicit resume or recovery transition reopens it). Each repo generates its run-status module from this file with scripts/generate_run_status_contract.py, and CI fails when the generated module is stale."
     ]
   },
   "run_statuses": [
@@ -39,6 +40,25 @@
     "awaiting_confirmation": "awaiting_confirmation",
     "awaiting_approval": "approval_required",
     "denied": "denied"
+  },
+  "run_status_lifecycle": {
+    "active": [
+      "queued",
+      "running"
+    ],
+    "awaiting": [
+      "awaiting_delivery_mode",
+      "awaiting_confirmation",
+      "awaiting_approval",
+      "approval_required"
+    ],
+    "terminal": [
+      "completed",
+      "failed",
+      "blocked",
+      "cancelled",
+      "denied"
+    ]
   },
   "step_statuses": [
     "pending",

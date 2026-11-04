@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 
+from .p2_foundation import P2_PRIVATE_STRATEGY_KEYS
 from .editorial_contract import (
     ArticleEditorialBrief, AudienceOption, normalize_cta_options, resolve_editorial_brief,
 )
@@ -130,7 +131,9 @@ def article_brief_for_catalog(strategy, request_payload):
 def merge_strategy(existing, incoming):
     """Generated scans cannot erase or replace policy or approval history."""
     result = deepcopy(incoming or {})
-    for key in (CATALOG_KEY, OFFER_PAGE_CHECKS_KEY, "chat_source_preferences", "startup_profile_details", "startup_branding"):
+    for key in (CATALOG_KEY, OFFER_PAGE_CHECKS_KEY, "chat_source_preferences", "startup_profile_details", "startup_branding", "article_voice",
+                "ops_alerts", "previous_owner", "founder_journey", "founder_first_profile", "founder_posted_articles",
+                *P2_PRIVATE_STRATEGY_KEYS):
         result.pop(key, None)
         if key in (existing or {}):
             result[key] = deepcopy(existing[key])
@@ -262,4 +265,5 @@ def discovery_audience_context(strategy, payload):
 
 def public_strategy(strategy):
     """Exclude private Chat defaults from worker/model and article contracts."""
-    return {key: deepcopy(value) for key, value in (strategy or {}).items() if key not in {OFFER_PAGE_CHECKS_KEY, "chat_source_preferences", "startup_profile_details", "startup_branding"}}
+    return {key: deepcopy(value) for key, value in (strategy or {}).items() if key not in {OFFER_PAGE_CHECKS_KEY, "chat_source_preferences", "startup_profile_details", "startup_branding", "article_voice", "ops_alerts", "previous_owner",
+        "founder_journey", "founder_first_profile", "founder_posted_articles", *P2_PRIVATE_STRATEGY_KEYS}}

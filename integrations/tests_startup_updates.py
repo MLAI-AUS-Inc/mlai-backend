@@ -76,6 +76,8 @@ from startup_updates.services import (
     build_cancel_backup_for_metric,
     cancel_startup_update_run,
     create_startup_update_run,
+    refresh_startup_update_run_source_context,
+    build_startup_update_target_windows,
     render_monthly_update_markdown,
     score_message_for_profile,
     set_startup_update_run_cancel_backups,
@@ -87,6 +89,29 @@ from startup_updates.slack_lineage import (
 )
 
 User = get_user_model()
+
+
+def create_checked_startup_update_run(**kwargs):
+    """Collection fixtures begin after successful source admission.
+
+    This keeps the existing ingestion/privacy/lineage suites focused on their
+    stage. tests_generation_reliability exercises the real mandatory barrier;
+    API run-creation requests still use the production factory directly.
+    """
+    run = create_startup_update_run(**kwargs)
+    request = run.run_request
+    windows = build_startup_update_target_windows(
+        date.fromisoformat(request["current_month"]),
+        timezone_name=request.get("reporting_timezone", "UTC"),
+    )
+    refresh_startup_update_run_source_context(
+        run=run, organization=kwargs["organization"], input_sources=request["input_sources"],
+        start_date=windows["financial_start_date"], end_date=windows["financial_end_date"],
+        manual_document_ids=request.get("manual_document_ids"), manual_summary=request.get("manual_summary", ""),
+    )
+    run.run_request = {**run.run_request, "source_preflight_complete": True}
+    run.save(update_fields=["run_request", "updated_at"])
+    return run
 
 
 class FakeSlackResponse:
@@ -136,6 +161,38 @@ class StartupUpdateApiTestCase(TestCase):
 
 
 class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
+    @patch("startup_updates.api_views.notify_valley_run_created")
+    def test_service_admission_keeps_failed_gmail_and_checks_every_selected_source(self, notify):
+        self.google_connection.scope = "https://www.googleapis.com/auth/calendar.readonly"
+        self.google_connection.save(update_fields=["scope"])
+        UserStartupBinding.objects.create(user=self.user, organization=self.organization,
+            google_connection=self.google_connection, is_default_for_gmail=True)
+        with self.captureOnCommitCallbacks(execute=True), self._with_key():
+            response = self.client.post(reverse("startup_updates_run"), {
+                "user_id": self.user.pk, "domain": self.organization.domain,
+                "input_sources": ["gmail", "slack"], "target_month": "2026-03-01",
+            }, format="json", **self.headers)
+        self.assertEqual(response.status_code, 201, response.data)
+        run = ContentFactoryRun.objects.get(run_id=response.data["run"]["run_id"])
+        self.assertEqual(run.run_request["input_sources"], ["gmail", "slack"])
+        self.assertEqual(run.run_request["source_preflight_version"], 1)
+        self.assertFalse(run.run_request.get("source_preflight_complete", False))
+        def probe(provider, **kwargs):
+            if provider == "gmail":
+                raise PermissionError("synthetic permission missing")
+            raise TimeoutError("synthetic provider outage")
+        with self._with_key(), patch("startup_updates.preflight.probe_source", side_effect=probe), patch(
+            "vibe_raising.views._sync_selected_connector_sources_for_draft",
+        ) as collect:
+            checked = self.client.post(reverse("startup_updates_source_preflight", args=[run.run_id]),
+                {}, format="json", **self.headers)
+        self.assertEqual(checked.status_code, 200, checked.data)
+        self.assertFalse(checked.data["ready"])
+        self.assertEqual([row["provider"] for row in checked.data["checks"]], ["gmail", "slack"])
+        self.assertEqual([row["status"] for row in checked.data["checks"]], ["needs_reconnect", "temporarily_unavailable"])
+        collect.assert_not_called()
+        notify.assert_called_once_with(run.run_id)
+
     @patch("startup_updates.api_views.notify_valley_run_created")
     def test_profile_upsert_and_run_creation(self, mock_notify):
         with self._with_key():
@@ -260,7 +317,7 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
             google_connection=self.google_connection,
             is_default_for_gmail=True,
         )
-        active_run = create_startup_update_run(
+        active_run = create_checked_startup_update_run(
             organization=self.organization,
             binding=binding,
             target_month=date(2026, 4, 1),
@@ -325,7 +382,7 @@ class StartupProfileAndRunViewTest(StartupUpdateApiTestCase):
             google_connection=self.google_connection,
             is_default_for_gmail=True,
         )
-        run = create_startup_update_run(
+        run = create_checked_startup_update_run(
             organization=self.organization,
             binding=binding,
             window_months=6,
@@ -416,7 +473,7 @@ class StartupUpdateCancellationTest(StartupUpdateApiTestCase):
         )
 
     def test_cancel_service_restores_previous_outputs_and_deletes_current_only_rows(self):
-        older_run = create_startup_update_run(
+        older_run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             window_months=6,
@@ -461,7 +518,7 @@ class StartupUpdateCancellationTest(StartupUpdateApiTestCase):
             },
         }
 
-        current_run = create_startup_update_run(
+        current_run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             window_months=6,
@@ -548,7 +605,7 @@ class StartupUpdateCancellationTest(StartupUpdateApiTestCase):
         )
 
     def test_cancelled_run_rejects_late_draft_result_writes(self):
-        run = create_startup_update_run(
+        run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             window_months=6,
@@ -590,7 +647,7 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
             google_connection=self.google_connection,
             is_default_for_gmail=True,
         )
-        self.run = create_startup_update_run(
+        self.run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             window_months=6,
@@ -632,6 +689,26 @@ class StartupUpdateIngestViewTest(StartupUpdateApiTestCase):
         self.assertIsNotNone(cursor.backfill_completed_at)
         self.assertEqual(response.data["ingested_count"], 1)
         self.assertEqual(response.data["relevance_counts"]["relevant"], 1)
+
+    @patch("startup_updates.api_views.sync_message_metadata_page")
+    def test_incomplete_first_page_does_not_mark_cursor_complete(self, mock_sync):
+        mock_sync.return_value = {"result_size_estimate": 2, "next_page_token": None,
+            "page_complete": False, "artifacts": []}
+        with self._with_key():
+            response = self.client.post(reverse("startup_updates_ingest_next_page", args=[self.run.run_id]),
+                {}, format="json", **self.headers)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.data["page_complete"])
+        self.assertIsNone(response.data["next_page_token"])
+        cursor = GmailSyncCursor.objects.get(organization=self.organization, google_connection=self.google_connection)
+        self.assertIsNone(cursor.backfill_completed_at)
+        mock_sync.return_value["page_complete"] = True
+        with self._with_key():
+            completed = self.client.post(reverse("startup_updates_ingest_next_page", args=[self.run.run_id]),
+                {}, format="json", **self.headers)
+        self.assertTrue(completed.data["page_complete"])
+        cursor.refresh_from_db()
+        self.assertIsNotNone(cursor.backfill_completed_at)
 
     def test_ingest_next_page_returns_source_unavailable_when_gmail_scope_missing(self):
         self.google_connection.scope = "openid https://www.googleapis.com/auth/userinfo.email"
@@ -839,7 +916,7 @@ class StartupUpdateSlackBackfillViewTest(StartupUpdateApiTestCase):
             channel_name="wins",
             selected=True,
         )
-        self.run = create_startup_update_run(
+        self.run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             input_sources=["gmail", "slack"],
@@ -1764,7 +1841,7 @@ class StartupUpdateSlackLineagePostgresTests(TransactionTestCase):
             access_token="xoxp-race",
             external_account_id="T-RACE",
         )
-        self.run = create_startup_update_run(
+        self.run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             input_sources=["gmail", "slack"],
@@ -2454,7 +2531,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             google_connection=self.google_connection,
             is_default_for_gmail=True,
         )
-        self.run = create_startup_update_run(
+        self.run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             window_months=6,
@@ -2506,6 +2583,28 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.thread.attachment_ids = [self.attachment.id]
         self.thread.save(update_fields=["attachment_ids", "updated_at"])
 
+    def _set_run_month(self, month):
+        from startup_updates.services import set_startup_update_run_target_month
+
+        # A draft month and its frozen evidence window must refer to the same
+        # reporting period, as they do for a newly created monthly run.
+        set_startup_update_run_target_month(self.run, month)
+
+    def _set_run_window(self, now):
+        from startup_updates.activity_scope import monthly_source_period
+
+        period = monthly_source_period(
+            now.date().replace(day=1), as_of=now + timedelta(hours=1)
+        )
+        period["start"] = max(
+            datetime.fromisoformat(period["start"]), now - timedelta(hours=1)
+        ).isoformat()
+        self.run.run_request["narrative_period"] = period
+        self.run.run_request["backfill_window_start"] = period["start"]
+        self.run.run_request["backfill_window_end"] = (
+            datetime.fromisoformat(period["end"]) - timedelta(microseconds=1)
+        ).isoformat()
+
     def _create_secondary_connection(self):
         other_user = User.objects.create_user(
             email=f"other-{User.objects.count()}@example.com",
@@ -2521,6 +2620,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
 
     def test_regeneration_creates_exact_revision_without_merging_old_bullets(self):
         month_bucket = date(2026, 3, 1)
+        self._set_run_month(month_bucket)
         MonthlyUpdateDraft.objects.create(
             organization=self.organization,
             month=month_bucket,
@@ -2640,7 +2740,14 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
     def test_draft_results_use_only_pinned_verified_metrics(self):
         self.profile.default_currency = "AUD"
         self.profile.save(update_fields=["default_currency"])
+        xero = ExternalServiceConnection.objects.create(
+            provider=ExternalServiceProvider.XERO, user=self.user, organization=self.organization,
+            access_token="synthetic-xero", status=ExternalServiceConnectionStatus.CONNECTED,
+        )
+        self.run.run_request["source_connection_pins"]["xero"] = xero.pk
+        self.run.run_request["reporting_config"]["currency"] = "AUD"
         month_bucket = date(2026, 3, 1)
+        self._set_run_month(month_bucket)
         revenue_metric = StartupMetricObservation.objects.create(
             organization=self.organization,
             run=self.run,
@@ -2653,6 +2760,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             period_month=month_bucket,
             confidence=1.0,
             source_metadata={
+                "connection_id": xero.pk,
                 "report_name": "ProfitAndLoss",
                 "report_start_date": "2026-03-01",
                 "source_metric": "xero_profit_and_loss_revenue",
@@ -2671,7 +2779,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             unit="AUD",
             period_month=month_bucket,
             confidence=1.0,
-            source_metadata={"report_name": "ProfitAndLoss"},
+            source_metadata={"connection_id": xero.pk, "report_name": "ProfitAndLoss"},
         )
         monthly_costs_metric = StartupMetricObservation.objects.create(
             organization=self.organization,
@@ -2685,6 +2793,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
             period_month=month_bucket,
             confidence=1.0,
             source_metadata={
+                "connection_id": xero.pk,
                 "report_name": "ProfitAndLoss",
                 "calculation_basis": "cost_of_sales_plus_operating_expenses_when_available_otherwise_total_expenses",
             },
@@ -2927,8 +3036,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
 
     def test_classification_batch_scopes_messages_to_run_window(self):
         now = timezone.now()
-        self.run.run_request["backfill_window_start"] = (now - timedelta(hours=1)).isoformat()
-        self.run.run_request["backfill_window_end"] = (now + timedelta(hours=1)).isoformat()
+        self._set_run_window(now)
         self.run.save(update_fields=["run_request", "updated_at"])
 
         GmailMessageArtifact.objects.create(
@@ -3042,8 +3150,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.thread.hydration_status = ArtifactProcessingStatus.PENDING
         self.thread.latest_message_internal_date = now - timedelta(minutes=20)
         self.thread.save(update_fields=["hydration_status", "latest_message_internal_date", "updated_at"])
-        self.run.run_request["backfill_window_start"] = (now - timedelta(hours=1)).isoformat()
-        self.run.run_request["backfill_window_end"] = (now + timedelta(hours=1)).isoformat()
+        self._set_run_window(now)
         self.run.run_request["max_source_threads"] = 1
         self.run.save(update_fields=["run_request", "updated_at"])
 
@@ -3315,8 +3422,7 @@ class StartupUpdateWorkflowViewsTest(StartupUpdateApiTestCase):
         self.message.save(update_fields=["internal_date", "updated_at"])
         self.thread.latest_message_internal_date = now - timedelta(minutes=20)
         self.thread.save(update_fields=["latest_message_internal_date", "updated_at"])
-        self.run.run_request["backfill_window_start"] = (now - timedelta(hours=1)).isoformat()
-        self.run.run_request["backfill_window_end"] = (now + timedelta(hours=1)).isoformat()
+        self._set_run_window(now)
         self.run.run_request["max_source_threads"] = 1
         self.run.save(update_fields=["run_request", "updated_at"])
 
@@ -3834,7 +3940,7 @@ class StartupUpdateOpenRunsViewTest(StartupUpdateApiTestCase):
             google_connection=self.google_connection,
             is_default_for_gmail=True,
         )
-        create_startup_update_run(
+        create_checked_startup_update_run(
             organization=self.organization,
             binding=binding,
             window_months=6,
@@ -3887,7 +3993,20 @@ class StartupUpdateServiceHelpersTest(TestCase):
                 "next_30_days": ["Close two more logos"],
             }
         )
-        self.assertIn("## KPI Snapshot", markdown)
+        self.assertEqual(
+            [line for line in markdown.splitlines() if line.startswith("## ")],
+            [
+                "## This month",
+                "## Key numbers",
+                "## Financial overview",
+                "## How you can help",
+                "## Progress",
+                "## Challenges",
+                "## Other progress",
+                "## What we learned",
+                "## Next steps",
+            ],
+        )
         self.assertIn("- **ARR:** $24,000", markdown)
 
     def test_score_message_for_profile_flags_relevant_company_mail(self):
@@ -4291,7 +4410,7 @@ class StartupUpdateGoogleAnalyticsPipelineViewTest(StartupUpdateApiTestCase):
             account_id="100",
             selected=True,
         )
-        self.run = create_startup_update_run(
+        self.run = create_checked_startup_update_run(
             organization=self.organization,
             binding=self.binding,
             input_sources=["gmail", "google_analytics"],

@@ -2,15 +2,17 @@ from .website_metrics import WebsiteMetricsView
 from .company_billing import CompanyBillingView
 from .article_preview_lease import ArticlePreviewLeaseView, ArticlePreviewLeaseProxyView
 from .article_review_views import VibeMarketingArticleReviewView
-from .website_views import WebsiteConnectionView, WebsiteConnectionActionView, WebsiteConnectionOperationView
+from .founder_draft_views import FounderDraftCopiedView, FounderDraftDownloadView, FounderDraftPostedLinkView
+from .hosted_article_views import HostedArticlePublishView
+from .website_views import WebsiteConnectionView, WebsiteConnectionActionView, WebsiteConnectionOperationView, WebsiteCostUsageView
 from django.urls import include, path
 
-from .custom_island_views import CustomContentIslandView
+from .custom_island_views import ContentIslandRemoveView, CustomContentIslandView
 from .github_repository_views import VibeMarketingGitHubRepositoryView
 from .island_research_views import ContentIslandResearchView, ContentIslandResearchAdoptView
 
 from .admin_views import VibeMarketingAdminUsageView
-from .editorial_views import EditorialCatalogApprovalView, EditorialCatalogView, EditorialBriefSuggestionView, EditorialArticlesView
+from .editorial_views import EditorialCatalogApprovalView, EditorialCatalogView, EditorialBriefSuggestionView, EditorialArticlesView, EditorialFirstAudienceView
 from .notification_channel_views import (
     VibeMarketingNotificationChannelDeliveryView,
     VibeMarketingNotificationChannelDetailView,
@@ -35,6 +37,7 @@ from .vibe_marketing_views import (
     VibeMarketingBaselineSkipView,
     VibeMarketingBaselineView,
     VibeMarketingBootstrapView,
+    VibeMarketingAuthorPhotoPreviewView,
     VibeMarketingCompanyAvatarView,
     VibeMarketingDailyReplayView,
     VibeMarketingDiscoveryView,
@@ -70,6 +73,8 @@ urlpatterns = [
     path("github/repository", VibeMarketingGitHubRepositoryView.as_view(), name="vibe-marketing-github-repository-no-slash"),
     path("website-connection", WebsiteConnectionView.as_view(), name="website-connection"),
     path("website-connection/", WebsiteConnectionView.as_view()),
+    path("website-connection/usage", WebsiteCostUsageView.as_view()),
+    path("website-connection/usage/", WebsiteCostUsageView.as_view()),
     path("website-connection/operations/<uuid:operation_id>", WebsiteConnectionOperationView.as_view()),
     path("website-connection/operations/<uuid:operation_id>/", WebsiteConnectionOperationView.as_view()),
     path("website-connection/<str:action>", WebsiteConnectionActionView.as_view(), name="website-connection-action"),
@@ -77,6 +82,16 @@ urlpatterns = [
     path("runs/<str:run_id>/article-review/preview-lease", ArticlePreviewLeaseView.as_view()),
     path("article-preview/<str:token>/<str:run_id>/", ArticlePreviewLeaseProxyView.as_view()),
     path("article-preview/<str:token>/<str:run_id>/<path:proxy_path>", ArticlePreviewLeaseProxyView.as_view()),
+    path("runs/<str:run_id>/hosted-publish", HostedArticlePublishView.as_view(), name="vibe-hosted-publish"),
+    path("runs/<str:run_id>/hosted-publish/", HostedArticlePublishView.as_view()),
+    # P1.10 draft tools (IF-P1-13). They sit above the runs/<run_id>/<action>
+    # catch-all so they never reach VibeMarketingRunControlView.
+    path("runs/<str:run_id>/copied", FounderDraftCopiedView.as_view(), name="vibe-founder-draft-copied-no-slash"),
+    path("runs/<str:run_id>/copied/", FounderDraftCopiedView.as_view(), name="vibe-founder-draft-copied"),
+    path("runs/<str:run_id>/posted-link", FounderDraftPostedLinkView.as_view(), name="vibe-founder-draft-posted-link-no-slash"),
+    path("runs/<str:run_id>/posted-link/", FounderDraftPostedLinkView.as_view(), name="vibe-founder-draft-posted-link"),
+    path("runs/<str:run_id>/article/download", FounderDraftDownloadView.as_view(), name="vibe-founder-draft-download-no-slash"),
+    path("runs/<str:run_id>/article/download/", FounderDraftDownloadView.as_view(), name="vibe-founder-draft-download"),
     path("runs/<str:run_id>/article-review", VibeMarketingArticleReviewView.as_view(), name="vibe-article-review"),
     path("runs/<str:run_id>/article-review/", VibeMarketingArticleReviewView.as_view(), name="vibe-article-review-slash"),
     path("islands/research", ContentIslandResearchView.as_view(), name="vibe-marketing-island-research-no-slash"),
@@ -84,17 +99,23 @@ urlpatterns = [
     path("islands/research/<str:run_id>/adopt", ContentIslandResearchAdoptView.as_view(), name="vibe-marketing-island-research-adopt"),
     path("islands/custom", CustomContentIslandView.as_view(), name="vibe-marketing-custom-island-no-slash"),
     path("islands/custom/", CustomContentIslandView.as_view(), name="vibe-marketing-custom-island"),
+    path("islands/<str:slug>/remove", ContentIslandRemoveView.as_view(), name="vibe-marketing-island-remove-no-slash"),
+    path("islands/<str:slug>/remove/", ContentIslandRemoveView.as_view(), name="vibe-marketing-island-remove"),
     path("editorial-catalog/articles/", EditorialArticlesView.as_view(), name="editorial-articles"),
     path("editorial-catalog/suggest-brief/", EditorialBriefSuggestionView.as_view(), name="editorial-brief-suggestion"),
     path("editorial-catalog", EditorialCatalogView.as_view(), name="vibe-marketing-editorial-catalog-no-slash"),
     path("editorial-catalog/", EditorialCatalogView.as_view(), name="vibe-marketing-editorial-catalog"),
     path("editorial-catalog/approve", EditorialCatalogApprovalView.as_view(), name="vibe-marketing-editorial-catalog-approve-no-slash"),
     path("editorial-catalog/approve/", EditorialCatalogApprovalView.as_view(), name="vibe-marketing-editorial-catalog-approve"),
+    path("editorial-catalog/first-audience", EditorialFirstAudienceView.as_view(), name="vibe-marketing-editorial-first-audience-no-slash"),
+    path("editorial-catalog/first-audience/", EditorialFirstAudienceView.as_view(), name="vibe-marketing-editorial-first-audience"),
     path("admin/usage/", VibeMarketingAdminUsageView.as_view(), name="vibe-marketing-admin-usage"),
     path("analytics/", include("content_analytics.urls")),
     path("bootstrap/", VibeMarketingBootstrapView.as_view(), name="vibe-marketing-bootstrap"),
     path("company/avatar", VibeMarketingCompanyAvatarView.as_view(), name="vibe-marketing-company-avatar-no-slash"),
     path("company/avatar/", VibeMarketingCompanyAvatarView.as_view(), name="vibe-marketing-company-avatar"),
+    path("authors/photo-preview", VibeMarketingAuthorPhotoPreviewView.as_view(), name="vibe-marketing-author-photo-preview-no-slash"),
+    path("authors/photo-preview/", VibeMarketingAuthorPhotoPreviewView.as_view(), name="vibe-marketing-author-photo-preview"),
     path("settings", VibeMarketingSettingsView.as_view(), name="vibe-marketing-settings-no-slash"),
     path("settings/", VibeMarketingSettingsView.as_view(), name="vibe-marketing-settings"),
     path("autofill", VibeMarketingAutofillView.as_view(), name="vibe-marketing-autofill-no-slash"),

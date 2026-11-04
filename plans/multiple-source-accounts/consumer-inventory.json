@@ -1,0 +1,54 @@
+{
+  "status": "implemented_pending_final_validation_and_review",
+  "request": "Combine selected sources in the MLAI CRM; choose one account per provider for new reports, preserving existing run pins",
+  "calendar_dependency_pr": "https://github.com/MLAI-AUS-Inc/mlai-backend/pull/1274",
+  "consumers": {
+    "identity_storage": "Verified account keys replace the different-account fallback. Reconnect preserves identity, refresh token isolation, metadata and current report default.",
+    "gmail": "Approved0051 adds verified subject identity, supports legacy exact-email adoption and independent mailboxes.",
+    "provider_status": "Account DTOs contain IDs, labels, health and selection flags only; no credentials or metadata.",
+    "report_selection": "StartupProfile JSON contains user/provider choices; missing explicit choices never fall back to a sibling.",
+    "new_runs": "Source pins capture selected owned IDs. Preflight worker threads, discovery, refresh, Notion and Linear collection resolve the saved pins.",
+    "financial_reporting": "Xero tenant metrics and cleanup stay connection-scoped. Multiple tenants share token rotation only within the same OAuth grant. Existing financial snapshot provenance filters remain.",
+    "pulse_financial_refresh": "New financial refresh jobs resolve the selected report account; explicit missing or disconnected choices never fall back to siblings. Existing jobs and idempotent retries retain their original account pins.",
+    "luma_metrics": "Each calendar has separate monthly observations. Legacy unscoped observations are compatible only when a single historical connection exists.",
+    "crm": "Only the global community calendar and explicitly selected MLAI-admin Luma connections are read. Union by event ID, source provenance, manage-only guest routing, no permissions imported, stale coverage after changed/failed sources.",
+    "disconnect": "Facade requires an owned connection ID when several accounts exist; no provider-wide delete.",
+    "desktop_web": "Account choices, add account, independent CRM selection, per-account disconnect; controlled failed-save behavior.",
+    "mobile": "Native shared Connections screen supports report selection, admin CRM inclusion, add/reconnect and per-account disconnect."
+  },
+  "provider_identity": {
+    "gmail": "verified Google sub",
+    "google_drive": "verified Google sub; not yet a reporting source",
+    "google_analytics": "verified Google sub with per-account property selections",
+    "github": "existing installation/account and repository picker retained",
+    "google_search_console": "existing website-scoped connection flow retained",
+    "slack": "workspace identity; existing personal Slack grant protections retained",
+    "linear": "workspace identity",
+    "notion": "workspace identity",
+    "stripe": "Stripe connected account ID",
+    "xero": "tenant ID, explicit report choice",
+    "bank_feed": "existing Basiq identity and provider consent for bank accounts retained",
+    "humanitix": "validated credential identity; provider has no account identity endpoint; optional label",
+    "luma": "verified calendar ID from calendars/get"
+  },
+  "limits": [
+    "Luma calendar keys do not enumerate every event hosted by a personal account. hi@mlai.au host-only coverage needs a supported authenticated host source.",
+    "Additional private Slack/Gmail/report accounts are not automatically ingested into community CRM.",
+    "No live account OAuth or key entry has been performed; no release yet."
+  ],
+  "safeguards": [
+    "No sends, contact permission or suppression changes",
+    "No full scheduler tick or listmonk restart",
+    "Only exact approved0051 migration; preserve all earlier hashes",
+    "Root owns mutations, no agents or concurrent releases"
+  ],
+  "validation": {
+    "backend": "285 synthetic PostgreSQL tests passed against approved379-file graph on isolated UTF-8 PostgreSQL17, external networking blocked",
+    "schema": "makemigrations --check --dry-run: no changes detected",
+    "test_assignment": "710fully selected,2partially selected,0omissions",
+    "desktop": "Full just ci passed; current typecheck/build, legacy-response and account-control E2E passed",
+    "mobile": "36 focused connection widget tests and full 3093-test mobile suite passed; final analyzer clean",
+    "database_free": "401 CRM, Studio source, account bridge and selected-report scope tests passed",
+    "current_main_compatibility": "After rebasing onto calendar merge 3b2a6cff: 38 approved-graph PostgreSQL tests, 24 database-free tests and model drift check passed, including financial refresh selection, retries and disconnected-account isolation."
+  }
+}
