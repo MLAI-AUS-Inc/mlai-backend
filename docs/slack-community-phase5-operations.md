@@ -97,6 +97,50 @@ observations still order older callbacks after scope rollback, including
 receipts retained by the legacy bot intake. Server-only command fields are
 removed from untrusted metadata.
 
+## Reading held and dropped sends
+
+A held send stays `pending` with a later `available_at` and does not use up a
+provider attempt. Its `last_error` is a fixed code that says why it is held:
+
+| `last_error` | Meaning |
+|---|---|
+| `provider_budget_deferred` | Waiting for Slack quota (shared budget or 429). |
+| `community_bot_reader_unavailable` | A bot post needs a joined member reader for the channel, and none is current. |
+| `community_bot_reader_scope_unavailable` | The current reader grant lacks a read scope the bot post needs. |
+| `legacy_community_send_unproven` | Legacy hold: the row has no enqueue marker, so it is retried every five minutes and never resent blindly. |
+| `community_channel_not_admitted` | The channel is out of the current workspace or channel scope, or processing is paused. |
+| `community_mapping_pending` | The room mapping or sync state changed, or is paused, while the send was running. |
+| `community_member_access_disabled` | A member post is waiting because member access is switched off. |
+| `community_receipt_unverified` | Slack's response did not yet prove the expected poster. |
+| `community_source_closed` | The source channel was reduced while the send was running. |
+| `member_membership_unproven` | The author has a linked grant, but their channel membership could not be confirmed yet. |
+| `member_delivery_deferred` | Any other member-path hold that has no specific code. |
+
+Permanent eligibility failures still make the row `dead`, and `last_error`
+keeps the exception text (for example `PublicBridgeConsentRequired: Current AI
+sharing permission is required`).
+
+Each send attempt that gets past its room-mapping check writes one
+`slack_member_send` log line with the `delivery_id`, an `outcome` and a
+`reason`. This includes failures during actor selection, before any Slack call.
+The line has `poster=member|bot` only after a poster was chosen. A legacy hold
+or a mapping change found during that first check has no log line; read it from
+the row's `last_error`. Outcomes:
+
+- `settled`: posted.
+- `deferred`: held. `reason` is the same code as the row's `last_error`, or
+  `parent_mapping_pending` for a reply whose parent has no Slack message yet.
+- `dropped`: permanent and the row is `dead`. `reason` is `consent_required`
+  (no current AI-sharing consent), `device_unverified` (the signing device is
+  not a current verified device of an active account), `account_unverified`, or
+  `permanent_failure`.
+- `unavailable`: permanent `MemberDeliveryUnavailable`, and the row is `dead`.
+- `retry`: provider outcome uncertain, and the row is `failed` with backoff.
+
+So one query by `delivery_id` on the delivery row, or on these log lines, shows
+whether a missing Chat-to-Slack post was dropped or held, and why. Log lines
+never contain message text, names or tokens.
+
 ## Validation and later gates
 
 The owning label is `integrations.tests_community_member_send_phase5` in both

@@ -81,7 +81,9 @@ class MemberDeliveryUnavailable(RuntimeError):
 
 
 class MemberDeliveryDeferred(BudgetDeferred):
-    pass
+    """A held write; `reason` is a closed code naming why, never a provider body."""
+
+    reason = "member_delivery_deferred"
 
 
 class MemberDeliveryRetry(RuntimeError):

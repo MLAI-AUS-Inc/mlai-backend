@@ -15,6 +15,12 @@ class PublicBridgeConsentRequired(RuntimeError):
 
     permanent = True
 
+    def __init__(self, message="", *, reason="consent_required"):
+        # `reason` is a closed code for logs: consent_required, device_unverified
+        # or account_unverified. The message stays the row's `last_error` text.
+        self.reason = reason
+        super().__init__(message)
+
 
 def send_with_ai_consent(delivery, send, **kwargs):
     """Recheck the signed sender and hold their consent lock through Slack I/O.
@@ -41,7 +47,8 @@ def send_with_ai_consent(delivery, send, **kwargs):
     resolver = community_account_for_key if member_room else verified_identity_for_buzz
     identity = resolver(**source)
     if not identity or not identity.get("user_profile_id"):
-        raise PublicBridgeConsentRequired("Public Slack sharing requires a verified MLAI account")
+        raise PublicBridgeConsentRequired("Public Slack sharing requires a verified MLAI account",
+                                          reason="account_unverified")
 
     with transaction.atomic():
         user = get_user_model().objects.select_for_update().filter(
