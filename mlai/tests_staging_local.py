@@ -19,7 +19,7 @@ class LocalTokenTests(TestCase):
         self.assertEqual(connection.vendor,'postgresql')
         name=str(connection.settings_dict['NAME'])
         self.assertTrue(name.startswith('test_'))
-        self.enterContext(override_settings(STAGING_LOCAL_DB_NAME=name))
+        self.enterContext(override_settings(SETTINGS_MODULE=LOCAL['SETTINGS_MODULE'],STAGING_LOCAL_DB_NAME=name))
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.output=Path(self.temp.name)/'token'
     def issue(self,create=False):
@@ -34,13 +34,13 @@ class LocalTokenTests(TestCase):
         user=get_user_model().objects.get(email='developer@staging.mlai.au')
         self.assertFalse(user.is_staff or user.is_superuser or user.has_usable_password())
         client=APIClient();client.credentials(HTTP_AUTHORIZATION='Bearer '+token)
-        with override_settings(ROOT_URLCONF='mlai.urls'):
+        with override_settings(SETTINGS_MODULE=LOCAL['SETTINGS_MODULE'],ROOT_URLCONF='mlai.urls'):
             self.assertEqual(client.get('/api/v1/auth/me/').status_code,200)
         with override_settings(**PILOT):
             self.assertEqual(client.get('/api/v1/auth/me/',HTTP_ORIGIN=NATIVE).status_code,401)
     def test_wrong_environment_and_database_refused(self):
         for changes in ({'SETTINGS_MODULE':'mlai.settings_staging_chat'},{'APP_ENV':'production'},{'STAGING_LOCAL_DB_NAME':'staging_account_api'}):
-            with override_settings(**changes),self.assertRaises(CommandError):self.issue(create=True)
+            with override_settings(**{'SETTINGS_MODULE':LOCAL['SETTINGS_MODULE'],**changes}),self.assertRaises(CommandError):self.issue(create=True)
         self.assertFalse(get_user_model().objects.exists())
     def test_unmarked_staff_and_overwrite_refused(self):
         user=get_user_model().objects.create_user(email='developer@staging.mlai.au')

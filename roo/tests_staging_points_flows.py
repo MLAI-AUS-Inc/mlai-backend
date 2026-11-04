@@ -15,7 +15,7 @@ class FixtureTests(TestCase):
         CommunityMemberProfile.objects.create(user=self.user,status='approved',review_reasons=['synthetic_staging_pilot'])
     def test_fixture_refuses_a_different_configured_database(self):
         from roo.staging_fixtures import seed_user
-        with override_settings(STAGING_FIXTURE_DATABASE='different_fixture_database'):
+        with override_settings(SETTINGS_MODULE=PILOT['SETTINGS_MODULE'],STAGING_FIXTURE_DATABASE='different_fixture_database'):
             with self.assertRaisesRegex(ValueError,'Unexpected fixture database'):
                 seed_user(self.user)
         self.assertFalse(Ledger.objects.filter(user=self.user).exists())
@@ -24,7 +24,7 @@ class FixtureTests(TestCase):
         from unittest.mock import patch
         from roo.staging_fixtures import seed_user
         with patch.dict(settings.DATABASES['default'],NAME='different_fixture_database'), \
-                override_settings(STAGING_FIXTURE_DATABASE='different_fixture_database'):
+                override_settings(SETTINGS_MODULE=PILOT['SETTINGS_MODULE'],STAGING_FIXTURE_DATABASE='different_fixture_database'):
             with self.assertRaisesRegex(ValueError,'Unexpected connected fixture database'):
                 seed_user(self.user)
         self.assertFalse(Ledger.objects.filter(user=self.user).exists())
