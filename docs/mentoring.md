@@ -223,7 +223,8 @@ Open questions that need a live test before the pilot relies on them:
 
 1. Review both existing mentoring migrations and the exact target plan against
    [the main rollout](mentoring-main-rollout.md); approval is environment-specific.
-2. Run the database-backed tests (not yet written) on a disposable database.
+2. Run `mentoring.tests.test_booking_database` against an approved disposable
+   PostgreSQL database.
 3. Apply the migration before or with the code (the app's tables must exist before
    any user deletion or admin page touches them). The deployer sets
    `APPROVED_MIGRATION_PLAN_SHA256` on the host (see the proposal for the exact value
@@ -246,7 +247,10 @@ Open questions that need a live test before the pilot relies on them:
 
 No-database suites, registered in `.github/workflows/deploy.yml`:
 `python scripts/test_without_database.py mentoring.tests.test_scheduling_unit mentoring.tests.test_google_unit mentoring.tests.test_service_unit mentoring.tests.test_dst_unit community_chat.tests.test_mentoring_views_unit`.
-Locking, constraints and real ledger rows need database tests after migration approval.
+The PostgreSQL suite `mentoring.tests.test_booking_database` exercises real ledger
+charges, refunds and payouts, replayed actions, low-balance requests, lazy
+completion, competing founders and simultaneous retries. It runs in the existing
+PostgreSQL CI lane. Migration execution requires approval for that environment.
 
 ## Becoming a mentor (invite only)
 

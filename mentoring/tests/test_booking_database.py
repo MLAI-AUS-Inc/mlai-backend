@@ -59,7 +59,7 @@ class BookingDatabaseTests(TransactionTestCase):
     def request(self, founder=None, request_id=None):
         return MentoringService.request_session(
             founder=founder or self.founder, mentor_id=self.mentor.pk,
-            starts_at=self.starts_at, expected_price=40,
+            starts_at=self.starts_at.isoformat(), expected_price=40,
             client_request_id=request_id or str(uuid.uuid4()),
             brief={'stage': 'Idea', 'struggle': 'Finding users', 'outcome': 'Next step'},
         )
@@ -77,11 +77,11 @@ class BookingDatabaseTests(TransactionTestCase):
 
     def test_accept_charges_once_and_pre_start_cancel_restores_balance(self):
         session, _ = self.request()
-        MentoringService.accept(session.pk, self.mentor_user)
+        accepted = MentoringService.accept(session.pk, self.mentor_user)
         self.assertEqual(self.balance(self.founder), 60)
         self.assertEqual(self.balance(self.mentor_user), 0)
-        with self.assertRaises(MentoringError):
-            MentoringService.accept(session.pk, self.mentor_user)
+        replay = MentoringService.accept(session.pk, self.mentor_user)
+        self.assertEqual(replay.charge_ledger_entry_id, accepted.charge_ledger_entry_id)
         self.assertEqual(self.balance(self.founder), 60)
         MentoringService.cancel(session.pk, self.founder)
         session.refresh_from_db()
@@ -99,9 +99,9 @@ class BookingDatabaseTests(TransactionTestCase):
                 MentoringService.cancel(session.pk, self.founder)
         self.assertEqual(caught.exception.code, 'session_started')
         with patch('mentoring.service.timezone.now', return_value=session.ends_at + timedelta(seconds=1)):
-            MentoringService.complete(session.pk, self.mentor_user)
-            with self.assertRaises(MentoringError):
-                MentoringService.complete(session.pk, self.mentor_user)
+            completed = MentoringService.complete(session.pk, self.mentor_user)
+            replay = MentoringService.complete(session.pk, self.mentor_user)
+            self.assertEqual(replay.payout_ledger_entry_id, completed.payout_ledger_entry_id)
         session.refresh_from_db()
         self.assertEqual(session.status, MentorSession.STATUS_COMPLETED)
         self.assertIsNotNone(session.payout_ledger_entry_id)

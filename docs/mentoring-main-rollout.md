@@ -8,7 +8,8 @@ and admins, or active Django staff/superusers. Ordinary members cannot use it.
 
 ## Migration review
 
-The files below are copied byte-for-byte from staging, not regenerated. The user approved these exact two migrations for disposable local/CI test
+The files below are copied byte-for-byte from staging, not regenerated. The user
+approved these exact two migrations for disposable local/CI test
 databases on 4 November 2026. That approval does not cover production. Production
 approval is still required for the actual host migration plan.
 
