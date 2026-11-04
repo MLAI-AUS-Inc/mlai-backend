@@ -158,6 +158,8 @@ The owning label is `integrations.tests_community_member_send_phase5` in both
 canonical SQLite and PostgreSQL lists. Existing
 `integrations.tests_public_bridge_consent`, `integrations.tests_slack_member_access`
 and `integrations.tests_member_delivery_phase4c` remain regression gates.
+`integrations.tests_community_delivery_observability`, also in both lists,
+covers the hold codes and send-log outcomes above without a database.
 The new PostgreSQL-only interleavings exercise device/AI/grant revocation
 through send and settlement. Database tests require the specifically approved
 existing migration files; this document grants no migration permission or
