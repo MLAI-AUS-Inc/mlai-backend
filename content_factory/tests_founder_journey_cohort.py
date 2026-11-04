@@ -79,6 +79,20 @@ def _tables(queries):
 
 @override_settings(**FLAGS)
 class CohortPredicateTests(TestCase):
+    def test_live_marker_reads_ignore_cached_config_and_unrelated_repository_payloads(self):
+        org = _org(created_at=PRE_LAUNCH)
+        stale = _config(org)
+        org._state.fields_cache['content_config'] = stale
+        payload = OrganizationContentConfig._meta.get_field('scan_artifact_cache')
+        for value in (cohorts.NEW_JOURNEY, cohorts.LEGACY):
+            OrganizationContentConfig.objects.filter(pk=stale.pk).update(
+                pillar_strategy={cohorts.MARKER_KEY: _marker(value)})
+            with mock.patch.object(payload, 'from_db_value', side_effect=AssertionError('Unrelated repository payload was loaded')):
+                with CaptureQueriesContext(connection) as queries:
+                    self.assertEqual(cohorts.cohort(org), value)
+                    self.assertEqual(cohorts.read_marker(org)['cohort'], value)
+            self.assertEqual(len(queries), 2)
+
     def test_disabled_by_id_or_domain_beats_a_new_journey_marker(self):
         built = make_new_journey_org(domain="Disabled-Startup.example.test")
         org = built.organization
