@@ -314,16 +314,11 @@ class PolicyTests(TransactionTestCase):
         config = OrganizationContentConfig.objects.get(organization=self.org)
         self.assertEqual(len(config.pillar_strategy['ops_alerts']), 1)
 
-    def test_hosted_rung_requires_actual_readiness_and_enabled_executor(self):
+    def test_strategy_exhaustion_keeps_the_repository_ladder(self):
         from content_factory import website_strategy as strategy
-        from content_factory.self_heal_testing import fake_provider
         operation = self.goal_operation()
-        goal = operation.receipt['goal']
-        with fake_provider('content_factory.hosted_auto_register', hosted_rung_ready=lambda org: True):
-            next_goal = strategy.advance(goal, source='a' * 40, now=self.now, reason='strategy_exhausted', organization=self.org)
-        self.assertEqual(next_goal['strategy_pin']['rung'], 'deterministic')
-        with fake_provider('content_factory.hosted_auto_register', hosted_rung_ready=lambda org: False):
-            next_goal = strategy.advance(goal, source='a' * 40, now=self.now, reason='strategy_exhausted', organization=self.org)
+        next_goal = strategy.advance(operation.receipt['goal'], source='a' * 40, now=self.now,
+            reason='strategy_exhausted', organization=self.org)
         self.assertEqual(next_goal['strategy_pin']['rung'], 'deterministic')
 
     def test_publish_only_recovery_cannot_enter_generic_article_orchestration(self):

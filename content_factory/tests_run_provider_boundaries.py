@@ -11,69 +11,14 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 
 from core.models import User
 from workflow_runs.models import ContentFactoryRun
-from . import hosted_articles as hosted
 from .run_ownership import (bind_admitted_run, reserve_admitted_run, user_principal,
     owner_receipt, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, public_run_value, HOSTED_PUBLICATION_OBSERVATION_KEY)
-from .tests_hosted_articles import article, DIGEST
 from .tests_run_event_authority import FLAGS
 from .tests_website_connections import WebsiteDatabaseFixture
 from .website_contract import WebsiteAuthorityError
 from .website_support import _project_legacy_verification, owner_support_operation
 
 
-@override_settings(**FLAGS, ARTICLES_HOSTED_SITES_ENABLED=True)
-class OwnedHostedProviderTests(TestCase):
-    def setUp(self):
-        from .tests_hosted_articles import HostedArticleTests
-        HostedArticleTests.setUp(self)
-        raw = {"domain": self.org.domain, "client_request_id": "owned-hosted-child",
-            "hosted_site_id": str(self.site.pk), "delivery_mode": "content_only", "delivery_mode_confirmed": True}
-        self.run = bind_admitted_run(reserve_admitted_run(organization=self.org, workflow="direct_generate",
-            principal=user_principal(self.user.pk, f"mlai_user:{self.user.pk}"), payload=raw), "owned-hosted-worker")
-        ContentFactoryRun.objects.filter(pk=self.run.pk).update(result={**self.run.result,
-            "article_approval_v1": {"source": "publish_reviewed", "approved_by_user_id": self.user.pk},
-            "publish_reviewed_v1": {"source_run_id": "original-reviewed"}})
-        self.run.refresh_from_db()
-        from .hosted_article_models import HostedArticlePublication
-        HostedArticlePublication.objects.create(site=self.site, run_id=self.run.run_id, requested_by=self.user)
-        self.before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
-
-    def assert_execution_retained(self):
-        after = ContentFactoryRun.objects.values().get(pk=self.run.pk)
-        for key in ("status", "current_step", "approval_state", "run_request", "created_at", "updated_at",
-                    "last_event_emitted_at", "reconciled_at", "error", "billing_status", "billing_ledger_id"):
-            self.assertEqual(after[key], self.before[key], key)
-        return after
-
-    def progress(self, **data):
-        return hosted.record_progress(domain=self.site.domain, run_id=self.run.run_id, data=data)
-
-    def test_real_render_deploy_live_records_provider_facts_without_owned_execution_writes(self):
-        with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False, ARTICLES_RUN_EVENT_AUTHORITY_ENABLED=False):
-            self.progress(status="rendering", article=article(), revision_digest=DIGEST)
-            self.assert_execution_retained()
-            self.progress(status="deployed", deployment={"worker_name": "mlai-blog-x",
-                "url": "https://mlai-blog-x.mlai.workers.dev", "manifest_digest": "m" * 64})
-            publication = self.progress(status="live", verified_digest=DIGEST)
-        after = self.assert_execution_retained()
-        self.assertEqual(publication.status, "live")
-        self.assertEqual(after["result"][HOSTED_PUBLICATION_OBSERVATION_KEY]["status"], "live")
-        self.assertIn("deploy_v1", after["result"])
-        self.assertNotIn(HOSTED_PUBLICATION_OBSERVATION_KEY, public_run_value(after["result"]))
-
-    def test_provider_failure_is_an_observation_not_a_competing_execution_failure(self):
-        self.progress(status="rendering", article=article(), revision_digest=DIGEST)
-        self.progress(status="failed", reason="Synthetic failed build")
-        after = self.assert_execution_retained()
-        self.assertEqual(after["result"][HOSTED_PUBLICATION_OBSERVATION_KEY]["status"], "failed")
-        self.assertNotIn("error_code", after["result"])
-
-    def test_pending_user_denial_blocks_hosted_provider_progress_before_execution_terminal(self):
-        from .run_user_stop import record_user_denial
-        record_user_denial(self.run, user=self.user, actor_id=f"mlai_user:{self.user.pk}")
-        with self.assertRaises(hosted.HostedPublishError):
-            self.progress(status="rendering", article=article(), revision_digest=DIGEST)
-        self.assert_execution_retained()
 
 
 @override_settings(**FLAGS)

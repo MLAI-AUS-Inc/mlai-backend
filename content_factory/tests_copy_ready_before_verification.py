@@ -234,7 +234,6 @@ class NewJourneyCopyReadyTests(_StartHarness, TestCase):
                 self.assertEqual(views._reported_article_delivery_mode(self.built.config), "review_draft")
 
 
-@override_settings(ARTICLES_HOSTED_SITES_ENABLED=True)  # PawShare's production shape
 class LegacyDeliveryModeTests(_StartHarness, TestCase):
     """G1: the five named organisations keep today's delivery mode with every P1 flag on."""
 

@@ -28,7 +28,6 @@ from .founder_journey_testing import (
     ALL_P1_FLAGS_ON, LAUNCHED_AT, NAMED_LEGACY_ORGS, P1_SETTING_DEFAULTS, make_history_free_org,
     make_named_legacy_org, make_new_journey_org,
 )
-from .hosted_article_models import HostedArticleSite
 from .models import NotificationChannel, OrganizationContentConfig, WrittenArticle
 from .services import island_refresh_scheduler
 from .website_models import WebsiteConnection, WebsiteConnectionOperation, WebsiteConnectionTarget
@@ -171,8 +170,6 @@ class FlapTests(TestCase):
         WebsiteConnectionTarget.objects.filter(connection__organization=org).update(verified_at=None)
         WebsiteConnection.objects.filter(organization=org).update(last_verified_at=None, verified_sha="")
         check("verification_dropped")
-        HostedArticleSite.objects.filter(organization=org).delete()
-        check("hosted_site_removed")
         WebsiteConnection.objects.filter(organization=org).delete()
         check("connection_deleted")
 
@@ -190,7 +187,6 @@ class FlapTests(TestCase):
                 state=WebsiteConnection.State.CONNECTED)
             WebsiteConnectionTarget.objects.create(connection=connection_row, target_key="articles", generation=1,
                 verified_at=timezone.now())
-            HostedArticleSite.objects.create(organization=org, domain=org.domain, state=HostedArticleSite.State.ACTIVE)
             self._flap(org, cohorts.NEW_JOURNEY)
 
 
@@ -421,7 +417,6 @@ class ReasonAndInventoryTests(TestCase):
         cases = {
             "website_connection": lambda: WebsiteConnection.objects.create(
                 organization=self.org, github_repo="e/r", state=WebsiteConnection.State.REVOKED),
-            "hosted_site": lambda: HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain),
             "setup_run_90d": lambda: self._run("repo_scan", created_at=timezone.now() - timedelta(days=10)),
         }
         for reason, make in cases.items():
@@ -599,7 +594,6 @@ class NamedLegacyOrgProofTests(TestCase):
         self.assertTrue(cohorts.has_connected_website(tala.organization))
         self.assertTrue(all(run.run_request["delivery_mode"] == "review_draft" for run in tala.runs))
         paw = make_named_legacy_org("pawshare")
-        self.assertEqual(paw.hosted_site.state, HostedArticleSite.State.ACTIVE)
         la_vie = make_named_legacy_org("la_vie")
         self.assertEqual(la_vie.target.contract["mode"], "adopted_registry")
         self.assertIsNotNone(la_vie.target.verified_at)

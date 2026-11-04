@@ -23,7 +23,6 @@ FLAG_KEYS = (
     "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED",
     # Article preview switches: restart portable previews, and publish only a rendered one.
     "CONTENT_FACTORY_PORTABLE_PREVIEW_REARM",
-    "HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW",
     # Run snapshots merge by meaning, and Content Factory run events are kept.
     "ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED",
     "ARTICLES_RUN_EVENTS_ENABLED",

@@ -5217,12 +5217,6 @@ def _portable_preview_revision_stale(run, stored) -> bool:
     return bool(known and shown and known != shown and stored.get("autoStartRevision") != known)
 
 
-def _portable_draft_published_hosted(run) -> bool:
-    """This draft is published, or being published, on its MLAI-hosted blog."""
-    from .hosted_article_models import HostedArticlePublication
-
-    statuses = (HostedArticlePublication.Status.PENDING, *HostedArticlePublication.RENDERED)
-    return HostedArticlePublication.objects.filter(run_id=run.run_id, status__in=statuses).exists()
 
 
 def _backend_live_preview_stand_in(payload) -> bool:
@@ -5354,7 +5348,6 @@ def _portable_article_preview_should_rearm(run):
     return (
         _portable_article_preview_rearm_due(run, stored, now)
         and not _portable_auto_start_throttled(stored, now)
-        and not _portable_draft_published_hosted(run)
     )
 
 

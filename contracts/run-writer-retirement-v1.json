@@ -623,84 +623,6 @@
       "pending_owner": null
     },
     {
-      "identity": "content_factory/hosted_articles.py:record_progress:c727850d4a87a194d53603b97cfce4dfed47774c1db0522c7f7e5bbed712fa8f:1",
-      "path": "content_factory/hosted_articles.py",
-      "function": "record_progress",
-      "line": 449,
-      "kind": "model_update",
-      "fields": [
-        "status",
-        "current_step",
-        "updated_at"
-      ],
-      "statement_sha256": "c727850d4a87a194d53603b97cfce4dfed47774c1db0522c7f7e5bbed712fa8f",
-      "duplicate_ordinal": 1,
-      "direct_model_chain": true,
-      "inferred_receivers": [],
-      "local_guard_mentioned": true,
-      "function_sha256": "75897e0294ebea7c5bc0db3b1a1d82184833bf9c0bb02622b2d94c6190d6adea",
-      "classification": "owned_backend_observation",
-      "test_refs": [
-        "content_factory/tests_hosted_publish_authority.py",
-        "content_factory/tests_run_verified_delivery.py"
-      ],
-      "reason": "Verified hosted provider facts remain publication/site metadata; event-owned Run branch stores protected observation/result only. Raw hosted status can affect legacy Run lifecycle only.",
-      "guard": "event_owned(run) split after current publication/site/body/revision/principal admission.",
-      "pending_owner": null
-    },
-    {
-      "identity": "content_factory/hosted_articles.py:record_progress:f3334136798b0789c51493585a22b21346fcddc0f8111d5a32de81578ae9d518:1",
-      "path": "content_factory/hosted_articles.py",
-      "function": "record_progress",
-      "line": 455,
-      "kind": "model_update",
-      "fields": [
-        "status",
-        "current_step",
-        "updated_at"
-      ],
-      "statement_sha256": "f3334136798b0789c51493585a22b21346fcddc0f8111d5a32de81578ae9d518",
-      "duplicate_ordinal": 1,
-      "direct_model_chain": true,
-      "inferred_receivers": [],
-      "local_guard_mentioned": true,
-      "function_sha256": "75897e0294ebea7c5bc0db3b1a1d82184833bf9c0bb02622b2d94c6190d6adea",
-      "classification": "owned_backend_observation",
-      "test_refs": [
-        "content_factory/tests_hosted_publish_authority.py",
-        "content_factory/tests_run_verified_delivery.py"
-      ],
-      "reason": "Verified hosted provider facts remain publication/site metadata; event-owned Run branch stores protected observation/result only. Raw hosted status can affect legacy Run lifecycle only.",
-      "guard": "event_owned(run) split after current publication/site/body/revision/principal admission.",
-      "pending_owner": null
-    },
-    {
-      "identity": "content_factory/hosted_articles.py:record_progress:77ee79b32ba9af199f85b06f563bef9b2c329a8d2f0791f77ec33492d5d94bea:1",
-      "path": "content_factory/hosted_articles.py",
-      "function": "record_progress",
-      "line": 461,
-      "kind": "model_update",
-      "fields": [
-        "status",
-        "current_step",
-        "updated_at"
-      ],
-      "statement_sha256": "77ee79b32ba9af199f85b06f563bef9b2c329a8d2f0791f77ec33492d5d94bea",
-      "duplicate_ordinal": 1,
-      "direct_model_chain": true,
-      "inferred_receivers": [],
-      "local_guard_mentioned": true,
-      "function_sha256": "75897e0294ebea7c5bc0db3b1a1d82184833bf9c0bb02622b2d94c6190d6adea",
-      "classification": "owned_backend_observation",
-      "test_refs": [
-        "content_factory/tests_hosted_publish_authority.py",
-        "content_factory/tests_run_verified_delivery.py"
-      ],
-      "reason": "Verified hosted provider facts remain publication/site metadata; event-owned Run branch stores protected observation/result only. Raw hosted status can affect legacy Run lifecycle only.",
-      "guard": "event_owned(run) split after current publication/site/body/revision/principal admission.",
-      "pending_owner": null
-    },
-    {
       "identity": "content_factory/island_removal.py:release_from_selections:f55182c22a98189b0b264d4d9d6d2473889a3b752a054d0a66949460633d552e:1",
       "path": "content_factory/island_removal.py",
       "function": "release_from_selections",
@@ -1030,7 +952,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "1d420d0650b94f0a049c57a7557e71e035b24804654e043419477c3c5da8ffa5",
+      "function_sha256": "2d841369ac7d1c8421802a1ae3e9ea0c38016acd4cadff6dea2d3a7db96a4d69",
       "classification": "new_admission",
       "test_refs": [
         "content_factory/tests_r3_named_admission.py",
@@ -1038,8 +960,8 @@
         "content_factory/tests_hosting_retirement_unit.py",
         "content_factory/tests_p2_merge_worker.py"
       ],
-      "reason": "Creates an independently admitted repository-only approved-body child, carries the original charge and seals admission before dispatch. Retirement slugs must match the same-organization saved publication and explicitly require founder merge.",
-      "guard": "Existing same-company current publish consent/body/revision/verified destination plus same-publication slug; no hosted destination or grant manufacture.",
+      "reason": "Creates an independently admitted repository-only approved-body child, carries the original charge and seals admission before dispatch. The one-off retirement slug adapter is removed after site migration.",
+      "guard": "Existing same-company current publish consent/body/revision/verified destination; no hosted destination, slug override or grant manufacture.",
       "pending_owner": null
     },
     {
@@ -7050,6 +6972,39 @@
         "content_factory/tests_hosted_articles.py",
         "content_factory/tests/test_p2_publish_reviewed.py",
         "content_factory/tests_prepare_journey_unit.py"
+      ]
+    },
+    {
+      "identity": "content_factory/hosted_articles.py:record_progress:c727850d4a87a194d53603b97cfce4dfed47774c1db0522c7f7e5bbed712fa8f:1",
+      "path": "content_factory/hosted_articles.py",
+      "function": "record_progress",
+      "classification": "removed_blog_provider_callback",
+      "reason": "The retired blog provider callback is deleted; publication history remains in the protected export and WrittenArticle records.",
+      "test_refs": [
+        "content_factory/tests_hosted_articles.py",
+        "content_factory/tests_hosting_retirement_unit.py"
+      ]
+    },
+    {
+      "identity": "content_factory/hosted_articles.py:record_progress:f3334136798b0789c51493585a22b21346fcddc0f8111d5a32de81578ae9d518:1",
+      "path": "content_factory/hosted_articles.py",
+      "function": "record_progress",
+      "classification": "removed_blog_provider_callback",
+      "reason": "The retired blog provider callback is deleted; publication history remains in the protected export and WrittenArticle records.",
+      "test_refs": [
+        "content_factory/tests_hosted_articles.py",
+        "content_factory/tests_hosting_retirement_unit.py"
+      ]
+    },
+    {
+      "identity": "content_factory/hosted_articles.py:record_progress:77ee79b32ba9af199f85b06f563bef9b2c329a8d2f0791f77ec33492d5d94bea:1",
+      "path": "content_factory/hosted_articles.py",
+      "function": "record_progress",
+      "classification": "removed_blog_provider_callback",
+      "reason": "The retired blog provider callback is deleted; publication history remains in the protected export and WrittenArticle records.",
+      "test_refs": [
+        "content_factory/tests_hosted_articles.py",
+        "content_factory/tests_hosting_retirement_unit.py"
       ]
     }
   ]

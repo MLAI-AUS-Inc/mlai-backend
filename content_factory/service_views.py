@@ -8960,7 +8960,7 @@ def _merge_django_owned_run_request(existing_request, incoming_request, *, drift
     publish_owned = set()
     if isinstance(publish_approval, dict) and publish_approval.get("source") == "publish_reviewed":
         publish_owned = {"approved_body", "approved_body_sha256", "body_format", "approval", "new_run_id", "run_id",
-            "source_run_id", "source_revision", "hosted_site_id", "original_billing_source_run_id"}
+            "source_run_id", "source_revision", "original_billing_source_run_id"}
         for field in publish_owned:
             if field in existing and field in incoming and incoming[field] != existing[field]:
                 conflict = EditorialRunConflict("Worker snapshots cannot change the approved publish body or destination")

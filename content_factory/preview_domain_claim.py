@@ -62,7 +62,6 @@ from integrations.utils import normalize_domain
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun
 
-from .hosted_article_models import HostedArticleSite
 from .preview_domain_lists import (CC_SECOND_LEVEL, FREE_MAIL_BRANDS, FREE_MAIL_DOMAINS, REGIONAL_SECOND_LEVEL,
                                    RESERVED_TLDS, SHARED_HOST_BRANDS, SHARED_HOST_SUFFIXES,
                                    UNCLAIMABLE_ROOTS, UNCLAIMABLE_SECOND_LEVEL, UNCLAIMABLE_TLDS,
@@ -230,9 +229,6 @@ def _held_by_rival(host: str, records, **others) -> bool:
                for spelling in _spellings([registrable_domain(host)]))
 
 
-def _rival_hosted_site(host: str, organization) -> bool:
-    """Another organisation has an MLAI-hosted article site (operators create these) at this site, a parent or a child."""
-    return _held_by_rival(host, HostedArticleSite.objects, organization=organization)
 
 
 def _rival_website(host: str, organization) -> bool:
@@ -320,14 +316,8 @@ def claim_basis(run_id: str, host: str) -> str:
     run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     organization = _run_organization(run) if run is not None else None
     # A listed mail provider's own site is never a tenant's, whatever was saved as its website.
-    if (organization is None or not registrable_domain(host) or _under(host, FREE_MAIL_DOMAINS)
-            or _rival_hosted_site(host, organization)):
+    if (organization is None or not registrable_domain(host) or _under(host, FREE_MAIL_DOMAINS)):
         return NONE
-    # Operator-created sites and live-deployment receipts prove control by themselves.
-    sites = HostedArticleSite.objects.filter(
-        organization=organization, state__in=[HostedArticleSite.State.ACTIVE, HostedArticleSite.State.DRAFT])
-    if any(covers(domain, host) for domain in sites.values_list("domain", flat=True)):
-        return "hosted_site"
     if _deployment_proven(organization, host):
         return "website_connection"
     # The weak bases never claim a mail brand's site or one another organisation saved.

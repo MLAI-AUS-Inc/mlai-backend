@@ -788,7 +788,6 @@ jobs:
           content_factory.tests.test_p2_authority_events \
           content_factory.tests.test_p2_authority_lineage \
           content_factory.tests.test_p2_authority_repin \
-          content_factory.tests.test_p2_hosted_registration \
           content_factory.tests.test_p2_publish_reviewed \
           content_factory.tests_p2_merge_worker \
           content_factory.tests_p2_policy \
@@ -801,7 +800,6 @@ jobs:
           content_factory.tests_free_baseline_reservations \
           content_factory.tests_p3_website_check_boundaries \
           content_factory.tests_p3_dispatch_identity_boundary \
-          content_factory.tests_hosted_publish_authority \
           content_factory.tests_p3_improvements \
           roo.tests_startup_checkout_return \
           content_factory.tests_p2_runs \
