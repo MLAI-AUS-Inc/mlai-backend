@@ -31,7 +31,7 @@ from rest_framework.views import APIView
 from core.permissions import IsHealthHackAdmin
 from core.user_compat import get_compat_user_role
 
-if os.environ.get("DJANGO_SETTINGS_MODULE") not in {"mlai.settings_staging_chat", "mlai.settings_staging_local"}:
+if os.environ.get("DJANGO_SETTINGS_MODULE") not in {"mlai.settings_staging_chat", "mlai.settings_staging_local", "mlai.settings_staging_founder"}:
     load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)  
