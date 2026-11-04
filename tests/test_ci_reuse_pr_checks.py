@@ -1,7 +1,10 @@
+import ast
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
+
+import yaml
 
 from scripts.ci_reuse_pr_checks import (
     attestation_name,
@@ -117,11 +120,45 @@ class ReusePrChecksTests(TestCase):
 
         self.assertIn("validation-route:", workflow)
         self.assertNotIn("record-pr-validation:", workflow)
-        self.assertEqual(workflow.count("reuse_pr_checks != 'true'"), 3)
+        self.assertEqual(workflow.count("reuse_pr_checks != 'true'"), 4)
         self.assertIn("needs.validation-route.outputs.reuse_pr_checks == 'true'", workflow)
         self.assertIn("needs.checks.result == 'success'", workflow)
         self.assertIn("needs.postgres-search.result == 'success'", workflow)
         self.assertIn("needs.migration-tests.result == 'success'", workflow)
+        self.assertIn("needs.p2-performance.result == 'success'", workflow)
+
+    def test_isolated_tick_remains_a_required_release_gate_with_no_missing_tagged_cases(self):
+        root = Path(__file__).resolve().parents[1]
+        jobs = yaml.safe_load((root / '.github/workflows/deploy.yml').read_text())['jobs']
+        performance = jobs['p2-performance']
+        self.assertEqual(performance['services'], jobs['postgres-search']['services'])
+        self.assertEqual(performance['env'], jobs['postgres-search']['env'])
+        self.assertIn('p2-performance', jobs['deploy']['needs'])
+        self.assertIn("needs.p2-performance.result == 'success'", jobs['deploy']['if'])
+        command = performance['steps'][-1]['run']
+        cases = []
+        for path in root.rglob('test*.py'):
+            if any(part.startswith('.') for part in path.relative_to(root).parts):
+                continue
+            module = '.'.join(path.relative_to(root).with_suffix('').parts)
+            tree = ast.parse(path.read_text())
+            for parent in tree.body:
+                if not isinstance(parent, ast.ClassDef):
+                    continue
+                for node in parent.body:
+                    if not isinstance(node, ast.FunctionDef):
+                        continue
+                    if any(isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name)
+                           and decorator.func.id == 'tag' and any(isinstance(arg, ast.Constant)
+                           and arg.value == 'p2_performance' for arg in decorator.args)
+                           for decorator in node.decorator_list):
+                        cases.append(f'{module}.{parent.name}.{node.name}')
+        self.assertEqual(len(cases), 1)
+        self.assertIn(cases[0], command)
+        self.assertNotIn('--exclude-tag', command)
+        policy = next(step['run'] for step in jobs['postgres-search']['steps']
+                      if step.get('name') == 'Verify Founder recovery policy and authority on PostgreSQL')
+        self.assertIn('--exclude-tag=p2_performance', policy)
 
     def test_manual_dispatch_uses_full_checks_and_main_release_gate(self):
         workflow = (

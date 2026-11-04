@@ -6976,6 +6976,36 @@
         "content_factory/tests_p2_policy.py",
         "content_factory/tests_run_policy_retirement.py"
       ]
+    },
+    {
+      "path": "content_factory/founder_journey_alerts.py",
+      "function": "_postgres_receipt_update",
+      "function_sha256": "83105997a6d320f093ee0226cda30da3c716632100f97f38ecff439a9f61f96c",
+      "reason": "PostgreSQL-only atomic metadata merge is restricted to the config pillar_strategy and Run result ops_alerts namespaces. UPDATE locks and merges the current row, preserves unrelated JSON and activity/execution clocks, does not grant execution authority, and keeps config reservation and Run mirroring as separate phases. Existing config receipts are never replaced; missing configs and portable databases keep the original locked path.",
+      "test_refs": [
+        "content_factory/tests_p2_notify.py",
+        "content_factory/tests_founder_journey_alerts.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_journey_alerts.py",
+      "function": "_queue_org_receipt",
+      "function_sha256": "fc6ac9651d406a301db91c1a6c46796e5213ae43dfbf84314a9ec472c185a32b",
+      "reason": "A new PostgreSQL incident receipt is reserved by atomic conditional update of current config JSON. Existing/settled receipt identities and the missing-config get-or-create uniqueness fence are preserved by the original locked fallback. No cached configuration controls this write.",
+      "test_refs": [
+        "content_factory/tests_p2_notify.py",
+        "content_factory/tests_founder_journey_alerts.py"
+      ]
+    },
+    {
+      "path": "content_factory/founder_journey_alerts.py",
+      "function": "_mirror_run_receipt",
+      "function_sha256": "cebe95b305c0b2089245141a43641b92bfc660f4949afa61e6884fc03f1f53cf",
+      "reason": "Only the current Run ops_alerts reason is merged atomically on PostgreSQL; concurrent callback status, result keys and worker clocks remain untouched. The portable locked implementation and in-memory mirror behavior are preserved.",
+      "test_refs": [
+        "content_factory/tests_p2_notify.py",
+        "content_factory/tests_founder_journey_alerts.py"
+      ]
     }
   ],
   "removed_prior_sites": [
