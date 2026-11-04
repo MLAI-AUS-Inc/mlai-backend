@@ -79,6 +79,7 @@ class FounderJourneyOrg:
     company: object
     connection: Optional[object] = None
     target: Optional[object] = None
+    # Historical records remain in the legacy fixture to test retirement compatibility.
     hosted_site: Optional[object] = None
     runs: list = field(default_factory=list)
     articles: list = field(default_factory=list)

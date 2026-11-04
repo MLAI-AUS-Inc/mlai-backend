@@ -92,14 +92,8 @@ def _native_failed(org, connection, source):
 
 
 def hosted_rung_ready(organization):
-    """Only an enrolled, supported, source-bound native failure can reach hosted fallback."""
-    if not _enabled(organization):
-        return False
-    candidate = _candidate(organization)
-    if candidate is None:
-        return False
-    _, connection, source, _ = candidate
-    return _native_failed(organization, connection, source)
+    """Founder blogs are no longer a setup strategy."""
+    return False
 
 
 def _unclaimed(org, domain):
@@ -147,147 +141,18 @@ def _update_auto(site, **values):
 
 
 def _proxy(site, connection, config):
-    from .website_connections import contract_for
-    engine = importlib.import_module("content_factory.failure_policy_engine")
-    run_id = "hosted-proxy-"+site.pk.hex+"-"+str(connection.generation)
-    if not engine.claim_pull_request_slot(site.organization, key=run_id+":1"):
-        return False
-    request = {**contract_for(connection), "run_id": run_id, "domain": site.domain,
-               "hosted_site_id": str(site.pk), "worker_url": site.worker_url,
-               "github_repo": connection.github_repo, "merge_policy": "backend_worker"}
-    stamp_run_request(request, organization=site.organization)
-    from .run_ownership import (owner_receipt, reserve_admitted_run, scheduler_principal,
-                               seal_new_run_admission)
-    with transaction.atomic():
-        run, created = ContentFactoryRun.objects.get_or_create(run_id=run_id, defaults={"organization": site.organization,
-            "domain": site.domain, "github_repo": connection.github_repo, "workflow": "article_system_setup",
-            "status": "queued", "run_request": request})
-        if run.organization_id != site.organization_id:
-            return False
-        if created:
-            seal_new_run_admission(run, created=created, principal=scheduler_principal('hosted_auto_register'))
-        elif owner_receipt(run) is not None:
-            request['client_request_id'] = run.run_request['client_request_id']
-            reserve_admitted_run(organization=site.organization, principal=scheduler_principal('hosted_auto_register'),
-                workflow='article_system_setup', payload=request, reserved_run_id=run_id)
-        if owner_receipt(run) is not None:
-            request = dict(run.run_request)
-    value = _remote(f"/api/hosted-sites/{site.pk}/proxy-setup", request)
-    if value is None:
-        return False
-    _update_auto(site, proxy_run_id=run.run_id, proxy_requested_at=timezone.now().isoformat())
-    return True
+    """Old proxy requests are inert after blog retirement."""
+    return False
 
 
 def activate(site):
-    """Require the owner-approved merged proxy and this site's exact hosted response body."""
-    auto = mapping(mapping(site.profile).get("auto"))
-    run = ContentFactoryRun.objects.filter(run_id=auto.get("proxy_run_id"), organization=site.organization).first()
-    merge = mapping(mapping(getattr(run, "result", None)).get("merge_v1"))
-    click = mapping(mapping(getattr(run, "result", None)).get("owner_merge_approval_v1"))
-    if (not merge.get("merge_sha") or click.get("kind") != "proxy" or not click.get("approved_at")
-            or click.get("head_sha") != merge.get("head_sha")
-            or click.get("approved_by_user_id") != merge.get("approved_by_user_id")):
-        return False
-    worker = urlsplit(site.worker_url)
-    if (worker.scheme != "https" or not re.fullmatch(r"[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev", worker.hostname or "")
-            or worker.path not in {"", "/"} or worker.query or worker.fragment or worker.username or worker.password or worker.port not in {None, 443}):
-        return False
-    try:
-        customer, headers = fetch_live_route(f"https://{site.domain}/blog/", site.domain)
-        own, _ = fetch_live_route(site.worker_url.rstrip("/")+"/blog/", worker.hostname)
-    except (WebsiteAuthorityError, ValueError):
-        return False
-    if headers.get("x-mlai-hosted") != "1" or hashlib.sha256(customer).digest() != hashlib.sha256(own).digest():
-        return False
-    with transaction.atomic():
-        Organization.objects.select_for_update().get(pk=site.organization_id)
-        current = HostedArticleSite.objects.select_for_update().get(pk=site.pk)
-        current_run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
-        current_click = mapping(mapping(current_run.result).get("owner_merge_approval_v1"))
-        current_merge = mapping(mapping(current_run.result).get("merge_v1"))
-        from founder_tools.services import organization_owner_user_id
-        if (current_click != click or current_merge != merge or organization_owner_user_id(site.organization) != click.get("approved_by_user_id")):
-            return False
-        if current.worker_url != site.worker_url or current.organization_id != site.organization_id or not _unclaimed(site.organization, site.domain):
-            return False
-        try:
-            hosted.require_current_publish_rights(site.organization, click.get("approved_by_user_id"))
-        except hosted.HostedPublishError:
-            return False
-        current.state = HostedArticleSite.State.ACTIVE
-        current.proxy_verified_at = timezone.now()
-        current.save(update_fields=["state", "proxy_verified_at", "updated_at"])
-    return True
+    """Retired sites cannot be activated, even by an old in-flight sweep."""
+    return False
 
 
 def run_hosted_sweep(now=None, limit=None):
-    """Create draft sites, deploy their immutable scaffold, request consent-bound proxy, activate."""
-    if not getattr(settings, "ARTICLES_HOSTED_AUTO_REGISTER_ENABLED", False):
-        return {"status": "disabled"}
-    now = now or timezone.now()
-    result = {"registered": 0, "proxy_requested": 0, "activated": 0}
-    allowed = {part.strip().lower() for part in str(getattr(settings, "ARTICLES_HOSTED_RUNG_ORGANIZATIONS", "")).split(",") if part.strip()}
-    ids = [int(part) for part in allowed if part.isdecimal() and len(part) <= 18]
-    domains = [part for part in allowed if not part.isdecimal()]
-    for org in Organization.objects.filter(Q(pk__in=ids) | Q(domain__in=domains)).order_by("pk")[:max(1, int(limit or 500))]:
-        if not _enabled(org):
-            continue
-        existing = HostedArticleSite.objects.filter(organization=org).first()
-        if existing and not mapping(mapping(existing.profile).get("auto")):
-            continue  # Existing sites, PawShare included, are never rewritten or activated here.
-        if existing is None:
-            candidate = _candidate(org)
-            if candidate is None:
-                continue
-            config, connection, source, framework = candidate
-            if not _unclaimed(org, public_host(org.domain)) or not _native_failed(org, connection, source):
-                continue
-            with transaction.atomic():
-                Organization.objects.select_for_update().get(pk=org.pk)
-                if HostedArticleSite.objects.filter(organization=org).exists() or not _unclaimed(org, public_host(org.domain)):
-                    continue
-                fresh = _candidate(org)
-                if fresh is None or fresh[1].pk != connection.pk or fresh[1].generation != connection.generation or fresh[2] != source:
-                    continue
-                existing, created = hosted.register_site(organization=org, profile=_profile(org, connection, source, framework), update_existing=False)
-                result["registered"] += int(created)
-        else:
-            config = OrganizationContentConfig.objects.select_related("website_connection").filter(organization=org).first()
-            connection = config.website_connection if config else None
-            auto = mapping(mapping(existing.profile).get("auto"))
-            if (connection is None or connection.state != "connected" or str(connection.pk) != auto.get("connection_id")
-                    or connection.generation != auto.get("generation") or connection.configuration_version != auto.get("configuration_version") or not _unclaimed(org, existing.domain)):
-                continue
-        if existing.state != HostedArticleSite.State.DRAFT:
-            continue
-        auto = mapping(mapping(existing.profile).get("auto"))
-        if not existing.worker_url:
-            # The site must exist before the builder can read its immutable recipe.
-            try:
-                attempted = parse_datetime(auto.get("build_last_attempt_at", ""))
-            except ValueError:
-                attempted = None
-            if attempted and timezone.is_aware(attempted) and attempted > now-timedelta(minutes=10):
-                continue
-            attempts = auto.get("build_attempts", 0)
-            attempts = attempts if type(attempts) is int and attempts >= 0 else 0
-            if attempts >= 6:
-                from .founder_journey_alerts import queue_founder_journey_alert
-                queue_founder_journey_alert(organization=org, alert_reason="self_heal_capped", slot="hosted-"+existing.pk.hex)
-                continue
-            _update_auto(existing, build_attempts=attempts+1, build_last_attempt_at=now.isoformat())
-            if _remote("/api/hosted-sites/sync", {"domain": existing.domain}) is not None:
-                _update_auto(existing, build_requested_at=now.isoformat())
-            continue
-        if not auto.get("proxy_run_id"):
-            try:
-                result["proxy_requested"] += int(_proxy(existing, connection, config))
-            except (ImportError, AttributeError):
-                pass
-        else:
-            result["activated"] += int(activate(existing))
-    return {"status": "completed", **result}
+    """Compatibility seam for old scheduler invocations; no reads or writes."""
+    return {"status": "retired"}
 
 
 def publish_via_hosted(run, *, retry=False):

@@ -62,7 +62,8 @@ class HostedPublishAuthorityTests(TransactionTestCase):
         return self.fixture.config.pillar_strategy['startup_team']
 
     def approve(self, user=None):
-        return hosted.request_publication(site=self.site, run=self.child, user=user or self.member, allow_continuation=True)
+        # Seed an already admitted pre-retirement publication for callback tests.
+        return HostedArticlePublication.objects.get_or_create(site=self.site, run_id=self.child.run_id, defaults={"requested_by": user or self.member})[0]
 
     def progress(self, **data):
         return hosted.record_progress(domain=self.site.domain, run_id=self.child.run_id, data=data)
@@ -107,17 +108,22 @@ class HostedPublishAuthorityTests(TransactionTestCase):
         self.assertFalse(teams.member_may_publish(self.owner, self.org))
         self.assert_refused_unchanged(self.rendering)
 
-    def test_stale_user_and_site_instances_do_not_bypass_new_admission(self):
+    def test_stale_instances_cannot_start_retired_publications(self):
         get_user_model().objects.filter(pk=self.member.pk).update(is_active=False)
-        self.assert_refused_unchanged(self.approve)
-        get_user_model().objects.filter(pk=self.member.pk).update(is_active=True)
-        HostedArticleSite.objects.filter(pk=self.site.pk).update(state='paused')
-        with self.assertRaises(hosted.HostedPublishError): self.approve()
+        for state in ('active', 'paused'):
+            HostedArticleSite.objects.filter(pk=self.site.pk).update(state=state)
+            with self.assertRaises(hosted.HostedPublishError) as refused:
+                hosted.request_publication(site=self.site, run=self.child, user=self.member, allow_continuation=True)
+            self.assertEqual((refused.exception.status, refused.exception.reason), (410, 'hosting_retired'))
         self.assertFalse(HostedArticlePublication.objects.exists())
 
-    def test_another_current_publisher_cannot_adopt_the_original_approvers_child(self):
+    def test_another_publisher_cannot_restart_an_old_publication(self):
         self.approve()
-        self.assert_refused_unchanged(lambda: self.approve(self.owner))
+        before = self.snapshot()
+        with self.assertRaises(hosted.HostedPublishError) as refused:
+            hosted.request_publication(site=self.site, run=self.child, user=self.owner, allow_continuation=True)
+        self.assertEqual(refused.exception.reason, 'hosting_retired')
+        self.assertEqual(self.snapshot(), before)
 
     def test_cancelled_child_cannot_be_revived_by_late_hosted_callbacks(self):
         self.approve(); self.rendering()

@@ -321,7 +321,7 @@ class PolicyTests(TransactionTestCase):
         goal = operation.receipt['goal']
         with fake_provider('content_factory.hosted_auto_register', hosted_rung_ready=lambda org: True):
             next_goal = strategy.advance(goal, source='a' * 40, now=self.now, reason='strategy_exhausted', organization=self.org)
-        self.assertEqual(next_goal['strategy_pin']['rung'], 'hosted')
+        self.assertEqual(next_goal['strategy_pin']['rung'], 'deterministic')
         with fake_provider('content_factory.hosted_auto_register', hosted_rung_ready=lambda org: False):
             next_goal = strategy.advance(goal, source='a' * 40, now=self.now, reason='strategy_exhausted', organization=self.org)
         self.assertEqual(next_goal['strategy_pin']['rung'], 'deterministic')

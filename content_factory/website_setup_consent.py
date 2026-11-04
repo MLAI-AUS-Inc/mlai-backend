@@ -13,10 +13,9 @@ def enabled(organization_id):
 
 def required_grants(*, channel="repository", ci_mode="hosted", strategy=None):
     """Compute the complete selected-channel grant set before dispatching writes."""
-    if strategy is not None and (not isinstance(strategy,str) or strategy not in {"adopt","native_collection","deterministic","model_adapter","agent","hosted"}):
+    if strategy is not None and (not isinstance(strategy,str) or strategy not in {"adopt","native_collection","deterministic","model_adapter","agent"}):
         raise ValueError("Unknown articles strategy")
-    if strategy == "hosted":channel = "hosted"
-    if not isinstance(channel,str) or not isinstance(ci_mode,str) or channel not in {"repository","hosted","wordpress","ghost"} or ci_mode not in {"hosted","repository"}:
+    if not isinstance(channel,str) or not isinstance(ci_mode,str) or channel not in {"repository","wordpress","ghost"} or ci_mode not in {"hosted","repository"}:
         raise ValueError("Unknown articles channel or verification mode")
     if channel!="repository":return {}
     result={"contents":"write","pull_requests":"write"}

@@ -3027,6 +3027,7 @@
       },
       "owner": "backend.articles",
       "refund": true,
+      "retired": true,
       "retry_policy": "observe_wait",
       "user_message": "We are waiting for your website to connect to your blog."
     },

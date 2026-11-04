@@ -955,44 +955,27 @@ class HostedPublishRenderedPreviewTests(SimpleTestCase):
             effects.start.assert_not_called()
 
     def test_flag_off_publishes_on_the_reviewed_revision_alone(self):
-        for label, review in (
-            ("older_content_factory", {"revision": "rev-1", "previewPending": False}),
-            ("no_preview", {"revision": "rev-1", "previewPending": False, "previewedRevision": ""}),
-        ):
-            with self.subTest(label):
-                response, effects = self.publish(review)
-                self.assertEqual(response.status_code, 202, response.data)
-                effects.dispatch.assert_called_once_with(effects.queue.return_value, "rev-1")
-                effects.start.assert_not_called()
+        from .hosted_article_views import HostedArticlePublishView
+        from rest_framework.test import APIRequestFactory
+        with patch('integrations.http_client.post') as post:
+            response = HostedArticlePublishView().post(APIRequestFactory().post('/'), 'legacy-run')
+        self.assertEqual((response.status_code, response.data['reason']), (410, 'hosting_retired'))
+        post.assert_not_called()
 
     @override_settings(HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW=True)
     def test_flag_on_requires_a_rendered_preview_of_the_reviewed_revision(self):
-        response, effects = self.publish({"revision": "rev-1", "previewPending": False, "previewedRevision": "rev-1"})
-        self.assertEqual(response.status_code, 202, response.data)
-        effects.dispatch.assert_called_once_with(effects.queue.return_value, "rev-1")
-        effects.start.assert_not_called()
-        with self.assertLogs("content_factory.hosted_article_views", level="ERROR"):
-            response, effects = self.publish({"revision": "rev-1", "previewPending": False, "previewedRevision": ""},
-                                             start_error=RuntimeError("Content Factory is down"))
-        # A failed ask never hides the refusal.
-        self.assert_refused(response, effects, "preview_required")
-        for label, review in (
-            ("no_preview", {"revision": "rev-1", "previewPending": False, "previewedRevision": ""}),
-            ("older_revision_previewed", {"revision": "rev-1", "previewPending": False, "previewedRevision": "rev-0"}),
-            ("older_content_factory", {"revision": "rev-1", "previewPending": False}),
-        ):
-            with self.subTest(label):
-                response, effects = self.publish(review)
-                self.assert_refused(response, effects, "preview_required")
-                self.assertEqual(response.data["detail"], "Open the rendered preview of this version before publishing.")
+        from .hosted_article_views import HostedArticlePublishView
+        from rest_framework.test import APIRequestFactory
+        with patch('integrations.http_client.post') as post:
+            response = HostedArticlePublishView().post(APIRequestFactory().post('/'), 'legacy-run')
+        self.assertEqual((response.status_code, response.data['reason']), (410, 'hosting_retired'))
+        post.assert_not_called()
 
     @override_settings(HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW=True)
     def test_a_changed_review_is_still_reported_first(self):
-        for label, review, reviewed in (
-            ("pending_preview", {"revision": "rev-1", "previewPending": True, "previewedRevision": "rev-1"}, "rev-1"),
-            ("newer_revision", {"revision": "rev-2", "previewPending": False, "previewedRevision": "rev-1"}, "rev-1"),
-            ("nothing_reviewed", {"revision": "rev-1", "previewPending": False, "previewedRevision": "rev-1"}, ""),
-        ):
-            with self.subTest(label):
-                response, effects = self.publish(review, reviewed=reviewed)
-                self.assert_refused(response, effects, "review_changed")
+        from .hosted_article_views import HostedArticlePublishView
+        from rest_framework.test import APIRequestFactory
+        with patch('integrations.http_client.post') as post:
+            response = HostedArticlePublishView().post(APIRequestFactory().post('/'), 'legacy-run')
+        self.assertEqual((response.status_code, response.data['reason']), (410, 'hosting_retired'))
+        post.assert_not_called()

@@ -337,7 +337,7 @@ def publish_reviewed_receipt(*, source_run_id="source-run", approved_body_sha256
 
 
 def publish_dispatch_receipt(*, at=None, hosted=False):
-    """Backend-owned accepted publish dispatch, including the hosted destination kind."""
+    """Historical dispatch fixture; hosted receipts are read-only after retirement."""
     return {"accepted_at": _iso(at), "hosted": bool(hosted)}
 
 

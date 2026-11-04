@@ -107,7 +107,8 @@ class HostedArticlePublishView(APIView):
         run = ContentFactoryRun.objects.filter(run_id=run_id).first()
         if run is None or not views._run_belongs_to_context(run, context):
             return None, None, None, Response({"detail": "Run not found."}, status=404)
-        site = hosted.active_site(context.organization)
+        sites = HostedArticleSite.objects.filter(organization=context.organization)
+        site = sites.filter(publications__run_id=run.run_id).first() or sites.filter(domain=hosted.normalized_domain(run.domain)).first()
         if site is None:
             return None, None, None, Response({"reason": "hosted_site_not_active",
                 "detail": "Hosted publishing is not switched on for this website."}, status=409)
@@ -123,46 +124,4 @@ class HostedArticlePublishView(APIView):
         return Response(hosted.publication_payload(publication))
 
     def post(self, request, run_id):
-        """Approve the reviewed revision exactly as the repository flow does, then publish it."""
-        from .article_review_views import check_approval_comments, record_review_approval, remote_review
-        from .portable_drafts import original_portable_run
-        context, run, site, error = self._resolve(request, run_id)
-        if error:
-            return error
-        if run.workflow not in views.ARTICLE_WORKFLOWS or not original_portable_run(run):
-            return Response({"reason": "not_a_hosted_article", "detail": "Only articles written for your hosted blog can be published there."}, status=400)
-        if views._latest_review_ready_component_revision(run, context) is not None:
-            return Response({"reason": "newer_revision", "detail": "A newer draft is ready. Open that revision before publishing."}, status=409)
-        data = request.data if isinstance(request.data, dict) else {}
-        review = remote_review(run)
-        if isinstance(review, Response):
-            return review
-        reviewed = str(data.get("reviewedRevision") or "")
-        if not reviewed or reviewed != str(review.get("revision") or "") or review.get("previewPending"):
-            return Response({"reason": "review_changed", "detail": "The article changed since you reviewed it. Review it again before publishing."}, status=409)
-        if (getattr(settings, "HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW", False) is True
-                and str(review.get("previewedRevision") or "") != reviewed):
-            # Content Factory names the revision its current rendered preview
-            # shows. A Content Factory without that field fails closed, and
-            # its preview ladder is asked for this revision's preview.
-            try:
-                views._start_portable_preview_of_unpreviewed_revision(run)
-            except Exception:
-                logger.exception("hosted_publish_preview_start_failed run_id=%s", run.run_id)
-            return Response({"reason": "preview_required", "detail": "Open the rendered preview of this version before publishing."}, status=409)
-        blocked = check_approval_comments(run, data)
-        if blocked is not None:
-            return blocked
-        try:
-            publication = hosted.request_publication(site=site, run=run, user=getattr(context.profile, "user", None))
-        except hosted.HostedPublishError as exc:
-            return _error(exc)
-        record_review_approval(run, context, data)
-        dispatch = _dispatch_hosted_publish(publication, reviewed)
-        if not dispatch["queued"]:
-            hosted.record_progress(domain=site.domain, run_id=run.run_id,
-                                   data={"status": "failed", "failure_reason": "hosted_dispatch_failed", "error": dispatch["error"]})
-            publication.refresh_from_db()
-            logger.warning("hosted_publish_dispatch_failed run_id=%s", run.run_id)
-            return Response(hosted.publication_payload(publication), status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        return Response(hosted.publication_payload(publication), status=status.HTTP_202_ACCEPTED)
+        return Response({"reason": "hosting_retired", "detail": "MLAI no longer hosts blogs. Publish this article to your own website."}, status=410)

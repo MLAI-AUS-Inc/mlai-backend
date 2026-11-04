@@ -47,7 +47,7 @@ class SweepRunnerTests(SimpleTestCase):
 
     def test_the_sweep_table(self):
         self.assertEqual([name for name, _, _ in self_heal_sweeps.SWEEPS], [
-            "failure_policy", "no_delivery_refunds", "merge_worker", "deployment_watch", "hosted_auto_register",
+            "failure_policy", "no_delivery_refunds", "merge_worker", "deployment_watch",
             "founder_transitions", "team_requests", "staff_alert_rules", "self_heal_report"])
 
     def test_missing_raising_and_flag_off_runners_are_isolated_in_order(self):

@@ -66,47 +66,30 @@ class HostedArticleTests(TestCase):
 
     def test_the_owner_queues_a_finished_article_and_content_factory_is_asked_to_publish_it(self):
         response, post = self.publish()
-        self.assertEqual(response.status_code, 202, response.data)
-        publication = HostedArticlePublication.objects.get(site=self.site, run_id=self.run.run_id)
-        self.assertEqual(publication.status, "pending")
-        self.assertEqual(publication.requested_by, self.user)
-        self.assertEqual(post.call_args.args[0], "https://cf.test/api/runs/hosted-run/hosted-publish")
-        self.assertEqual(post.call_args.kwargs["json"], {"domain": self.site.domain, "base_path": "/blog/", "publication_id": str(publication.pk),
-                                                          "reviewed_revision": "rev-1"})
-        self.run.refresh_from_db()
-        self.assertEqual(self.run.result["article_review_approval"]["revision"], "rev-1")
+        self.assertEqual((response.status_code, response.data['reason']), (410, 'hosting_retired'))
+        post.assert_not_called()
+        self.assertFalse(HostedArticlePublication.objects.exists())
 
     def test_publishing_needs_the_current_reviewed_revision_and_a_repo_free_article(self):
-        for reviewed, review in (("", None), ("rev-0", None), ("rev-1", {"revision": "rev-1", "previewPending": True})):
-            response, post = self.publish(reviewed=reviewed, review=review)
-            self.assertEqual((response.status_code, response.data["reason"]), (409, "review_changed"))
-            post.assert_not_called()
-        self.run.run_request = {"delivery_mode": "review_draft"}
-        self.run.save(update_fields=["run_request"])
         response, post = self.publish()
-        self.assertEqual((response.status_code, response.data["reason"]), (400, "not_a_hosted_article"))
+        self.assertEqual((response.status_code, response.data['reason']), (410, 'hosting_retired'))
+        post.assert_not_called()
         self.assertFalse(HostedArticlePublication.objects.exists())
 
     def test_a_content_factory_outage_is_reported_and_recorded(self):
-        response, _ = self.publish(dispatch_status=500)
-        self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.data["status"], "failed")
-        self.assertEqual(response.data["failureReason"], "hosted_dispatch_failed")
+        response, post = self.publish()
+        self.assertEqual((response.status_code, response.data['reason']), (410, 'hosting_retired'))
+        post.assert_not_called()
+        self.assertFalse(HostedArticlePublication.objects.exists())
 
     def test_unfinished_articles_and_sites_without_hosting_cannot_publish(self):
-        self.run.status = "running"
-        self.run.save(update_fields=["status"])
         response, post = self.publish()
-        self.assertEqual((response.status_code, response.data["reason"]), (409, "article_not_ready"))
+        self.assertEqual((response.status_code, response.data['reason']), (410, 'hosting_retired'))
         post.assert_not_called()
-        self.site.state = "paused"
-        self.site.save(update_fields=["state"])
-        response, post = self.publish()
-        self.assertEqual((response.status_code, response.data["reason"]), (409, "hosted_site_not_active"))
-        post.assert_not_called()
+        self.assertFalse(HostedArticlePublication.objects.exists())
 
     def test_render_upload_and_live_check_make_the_article_live(self):
-        hosted.request_publication(site=self.site, run=self.run, user=self.user)
+        HostedArticlePublication.objects.get_or_create(site=self.site, run_id=self.run.run_id, defaults={"requested_by": self.user})[0]
         self.progress(status="rendering", article=article(), revision_digest=DIGEST)
         self.progress(status="deployed", deployment={"worker_name": "mlai-blog-x", "url": "https://mlai-blog-x.mlai.workers.dev", "manifest_digest": "m" * 64})
         publication = self.progress(status="live", verified_digest=DIGEST)
@@ -123,7 +106,7 @@ class HostedArticleTests(TestCase):
         self.assertEqual([row["slug"] for row in state["publications"]], ["dog-friendly-cafes"])
 
     def test_a_live_page_without_this_revision_and_out_of_order_reports_are_refused(self):
-        hosted.request_publication(site=self.site, run=self.run, user=self.user)
+        HostedArticlePublication.objects.get_or_create(site=self.site, run_id=self.run.run_id, defaults={"requested_by": self.user})[0]
         with self.assertRaises(hosted.HostedPublishError) as stale:
             self.progress(status="live", verified_digest=DIGEST)
         self.assertEqual(stale.exception.reason, "hosted_status_stale")
@@ -138,7 +121,7 @@ class HostedArticleTests(TestCase):
         other = ContentFactoryRun.objects.create(run_id="other-run", domain=self.org.domain, organization=self.org,
                                                  workflow="direct_generate", status="completed", github_repo="", result={})
         for run in (self.run, other):
-            hosted.request_publication(site=self.site, run=run, user=self.user)
+            HostedArticlePublication.objects.get_or_create(site=self.site, run_id=run.run_id, defaults={"requested_by": self.user})[0]
         self.progress(status="rendering", article=article(), revision_digest=DIGEST)
         with self.assertRaises(hosted.HostedPublishError) as taken:
             hosted.record_progress(domain=self.site.domain, run_id=other.run_id,
@@ -146,10 +129,11 @@ class HostedArticleTests(TestCase):
         self.assertEqual(taken.exception.reason, "hosted_slug_taken")
 
     def test_a_live_article_keeps_its_last_revision_while_a_republish_is_queued_or_fails(self):
-        hosted.request_publication(site=self.site, run=self.run, user=self.user)
+        HostedArticlePublication.objects.get_or_create(site=self.site, run_id=self.run.run_id, defaults={"requested_by": self.user})[0]
         self.progress(status="rendering", article=article(), revision_digest=DIGEST)
         self.progress(status="live", verified_digest=DIGEST)
-        hosted.request_publication(site=self.site, run=self.run, user=self.user)
+        HostedArticlePublication.objects.get_or_create(site=self.site, run_id=self.run.run_id, defaults={"requested_by": self.user})[0]
+        HostedArticlePublication.objects.filter(site=self.site, run_id=self.run.run_id).update(status="pending")
         self.assertEqual([row["status"] for row in hosted.site_render_state(self.site)["publications"]], ["pending"])
         self.progress(status="rendering")
         self.progress(status="failed", failure_reason="cloudflare_refused")
@@ -162,7 +146,7 @@ class HostedArticleTests(TestCase):
         response = HostedArticleSiteServiceView.as_view()(request)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["basePath"], "/blog/")
-        hosted.request_publication(site=self.site, run=self.run, user=self.user)
+        HostedArticlePublication.objects.get_or_create(site=self.site, run_id=self.run.run_id, defaults={"requested_by": self.user})[0]
         request = self.factory.put("/synthetic", {"domain": self.site.domain, "status": "rendering", "article": article(),
                                                   "revision_digest": DIGEST}, format="json", HTTP_X_API_KEY=KEY)
         response = HostedArticlePublicationServiceView.as_view()(request, run_id=self.run.run_id)
@@ -176,37 +160,16 @@ class HostedArticleSiteLifecycleTests(TestCase):
         self.factory = APIRequestFactory()
 
     def test_a_site_is_registered_as_draft_deployed_then_activated(self):
-        import json
-        import tempfile
         from io import StringIO
-
         from django.core.management import call_command
         from django.core.management.base import CommandError
-
-        build = {"registry_path": "src/articles/articles.json", "body_dir": "src/articles/content",
-                 "build_command": ["npm", "run", "build"], "output_dir": "dist", "publish_prefix": "blog/"}
-        profile = {"domain": self.org.domain, "base_path": "/blog/", "build": {**build, "build_command": "npm run build"}}
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-            json.dump(profile, fh)
-        with self.assertRaises(CommandError):
-            call_command("hosted_article_site", "register", self.org.domain, profile=fh.name, stdout=StringIO())
-        with open(fh.name, "w") as rewrite:
-            json.dump({**profile, "build": build}, rewrite)
-        call_command("hosted_article_site", "register", "https://www." + self.org.domain, profile=fh.name, stdout=StringIO())
-        site = HostedArticleSite.objects.get(domain=self.org.domain)
-        self.assertEqual((site.state, site.organization, site.profile["build"]), ("draft", self.org, build))
-        with self.assertRaises(CommandError):
-            call_command("hosted_article_site", "activate", self.org.domain, stdout=StringIO())
-        request = self.factory.put("/synthetic", {"domain": self.org.domain, "proxy_verified": True,
-            "deployment": {"worker_name": "mlai-blog-y", "url": "https://mlai-blog-y.mlai.workers.dev", "manifest_digest": "m" * 64}},
-            format="json", HTTP_X_API_KEY=KEY)
-        self.assertEqual(HostedArticleSiteServiceView.as_view()(request).status_code, 200)
+        for action in ('register', 'activate'):
+            with self.assertRaises(CommandError):
+                call_command('hosted_article_site', action, self.org.domain, stdout=StringIO())
+        site = HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain, state='active')
+        call_command('hosted_article_site', 'pause', self.org.domain, stdout=StringIO())
         site.refresh_from_db()
-        self.assertEqual(site.worker_url, "https://mlai-blog-y.mlai.workers.dev")
-        self.assertIsNotNone(site.proxy_verified_at)
-        call_command("hosted_article_site", "activate", self.org.domain, stdout=StringIO())
-        site.refresh_from_db()
-        self.assertEqual(site.state, "active")
+        self.assertEqual(site.state, 'paused')
 
 
 @override_settings(ROO_API_KEY=KEY, INTERNAL_API_KEY=KEY, ARTICLES_HOSTED_SITES_ENABLED=True)
@@ -295,43 +258,23 @@ class HostedArticleGateTests(TestCase):
         self.site = HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain, state="draft", worker_url="https://w.test")
 
     def test_only_an_active_hosted_site_turns_a_connected_website_into_repo_free_publishing(self):
-        from .activation import article_capabilities
         from .portable_drafts import has_connected_website, website_preview_delivery_mode
         from .vibe_marketing_views import _effective_article_delivery_mode
-
-        self.assertTrue(has_connected_website(self.config))
-        self.assertEqual(website_preview_delivery_mode(self.config, "content_only"), "review_draft")
-        self.assertFalse(hosted.hosted_capabilities(self.config)["canPublishHostedArticle"])
-        self.site.state = "active"
-        self.site.save(update_fields=["state"])
-        self.assertFalse(has_connected_website(self.config))
-        self.assertEqual(website_preview_delivery_mode(self.config, "content_only"), "content_only")
-        self.assertEqual(_effective_article_delivery_mode(self.config), "content_only")
-        caps = hosted.hosted_capabilities(self.config)
-        self.assertEqual(caps, {"canPublishHostedArticle": True, "hostedSite": {"state": "active", "baseUrl": "https://gates.example.test/blog/", "proxyVerified": False}})
-        with patch("content_factory.activation.get_content_factory_content_island_topic_cost_points", return_value=1), \
-             patch("content_factory.activation.get_content_factory_article_cost_points", return_value=1):
-            projected = article_capabilities(self.config, domain=self.org.domain)
-        self.assertTrue(projected["canPublishHostedArticle"])
-        self.assertFalse(projected["canPublishArticle"])
+        for state in ('draft', 'active', 'paused', 'retired'):
+            self.site.state = state
+            self.site.save(update_fields=['state'])
+            self.assertTrue(has_connected_website(self.config))
+            self.assertEqual(website_preview_delivery_mode(self.config, 'content_only'), 'review_draft')
+            self.assertEqual(_effective_article_delivery_mode(self.config), 'review_draft')
+            self.assertEqual(hosted.hosted_capabilities(self.config), {})
 
     def test_the_publish_step_follows_the_hosted_publication(self):
-        self.site.state = "active"
-        self.site.save(update_fields=["state"])
-        run = ContentFactoryRun.objects.create(run_id="gate-run", domain=self.org.domain, organization=self.org, workflow="direct_generate",
-                                               status="completed", github_repo="", result={},
-                                               run_request={"delivery_mode": "content_only", "delivery_mode_confirmed": True})
-        step = hosted.hosted_publish_step(run, self.config)
-        self.assertEqual((step["status"], step["intent"], step["label"]), ("ready", "hosted-publish", "Publish article"))
-        publication = HostedArticlePublication.objects.create(site=self.site, run_id=run.run_id, slug="a-story", status="deployed")
-        self.assertEqual(hosted.hosted_publish_step(run, self.config)["status"], "running")
-        publication.status = "live"
-        publication.save(update_fields=["status"])
-        live = hosted.hosted_publish_step(run, self.config)
-        self.assertEqual((live["status"], live["href"]), ("complete", "https://gates.example.test/blog/a-story/"))
-        repo_run = ContentFactoryRun.objects.create(run_id="repo-run", domain=self.org.domain, organization=self.org, workflow="direct_generate",
-                                                    status="completed", github_repo="example/site", result={}, run_request={"delivery_mode": "review_draft"})
-        self.assertIsNone(hosted.hosted_publish_step(repo_run, self.config))
+        self.site.state = 'active'
+        self.site.save(update_fields=['state'])
+        run = ContentFactoryRun.objects.create(run_id='legacy', organization=self.org, domain=self.org.domain)
+        HostedArticlePublication.objects.create(site=self.site, run_id=run.run_id, slug='saved', status='live')
+        self.assertIsNone(hosted.hosted_publish_step(run, self.config))
+        self.assertEqual(hosted.publication_payload(self.site.publications.get())['liveUrl'], 'https://gates.example.test/blog/saved/')
 
 
 class HostedArticleRolloutTests(TestCase):

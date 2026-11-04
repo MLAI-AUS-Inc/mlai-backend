@@ -10,7 +10,7 @@ CREDENTIAL_PREFIX = re.compile(r"(?:sk-|xox[baprs]-|AKIA|ASIA)")
 ID = re.compile(r"[A-Za-z0-9_.:-]{1,100}")
 CODE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}")
 STATES = {"pending", "running", "queued", "waiting", "awaiting_approval", "code_review_ready", "completed", "failed", "blocked", "cancelled", "denied", "needs_user", "needs_attention", "deleted", "stopped"}
-RUNGS = {"adopt", "native_collection", "deterministic", "model_adapter", "agent", "hosted"}
+RUNGS = {"adopt", "native_collection", "deterministic", "model_adapter", "agent"}
 REASONS = {"inventory_selected", "source_changed", "strategy_exhausted", "fingerprint_guard", "inventory_exhausted"}
 
 

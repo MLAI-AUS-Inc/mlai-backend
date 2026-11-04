@@ -1,4 +1,5 @@
 {
+  "$comment": "HOSTED_PROXY_UNVERIFIED is retired; accepted only for historical publication reports. Preview failure codes remain active.",
   "$id": "urn:mlai:articles:failure:v1",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,

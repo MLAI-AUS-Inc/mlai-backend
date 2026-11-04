@@ -1,7 +1,6 @@
 """Preserve a draft when website delivery has exhausted its safe recovery paths."""
 from __future__ import annotations
 
-import importlib
 from datetime import timedelta
 from uuid import uuid4
 
@@ -22,29 +21,27 @@ def _enabled(organization):
 
 
 def _hosted(run):
-    from .hosted_articles import active_site
-    if active_site(run.organization) is None:
-        return None
-    try:
-        publish = getattr(importlib.import_module('content_factory.hosted_auto_register'), 'publish_via_hosted')
-    except (ImportError, AttributeError):
-        return None
-    try:
-        return publish(run)
-    except ValueError:
-        # No current article-publish consent: retain a portable draft rather
-        # than turn setup consent into an article publication permission.
-        return None
+    """Retired hosting never intercepts copy-ready delivery."""
+    return None
 
 
 def switch_to_copy_ready(*, run, reason, now=None):
     """Switch the same run's delivery without replacing its consent or billing."""
-    if not _enabled(run.organization):
+    def allowed(current):
+        if _enabled(current.organization):
+            return True
+        if reason != "hosting_retired":
+            return False
+        from .hosted_article_models import HostedArticlePublication
+        from django.db.models import Q
+        return HostedArticlePublication.objects.filter(site__organization=current.organization).filter(
+            Q(run_id=current.run_id) | Q(written_article__source_run_id=current.run_id)).exists()
+    if not allowed(run):
         return {'status': 'refused', 'detail': 'Not available yet.'}
     now = now or timezone.now()
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update(of=('self',)).select_related('organization').get(pk=run.pk)
-        if not _enabled(current.organization) or current.status in {'cancelled', 'denied'}:
+        if not allowed(current) or current.status in {'cancelled', 'denied'}:
             return {'status': 'refused', 'detail': 'This article cannot change delivery.'}
         old = mapping(mapping(current.result).get('channel_v1'))
         if old.get('version') == 1 and old.get('dispatch_state') == 'accepted':
@@ -58,26 +55,21 @@ def switch_to_copy_ready(*, run, reason, now=None):
         ContentFactoryRun.objects.filter(pk=current.pk).update(result={**mapping(current.result), 'channel_v1': receipt})
     # CF receives a delivery intent, never a rewritten portable authority tuple.
     # It retains saved body/spec and only replaces remaining delivery steps.
-    hosted = _hosted(current)
-    if isinstance(hosted, dict) and hosted.get('status') not in {'refused', 'blocked', 'failed', 'unavailable'}:
-        receipt['channel'] = 'hosted'
-        receipt['dispatch_state'] = 'accepted'
-    else:
-        from .founder_draft_views import is_delivered_content_only
-        if not is_delivered_content_only(current):
-            from .vibe_marketing_views import _call_content_factory_run_action
-            response = _call_content_factory_run_action(run_id=current.run_id, workflow=current.workflow, action='resume',
-                payload={'channel_switch': {'delivery_mode': 'content_only', 'key': f'{current.run_id}:copy-ready'}},
-                transport_errors_are_pending=True, preserve_run_clock=True)
-            acknowledgement = mapping(mapping(response).get('channel_switch'))
-            if (type(acknowledgement.get('version')) is int and acknowledgement['version'] == 1
-                    and acknowledgement.get('run_id') == current.run_id
-                    and acknowledgement.get('key') == f'{current.run_id}:copy-ready'
-                    and acknowledgement.get('state') in {'applied', 'completed'}
-                    and acknowledgement.get('delivery_mode') == 'content_only'):
-                receipt['dispatch_state'] = 'accepted'
-        else:
+    from .founder_draft_views import is_delivered_content_only
+    if not is_delivered_content_only(current):
+        from .vibe_marketing_views import _call_content_factory_run_action
+        response = _call_content_factory_run_action(run_id=current.run_id, workflow=current.workflow, action='resume',
+            payload={'channel_switch': {'delivery_mode': 'content_only', 'key': f'{current.run_id}:copy-ready'}},
+            transport_errors_are_pending=True, preserve_run_clock=True)
+        acknowledgement = mapping(mapping(response).get('channel_switch'))
+        if (type(acknowledgement.get('version')) is int and acknowledgement['version'] == 1
+                and acknowledgement.get('run_id') == current.run_id
+                and acknowledgement.get('key') == f'{current.run_id}:copy-ready'
+                and acknowledgement.get('state') in {'applied', 'completed'}
+                and acknowledgement.get('delivery_mode') == 'content_only'):
             receipt['dispatch_state'] = 'accepted'
+    else:
+        receipt['dispatch_state'] = 'accepted'
     with transaction.atomic():
         locked = ContentFactoryRun.objects.select_for_update().get(pk=current.pk)
         latest = mapping(mapping(locked.result).get('channel_v1'))

@@ -107,6 +107,20 @@ class MergeWorkerTests(TransactionTestCase):
         self.assertEqual(self.tokens[0]["permission_profile"], "ci_evidence")
         self.assertEqual(self.tokens[-1]["permission_mode"], "write")
 
+    def test_retirement_publications_require_manual_merge_but_observe_it(self):
+        run = self.run_fixture()
+        run.run_request['retirement_requires_owner_merge'] = True
+        self.save(run)
+        with self.providers():
+            self.assertEqual(self.sweep()['merged'], 0)
+        self.assertFalse(any(method == 'PUT' for method, _, _ in self.calls))
+        self.pull.update(merged=True, state='closed', merge_commit_sha=MERGED)
+        with self.providers():
+            self.assertEqual(self.sweep(minutes=20)['merged'], 1)
+        run.refresh_from_db()
+        self.assertEqual(run.result['merge_v1']['method'], 'observed')
+        self.assertFalse(any(method == 'PUT' for method, _, _ in self.calls))
+
     def test_m1_setup_scaffold_proxy_never_merge_without_owner_click_across_three_sweeps(self):
         for kind in ("setup", "scaffold", "proxy"):
             run = self.run_fixture(kind=kind, approved=False)
