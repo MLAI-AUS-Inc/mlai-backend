@@ -155,6 +155,7 @@ class CommunityHomeView(APIView):
                     "event_discounts": event_discounts_enabled(),
                     "coworking_booking": coworking_booking_available(request.user),
                     "link_love": False,
+                    "mentor_booking": bool(getattr(settings, "MENTOR_BOOKING_ENABLED", False)),
                     "meeting_rooms": bool(
                         getattr(settings, "MEETING_ROOM_BOOKING_ENABLED", False)
                     ),

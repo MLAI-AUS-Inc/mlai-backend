@@ -265,6 +265,7 @@ INSTALLED_APPS = [
     'victor_ai',
     'jobs',
     'org_memory',
+    'mentoring',
     "rest_framework",
     "roo",
 
@@ -544,6 +545,8 @@ REST_FRAMEWORK = {
         'community_chat_slack_directory': os.getenv('COMMUNITY_CHAT_SLACK_DIRECTORY_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
         'community_chat_crm': os.getenv('COMMUNITY_CHAT_CRM_RATE', '240/minute'),
+        'community_chat_mentoring': os.getenv('COMMUNITY_CHAT_MENTORING_RATE', '60/minute'),
+        'community_chat_mentoring_write': os.getenv('COMMUNITY_CHAT_MENTORING_WRITE_RATE', '20/minute'),
         'community_chat_admin': os.getenv('COMMUNITY_CHAT_ADMIN_RATE', '120/minute'),
         'my_startup_bootstrap': os.getenv('MY_STARTUP_BOOTSTRAP_RATE', '120/minute'),
         'my_startup_read': os.getenv('MY_STARTUP_READ_RATE', '120/minute'),
@@ -718,6 +721,16 @@ MEETING_ROOM_BOOKING_ENABLED = _env_is_true(
     'MEETING_ROOM_BOOKING_ENABLED',
     False,
 )
+# Vibe Mentoring pilot. Off by default; see docs/mentoring.md.
+MENTOR_BOOKING_ENABLED = _env_is_true('MENTOR_BOOKING_ENABLED', False)
+MENTOR_REQUEST_TTL_HOURS = int(os.getenv('MENTOR_REQUEST_TTL_HOURS', '48'))
+MENTOR_AUTO_COMPLETE_HOURS = int(os.getenv('MENTOR_AUTO_COMPLETE_HOURS', '24'))
+# Google Meet links and free/busy for mentoring, through one MLAI-owned free
+# Google account. Off by default; secrets come only from the environment.
+MENTORING_GOOGLE_ENABLED = _env_is_true('MENTORING_GOOGLE_ENABLED', False)
+MENTORING_GOOGLE_CLIENT_ID = os.getenv('MENTORING_GOOGLE_CLIENT_ID', '')
+MENTORING_GOOGLE_CLIENT_SECRET = os.getenv('MENTORING_GOOGLE_CLIENT_SECRET', '')
+MENTORING_GOOGLE_REFRESH_TOKEN = os.getenv('MENTORING_GOOGLE_REFRESH_TOKEN', '')
 PASSWORD_RESET_TTL_SECONDS = int(os.getenv('PASSWORD_RESET_TTL_SECONDS', '3600'))
 PASSWORD_RESET_MIN_RESPONSE_SECONDS = float(
     os.getenv('PASSWORD_RESET_MIN_RESPONSE_SECONDS', '0.12')

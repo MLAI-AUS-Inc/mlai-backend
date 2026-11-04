@@ -91,6 +91,7 @@ subsystem-specific contracts and runbooks.
 
 - [`community-chat-account-profile.md`](community-chat-account-profile.md)
 - [`community-chat-test-results-2026-09-07.md`](community-chat-test-results-2026-09-07.md) — disposable backend regression evidence
+- [Mentor booking](mentoring.md) — invite-only mentors, Roo payments, availability and staff review; [main rollout](mentoring-main-rollout.md).
 - [`community-chat-home.md`](community-chat-home.md)
 - [`community-chat-roo-dm.md`](community-chat-roo-dm.md) — owner-scoped Slack Roo chat
 - [`community-chat-coworking.md`](community-chat-coworking.md) — signed booking handoff to Public Roo
