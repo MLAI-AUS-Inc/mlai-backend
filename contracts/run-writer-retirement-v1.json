@@ -1241,12 +1241,20 @@
         "receipt"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "c11d5bbaaf81f0dd35e7877c9a60f357ec6fb48456b3879bfd1d9e4c8a234c6f",
+      "function_sha256": "83df938a3af23451922b4d303f268381e9dfb477f3c4401f796ef083d7885a49",
       "classification": "non_cf_model",
-      "test_refs": [],
+      "test_refs": [
+        "content_factory/tests_ops_dm_delivery.py",
+        "content_factory/tests_reconciliation_unit.py"
+      ],
       "reason": "The candidate receipt.update is a Python dictionary update inside notification bookkeeping, not a Run ORM mutation.",
       "guard": "Receiver receipt assigned from result JSON.",
-      "pending_owner": null
+      "pending_owner": null,
+      "reviewed_change": {
+        "at": "2026-11-04T03:52:21.046837+00:00",
+        "scope": "One constant [CG] to [CGD]; all other function AST identical.",
+        "reason": "Configured server-only destination remains checked before candidate reads. The witness receipt.update is dictionary notification bookkeeping, not lifecycle ORM authority. Existing fresh locked result merges, stable client_msg_id, provider acknowledgement, lease and attempt matching remain identical; D is the explicitly nominated same-bot conversation. No worker/owner URL, new recipient, lifecycle clock, admission or settlement authority is added."
+      }
     },
     {
       "identity": "content_factory/reconciliation.py:_reconcile_restart_receipts:1e3e650238823f771fa787ac78c9a41ff4f0478b0aa07a6d637b55799110241e:1",
