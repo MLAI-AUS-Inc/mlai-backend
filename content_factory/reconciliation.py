@@ -1285,7 +1285,7 @@ def _deliver_pending_refusal_alerts(*, limit, now):
     from uuid import NAMESPACE_URL, uuid5
     import re
     channel = str(getattr(settings, "CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID", "") or "").strip()
-    if not re.fullmatch(r"[CG][A-Z0-9]{8,}", channel):
+    if not re.fullmatch(r"[CGD][A-Z0-9]{8,}", channel):
         return 0
     from integrations.services.slack import SlackService
     candidates = ContentFactoryRun.objects.filter(updated_at__gte=now - timedelta(days=1),

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 def channel():
     """Use only the server's existing ops destination, never a worker/owner URL."""
     value = str(getattr(settings, "CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID", "") or "").strip()
-    return value if re.fullmatch(r"[CG][A-Z0-9]{8,99}", value) else None
+    return value if re.fullmatch(r"[CGD][A-Z0-9]{8,99}", value) else None
 
 
 def reserve(op, alert, *, now):

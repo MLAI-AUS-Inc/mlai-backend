@@ -119,7 +119,7 @@ NO_DRAFT_AFTER = timedelta(hours=24)
 YOUR_TURN_AFTER = timedelta(hours=72)
 MAX_DELIVERY_ATTEMPTS = 3
 RETRY_AFTER = timedelta(minutes=5)
-SLACK_CHANNEL_PATTERN = re.compile(r"[CG][A-Z0-9]{8,}")
+SLACK_CHANNEL_PATTERN = re.compile(r"[CGD][A-Z0-9]{8,}")
 SAFE_TOKEN = re.compile(r"[A-Za-z0-9_.:\-]{1,100}")
 SAFE_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.\-]{0,79}")
 DETAIL_KEY = re.compile(r"[a-z][a-z0-9_]{0,40}")

@@ -181,6 +181,10 @@ goal compare-and-set, retaining the first incident snapshot. Owner-action
 notifications remain independent.
 
 Delivery reuses `CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID` and `SlackService`.
+The server-configured destination accepts an approved Slack channel (`C`/`G`)
+or direct message (`D`). Resolve a DM for the nominated recipient with the same
+bot that sends alerts; a Slack user ID, channel name or URL is not a destination.
+This does not enable alerts or select a recipient automatically.
 It claims a bounded lease, releases DB locks before transport, reuses a stable
 client message UUID after uncertainty, and records only a matching provider
 acknowledgement. The existing ops policy supplies three attempts with a

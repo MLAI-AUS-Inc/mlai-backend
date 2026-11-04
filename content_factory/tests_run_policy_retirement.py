@@ -2,6 +2,7 @@
 from copy import deepcopy
 from unittest.mock import patch
 from django.test import TransactionTestCase, override_settings
+from django.db import transaction
 from django.utils import timezone
 from workflow_runs.models import ContentFactoryRun
 from . import failure_policy_engine as engine
@@ -44,6 +45,9 @@ class OwnedPolicyRetirementTests(TransactionTestCase):
                 self.assertEqual(engine.apply(stale, self.forged)['status'], 'deferred')
                 self.assertEqual(engine._execute_run(stale, self.forged, now=self.now)['status'], 'deferred')
                 engine._write_run(stale, {'attempts': 99})
+                with transaction.atomic():
+                    locked = ContentFactoryRun.objects.select_for_update().get(pk=stale.pk)
+                    engine._write_locked_run(locked, {'attempts': 99})
                 self.assertEqual(engine._candidates(self.now, 50), [])
                 report = engine.run_policy_sweep(now=self.now)
                 self.assertEqual(report['checked'], 0)
