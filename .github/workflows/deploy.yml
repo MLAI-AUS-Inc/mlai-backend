@@ -265,6 +265,9 @@ jobs:
     - name: Test isolated staging controller, network and startup gates
       run: python -m unittest ops.staging-chat.test_auto_deploy ops.staging-chat.test_network_policy ops.staging-chat.test_start_api ops.founder-staging.test_inbox_fixture -v
 
+    - name: Check founder fixture email profile and provider without database access
+      run: python scripts/test_without_database.py community_chat.tests.test_founder_staging_email_unit
+
     - name: Test isolated staging provider and development boundaries without database access
       run: python scripts/test_without_database.py mlai.tests_staging_integrations roo.tests_development_build
 
@@ -1102,6 +1105,7 @@ jobs:
           community_chat.tests.test_device_metadata \
           community_chat.tests.test_email_code_auth \
           community_chat.tests.test_email_code_delivery \
+          community_chat.tests.test_founder_staging_outbox \
           community_chat.tests.test_home_facades \
           community_chat.tests.test_onboarding \
           community_chat.tests.test_onboarding_names_unit \

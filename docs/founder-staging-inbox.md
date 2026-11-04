@@ -53,21 +53,38 @@ staging outbox provider. Configure the repository's inbox URL and scoped read
 secret only after the live service and delivery path are verified. Do not enable
 the weekly schedule before the first actual manual acceptance run is reviewed.
 
-## Remaining application wiring
+## Scoped normal outbox component
+
+The normal email outbox supports the exact future
+`mlai.settings_staging_founder` profile. Its provider guard requires the fixed
+founder staging frontend/API origins, reserved domain, separate write credential,
+local email/account-creation capabilities and four notification flags off.
+Every existing runtime profile retains its ordinary delivery behavior.
+
+In fixture mode, expired-challenge cleanup and delivery leasing select only
+that frontend origin and web client. The lease uses an `IN` subquery, retaining
+the original delivery-row locks. Direct foreign IDs return without decrypting,
+cancelling or sending. A direct legacy send is refused in fixture mode. The
+provider carries the durable outbox UUID and original challenge timestamps,
+disables redirects and environment proxies, and checks the accepted receipt ID
+before marking the row sent. Encrypted-code cleanup and bounded retries remain.
+
+PostgreSQL namespace/foreign-row/retry controls and real local HTTP delivery
+pass alongside the complete existing email-code auth and delivery suites. The
+test-only private DNS/port mapping does not prove hosted network readiness.
+
+## Remaining runtime wiring
 
 The existing password-pilot API keeps signup and email codes disabled. The
-fixture needs a separately reviewed staging API/frontend profile with its own
+fixture still needs a separately reviewed staging API/frontend profile with its own
 origin, cookies and credentials, preserving all eight existing accounts/roles.
 Admission must enforce the reserved UUID-address namespace on the server.
 
-Delivery must use the real `CommunityChatEmailCodeDelivery` outbox and ordinary
-email-code verification. A dedicated worker must scope **both** expired
-challenge cleanup and delivery leasing to the fixture profile's origin before
-touching rows. The current unscoped worker cannot simply be enabled. Pass its
-actual delivery UUID and immutable challenge creation/expiry times to this
-provider, retain ordinary retry/lease behavior and
-never fall back to Customer.io or another live provider. The normal draft-ready
-and other four notification flags remain off.
+The runtime settings profile is not present or enabled yet. Start its dedicated
+worker only in the validated fixture profile; the password-pilot worker cannot
+simply be enabled. Complete server-side recipient/session admission and normal
+email-code verification before activating signup. Draft-ready and the other
+four notification flags remain off.
 
 The generation worker, isolated model provider, wildcard website and preview
 fixture, source pins, network policy and actual frontend acceptance workflow
