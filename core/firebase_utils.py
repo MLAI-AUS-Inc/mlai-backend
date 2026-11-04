@@ -9,7 +9,7 @@ import urllib.parse
 from datetime import timedelta
 from dotenv import load_dotenv
 
-if os.environ.get("DJANGO_SETTINGS_MODULE") not in {"mlai.settings_staging_chat", "mlai.settings_staging_local"}:
+if os.environ.get("DJANGO_SETTINGS_MODULE") not in {"mlai.settings_staging_chat", "mlai.settings_staging_local", "mlai.settings_staging_founder"}:
     load_dotenv()
 
 # Configure logging

@@ -28,6 +28,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [Founder staging inbox component](founder-staging-inbox.md) — reserved CI-only inbox contract, isolated deployment preparation and remaining real-outbox integration
+
 - [Job to Run cutover](run-job-cutover.md) — parity, copied identity, historical coverage and rollback
 - [Topic discovery reconciliation](discovery-reconciliation.md) — bounded cohort preview, saved scope and activation boundary
 - [Nightly island refresh reconciliation](nightly-refresh-reconciliation.md) — new scheduler contract, bounded preview and separate rollout

@@ -47,6 +47,9 @@ def decrypt_signup_email(encrypted):
 def send_community_chat_email_code(user, code):
     """Send one code through the dedicated Customer.io transaction."""
 
+    from .founder_staging_email import fixture_scope
+    if fixture_scope() is not None:
+        raise RuntimeError("Founder fixture delivery requires the scoped durable outbox")
     from mlai.staging_integrations import require_staging_capability
     require_staging_capability('email')
     api_key = str(settings.CUSTOMERIO_API_KEY).strip()
@@ -83,26 +86,27 @@ def _lock(queryset):
 def claim_email_code_delivery():
     """Lease one due outbox row, including an abandoned send lease."""
 
+    from .founder_staging_email import fixture_scope
+    scope = fixture_scope()
     now = timezone.now()
     from .models import CommunityChatEmailCodeChallenge
-    CommunityChatEmailCodeChallenge.objects.filter(
+    challenges = CommunityChatEmailCodeChallenge.objects.all()
+    if scope is not None:
+        challenges = challenges.filter(origin=scope.origin, client_id=scope.client)
+    challenges.filter(
         expires_at__lte=now,
     ).exclude(encrypted_signup_email="").update(encrypted_signup_email="")
     stale_claim = now - timedelta(seconds=DELIVERY_LEASE_SECONDS)
+    due = CommunityChatEmailCodeDelivery.objects.filter(
+        Q(status=EmailCodeDeliveryStatus.PENDING, available_at__lte=now)
+        | Q(status=EmailCodeDeliveryStatus.SENDING, claimed_at__lt=stale_claim)
+    )
+    if scope is not None:
+        # An IN subquery scopes the lease without adding joined row locks.
+        due = due.filter(challenge_id__in=challenges.values("pk"))
     with transaction.atomic():
         delivery = (
-            _lock(
-                CommunityChatEmailCodeDelivery.objects.filter(
-                    Q(
-                        status=EmailCodeDeliveryStatus.PENDING,
-                        available_at__lte=now,
-                    )
-                    | Q(
-                        status=EmailCodeDeliveryStatus.SENDING,
-                        claimed_at__lt=stale_claim,
-                    )
-                )
-            )
+            _lock(due)
             .order_by("available_at", "created_at")
             .first()
         )
@@ -141,9 +145,18 @@ def _cancel_delivery(delivery, now):
 def deliver_email_code(delivery_id):
     """Deliver one leased row without logging its address or code."""
 
-    delivery = CommunityChatEmailCodeDelivery.objects.select_related(
+    from .founder_staging_email import fixture_scope, send_fixture_code
+    scope = fixture_scope()
+    query = CommunityChatEmailCodeDelivery.objects.select_related(
         "challenge__user"
-    ).get(id=delivery_id)
+    )
+    if scope is not None:
+        query = query.filter(challenge__origin=scope.origin, challenge__client_id=scope.client)
+        delivery = query.filter(id=delivery_id).first()
+        if delivery is None:
+            return "not_scoped"
+    else:
+        delivery = query.get(id=delivery_id)
     challenge = delivery.challenge
     now = timezone.now()
     if (
@@ -165,7 +178,10 @@ def deliver_email_code(delivery_id):
             )
         else:
             recipient = challenge.user
-        response = send_community_chat_email_code(recipient, code)
+        if scope is None:
+            response = send_community_chat_email_code(recipient, code)
+        else:
+            response = send_fixture_code(scope, delivery_id=delivery.id, challenge=challenge, recipient=recipient, code=code)
     except InvalidToken:
         logger.error(
             "Chat email-code delivery payload could not be decrypted delivery_id=%s",
@@ -216,6 +232,9 @@ def deliver_email_code(delivery_id):
 
 def process_email_code_deliveries(*, limit=25):
     counts = {"sent": 0, "retry": 0, "failed": 0, "cancelled": 0}
+    from .founder_staging_email import fixture_scope
+    if fixture_scope() is not None:
+        counts["not_scoped"] = 0
     for _ in range(max(0, limit)):
         delivery_id = claim_email_code_delivery()
         if delivery_id is None:

@@ -72,8 +72,11 @@ def issue_email_code_challenge(
     """Create a uniform challenge and queue delivery only for eligible users."""
 
     canonical_email = normalize_email(email)
+    from .founder_staging_identity import require_context, require_recipient
+    fixture = require_context(client_id=client_id, origin=origin, platform=platform)
     digest = email_digest(canonical_email)
     user = User.objects.resolve_email(canonical_email)
+    require_recipient(canonical_email, user)
     eligible_user = user if is_email_code_eligible(user) else None
     signup = bool(
         user is None and settings.COMMUNITY_CHAT_SIGNUP_ENABLED and onboarding_version == 1
@@ -96,6 +99,8 @@ def issue_email_code_challenge(
             consumed_at__isnull=True,
             invalidated_at__isnull=True,
         )
+        if fixture is not None:
+            active = active.filter(origin=fixture.origin, platform="web")
         CommunityChatEmailCodeDelivery.objects.filter(
             challenge__in=active,
             status__in=(
@@ -171,6 +176,12 @@ def consume_email_code(*, challenge_id, code, client_id, installation_id):
         except (CommunityChatEmailCodeChallenge.DoesNotExist, ValueError):
             challenge = None
 
+        from .founder_staging_identity import require_challenge, InvalidFixtureIdentity
+        try:
+            require_challenge(challenge, client_id=client_id, installation_id=installation_id)
+        except InvalidFixtureIdentity:
+            raise InvalidEmailCode("invalid_or_expired_code") from None
+
         signup = bool(challenge and challenge.user_id is None and challenge.encrypted_signup_email
                       and challenge.onboarding_version == 1 and settings.COMMUNITY_CHAT_SIGNUP_ENABLED)
         signup_email = ""
@@ -217,6 +228,11 @@ def consume_email_code(*, challenge_id, code, client_id, installation_id):
                     "email": signup_email, "password": make_password(None), "email_verified_at": now,
                 })
                 locked_user = User.objects.select_for_update().get(pk=user.pk)
+                from .founder_staging_identity import require_recipient
+                try:
+                    require_recipient(signup_email, locked_user)
+                except InvalidFixtureIdentity:
+                    raise InvalidEmailCode("invalid_or_expired_code") from None
                 if not is_email_code_eligible(locked_user):
                     raise InvalidEmailCode("invalid_or_expired_code")
                 if created:

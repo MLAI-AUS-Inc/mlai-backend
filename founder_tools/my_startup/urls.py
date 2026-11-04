@@ -3,6 +3,7 @@
 from django.urls import URLPattern, URLResolver, include, path
 
 from content_factory import urls_vibe_marketing
+from content_factory.founder_draft_views import FounderDraftDownloadView
 from core import urls as auth_urls, urls_users
 from founder_tools import urls as founder_urls
 from integrations import api_urls as connector_urls
@@ -52,6 +53,10 @@ def selected_patterns(patterns, allowed):
 marketing = selected_patterns(urls_vibe_marketing.urlpatterns, MARKETING_VIEWS)
 preview = [item for item in marketing if "/live-preview/" in str(item.pattern)]
 urlpatterns = [
+    # The canonical article client uses this shorter URL. Keep the same normal
+    # Chat account, cohort, run ownership and current-export authorization.
+    *[path(f"runs/<str:run_id>/article/download{suffix}", startup_view(FounderDraftDownloadView))
+      for suffix in ("", "/")],
     path(
         "integrations/sources/connections/<int:connection_id>",
         MyStartupConnectorDisconnectView.as_view(),

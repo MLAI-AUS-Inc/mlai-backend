@@ -1,0 +1,30 @@
+# Operator-only fragment. It is not included by any existing deployment.
+# Review the new fixture network/ingress and install scoped credentials first.
+services:
+  founder-ci-inbox:
+    image: ${FOUNDER_STAGING_INBOX_IMAGE:?exact reviewed image digest required}
+    command: [python, /app/ops/founder-staging/inbox_fixture.py]
+    environment:
+      APP_ENV: founder-inbox-staging
+      FOUNDER_STAGING_INBOX_ENABLED: "true"
+      FOUNDER_STAGING_EMAIL_DOMAIN: ${FOUNDER_STAGING_EMAIL_DOMAIN:?reserved staging fixture domain required}
+      FOUNDER_STAGING_INBOX_READ_TOKEN: ${FOUNDER_STAGING_INBOX_READ_TOKEN:?scoped CI read credential required}
+      FOUNDER_STAGING_INBOX_WRITE_TOKEN: ${FOUNDER_STAGING_INBOX_WRITE_TOKEN:?separate private provider credential required}
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: "0.25"
+    restart: on-failure
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8990/healthz', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    networks: [fixture-inbox]
+networks:
+  fixture-inbox:
+    external: true
+    name: mlai-founder-staging-inbox-internal
