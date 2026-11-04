@@ -39,6 +39,31 @@ an AI conversation; the app explains that messages sent there are shared with Ro
 in Slack. The generic mirror privacy flag `included_in_roo=false` continues to
 mean that imported conversations are not added to Roo's context or analytics.
 
+## Verified Chat message routing
+
+Slack may attach `bot_id` and `app_id` to a message sent with the owner's user
+authorization. Public Roo verifies these DMs through the Roo-key-only
+`GET /api/v1/integrations/bridge/roo/dm-actor` endpoint, independently of the
+public channel actor endpoint. The scope is the exact workspace, Slack DM,
+message timestamp, thread timestamp and observed owner Slack ID.
+
+New completed Chat-to-Roo creates retain a SHA-256 digest of the acknowledged
+Slack text plus the connection, OAuth, consent and Chat-channel generations in
+existing delivery metadata. No private body is retained for this handoff. The
+resolver requires a live one-to-one owner/Roo conversation, current connection,
+AI consent, original verified device and canonical account. Edits, deletions,
+revocation and generation changes invalidate the handoff. Roo compares the
+signed event body to the digest before running the usual permission-checked
+skills, with the source Chat event as its stable award/reply operation ID.
+
+A callback racing an uncommitted create returns retryable 409. Unrelated bots
+and old records without a receipt receive no authority. Deploy the backend
+before Roo; verification applies to new messages and does not replay previously
+ignored commands. No database migration or feature-flag change is required.
+
+Run `python scripts/test_without_database.py integrations.tests_private_roo_actor`
+for offline authorization and contract checks without database construction.
+
 ## Rollout and verification
 
 Ship backend and client changes together after the normal release approval. An
