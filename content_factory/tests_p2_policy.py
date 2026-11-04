@@ -342,6 +342,55 @@ class PolicyTests(TransactionTestCase):
 class LockedPolicyMetadataTests(TransactionTestCase):
     """Metadata preserves fresh callback fields without repeated row locking."""
 
+    def test_fresh_owner_check_reads_locked_authority_without_unrelated_request_payload(self):
+        from django.test.utils import CaptureQueriesContext
+        fixture = make_p2_org()
+        run = make_run(fixture.organization, result={})
+        ContentFactoryRun.objects.filter(pk=run.pk).update(result={'run_owner_v1': {
+            'schema_version': 1, 'identity': {}, 'authority': {'event_protocol': 1}}})
+        field = ContentFactoryRun._meta.get_field('run_request')
+        with patch.object(field, 'from_db_value', side_effect=AssertionError('Unrelated request payload was loaded')):
+            with CaptureQueriesContext(connection) as queries:
+                self.assertTrue(engine._fresh_owned_run(run))
+        selects = [query['sql'] for query in queries if query['sql'].lstrip().upper().startswith('SELECT')]
+        self.assertEqual(len(selects), 1)
+        if connection.features.has_select_for_update:
+            self.assertIn('FOR UPDATE', selects[0])
+
+    def test_existing_config_uses_two_fresh_locked_reads_in_org_then_config_order(self):
+        from django.db import transaction
+        from django.test.utils import CaptureQueriesContext
+        fixture = make_p2_org()
+        OrganizationContentConfig.objects.filter(pk=fixture.config.pk).update(
+            pillar_strategy={"fresh_policy": {"kept": True}})
+        with transaction.atomic():
+            with CaptureQueriesContext(connection) as queries:
+                current = engine._locked_config(fixture.organization)
+        self.assertEqual(current.pk, fixture.config.pk)
+        self.assertEqual(current.pillar_strategy, {"fresh_policy": {"kept": True}})
+        self.assertEqual(len(queries), 2)
+        self.assertIn(connection.ops.quote_name(fixture.organization._meta.db_table), queries[0]["sql"])
+        self.assertIn(connection.ops.quote_name(OrganizationContentConfig._meta.db_table), queries[1]["sql"])
+        if connection.features.has_select_for_update:
+            self.assertTrue(all("FOR UPDATE" in query["sql"] for query in queries))
+
+    def test_missing_config_is_created_and_reloaded_under_the_same_org_lock(self):
+        from django.db import transaction
+        from django.test.utils import CaptureQueriesContext
+        from organizations.models import Organization
+        organization = Organization.objects.create(name="Synthetic missing config", domain="missing-config.synthetic.test")
+        self.assertFalse(OrganizationContentConfig.objects.filter(organization=organization).exists())
+        with transaction.atomic():
+            with CaptureQueriesContext(connection) as queries:
+                current = engine._locked_config(organization)
+        self.assertEqual(current.organization_id, organization.pk)
+        self.assertEqual(OrganizationContentConfig.objects.filter(organization=organization).count(), 1)
+        self.assertIn(connection.ops.quote_name(Organization._meta.db_table), queries[0]["sql"])
+        self.assertIn(connection.ops.quote_name(OrganizationContentConfig._meta.db_table), queries[-1]["sql"])
+        if connection.features.has_select_for_update:
+            self.assertIn("FOR UPDATE", queries[0]["sql"])
+            self.assertIn("FOR UPDATE", queries[-1]["sql"])
+
     def test_locked_metadata_uses_one_update_and_preserves_worker_clock_and_fields(self):
         from django.db import connection, transaction
         from django.test.utils import CaptureQueriesContext

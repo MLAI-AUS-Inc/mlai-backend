@@ -2,7 +2,7 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from content_factory.article_publish_approval import (
     RECEIPT_KEY,
@@ -221,7 +221,7 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
         self.assertFalse(_article_publish_retry_authorized(run))
 
     def test_receipt_rejects_regressed_quality_status_with_unchanged_hash(self):
-        for status in ("blocking_findings", "queued"):
+        for status in ("blocking_findings", "queued", "self_healing"):
             with self.subTest(status=status):
                 run = _review_run()
                 receipt = make_article_publish_approval_receipt(run, actor_id="founder-1")
@@ -301,7 +301,7 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
         self.assertFalse(_article_publish_retry_authorized(run))
         run.approval_state = "approved"
         self.assertTrue(_article_publish_retry_authorized(run))
-        for status in ("blocking_findings", "queued"):
+        for status in ("blocking_findings", "queued", "self_healing"):
             run.result["article_preview_quality"]["status"] = status
             self.assertTrue(_article_publish_retry_authorized(run))
         del run.result["publish_child_run_id"]
@@ -333,3 +333,223 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
         self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
         run.result.pop("article_preview_quality")
         self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
+
+
+class HostedQualityPublishStateTests(SimpleTestCase):
+    def test_self_healing_locks_publishing_and_clears_local_and_remote_stale_blockers(self):
+        from content_factory.hosted_quality_state import preview_quality_publish_notice
+        from content_factory.vibe_marketing_views import _merge_django_owned_article_result
+        quality = {"status": "self_healing", "self_heal_attempt": 1}
+        self.assertEqual(preview_quality_publish_notice(quality),
+                         ("locked", "We're fixing a few things in the preview automatically."))
+        merged = _merge_django_owned_article_result(
+            {"approval_blocker": {"message": "An earlier rejection"}},
+            {"article_preview_quality": quality, "approval_blocker": {"message": "A stale remote rejection"}})
+        self.assertNotIn("approval_blocker", merged)
+        self.assertEqual(merged["article_preview_quality"], quality)
+        run = _review_run()
+        run.result["article_preview_quality"] = quality
+        self.assertIsNone(make_article_publish_approval_receipt(run, actor_id="founder-1"))
+
+    def test_exhausted_safety_uses_staff_copy_and_never_projects_raw_claims(self):
+        from content_factory.hosted_quality_state import SAFETY_MESSAGE, preview_quality_publish_notice
+        from content_factory.hosted_quality_issues import public_hosted_quality_issues
+        from content_factory.tests_hosted_quality_issues_unit import sixth_shaped_report
+        quality, preview, manifest = sixth_shaped_report()
+        quality.update(self_heal_exhausted=True, escalation="safety_review", founder_message="Raw safety details")
+        self.assertEqual(preview_quality_publish_notice(quality), ("blocked", SAFETY_MESSAGE))
+        self.assertEqual(public_hosted_quality_issues(quality, preview, manifest), [])
+
+    def test_specific_terminal_message_precedes_the_legacy_neutral_fallback(self):
+        from content_factory.hosted_quality_state import FALLBACK_MESSAGE, preview_quality_publish_notice
+        quality = {"status": "blocking_findings", "self_heal_exhausted": True,
+                   "founder_message": "The preview is missing part of the article."}
+        self.assertEqual(preview_quality_publish_notice(quality), ("blocked", quality["founder_message"]))
+        quality.pop("founder_message")
+        self.assertEqual(preview_quality_publish_notice(quality), ("blocked", FALLBACK_MESSAGE))
+
+    def test_staff_rules_detect_exhausted_quality_on_an_awaiting_approval_run(self):
+        from django.utils import timezone
+        from content_factory.staff_alert_rules import _run_reasons
+        from content_factory.founder_journey_alerts import ALERT_REASONS
+        for escalation, reason in (("safety_review", "article_safety_review_required"),
+                                   ("quality_review", "article_quality_review_required")):
+            run = SimpleNamespace(result={"article_preview_quality": {"status": "blocking_findings",
+                                  "self_heal_exhausted": True, "escalation": escalation}},
+                                  status="awaiting_approval", run_request={})
+            self.assertIn(reason, _run_reasons(run, timezone.now()))
+            self.assertIn(reason, ALERT_REASONS)
+            run.result["article_preview_quality"]["status"] = "self_healing"
+            self.assertNotIn(reason, _run_reasons(run, timezone.now()))
+
+
+@override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=True,
+                   ARTICLES_STAFF_ALERT_RULES_ENABLED=False,
+                   ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED=False,
+                   ARTICLES_GOAL_NOTIFICATIONS_ENABLED=False,
+                   MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED=False,
+                   MY_STARTUP_TURN_REMINDERS_ENABLED=False)
+class HostedQualityOwnerAlertTests(SimpleTestCase):
+    def setUp(self):
+        from copy import deepcopy
+        self.run = _review_run()
+        self.run.pk, self.run.organization_id, self.run.workflow = 17, 23, "article_generation"
+        self.run.organization = SimpleNamespace(pk=23)
+        self.run.result["article_preview_quality"].update(
+            status="blocking_findings", self_heal_exhausted=True, escalation="safety_review")
+        self.current = deepcopy(self.run)
+        self.manager = self.enterContext(patch("content_factory.hosted_quality_alerts.ContentFactoryRun.objects"))
+        self.manager.select_related.return_value.filter.return_value.first.return_value = self.current
+        self.callbacks = []
+        self.commit = self.enterContext(patch("content_factory.hosted_quality_alerts.transaction.on_commit",
+                                             side_effect=self.callbacks.append))
+        self.queue = self.enterContext(patch("content_factory.hosted_quality_alerts.queue_founder_journey_alert"))
+        self.enterContext(patch("content_factory.run_reconciliation.authoritative_run", return_value=False))
+
+    def test_both_owner_reasons_wait_for_commit_and_use_the_fresh_saved_run(self):
+        from content_factory.hosted_quality_alerts import queue_hosted_quality_review_alert
+        for escalation, reason in (("safety_review", "article_safety_review_required"),
+                                   ("quality_review", "article_quality_review_required")):
+            with self.subTest(escalation=escalation):
+                self.run.result["article_preview_quality"]["escalation"] = escalation
+                self.current.result["article_preview_quality"]["escalation"] = escalation
+                queue_hosted_quality_review_alert(self.run)
+                self.queue.assert_not_called()
+                self.callbacks.pop()()
+                self.queue.assert_called_once_with(
+                    organization=self.current.organization, run=self.current, alert_reason=reason)
+                self.queue.reset_mock()
+
+    def test_a_new_generation_input_preview_or_stop_wins_before_commit(self):
+        from copy import deepcopy
+        from content_factory.hosted_quality_alerts import queue_hosted_quality_review_alert
+        changes = (
+            lambda r: r.result["article_preview_quality"].update(inputs_sha256="c" * 64),
+            lambda r: r.result["article_preview_quality"].update(status="self_healing"),
+            lambda r: r.result["livePreview"].update(resumeGeneration=1),
+            lambda r: r.result["livePreview"].update(previewUrl="https://preview.example/new"),
+            lambda r: setattr(r, "status", "cancelled"),
+            lambda r: setattr(r, "organization_id", 99),
+        )
+        for change in changes:
+            with self.subTest(change=change):
+                current = deepcopy(self.run)
+                self.manager.select_related.return_value.filter.return_value.first.return_value = current
+                queue_hosted_quality_review_alert(self.run)
+                change(current)
+                self.callbacks.pop()()
+                self.queue.assert_not_called()
+
+    def test_unverified_owned_metadata_cannot_fall_back_to_a_legacy_alert(self):
+        from content_factory.hosted_quality_alerts import queue_hosted_quality_review_alert
+        queue_hosted_quality_review_alert(self.run)
+        with patch("content_factory.run_reconciliation.authoritative_run", return_value=True), \
+             patch("content_factory.run_review_quality.current_review_verified", return_value=False) as proof:
+            self.callbacks.pop()()
+        proof.assert_called_once_with(self.current)
+        self.queue.assert_not_called()
+
+    def test_primary_gate_inflight_portable_and_scheduler_states_do_not_queue(self):
+        from copy import deepcopy
+        from content_factory.hosted_quality_alerts import queue_hosted_quality_review_alert
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=False):
+            queue_hosted_quality_review_alert(self.run)
+        for change in (
+            lambda r: r.result["article_preview_quality"].update(self_heal_exhausted=False),
+            lambda r: setattr(r, "status", "running"),
+            lambda r: r.run_request.update(request_source="mlai_backend_scheduler"),
+            lambda r: r.run_request.update(delivery_mode="content_only", delivery_mode_confirmed=True),
+            lambda r: r.result["article_preview_quality"].update(reviewed_preview_commit_sha="c" * 40),
+        ):
+            run = deepcopy(self.run)
+            change(run)
+            queue_hosted_quality_review_alert(run)
+        self.commit.assert_not_called()
+        self.manager.select_related.assert_not_called()
+        self.queue.assert_not_called()
+
+    def test_a_current_owned_stop_intent_wins_before_commit(self):
+        from content_factory.hosted_quality_alerts import queue_hosted_quality_review_alert
+        queue_hosted_quality_review_alert(self.run)
+        with patch("content_factory.run_ownership.user_stop_intent", return_value={"denied": True}):
+            self.callbacks.pop()()
+        self.queue.assert_not_called()
+
+    def test_existing_failed_or_unconfigured_receipts_are_not_reset(self):
+        from content_factory.hosted_quality_alerts import queue_hosted_quality_review_alert
+        from content_factory.founder_journey_alerts import founder_journey_alert_id
+        reason = "article_safety_review_required"
+        identifier = founder_journey_alert_id(
+            organization_id=self.run.organization_id, alert_reason=reason, run_id=self.run.run_id)
+        for state in ("failed", "unconfigured", "sent"):
+            self.run.result["ops_alerts"] = {reason: {"alert_id": identifier, "state": state}}
+            queue_hosted_quality_review_alert(self.run)
+        self.commit.assert_not_called()
+        self.queue.assert_not_called()
+
+    def test_delivery_queue_failure_does_not_expose_raw_errors_or_fail_the_status_poll(self):
+        from content_factory.hosted_quality_alerts import queue_hosted_quality_review_alert
+        self.queue.side_effect = RuntimeError("secret clinical/provider text")
+        with patch("content_factory.hosted_quality_alerts.logger.warning") as log:
+            queue_hosted_quality_review_alert(self.run)
+            self.callbacks.pop()()
+        self.assertNotIn("secret clinical", repr(log.call_args))
+        self.assertIn("RuntimeError", repr(log.call_args))
+
+    def test_deleted_runs_and_a_primary_gate_closed_before_commit_do_not_queue(self):
+        from content_factory.hosted_quality_alerts import queue_hosted_quality_review_alert
+        queue_hosted_quality_review_alert(self.run)
+        self.manager.select_related.return_value.filter.return_value.first.return_value = None
+        self.callbacks.pop()()
+        self.manager.select_related.return_value.filter.return_value.first.return_value = self.current
+        queue_hosted_quality_review_alert(self.run)
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=False):
+            self.callbacks.pop()()
+        self.queue.assert_not_called()
+
+
+class HostedQualitySyncHookTests(SimpleTestCase):
+    def test_owned_observations_use_the_refreshed_run_and_never_the_remote_snapshot(self):
+        from content_factory.vibe_marketing_views import _sync_local_run_from_remote
+        original, current = _review_run(), _review_run()
+        with patch("content_factory.run_owned_observations.refresh_owned_run", return_value=current), \
+             patch("content_factory.hosted_quality_alerts.queue_hosted_quality_review_alert") as queue:
+            self.assertIs(_sync_local_run_from_remote(original, {"forged": "snapshot"}), current)
+        queue.assert_called_once_with(current)
+
+    def test_legacy_sync_releases_its_run_lock_before_queuing_and_stale_input_never_queues(self):
+        from contextlib import contextmanager
+        from content_factory.vibe_marketing_views import _sync_local_run_from_remote
+        run = _review_run()
+        run.pk, run.workflow, run.refresh_from_db = 1, "article_generation", MagicMock()
+        order = []
+
+        @contextmanager
+        def atomic():
+            order.append("lock")
+            try:
+                yield
+            finally:
+                order.append("unlock")
+
+        with patch("content_factory.run_owned_observations.refresh_owned_run", return_value=None), \
+             patch("content_factory.vibe_marketing_views.ContentFactoryRun.objects") as model, \
+             patch("content_factory.vibe_marketing_views.scoped_run_contract", return_value={}), \
+             patch("content_factory.vibe_marketing_views.authority_guard", return_value=nullcontext()), \
+             patch("content_factory.vibe_marketing_views.transaction.atomic", side_effect=atomic), \
+             patch("content_factory.portable_drafts.portable_run_update_allowed", return_value=False), \
+             patch("content_factory.run_state.stale_execution_event", return_value=False) as stale, \
+             patch("content_factory.vibe_marketing_views._sync_local_run_from_remote_locked", return_value=run), \
+             patch("content_factory.first_article_entitlement.settle_entitlement_for_run",
+                   side_effect=lambda _: order.append("settle")), \
+             patch("content_factory.hosted_quality_alerts.queue_hosted_quality_review_alert",
+                   side_effect=lambda _: order.append("alert")) as queue:
+            self.assertIs(_sync_local_run_from_remote(run, {"status": "approval_required"}), run)
+            self.assertEqual(order, ["lock", "unlock", "settle", "alert"])
+            model.select_for_update.return_value.get.assert_called_once_with(pk=run.pk)
+            order.clear()
+            queue.reset_mock()
+            stale.return_value = True
+            self.assertIs(_sync_local_run_from_remote(run, {"status": "approval_required"}), run)
+            self.assertEqual(order, ["lock", "unlock"])
+            queue.assert_not_called()

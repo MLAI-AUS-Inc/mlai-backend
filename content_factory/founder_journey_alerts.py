@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import importlib
+import json
 import logging
 import re
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
@@ -42,7 +43,7 @@ from uuid import NAMESPACE_URL, uuid5
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Exists, Max, OuterRef, Q
 from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
@@ -76,6 +77,8 @@ REASON_LABELS = {
 }
 # IF-P2-23: the P2 reasons, each queued by the package the contract names.
 P2_REASON_LABELS = {
+    "article_safety_review_required": "An article needs staff review of safety guidance",
+    "article_quality_review_required": "An article's automatic quality repair needs staff review",
     "our_team_item": "A startup has an item no automatic path can finish",
     "unregistered_failure_code": "A run reported a failure code the registry does not know",
     "codeless_terminal": "A run stopped without a failure code",
@@ -601,9 +604,54 @@ def _receipt_index():
     return [(organization_id, receipts if isinstance(receipts, dict) else {}) for organization_id, receipts in rows]
 
 
+def _postgres_receipt_update(target, owner_id, key, receipt):
+    """Atomically merge one ops receipt into the current row without its other JSON.
+
+    UPDATE takes the same row lock and rechecks the current JSON after a
+    concurrent writer commits. The config reservation still commits before
+    the separate Run mirror, preserving the existing cross-table lock order.
+    Only ops_alerts changes; execution fields and activity clocks are untouched.
+    """
+    from .models import OrganizationContentConfig
+    if target == 'config':
+        model, field, owner = OrganizationContentConfig, 'pillar_strategy', 'organization_id'
+        predicate = "jsonb_typeof({field} -> %s::text -> %s::text) IS DISTINCT FROM 'object'"
+        condition = [RECEIPTS_KEY, key]
+    elif target == 'run':
+        model, field, owner = ContentFactoryRun, 'result', 'id'
+        predicate = "({field} -> %s::text -> %s::text) IS DISTINCT FROM %s::jsonb"
+        condition = [RECEIPTS_KEY, key, json.dumps(receipt)]
+    else:
+        raise ValueError('Only incident config and Run metadata can be updated.')
+    quote = connection.ops.quote_name
+    column = quote(field)
+    # Normalize malformed legacy containers just as the portable Python path
+    # does, while retaining every unrelated key in a valid current object.
+    document = f"CASE WHEN jsonb_typeof({column}) = 'object' THEN {column} ELSE '{{}}'::jsonb END"
+    receipts = f"CASE WHEN jsonb_typeof({column} -> %s::text) = 'object' THEN {column} -> %s::text ELSE '{{}}'::jsonb END"
+    sql = (f"UPDATE {quote(model._meta.db_table)} SET {column} = ({document}) || "
+           f"jsonb_build_object(%s::text, ({receipts}) || jsonb_build_object(%s::text, %s::jsonb)) "
+           f"WHERE {quote(owner)} = %s AND " + predicate.format(field=column) +
+           f" RETURNING {column} -> %s::text -> %s::text")
+    parameters = [RECEIPTS_KEY, RECEIPTS_KEY, RECEIPTS_KEY, key, json.dumps(receipt), owner_id,
+                  *condition, RECEIPTS_KEY, key]
+    with connection.cursor() as cursor:
+        cursor.execute(sql, parameters)
+        row = cursor.fetchone()
+    if row is None:
+        return None
+    return json.loads(row[0]) if isinstance(row[0], str) else row[0]
+
+
 def _queue_org_receipt(organization, alert_id, receipt) -> dict:
     """Store ``receipt`` under ``alert_id`` unless one is there; return the stored receipt."""
     from .models import OrganizationContentConfig
+    if connection.vendor == 'postgresql':
+        inserted = _postgres_receipt_update('config', organization.pk, alert_id, receipt)
+        if inserted is not None:
+            return inserted
+        # Existing receipts retain their state and identity. The old locked
+        # path also creates a missing config with the same uniqueness fence.
     with transaction.atomic():
         config, _ = OrganizationContentConfig.objects.select_for_update().get_or_create(organization=organization)
         strategy = dict(config.pillar_strategy) if isinstance(config.pillar_strategy, dict) else {}
@@ -617,13 +665,16 @@ def _queue_org_receipt(organization, alert_id, receipt) -> dict:
 
 def _mirror_run_receipt(run, alert_reason, receipt):
     """Copy an index receipt onto its run (its own transaction, after the config lock is released)."""
-    with transaction.atomic():
-        locked = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).values_list("result", flat=True).first()
-        result = dict(locked) if isinstance(locked, dict) else {}
-        receipts = dict(_receipts_in(result))
-        if receipts.get(alert_reason) != receipt:
-            receipts[alert_reason] = receipt
-            ContentFactoryRun.objects.filter(pk=run.pk).update(result={**result, RECEIPTS_KEY: receipts})
+    if connection.vendor == 'postgresql':
+        _postgres_receipt_update('run', run.pk, alert_reason, receipt)
+    else:
+        with transaction.atomic():
+            locked = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).values_list("result", flat=True).first()
+            result = dict(locked) if isinstance(locked, dict) else {}
+            receipts = dict(_receipts_in(result))
+            if receipts.get(alert_reason) != receipt:
+                receipts[alert_reason] = receipt
+                ContentFactoryRun.objects.filter(pk=run.pk).update(result={**result, RECEIPTS_KEY: receipts})
     # A caller that saves its in-memory run afterwards keeps the receipt too.
     if hasattr(run, "result"):
         current = run.result if isinstance(run.result, dict) else {}

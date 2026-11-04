@@ -231,7 +231,9 @@ def _fresh_owned_run(run):
         return False
     from .website_run_authority import event_owned
     with transaction.atomic():
-        current = ContentFactoryRun.objects.select_for_update(of=('self',)).select_related('organization').get(pk=run.pk)
+        # Ownership depends only on the fresh backend receipt. Keep its row
+        # lock without hydrating article inputs or joining the organisation.
+        current = ContentFactoryRun.objects.select_for_update(of=('self',)).only('result').get(pk=run.pk)
         return event_owned(current)
 
 
@@ -267,6 +269,12 @@ def _alert(organization, reason, *, run=None, slot=None, details=None):
 def _locked_config(organization):
     from organizations.models import Organization
     Organization.objects.select_for_update().get(pk=organization.pk)
+    try:
+        # The normal path needs one fresh locked read, rather than an ordinary
+        # get_or_create read followed by a second read of the same config.
+        return OrganizationContentConfig.objects.select_for_update().get(organization=organization)
+    except OrganizationContentConfig.DoesNotExist:
+        pass
     config, _ = OrganizationContentConfig.objects.get_or_create(organization=organization)
     return OrganizationContentConfig.objects.select_for_update().get(pk=config.pk)
 

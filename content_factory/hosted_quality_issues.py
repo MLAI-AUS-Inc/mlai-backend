@@ -45,6 +45,8 @@ def _timestamp(value):
 def public_hosted_quality_issues(quality, preview, manifest, *, resume_generation=None):
     """Project claim errors only for the exact hosted preview attempt on screen."""
     quality, preview, manifest = _mapping(quality), _mapping(preview), _mapping(manifest)
+    if quality.get("escalation") == "safety_review":
+        return []  # Staff own unresolved safety guidance; founders receive the quality notice.
     if quality.get("status") != "blocking_findings" or preview.get("available") is not True:
         return []
     if (preview.get("exactRender") if "exactRender" in preview else preview.get("exact_render")) is not True:

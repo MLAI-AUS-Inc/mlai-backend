@@ -84,14 +84,15 @@ class ArticleRunWorkflowProgressTests(TestCase):
         self.assertEqual(progress["currentStepId"], "review")
         publish = _step(progress, "publish")
         self.assertEqual(publish["status"], "blocked")
-        self.assertEqual(publish["primaryAction"]["label"], "Review preview findings")
+        self.assertIsNone(publish["primaryAction"])
         self.assertIn("articleStep=review", publish["href"])
 
     def test_quality_recheck_must_settle_before_publish_is_ready(self):
-        for quality_status in ("queued", "running", "transient_findings"):
+        for quality_status in ("queued", "running", "transient_findings", "self_healing"):
             with self.subTest(quality_status=quality_status):
                 progress = _article_progress(quality_status=quality_status)
                 self.assertEqual(_step(progress, "publish")["status"], "locked")
+                self.assertIsNone(_step(progress, "publish")["primaryAction"])
                 self.assertEqual(progress["currentStepId"], "review")
 
         progress = _article_progress(quality_status="passed")
