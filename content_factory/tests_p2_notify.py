@@ -8,6 +8,7 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from unittest import skipUnless
 from unittest.mock import patch
 
 from django.core.cache import cache
@@ -391,6 +392,115 @@ class NotificationTests(TransactionTestCase):
         self.assertEqual(results[0]["ids"], results[1]["ids"])
         config = OrganizationContentConfig.objects.get(organization=self.org)
         self.assertEqual(len(config.pillar_strategy["ops_alerts"]), 1)
+
+    @skipUnless(connection.vendor == "postgresql", "Atomic JSON receipt storage uses PostgreSQL")
+    def test_single_incident_reservation_has_bounded_database_round_trips(self):
+        from . import founder_journey_alerts as alerts
+        run = self.make_run({"provider_state": {"nonce": "keep-current"}})
+        before = run.updated_at
+        with CaptureQueriesContext(connection) as queries:
+            identifier = alerts.queue_founder_journey_alert(
+                organization=self.org, alert_reason="our_team_item", run=run)
+        self.assertLessEqual(len(queries), 4)
+        run.refresh_from_db();self.fixture.config.refresh_from_db()
+        self.assertEqual(run.updated_at, before)
+        self.assertEqual(run.result["provider_state"], {"nonce": "keep-current"})
+        self.assertEqual(run.result["ops_alerts"]["our_team_item"],
+                         self.fixture.config.pillar_strategy["ops_alerts"][identifier])
+
+    @skipUnless(connection.vendor == "postgresql", "Atomic JSON receipt storage uses PostgreSQL")
+    def test_single_incident_mirror_keeps_an_intervening_callback_and_clock(self):
+        from . import founder_journey_alerts as alerts
+        from workflow_runs.models import ContentFactoryRun
+        run = self.make_run({"old_snapshot": True})
+        moved_at = self.now + timedelta(seconds=1)
+        original = alerts._postgres_receipt_update
+        def reserve(target, *args):
+            value = original(target, *args)
+            if target == "config":
+                self.assertFalse(connection.in_atomic_block)
+                ContentFactoryRun.objects.filter(pk=run.pk).update(
+                    result={"callback_nonce": "fresh-provider-result"}, status="running", updated_at=moved_at)
+            return value
+        with patch.object(alerts, "_postgres_receipt_update", side_effect=reserve):
+            alerts.queue_founder_journey_alert(organization=self.org, alert_reason="our_team_item", run=run)
+        run.refresh_from_db()
+        self.assertEqual((run.status, run.updated_at), ("running", moved_at))
+        self.assertEqual(run.result["callback_nonce"], "fresh-provider-result")
+        self.assertNotIn("old_snapshot", run.result)
+        self.assertIn("our_team_item", run.result["ops_alerts"])
+
+    @skipUnless(connection.vendor == "postgresql", "Atomic JSON receipt storage uses PostgreSQL")
+    def test_single_incident_replay_keeps_settled_index_and_unrelated_receipts(self):
+        from . import founder_journey_alerts as alerts
+        run = self.make_run({"ops_alerts": {"unrelated": {"state": "sent"}}})
+        identifier = alerts.queue_founder_journey_alert(organization=self.org, alert_reason="our_team_item", run=run)
+        self.fixture.config.refresh_from_db()
+        strategy = self.fixture.config.pillar_strategy
+        settled = {**strategy["ops_alerts"][identifier], "state": "sent", "attempts": 2}
+        strategy["ops_alerts"][identifier] = settled
+        strategy["independent_config_nonce"] = "preserved"
+        OrganizationContentConfig.objects.filter(pk=self.fixture.config.pk).update(pillar_strategy=strategy)
+        self.assertEqual(alerts.queue_founder_journey_alert(
+            organization=self.org, alert_reason="our_team_item", run=run, details={"attempts": 99}), identifier)
+        run.refresh_from_db();self.fixture.config.refresh_from_db()
+        self.assertEqual(run.result["ops_alerts"]["our_team_item"], settled)
+        self.assertEqual(run.result["ops_alerts"]["unrelated"], {"state": "sent"})
+        self.assertEqual(self.fixture.config.pillar_strategy["independent_config_nonce"], "preserved")
+
+    @skipUnless(connection.vendor == "postgresql", "Atomic JSON receipt storage uses PostgreSQL")
+    def test_single_incident_concurrent_queues_reserve_one_receipt(self):
+        from . import founder_journey_alerts as alerts
+        from workflow_runs.models import ContentFactoryRun
+        run = self.make_run({"callback_nonce": "keep"})
+        def reserve():
+            close_old_connections()
+            try:
+                current = ContentFactoryRun.objects.get(pk=run.pk)
+                return alerts.queue_founder_journey_alert(
+                    organization=self.org, alert_reason="our_team_item", run=current)
+            finally:
+                connections.close_all()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ids = list(pool.map(lambda _: reserve(), range(2)))
+        self.assertEqual(ids[0], ids[1])
+        self.fixture.config.refresh_from_db();run.refresh_from_db()
+        self.assertEqual(len(self.fixture.config.pillar_strategy["ops_alerts"]), 1)
+        self.assertEqual(run.result["callback_nonce"], "keep")
+        self.assertEqual(run.result["ops_alerts"]["our_team_item"],
+                         self.fixture.config.pillar_strategy["ops_alerts"][ids[0]])
+
+    @skipUnless(connection.vendor == "postgresql", "Atomic JSON receipt storage uses PostgreSQL")
+    def test_single_incident_normalizes_malformed_legacy_containers(self):
+        from . import founder_journey_alerts as alerts
+        run = self.make_run({"callback_nonce": "keep", "ops_alerts": ["old-shape"]})
+        OrganizationContentConfig.objects.filter(pk=self.fixture.config.pk).update(pillar_strategy=["old-shape"])
+        identifier = alerts.queue_founder_journey_alert(organization=self.org, alert_reason="our_team_item", run=run)
+        self.fixture.config.refresh_from_db();run.refresh_from_db()
+        self.assertEqual(run.result["callback_nonce"], "keep")
+        self.assertEqual(run.result["ops_alerts"]["our_team_item"]["alert_id"], identifier)
+        self.assertEqual(self.fixture.config.pillar_strategy["ops_alerts"][identifier]["alert_id"], identifier)
+
+    @skipUnless(connection.vendor == "postgresql", "Atomic JSON receipt storage uses PostgreSQL")
+    def test_single_incident_still_creates_a_missing_config(self):
+        from . import founder_journey_alerts as alerts
+        run = self.make_run()
+        OrganizationContentConfig.objects.filter(organization=self.org).delete()
+        identifier = alerts.queue_founder_journey_alert(organization=self.org, alert_reason="our_team_item", run=run)
+        config = OrganizationContentConfig.objects.get(organization=self.org)
+        self.assertEqual(config.pillar_strategy["ops_alerts"][identifier]["alert_id"], identifier)
+
+    @skipUnless(connection.vendor == "postgresql", "Atomic JSON receipt storage uses PostgreSQL")
+    def test_single_incident_reservation_and_mirror_respect_outer_rollback(self):
+        from . import founder_journey_alerts as alerts
+        run = self.make_run({"callback_nonce": "keep"})
+        with self.assertRaisesRegex(RuntimeError, "roll back this reservation"):
+            with transaction.atomic():
+                alerts.queue_founder_journey_alert(organization=self.org, alert_reason="our_team_item", run=run)
+                raise RuntimeError("roll back this reservation")
+        self.fixture.config.refresh_from_db();run.refresh_from_db()
+        self.assertNotIn("ops_alerts", self.fixture.config.pillar_strategy)
+        self.assertEqual(run.result, {"callback_nonce": "keep"})
 
     def test_reviewed_child_live_projection_keeps_original_article_identity(self):
         source = self.ready()

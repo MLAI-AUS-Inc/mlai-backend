@@ -14490,8 +14490,10 @@ def _sync_steps_from_remote(run, remote_data):
 
 def _sync_local_run_from_remote(run, remote_data):
     from .run_owned_observations import refresh_owned_run
+    from .hosted_quality_alerts import queue_hosted_quality_review_alert
     owned = refresh_owned_run(run)
     if owned is not None:
+        queue_hosted_quality_review_alert(owned)
         return owned
     from content_factory.run_state import stale_execution_event
     from .portable_drafts import portable_run_update_allowed
@@ -14513,6 +14515,7 @@ def _sync_local_run_from_remote(run, remote_data):
     # After the run lock is released: a mirrored delivery consumes the free first article.
     from .first_article_entitlement import settle_entitlement_for_run
     settle_entitlement_for_run(run)
+    queue_hosted_quality_review_alert(run)
     return run
 
 
