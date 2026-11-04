@@ -505,3 +505,92 @@ class FailureContractTests(TestCase):
     def test_the_sweep_is_a_scheduled_runner(self):
         source = (Path(__file__).resolve().parents[1] / "core/management/commands/run_scheduled_discovery.py").read_text()
         self.assertIn('("founder_journey_alerts", run_founder_journey_alert_sweep)', source)
+
+
+@override_settings(ARTICLES_STAFF_ALERT_RULES_ENABLED=False,
+                   ARTICLES_OPERATIONAL_ALERTS_ENABLED=False,
+                   ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED=False,
+                   ARTICLES_GOAL_NOTIFICATIONS_ENABLED=False,
+                   MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED=False,
+                   MY_STARTUP_TURN_REMINDERS_ENABLED=False)
+class HostedQualityOwnerQueueTests(FounderJourneyFixture):
+    def setUp(self):
+        super().setUp()
+        self.old_receipts = {
+            f"old-{i}": {"alert_id": f"old-{i}", "alert_reason": "run_terminal",
+                         "state": "unconfigured", "attempts": 0}
+            for i in range(16)
+        }
+        self.old_receipts["already-sent"] = {
+            "alert_id": "already-sent", "alert_reason": "run_blocked", "state": "sent", "attempts": 1}
+        OrganizationContentConfig.objects.create(
+            organization=self.org, auto_publish=False, requires_review=True,
+            pillar_strategy={"keep": "original", "ops_alerts": self.old_receipts})
+
+    def held_run(self, escalation="safety_review"):
+        url = "https://preview.example.test/stories/held"
+        return self.make_run(
+            workflow="article_generation", status="approval_required", age=timedelta(days=90), touched=self.now,
+            run_request={"roo_points_billing_status": "charged", "roo_points_cost": 12},
+            result={"generation": 0, "livePreview": {"previewUrl": url, "resumeGeneration": 0,
+                    "proof": {"commitSha": "a" * 40}}, "article_preview_quality": {
+                    "preview_url": url, "resume_generation": 0, "inputs_sha256": "b" * 64,
+                    "status": "blocking_findings", "self_heal_exhausted": True, "escalation": escalation,
+                    "founder_message": "secret clinical/provider content"}})
+
+    def test_owner_observation_delivers_once_with_broad_rules_off_and_preserves_old_receipts(self):
+        from copy import deepcopy
+        from .hosted_quality_alerts import queue_hosted_quality_review_alert
+        for escalation, reason in (("safety_review", "article_safety_review_required"),
+                                   ("quality_review", "article_quality_review_required")):
+            with self.subTest(escalation=escalation):
+                run = self.held_run(escalation)
+                original_quality, original_request = deepcopy(run.result["article_preview_quality"]), deepcopy(run.run_request)
+                with self.captureOnCommitCallbacks(execute=False) as callbacks:
+                    queue_hosted_quality_review_alert(run)
+                    self.assertNotIn(reason, self.receipts(run))
+                self.assertEqual(len(callbacks), 1)
+                callbacks[0]()
+                outcome, calls = self.sweep(now=timezone.now() + timedelta(seconds=1))
+                self.assertEqual(outcome["sent"], 1)
+                self.assertEqual(len(calls), 1)
+                receipt = self.receipts(run)[reason]
+                self.assertEqual(receipt["state"], "sent")
+                self.assertNotIn("secret clinical", str(calls) + str(receipt))
+                self.assertEqual(run.result["article_preview_quality"], original_quality)
+                self.assertEqual(run.run_request, original_request)
+                self.assertEqual(run.status, "approval_required")
+                with self.captureOnCommitCallbacks(execute=True) as repeated:
+                    queue_hosted_quality_review_alert(run)
+                self.assertEqual(repeated, [])
+                replay, calls = self.sweep(now=timezone.now() + timedelta(seconds=2))
+                self.assertEqual(replay["sent"], 0)
+                self.assertEqual(calls, [])
+        cfg = OrganizationContentConfig.objects.get(organization=self.org)
+        self.assertEqual(OrganizationContentConfig.objects.count(), 1)
+        self.assertFalse(cfg.auto_publish)
+        self.assertTrue(cfg.requires_review)
+        self.assertEqual(cfg.pillar_strategy["keep"], "original")
+        for key, value in self.old_receipts.items():
+            self.assertEqual(cfg.pillar_strategy["ops_alerts"][key], value)
+
+    def test_new_repair_wins_before_the_commit_callback(self):
+        from .hosted_quality_alerts import queue_hosted_quality_review_alert
+        run = self.held_run()
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            queue_hosted_quality_review_alert(run)
+        run.result["article_preview_quality"].update(status="self_healing", self_heal_exhausted=False)
+        ContentFactoryRun.objects.filter(pk=run.pk).update(result=run.result)
+        callbacks[0]()
+        self.assertEqual(self.org_receipts(), self.old_receipts)
+
+    def test_a_rolled_back_sync_does_not_queue_an_alert(self):
+        from django.db import transaction
+        from .hosted_quality_alerts import queue_hosted_quality_review_alert
+        run = self.held_run()
+        with self.captureOnCommitCallbacks(execute=True) as callbacks:
+            with transaction.atomic():
+                queue_hosted_quality_review_alert(run)
+                transaction.set_rollback(True)
+        self.assertEqual(callbacks, [])
+        self.assertEqual(self.org_receipts(), self.old_receipts)
