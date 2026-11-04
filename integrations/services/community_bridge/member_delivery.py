@@ -1034,9 +1034,15 @@ def _prepare(delivery, original, authority, actor, saved):
 def execute(delivery):
     """One immutable attempt; all external work and settlement remain fenced."""
     original, identity, saved = _stamp_identity(delivery)
-    if not access.enabled():
-        raise MemberDeliveryDeferred(60)
-    authority, actor = _choose(delivery, original, saved)
+    actor = None
+    try:
+        if not access.enabled():
+            raise MemberDeliveryDeferred(60, reason="community_member_access_disabled")
+        authority, actor = _choose(delivery, original, saved)
+    except Exception as error:
+        from .observability import send_failure
+        send_failure(original, actor, delivery["id"], error)
+        raise
     client = None
     attempt = None
     command = None

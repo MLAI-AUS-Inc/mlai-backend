@@ -23,7 +23,7 @@ HOLD_REASONS = frozenset({
     "community_source_closed", "parent_mapping_pending", "member_membership_unproven",
 })
 # Closed codes for permanent drops (row becomes dead without a provider call).
-DROP_REASONS = frozenset({"consent_required", "device_unverified", "account_unverified", "permanent_failure"})
+DROP_REASONS = frozenset({"consent_required", "device_unverified", "permanent_failure"})
 _SCHEMAS = {
     "slack_member_event": {
         "route": {"members", "community"},

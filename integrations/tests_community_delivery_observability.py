@@ -22,10 +22,19 @@ from integrations.services.message_sync.scheduler import BudgetDeferred
 
 ROOM = str(uuid.uuid4())
 SECRET_TEXT = "my phone is 0400 000 000"
+# Operator-facing codes as published in docs/slack-community-phase5-operations.md,
+# "Reading held and dropped sends". The document is the oracle, not the allowlist.
+DOCUMENTED_HOLD_CODES = (
+    "provider_budget_deferred", "community_bot_reader_unavailable", "community_bot_reader_scope_unavailable",
+    "legacy_community_send_unproven", "community_channel_not_admitted", "community_mapping_pending",
+    "community_member_access_disabled", "community_receipt_unverified", "community_source_closed",
+    "member_membership_unproven", "member_delivery_deferred",
+)
+DOCUMENTED_DROP_CODES = ("consent_required", "device_unverified", "permanent_failure")
 
 
-def _original():
-    return SimpleNamespace(pk=7, audience="community", destination_platform="buzz",
+def _original(audience="community"):
+    return SimpleNamespace(pk=7, audience=audience, destination_platform="buzz",
                            slack_workspace_id="T1", slack_channel_id="C1", destination_channel_id=ROOM)
 
 
@@ -73,7 +82,7 @@ class HoldReasonTests(SimpleTestCase):
         self.assertEqual(self._defer(reason=None).last_error, "provider_budget_deferred")
         # A well-formed but unlisted code must not reach the row either.
         self.assertEqual(self._defer(reason="unknown_code").last_error, "provider_budget_deferred")
-        for reason in observability.HOLD_REASONS:
+        for reason in DOCUMENTED_HOLD_CODES:
             self.assertEqual(self._defer(reason=reason).last_error, reason)
 
     def test_worker_passes_the_hold_reason_to_the_row(self):
@@ -90,7 +99,6 @@ class FailureOutcomeTests(SimpleTestCase):
         cases = {
             PublicBridgeConsentRequired("Current AI sharing permission is required"): "consent_required",
             PublicBridgeConsentRequired("x", reason="device_unverified"): "device_unverified",
-            PublicBridgeConsentRequired("x", reason="account_unverified"): "account_unverified",
             PublicBridgeConsentRequired("x", reason="not-a-code"): "consent_required",
         }
         for error, reason in cases.items():
@@ -107,11 +115,30 @@ class FailureOutcomeTests(SimpleTestCase):
                          ("unavailable", "authority_or_provider_hold"))
         self.assertEqual(observability.failure_outcome(member.MemberDeliveryRetry("x")), ("retry", "authority_or_provider_hold"))
 
-    def test_every_reason_passes_the_closed_schema(self):
-        base = {"mapping_id": 7, "workspace_id": "T1", "channel_id": "C1", "room_id": ROOM, "delivery_id": 42}
-        for reason in observability.HOLD_REASONS | observability.DROP_REASONS:
-            self.assertIsNotNone(observability._closed("slack_member_send", {**base, "outcome": "deferred", "reason": reason}))
-        self.assertIsNotNone(observability._closed("slack_member_send", {**base, "outcome": "dropped", "reason": "consent_required"}))
+    def _logged_line(self, outcome, reason):
+        info = Mock()
+        connection = SimpleNamespace(connection=object(), in_atomic_block=False, autocommit=True)
+        with patch.object(observability.logger, "info", info), \
+                patch.object(observability, "connections", SimpleNamespace(_connections=SimpleNamespace(default=connection))):
+            observability.emit("slack_member_send", mapping_id=7, workspace_id="T1", channel_id="C1", room_id=ROOM,
+                               delivery_id=42, outcome=outcome, reason=reason)
+        if not info.call_args_list:
+            return None
+        (fmt, family, body), _ = info.call_args
+        return f"{family} {body}"
+
+    def test_every_documented_code_is_written_to_the_send_log(self):
+        for reason in DOCUMENTED_HOLD_CODES + ("parent_mapping_pending",):
+            line = self._logged_line("deferred", reason)
+            self.assertIsNotNone(line, reason)
+            self.assertIn("outcome=deferred", line)
+            self.assertIn(f"reason={reason}", line)
+        for reason in DOCUMENTED_DROP_CODES:
+            line = self._logged_line("dropped", reason)
+            self.assertIsNotNone(line, reason)
+            self.assertIn(f"reason={reason}", line)
+        self.assertIsNone(self._logged_line("deferred", "unknown_code"))
+        self.assertIsNone(self._logged_line("deferred", SECRET_TEXT))
 
 
 class ExecuteObservationTests(SimpleTestCase):
@@ -155,3 +182,39 @@ class ExecuteObservationTests(SimpleTestCase):
         self.assertIs(raised, error)
         self.assertTrue(raised.permanent)
         self.assertEqual((fields["outcome"], fields["reason"], fields["poster"]), ("dropped", "consent_required", "bot"))
+
+
+class MemberExecuteObservationTests(SimpleTestCase):
+    """The member-room path records selection failures with the same observation."""
+
+    def _run(self, enabled=True, **stubs):
+        emit = Mock()
+        with patch.object(member, "_stamp_identity", return_value=(_original("members"), {}, {})), \
+                patch.object(member.access, "enabled", return_value=enabled), \
+                patch.object(observability, "emit", emit), \
+                patch.multiple(member, **stubs):
+            with self.assertRaises(Exception) as caught:
+                member.execute(_delivery())
+        sends = [call.kwargs for call in emit.call_args_list if call.args == ("slack_member_send",)]
+        self.assertEqual(len(sends), 1)
+        self.assertNotIn(SECRET_TEXT, str(emit.call_args_list))
+        return caught.exception, sends[0]
+
+    def test_member_access_disabled_is_logged_as_held_with_its_code(self):
+        raised, fields = self._run(enabled=False, _choose=Mock(side_effect=AssertionError("selection must not run")))
+        self.assertEqual(raised.retry_after, 60)
+        self.assertEqual((fields["outcome"], fields["reason"], fields["delivery_id"]),
+                         ("deferred", "community_member_access_disabled", 42))
+        self.assertNotIn("poster", fields)
+
+    def test_member_selection_failures_are_logged_without_poster(self):
+        cases = (
+            (worker.ParentMappingPending("p"), ("deferred", "parent_mapping_pending")),
+            (member.MemberDeliveryUnavailable("not_a_slack_member"), ("unavailable", "authority_or_provider_hold")),
+            (BudgetDeferred(60, reason="member_membership_unproven"), ("deferred", "member_membership_unproven")),
+        )
+        for error, expected in cases:
+            raised, fields = self._run(_choose=Mock(side_effect=error))
+            self.assertIs(raised, error)
+            self.assertEqual((fields["outcome"], fields["reason"]), expected)
+            self.assertNotIn("poster", fields)

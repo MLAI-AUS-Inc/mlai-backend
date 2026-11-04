@@ -114,7 +114,7 @@ provider attempt. Its `last_error` is a fixed code that says why it is held:
 | `community_receipt_unverified` | Slack's response did not yet prove the expected poster. |
 | `community_source_closed` | The source channel was reduced while the send was running. |
 | `member_membership_unproven` | The author has a linked grant, but their channel membership could not be confirmed yet. |
-| `member_delivery_deferred` | Any other member-path hold that has no specific code. |
+| `member_delivery_deferred` | Any other hold from the shared send machinery (reconcile reads, response checks) that has no specific code, for member or bot posts. |
 
 A reply whose parent has no Slack message yet is a separate dependency wait:
 its row status is `waiting_parent`, not `pending`, until the parent is mapped.
@@ -142,8 +142,7 @@ lead to:
   or `parent_mapping_pending` for the `waiting_parent` dependency wait above.
 - `dropped`: permanent; the row becomes `dead`. `reason` is `consent_required`
   (no current AI-sharing consent), `device_unverified` (the signing device is
-  not a current verified device of an active account), `account_unverified`, or
-  `permanent_failure`.
+  not a current verified device of an active account), or `permanent_failure`.
 - `unavailable`: permanent `MemberDeliveryUnavailable`; the row becomes `dead`.
 - `retry`: provider outcome uncertain. With durable sync (`MESSAGE_SYNC_ENABLED`)
   the row becomes `failed` with backoff. Without it, the row becomes `dead` once
