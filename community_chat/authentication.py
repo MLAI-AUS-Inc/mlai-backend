@@ -85,6 +85,10 @@ class CommunityChatBootstrapAuthentication(BaseAuthentication):
         if not hmac.compare_digest(token.token_hash, token_hash):
             raise AuthenticationFailed("Community chat authorization is invalid.")
 
+        if getattr(settings, 'SETTINGS_MODULE', '') == 'mlai.settings_staging_founder':
+            from mlai.founder_staging_admission import require_browser_credential
+            require_browser_credential(request, token)
+
         from .onboarding import require_community_access
         require_community_access(token.user)
 
@@ -175,6 +179,12 @@ class CommunityChatOnboardingAuthentication(CommunityChatAccountAuthentication):
 
 def _check_staging_transport(request):
     """Share the exact hosted transport gate without delegating authentication."""
+    if getattr(settings, 'SETTINGS_MODULE', '') == 'mlai.settings_staging_founder':
+        from mlai.founder_staging_admission import require_browser_credential
+        credential = (getattr(request, 'community_chat_account_session', None)
+                      or getattr(request, 'community_chat_bootstrap_token', None))
+        require_browser_credential(request, credential)
+        return
     if (getattr(settings,'SETTINGS_MODULE','')=='mlai.settings_staging_chat'
             and getattr(settings,'APP_ENV','')=='chat-staging'):
         from .staging_password import require_credential_transport

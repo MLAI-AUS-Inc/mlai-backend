@@ -263,10 +263,10 @@ jobs:
       run: python scripts/test_without_database.py mentoring.tests.test_scheduling_unit mentoring.tests.test_google_unit mentoring.tests.test_service_unit mentoring.tests.test_dst_unit mentoring.tests.test_followup_unit community_chat.tests.test_mentoring_views_unit mentoring.tests.test_admin_unit community_chat.tests.test_mentoring_admin_views_unit community_chat.tests.test_staff_admin_unit
 
     - name: Test isolated staging controller, network and startup gates
-      run: python -m unittest ops.staging-chat.test_auto_deploy ops.staging-chat.test_network_policy ops.staging-chat.test_start_api ops.founder-staging.test_inbox_fixture mlai.test_founder_staging_environment -v
+      run: python -m unittest ops.staging-chat.test_auto_deploy ops.staging-chat.test_network_policy ops.staging-chat.test_start_api ops.founder-staging.test_inbox_fixture mlai.test_founder_staging_environment mlai.test_founder_staging_profile -v
 
     - name: Check founder fixture email profile and provider without database access
-      run: python scripts/test_without_database.py community_chat.tests.test_founder_staging_email_unit
+      run: python scripts/test_without_database.py community_chat.tests.test_founder_staging_email_unit mlai.tests_founder_staging_admission
 
     - name: Test isolated staging provider and development boundaries without database access
       run: python scripts/test_without_database.py mlai.tests_staging_integrations roo.tests_development_build
@@ -1106,6 +1106,7 @@ jobs:
           community_chat.tests.test_email_code_auth \
           community_chat.tests.test_email_code_delivery \
           community_chat.tests.test_founder_staging_outbox \
+          community_chat.tests.test_founder_staging_browser \
           community_chat.tests.test_home_facades \
           community_chat.tests.test_onboarding \
           community_chat.tests.test_onboarding_names_unit \

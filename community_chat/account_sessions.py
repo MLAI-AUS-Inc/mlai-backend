@@ -113,6 +113,7 @@ def authenticate_access_token(raw_token, *, required_public_key=None):
     )
     if not _valid_session(session, now) or session.access_expires_at <= now:
         raise InvalidAccountSession("invalid_session")
+    _require_fixture_session(session)
     validate_browser_account_binding(session, required_public_key)
     _validate_device_owner(session)
     CommunityChatAccountSession.objects.filter(id=session.id).update(last_used_at=now)
@@ -138,6 +139,14 @@ def validate_browser_account_binding(session, expected_public_key):
         raise InvalidBrowserAccountBinding("account_identity_mismatch")
 
 
+def _require_fixture_session(session):
+    from .founder_staging_identity import require_session, InvalidFixtureIdentity
+    try:
+        require_session(session)
+    except InvalidFixtureIdentity:
+        raise InvalidAccountSession("invalid_session") from None
+
+
 def rotate_account_session(raw_refresh_token, *, required_origin=None, required_public_key=None):
     if not str(raw_refresh_token).startswith(REFRESH_TOKEN_PREFIX):
         raise InvalidAccountSession("invalid_session")
@@ -154,6 +163,7 @@ def rotate_account_session(raw_refresh_token, *, required_origin=None, required_
         )
         if not _valid_session(session, now):
             raise InvalidAccountSession("invalid_session")
+        _require_fixture_session(session)
         validate_browser_account_binding(session, required_public_key)
         _validate_device_owner(session)
         if required_origin is not None and not secrets.compare_digest(
@@ -198,6 +208,7 @@ def revoke_account_session(raw_refresh_token, *, required_origin=None, required_
         )
         if not _valid_session(session, now):
             raise InvalidAccountSession("invalid_session")
+        _require_fixture_session(session)
         validate_browser_account_binding(session, required_public_key)
         if required_origin is not None and not secrets.compare_digest(
             session.origin,

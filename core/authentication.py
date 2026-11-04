@@ -20,6 +20,11 @@ class CustomJWTAuthentication(JWTAuthentication):
         return user
 
     def authenticate(self, request):
+        if getattr(settings, 'SETTINGS_MODULE', '') == 'mlai.settings_staging_founder':
+            if getattr(settings, 'APP_ENV', '') != 'chat-staging':
+                raise exceptions.AuthenticationFailed('Founder staging configuration is invalid.')
+            from community_chat.authentication import CommunityChatAccountAuthentication
+            return CommunityChatAccountAuthentication().authenticate(request)
         # Hosted staging uses its independent account sessions throughout the
         # ordinary route tree; domain permissions still decide what a user can do.
         if getattr(settings,'SETTINGS_MODULE','') == 'mlai.settings_staging_chat':

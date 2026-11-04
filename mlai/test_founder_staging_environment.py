@@ -10,7 +10,8 @@ def environment():
             "RUN_MIGRATIONS_ON_START": "0", "DATABASE_URL": "postgresql://founder_runtime:" + "a" * 64 + "@founder-postgres:5432/founder_acceptance",
             "REDIS_URL": "redis://:" + "b" * 64 + "@founder-redis:6379/0", "SECRET_KEY": "c" * 96,
             "COMMUNITY_CHAT_EMAIL_CODE_PEPPER": "d" * 64, "FOUNDER_STAGING_INBOX_WRITE_TOKEN": "e" * 64,
-            "COMMUNITY_CHAT_ADAPTER_TOKEN": "f" * 64, "FOUNDER_STAGING_EMAIL_DOMAIN": "staging.founder.mlai.au"}
+            "COMMUNITY_CHAT_ADAPTER_TOKEN": "f" * 64, "COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET": "0" * 64,
+            "MLAI_CHAT_ACCOUNT_KEY_SECRET": "1" * 64, "FOUNDER_STAGING_EMAIL_DOMAIN": "staging.founder.mlai.au"}
 
 
 class StartupBoundaryTests(unittest.TestCase):
@@ -62,6 +63,9 @@ class StartupBoundaryTests(unittest.TestCase):
         value = environment(); value["DATABASE_URL"] = value["DATABASE_URL"].replace("a" * 64, "short")
         with self.assertRaises(InvalidFounderEnvironment):
             checked_founder_environment(value)
+        for name in ("COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET", "MLAI_CHAT_ACCOUNT_KEY_SECRET"):
+            with self.subTest(name=name), self.assertRaises(InvalidFounderEnvironment):
+                checked_founder_environment({**environment(), name: environment()["SECRET_KEY"]})
 
     def test_cache_notifications_password_and_email_domain_are_fixed(self):
         for key, value in (("REDIS_URL", environment()["REDIS_URL"].replace("founder-redis", "redis-api")),

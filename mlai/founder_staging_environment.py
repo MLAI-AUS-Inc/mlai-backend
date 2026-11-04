@@ -14,7 +14,8 @@ DATABASE = ("founder-postgres", 5432, "founder_runtime", "/founder_acceptance")
 CACHE = ("founder-redis", 6379, "/0")
 EMAIL_DOMAIN = "staging.founder.mlai.au"
 TOKEN = re.compile(r"[0-9a-f]{64,128}")
-PRIVATE_INPUTS = {"SECRET_KEY", "COMMUNITY_CHAT_EMAIL_CODE_PEPPER", "FOUNDER_STAGING_INBOX_WRITE_TOKEN", "COMMUNITY_CHAT_ADAPTER_TOKEN"}
+PRIVATE_INPUTS = {"SECRET_KEY", "COMMUNITY_CHAT_EMAIL_CODE_PEPPER", "FOUNDER_STAGING_INBOX_WRITE_TOKEN", "COMMUNITY_CHAT_ADAPTER_TOKEN",
+                  "COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET", "MLAI_CHAT_ACCOUNT_KEY_SECRET"}
 SECRET_NAME = re.compile(r"(?:^|_)(?:KEYS?|SECRET|TOKEN|PASSWORD|CREDENTIALS|SERVICE_ACCOUNT)(?:_(?:B64|BASE64|JSON))?$")
 NOTIFICATIONS = (
     "ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED", "ARTICLES_GOAL_NOTIFICATIONS_ENABLED",
@@ -35,6 +36,8 @@ class FounderEnvironment:
     email_pepper: str = field(repr=False)
     inbox_writer: str = field(repr=False)
     adapter_token: str = field(repr=False)
+    delivery_secret: str = field(repr=False)
+    account_key_secret: str = field(repr=False)
     email_domain: str = EMAIL_DOMAIN
 
 
@@ -83,9 +86,10 @@ def checked_founder_environment(environ):
     _refuse((database.hostname, database.port, unquote(database.username or ""), database.path) == DATABASE)
     _refuse((cache.hostname, cache.port, cache.path) == CACHE and cache.username in (None, "", "default"))
     credentials = [unquote(database.password or ""), unquote(cache.password or "")]
-    names = ("SECRET_KEY", "COMMUNITY_CHAT_EMAIL_CODE_PEPPER", "FOUNDER_STAGING_INBOX_WRITE_TOKEN", "COMMUNITY_CHAT_ADAPTER_TOKEN")
+    names = ("SECRET_KEY", "COMMUNITY_CHAT_EMAIL_CODE_PEPPER", "FOUNDER_STAGING_INBOX_WRITE_TOKEN", "COMMUNITY_CHAT_ADAPTER_TOKEN",
+             "COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET", "MLAI_CHAT_ACCOUNT_KEY_SECRET")
     values = [environ.get(name, "") for name in names]
     _refuse(all(isinstance(value, str) and TOKEN.fullmatch(value) for value in [*credentials, *values]))
-    _refuse(len(set([*credentials, *values])) == 6)
+    _refuse(len(set([*credentials, *values])) == 8)
     _refuse(environ.get("FOUNDER_STAGING_EMAIL_DOMAIN") == EMAIL_DOMAIN)
     return FounderEnvironment(database_url, redis_url, *values)

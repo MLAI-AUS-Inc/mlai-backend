@@ -24,7 +24,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.crypto import salted_hmac
 from rest_framework import status
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
 from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.renderers import JSONRenderer
@@ -743,6 +743,11 @@ class EmailCodeRequestView(APIView):
         device = data["device"]
         email = normalize_account_email(data["email"])
         origin = _password_auth_origin(request, data["client_id"])
+        from .founder_staging_identity import precheck_recipient, InvalidFixtureIdentity
+        try:
+            precheck_recipient(email)
+        except InvalidFixtureIdentity:
+            raise AuthenticationFailed("Founder fixture identity is invalid.") from None
         enforce_chat_email_code_request_limits(
             request,
             email,
@@ -753,17 +758,20 @@ class EmailCodeRequestView(APIView):
             client_ip(request),
             algorithm="sha256",
         ).hexdigest()
-        challenge = issue_email_code_challenge(
-            email=email,
-            client_id=data["client_id"],
-            installation_id=device["installation_id"],
-            origin=origin,
-            platform=device["platform"],
-            device_name=device.get("name", ""),
-            public_key=device["public_key"],
-            requested_ip_digest=ip_digest,
-            onboarding_version=data.get("onboarding_version", 0),
-        )
+        try:
+            challenge = issue_email_code_challenge(
+                email=email,
+                client_id=data["client_id"],
+                installation_id=device["installation_id"],
+                origin=origin,
+                platform=device["platform"],
+                device_name=device.get("name", ""),
+                public_key=device["public_key"],
+                requested_ip_digest=ip_digest,
+                onboarding_version=data.get("onboarding_version", 0),
+            )
+        except InvalidFixtureIdentity:
+            raise AuthenticationFailed("Founder fixture identity is invalid.") from None
         _uniform_email_code_delay(started_at)
         resend_available_at = challenge.created_at + timedelta(
             seconds=settings.COMMUNITY_CHAT_EMAIL_CODE_RESEND_SECONDS
@@ -799,6 +807,12 @@ class EmailCodeVerifyView(APIView):
         serializer = CommunityChatEmailCodeVerifySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        from .founder_staging_identity import precheck_verification, InvalidFixtureIdentity
+        try:
+            precheck_verification(challenge_id=data["challenge_id"], client_id=data["client_id"],
+                                  installation_id=data["installation_id"])
+        except InvalidFixtureIdentity:
+            raise AuthenticationFailed("Founder fixture identity is invalid.") from None
         enforce_chat_email_code_verify_limits(
             request,
             data["challenge_id"],
