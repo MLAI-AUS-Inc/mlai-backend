@@ -289,6 +289,20 @@ def current_operation(connection):
     return latest
 
 
+def cleanup_history(rows):
+    """Expose bounded cleanup outcomes without provider bodies or new authority."""
+    result = []
+    for row in rows:
+        receipt = mapping(row.get("receipt"))
+        if receipt.get("remote_cleanup_pending") is not True or row.get("state") == "completed":
+            continue
+        result.append({"id": str(row["id"]), "action": row["action"], "state": row["state"],
+            "generation": row["generation"], "needsAttention": row["state"] == "needs_attention"})
+        if len(result) == 10:
+            break
+    return result
+
+
 def source_check_in_flight(connection, latest, capabilities=None, *, now=None):
     """The server's unsettled re-check of this website's source, if any.
 
@@ -421,6 +435,11 @@ def journey_for_context(context, config, *, capabilities=None, owner_view=False)
     journey = project_journey(company_id=context.company.pk, domain=context.organization.domain, website=website,
         capabilities=capabilities, discovery=discovery, target=target, operation=operation, epoch=epoch, proof=proof, source_runs=source_runs, ci_source_runs=ci_source_runs, permissions=grants,
         setup_pull_request=setup_pull_request, source_check=source_check)
+    if config.website_connection_id:
+        rows = config.website_connection.operations.filter(action__in=["disconnect", "reconnect", "rotate", "purge", "cancel-operation"],
+            receipt__remote_cleanup_pending=True).exclude(state="completed").exclude(pk=getattr(latest, "pk", None)).order_by("-created_at").values("id", "action", "state", "generation", "receipt")[:10]
+        journey["historicalCleanup"] = cleanup_history(rows)
+        journey["revision"] = evidence_digest({"current": journey["revision"], "cleanup": journey["historicalCleanup"]})
     from .founder_journey_cohort import is_new_journey
     if is_new_journey(context.organization, config):
         from .founder_display_copy import plain_founder_journey

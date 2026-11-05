@@ -115,3 +115,18 @@ tests also passed. The first full CI run exposed a missing `settings` import in
 Roo link issuance; that import is fixed and the new destination regression
 exercises the real API. Production already has migration 0024; this feature
 still introduces no migration.
+
+## Website cleanup status
+
+The company-scoped `websiteJourney` response includes optional `historicalCleanup`
+entries alongside the current operation. Each bounded entry contains `id`,
+`action`, `state`, `generation`, and `needsAttention`. It exposes no provider
+responses or retry/publication authority. The current operation is excluded;
+an older cleanup never replaces current preparation progress.
+
+Cleanup receipts retain closed per-step failures in `cleanup_step_failures`,
+including a canonical code, safe HTTP status when available, and retryability.
+Permanent repository-access failures wait for prerequisite repair while original
+refunds and service preview cleanup can continue. A newer connection supersedes
+old repository-removal work with an explicit retained outcome; it does not lend
+new consent to that old work. Original cleanup deadlines remain in force.
