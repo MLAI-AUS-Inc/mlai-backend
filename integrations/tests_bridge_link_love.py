@@ -65,7 +65,13 @@ class LinkLoveActorTests(SimpleTestCase):
         with self.assertRaises(BridgeActorError): self.resolve()
 
     def test_own_chat_root_is_reported_even_across_devices(self):
-        self.links.filter.return_value.first.return_value = SimpleNamespace(source_author_id="ef" * 32)
+        self.links.filter.return_value.first.return_value = SimpleNamespace(source_author_id="ef" * 32, destination_payload={})
+        self.assertTrue(self.resolve()["is_root_author"])
+
+    def test_rotating_the_root_device_does_not_allow_self_rewards(self):
+        self.links.filter.return_value.first.return_value = SimpleNamespace(source_author_id="ef" * 32,
+            destination_payload={"poster": {"kind": "bot", "user_id": 42}})
+        self.account.side_effect = [self.account.return_value, None]
         self.assertTrue(self.resolve()["is_root_author"])
 
     def test_member_delivery_revalidates_original_grant(self):

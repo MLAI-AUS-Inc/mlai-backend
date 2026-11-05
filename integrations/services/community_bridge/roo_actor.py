@@ -178,12 +178,18 @@ def resolve_roo_actor(*, workspace_id, channel_id, message_id, thread_ts, bridge
         root_account = community_account_for_key(
             slack_workspace_id=workspace_id, buzz_pubkey=root_link.source_author_id,
         ) if root_link else None
+        # A rotated/revoked root signing device must not let its owner earn on
+        # their own post. The worker's frozen poster retains the original owner.
+        root_destination = root_link.destination_payload if root_link else {}
+        root_poster = root_destination.get("poster") if isinstance(root_destination, dict) else None
+        owns_root = (bool(root_account and root_account["user_id"] == account["user_id"])
+                     or isinstance(root_poster, dict) and root_poster.get("user_id") == account["user_id"])
         return {
             **{key: value for key, (value, _) in fields.items()},
             "purpose": "link_love", "actor_profile_id": account["user_profile_id"],
             "actor_slack_user_id": account["slack_user_id"],
             "source_event_id": link.source_message_id,
-            "is_root_author": bool(root_account and root_account["user_id"] == account["user_id"]),
+            "is_root_author": owns_root,
             "text": str((link.source_payload or {}).get("text") or ""),
         }
     identity = verified_identity_for_buzz(
