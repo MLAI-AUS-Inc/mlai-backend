@@ -2898,13 +2898,15 @@ class SystemAwardView(APIView):
             request.data.get('created_by_slack_id') or request.data.get('admin_slack_id') or 'SYSTEM'
         )
         target_slack_id = clean_slack_id(request.data.get('target_slack_id') or '')
+        target_profile_id = request.data.get('target_profile_id')
         points = request.data.get('points')
         reason = str(request.data.get('reason') or 'System award')
         idempotency_key = str(request.data.get('idempotency_key') or '').strip()
 
-        if not target_slack_id or points is None:
+        if bool(target_slack_id) == bool(target_profile_id) or points is None:
             return Response(
-                {'error': 'target_slack_id and points are required'},
+                {'error': ('Exactly one target_slack_id or target_profile_id and points are required'
+                           if target_profile_id else 'target_slack_id and points are required')},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -2917,7 +2919,17 @@ class SystemAwardView(APIView):
             return Response({'error': 'System awards must be positive'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            user = get_or_create_user_for_slack_id(target_slack_id)
+            from .system_rewards import canonical_link_love_key, native_reward_user
+            if target_profile_id:
+                if not HasStrictRooApiKey().has_permission(request, self):
+                    return Response({'error': 'Roo service credential required'}, status=403)
+                user = native_reward_user(target_profile_id, points=points, reason=reason, idempotency_key=idempotency_key)
+            else:
+                user = get_or_create_user_for_slack_id(target_slack_id)
+            idempotency_key = canonical_link_love_key(
+                user, idempotency_key, recipient=f"profile:{target_profile_id}" if target_profile_id else target_slack_id,
+                points=points, reason=reason,
+            )
         except ValueError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception:
@@ -2948,6 +2960,8 @@ class SystemAwardView(APIView):
                 'points_awarded': ledger.delta,
                 'new_balance': balance['balance'],
                 'ledger_id': ledger.id,
+                'display_name': user.full_name or 'MLAI member',
+                'target_profile_id': str(user.community_chat_profile_id),
             })
         except ValueError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)

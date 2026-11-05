@@ -147,6 +147,25 @@ Roll out this backend endpoint before the corresponding Public Roo change.
 Both use the existing Roo API key and bridge configuration; no schema or Slack
 scope changes are required. Do not replay an old points request automatically.
 
+## Automatic link-love replies
+
+The Roo actor endpoint also accepts `purpose=link_love` for original replies in
+`ROO_LINK_LOVE_SLACK_CHANNEL_ID` (default `C09BQAWJ66R`). This reward-only path
+requires the exact completed delivery acknowledgement, enabled public mapping,
+current verified Chat account/device, consent and original posting authority.
+It returns a canonical account profile, stored reply text, optional Slack alias
+and whether the author owns the root. It requires neither a Roo mention nor a
+Slack account and never grants general command or administrator authority.
+
+`POST /api/v1/points/system/award/` can select `target_profile_id` instead of
+`target_slack_id` only with the strict Roo credential, a verified consenting
+account, exactly two points, reason `link-love` and a stable link-love operation
+key. The backend canonicalizes Slack and Chat keys to one member/post operation,
+honoring historical Slack awards. It returns the account display name for
+escaped presentation, independently of recipient identity. No schema changes.
+
+Deploy the backend before Roo. Deployments do not replay historical replies.
+
 ## Canonical event
 
 Every verified provider event is normalized to:
