@@ -1,11 +1,15 @@
 from datetime import timedelta
 
+from django import forms
 from django.contrib import admin, messages
 from django.utils import timezone
 
 from .models import (  # noqa: F401  (invite_link is re-exported for callers of this module)
-    INVITE_TTL_DAYS, MentorAvailabilityRule, MentorInvite, MentorProfile, MentorSession, invite_link,
+    INVITE_TTL_DAYS, MAX_SESSION_MINUTES, MIN_SESSION_MINUTES, MentorAvailabilityRule, MentorInvite,
+    MentorProfile, MentorSession, invite_link,
 )
+from .service import MAX_PRICE_ROO  # the bound the mentor API enforces
+
 
 
 class AvailabilityInline(admin.TabularInline):
@@ -13,9 +17,36 @@ class AvailabilityInline(admin.TabularInline):
     extra = 0
 
 
+class MentorProfileAdminForm(forms.ModelForm):
+    """Applies the API's session length and price rules to staff edits.
+
+    Checked in the form (not on the model fields) so no migration is needed.
+    """
+
+    class Meta:
+        model = MentorProfile
+        fields = '__all__'
+
+    def clean_session_minutes(self):
+        minutes = self.cleaned_data['session_minutes']
+        if not MIN_SESSION_MINUTES <= minutes <= MAX_SESSION_MINUTES or minutes % 5:
+            raise forms.ValidationError(
+                f'Session length must be a multiple of 5 from {MIN_SESSION_MINUTES} to {MAX_SESSION_MINUTES} minutes.'
+            )
+        return minutes
+
+    def clean_price_roo(self):
+        price = self.cleaned_data['price_roo']
+        if not 1 <= price <= MAX_PRICE_ROO:
+            raise forms.ValidationError(f'Price must be a whole number from 1 to {MAX_PRICE_ROO} Roo Points.')
+        return price
+
+
 @admin.register(MentorProfile)
 class MentorProfileAdmin(admin.ModelAdmin):
     """Only staff here can make someone a mentor (is_active)."""
+
+    form = MentorProfileAdminForm
 
     list_display = ('user', 'is_active', 'session_minutes', 'price_roo', 'location_type')
     list_editable = ('is_active', 'price_roo')
@@ -23,6 +54,11 @@ class MentorProfileAdmin(admin.ModelAdmin):
     search_fields = ('user__email', 'user__first_name', 'user__last_name')
     raw_id_fields = ('user',)
     inlines = [AvailabilityInline]
+
+    def get_changelist_form(self, request, **kwargs):
+        # The inline-editable price on the list page must follow the same rules.
+        kwargs.setdefault('form', MentorProfileAdminForm)
+        return super().get_changelist_form(request, **kwargs)
 
 
 @admin.register(MentorInvite)
