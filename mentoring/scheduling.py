@@ -8,22 +8,34 @@ MIN_LEAD_MINUTES = 60
 MAX_ADVANCE_DAYS = 30
 
 
-def generate_slots(*, rules, tz_name, session_minutes, first_day, last_day, busy, now, away=()):
-    """Return the free slot start datetimes (UTC, aware) for a mentor.
+def protected_interval(starts_at, session_minutes, before_minutes=0, after_minutes=0):
+    """Return the half-open UTC interval protected by a meeting's frozen buffers."""
+    return (
+        starts_at - timedelta(minutes=before_minutes),
+        starts_at + timedelta(minutes=session_minutes + after_minutes),
+    )
 
-    rules: iterable of (weekday, start_time, end_time) in the mentor's timezone.
-    busy: iterable of (starts_at, ends_at) aware datetimes that block the slot.
-    A slot is kept only when it fits wholly inside a window, starts at least
-    MIN_LEAD_MINUTES from now, is within MAX_ADVANCE_DAYS, and overlaps no busy
-    interval. Wall-clock times that do not exist or repeat around a DST change
-    are resolved by zoneinfo and then filtered by the window check.
+
+def generate_slots(*, rules, tz_name, session_minutes, first_day, last_day, busy, now,
+                   away=(), buffer_before_minutes=0, buffer_after_minutes=0,
+                   minimum_notice_minutes=MIN_LEAD_MINUTES,
+                   booking_horizon_days=MAX_ADVANCE_DAYS,
+                   start_increment_minutes=None):
+    """Return UTC slots, checking full protected intervals against busy time.
+
+    Legacy callers retain duration-sized increments from each window's start.
+    Instant callers explicitly select midnight-aligned increments and buffers.
+    UTC stepping preserves both folds of a repeated hour and skips nonexistent
+    local times. Buffers must fit inside the offered weekly window.
     """
     tz = ZoneInfo(tz_name)
     length = timedelta(minutes=session_minutes)
-    earliest = now + timedelta(minutes=MIN_LEAD_MINUTES)
-    latest = now + timedelta(days=MAX_ADVANCE_DAYS)
-    busy = [(s, e) for s, e in busy]
-    away = [(a, b) for a, b in away]
+    before = timedelta(minutes=buffer_before_minutes)
+    after = timedelta(minutes=buffer_after_minutes)
+    earliest = now + timedelta(minutes=minimum_notice_minutes)
+    latest = now + timedelta(days=booking_horizon_days)
+    busy = list(busy)
+    away = list(away)
     by_weekday = {}
     for weekday, start, end in rules:
         by_weekday.setdefault(weekday, []).append((start, end))
@@ -34,17 +46,29 @@ def generate_slots(*, rules, tz_name, session_minutes, first_day, last_day, busy
             day += timedelta(days=1)
             continue
         for start, end in sorted(by_weekday.get(day.weekday(), [])):
-            cursor = datetime.combine(day, start, tzinfo=tz).astimezone(dt_timezone.utc)
-            window_end = datetime.combine(day, end, tzinfo=tz).astimezone(dt_timezone.utc)
+            window_start = datetime.combine(day, start, tzinfo=tz).astimezone(dt_timezone.utc)
+            window_end = datetime.combine(day, end, tzinfo=tz).replace(fold=1).astimezone(dt_timezone.utc)
+            cursor = window_start
+            step = timedelta(minutes=1 if start_increment_minutes else session_minutes)
             while cursor + length <= window_end:
-                slot_end = cursor + length
+                local = cursor.astimezone(tz)
+                local_end = (cursor + length).astimezone(tz)
+                aligned = (
+                    start_increment_minutes is None
+                    or (local.hour * 60 + local.minute) % start_increment_minutes == 0
+                )
+                p_start, p_end = cursor - before, cursor + length + after
                 if (
-                    cursor >= earliest
-                    and cursor <= latest
-                    and not any(cursor < b_end and slot_end > b_start for b_start, b_end in busy)
+                    aligned and local.date() == day
+                    and local.time().replace(tzinfo=None) >= start
+                    and local_end.date() == day
+                    and local_end.time().replace(tzinfo=None) <= end
+                    and p_start >= window_start and p_end <= window_end
+                    and cursor >= earliest and cursor <= latest
+                    and not any(overlaps(p_start, p_end, b_start, b_end) for b_start, b_end in busy)
                 ):
                     slots.append(cursor)
-                cursor = slot_end
+                cursor += step
         day += timedelta(days=1)
     return sorted(set(slots))
 

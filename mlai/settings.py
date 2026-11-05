@@ -723,6 +723,8 @@ MEETING_ROOM_BOOKING_ENABLED = _env_is_true(
 )
 # Vibe Mentoring pilot. Off by default; see docs/mentoring.md.
 MENTOR_BOOKING_ENABLED = _env_is_true('MENTOR_BOOKING_ENABLED', False)
+# Independent admission flag: existing request clients never charge implicitly.
+MENTOR_INSTANT_BOOKING_ENABLED = _env_is_true('MENTOR_INSTANT_BOOKING_ENABLED', False)
 MENTOR_REQUEST_TTL_HOURS = int(os.getenv('MENTOR_REQUEST_TTL_HOURS', '48'))
 MENTOR_AUTO_COMPLETE_HOURS = int(os.getenv('MENTOR_AUTO_COMPLETE_HOURS', '24'))
 # Google Meet links and free/busy for mentoring, through one MLAI-owned free
@@ -731,6 +733,15 @@ MENTORING_GOOGLE_ENABLED = _env_is_true('MENTORING_GOOGLE_ENABLED', False)
 MENTORING_GOOGLE_CLIENT_ID = os.getenv('MENTORING_GOOGLE_CLIENT_ID', '')
 MENTORING_GOOGLE_CLIENT_SECRET = os.getenv('MENTORING_GOOGLE_CLIENT_SECRET', '')
 MENTORING_GOOGLE_REFRESH_TOKEN = os.getenv('MENTORING_GOOGLE_REFRESH_TOKEN', '')
+
+# Personal, mentor-owned Google Calendar OAuth. This does not borrow Gmail or
+# the legacy global organiser's refresh token.
+MENTOR_CALENDAR_GOOGLE_ENABLED = _env_is_true('MENTOR_CALENDAR_GOOGLE_ENABLED', False)
+MENTOR_CALENDAR_GOOGLE_CLIENT_ID = os.getenv('MENTOR_CALENDAR_GOOGLE_CLIENT_ID', '')
+MENTOR_CALENDAR_GOOGLE_CLIENT_SECRET = os.getenv('MENTOR_CALENDAR_GOOGLE_CLIENT_SECRET', '')
+MENTOR_CALENDAR_GOOGLE_REDIRECT_URI = os.getenv('MENTOR_CALENDAR_GOOGLE_REDIRECT_URI', '')
+MENTOR_CALENDAR_CHAT_ORIGIN = os.getenv('MENTOR_CALENDAR_CHAT_ORIGIN', 'https://chat.mlai.au')
+
 PASSWORD_RESET_TTL_SECONDS = int(os.getenv('PASSWORD_RESET_TTL_SECONDS', '3600'))
 PASSWORD_RESET_MIN_RESPONSE_SECONDS = float(
     os.getenv('PASSWORD_RESET_MIN_RESPONSE_SECONDS', '0.12')

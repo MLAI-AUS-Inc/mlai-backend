@@ -37,6 +37,7 @@ from integrations.services.xero_reconciliation import run_daily_payout_reconcili
 from jobs.services.job_pipeline import enqueue_daily_jobs as run_daily_jobs_scheduler
 from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
 from roo.coding import reconcile_coding_reservations
+from mentoring.instant_booking import process_due_bookings
 from roo.models import ScheduledDiscoveryHeartbeat
 from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
 
@@ -128,6 +129,7 @@ class Command(BaseCommand):
             ("website_connection_operations", process_website_connection_operations),
             ("website_consistency", run_website_consistency_sweep),
             ("article_dispatch_outbox", process_dispatch_outbox),
+            ("mentor_booking_operations", process_due_bookings),
             # P2 self-heal sweeps (policy, refunds, merge worker, notifications,
             # alert rules). Not gated by the founder-journey switch: each sweep
             # checks its own flag, and a missing or failing one never stops the next.
