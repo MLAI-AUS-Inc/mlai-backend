@@ -277,7 +277,9 @@ class LaunchWindowHistoryTests(TestCase):
         marker = cohorts.read_marker(pawshare.organization)
         self.assertEqual((marker["cohort"], marker["assignedBy"]), ("legacy", "report_apply"))
         self.assertIn("before_launch:named_org", marker["reasons"])
-        self.assertIn("hosted_site", marker["reasons"])
+        self.assertNotIn("hosted_site", marker["reasons"])
+        for reason in ("website_connection", "published_article", "named_org"):
+            self.assertIn(reason, marker["reasons"])
         self.assertFalse(cohorts.is_new_journey(pawshare.organization))
         _, report, code = row_for(pawshare.organization)
         self.assertEqual((code, report["legacy_orgs_losing_an_action"]), (0, 0))
