@@ -12763,8 +12763,9 @@ def _serialize_bootstrap(context, request=None, *, view="summary"):
             if payload is None:
                 holds_lock = _acquire_bootstrap_compute_lock(lock_key)
 
-    runs = _latest_runs_for_org(context.organization, config=config, prefetch_feedback=payload is None)
+    runs = []
     try:
+        runs = _latest_runs_for_org(context.organization, config=config, prefetch_feedback=payload is None)
         capabilities = None
         if payload is None:
             # The live overlay projects progress once for root + displayed runs,
