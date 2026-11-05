@@ -64,7 +64,7 @@ def stream_dto(stream, *, now):
             'reserved': used}, 'daily_budget_override': stream.daily_budget_override, 'policy_overrides': stream.policy_overrides,
         'capacity_forecast': forecast(stream, now), 'forecast_assumption': 'Healthy feedback and sufficient demand; sending windows and competing campaigns apply.',
         'days': history, 'seeds': seeds, 'checks': {kind: observations.latest(stream, kind)
-            for kind in ('dns', 'config', 'reputation', 'postmaster', 'root_postmaster', 'heartbeat', 'suppressions')}}
+            for kind in ('dns', 'config', 'reputation', 'postmaster', 'root_postmaster', 'heartbeat', 'suppressions', 'transactional')}}
 
 
 def update_stream(key, values, *, actor, now):

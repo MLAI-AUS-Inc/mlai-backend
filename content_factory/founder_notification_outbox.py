@@ -28,11 +28,11 @@ import json
 import logging
 import time
 from datetime import timedelta
-from email.utils import formataddr, parseaddr
 from urllib.parse import quote, urlencode
 from uuid import UUID
 
 from django.conf import settings
+from integrations import system_mail
 from django.db.models import Q
 from django.utils import timezone
 
@@ -69,8 +69,6 @@ READY_STATUSES = ("completed", "awaiting_approval", "approval_required")
 # Founder copy (contract section 11.1). No codes, no dashes.
 SUBJECT = "Your draft is ready"
 BODY = "Tap to review it and copy it to your website."
-SENDER_NAME = "MLAI"
-DEFAULT_SENDER_ADDRESS = "notifications@mlai.au"
 
 
 def enabled() -> bool:
@@ -88,7 +86,7 @@ def can_notify(organization, user) -> bool:
     if recipient_checks_enabled(organization) and not verified_email(user):
         return False
     return bool(enabled() and organization is not None and cohort.is_new_journey(organization)
-                and str(getattr(settings, "RESEND_API_KEY", "") or "")
+                and system_mail.resend_key()
                 and str(getattr(user, "email", "") or "").strip())
 
 
@@ -256,8 +254,7 @@ def draft_link(run_id, company_id) -> str:
 
 
 def _sender() -> str:
-    _, address = parseaddr(str(getattr(settings, "RESEND_FROM_EMAIL", "") or ""))
-    return formataddr((SENDER_NAME, address if "@" in address else DEFAULT_SENDER_ADDRESS))
+    return system_mail.sender()
 
 
 def email_payload(email, link) -> dict:
@@ -275,27 +272,30 @@ def post_email(payload, run_id) -> str:
     from .website_connections import require_unlocked_remote_call
     from agent_runtime import native_crypto
     from agent_runtime.webhook_transport import CallbackEndpointError
-    api_key = str(getattr(settings, "RESEND_API_KEY", "") or "")
+    api_key = system_mail.resend_key()
     if not api_key:
         raise transport.NotificationTransportError("email_unconfigured", retryable=False)
     require_unlocked_remote_call()
-    try:
-        response = transport.post_webhook(
-            "https://api.resend.com/emails", native_crypto.canonical_json(payload).encode(),
-            {"Authorization": "Bearer " + api_key, "Idempotency-Key": f"articles-draft-ready/{run_id}"},
-            timeout=10, max_response_bytes=16384)
-        value = json.loads(response.body)
-    except (CallbackEndpointError, ValueError) as exc:
-        raise transport.NotificationTransportError("email_response_unavailable") from exc
-    if (response.status in {408, 429} or response.status >= 500
-            or response.status == 409 and isinstance(value, dict) and value.get("name") == "concurrent_idempotent_requests"):
-        raise transport.NotificationTransportError("email_temporarily_unavailable")
-    if response.status not in {200, 201} or not isinstance(value, dict):
-        raise transport.NotificationTransportError("email_rejected", retryable=False)
-    try:
-        return str(UUID(value["id"]))
-    except (ValueError, TypeError, KeyError) as exc:
-        raise transport.NotificationTransportError("email_response_unavailable") from exc
+    with system_mail.observe("resend") as attempt:
+        try:
+            response = transport.post_webhook(
+                "https://api.resend.com/emails", native_crypto.canonical_json(payload).encode(),
+                {"Authorization": "Bearer " + api_key, "Idempotency-Key": f"articles-draft-ready/{run_id}"},
+                timeout=10, max_response_bytes=16384)
+            value = json.loads(response.body)
+        except (CallbackEndpointError, ValueError) as exc:
+            raise transport.NotificationTransportError("email_response_unavailable") from exc
+        if (response.status in {408, 429} or response.status >= 500
+                or response.status == 409 and isinstance(value, dict) and value.get("name") == "concurrent_idempotent_requests"):
+            raise transport.NotificationTransportError("email_temporarily_unavailable")
+        if response.status not in {200, 201} or not isinstance(value, dict):
+            raise transport.NotificationTransportError("email_rejected", retryable=False)
+        try:
+            identifier = str(UUID(value["id"]))
+            attempt.accepted({"id": identifier})
+            return identifier
+        except (ValueError, TypeError, KeyError) as exc:
+            raise transport.NotificationTransportError("email_response_unavailable") from exc
 
 
 def _devices(user):

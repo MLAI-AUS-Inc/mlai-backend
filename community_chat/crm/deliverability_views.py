@@ -45,6 +45,7 @@ class DeliverabilityView(DeliverabilityOwnerView):
             "guardian_enabled": policy.value("CRM_GUARDIAN_ENABLED"),
             "monitors_enabled": policy.value("CRM_MONITORS_ENABLED"),
             "lifecycle_enabled": policy.value("CRM_LIFECYCLE_ENABLED"),
+            "transactional_monitor_enabled": policy.value("CRM_TRANSACTIONAL_MONITOR_ENABLED"),
             "seed_heartbeat_enabled": policy.value("CRM_SEED_HEARTBEAT_ENABLED"),
             "dry_run": policy.value("CRM_GUARDIAN_DRY_RUN")})
 

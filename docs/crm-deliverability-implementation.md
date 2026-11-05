@@ -336,3 +336,37 @@ domain. The root DMARC record is present; explicit stream DMARC records are
 absent. This checks only public DNS, not provider verification, key scope,
 SMTP configuration, quotas, Postmaster access or seed accounts. Production
 readiness remains unverified and Phase 0 setup is still required.
+
+## Phase 6 qualification and Phase 7 source completion
+
+The frozen lifecycle source passed all 838 CRM tests in disposable PostgreSQL
+(351.978 seconds), validating the same approved 384 migration hashes. It adds
+no migration. Policy/configuration, model-drift, shell and test-assignment
+checks passed. The lifecycle UI uses explicit correction confirmation and
+owner-prepared reconfirmation drafts; the focused browser regression passed
+31 campaign, contact, event and Health scenarios.
+
+Phase 7 adds the canonical system sender to all five named transports,
+Customer.io From and tracking controls, dedicated notify-key preference and
+an independent default-off system-mail monitor. Start/result metadata is
+payload-free and savepoint-isolated. Provider and purpose failure rates,
+Resend hard bounces and sustained delivery p95 can only alert. Missing
+Customer.io delivery feedback and unverified DKIM remain unknown. The
+[runbook](crm.md#system-email-and-sign-in-monitoring-phase-7) records the
+provider cutover, staging-message and staged DMARC gates. No connected
+environment, DNS, provider, schema or campaign was changed by this source work.
+
+The optional DMARC XML reader and LLM features remain deferred. Retiring the
+finite warm-up requires its actual completed run after 17 November. Source
+qualification is separate from staging rehearsal, production rollout and
+authorization to send.
+
+Phase 7 qualification: **943 tests passed** on frozen source in disposable
+PostgreSQL (230.372 seconds), covering all CRM suites, sign-in delivery,
+approval notifications, founder outboxes and notification channels. The
+86 focused pure checks, model drift, configuration, shell syntax and test
+assignment checks passed (848 fully selected modules, no new omissions). A
+subsequent notification response-shape adjustment is covered by the seven
+transactional pure tests plus eight deployment-configuration checks. The
+approved migration graph remains exactly 384 unchanged hashes. No live
+provider call, inbox access, DNS update, deployment or send was performed.
