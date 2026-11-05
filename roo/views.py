@@ -2905,7 +2905,8 @@ class SystemAwardView(APIView):
 
         if bool(target_slack_id) == bool(target_profile_id) or points is None:
             return Response(
-                {'error': 'Exactly one target_slack_id or target_profile_id and points are required'},
+                {'error': ('Exactly one target_slack_id or target_profile_id and points are required'
+                           if target_profile_id else 'target_slack_id and points are required')},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
