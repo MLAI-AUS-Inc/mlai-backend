@@ -166,3 +166,19 @@ def historical_counterparty_for_key(public_key, occurred_at):
     if user is None:
         raise VolunteerError("member_unavailable", 404)
     return user
+
+
+def counterparty_for_key(public_key, occurred_at=None):
+    """Keep old receipt formats safe when a referenced key has changed owners."""
+    from community_chat.models import CommunityChatDevice
+
+    if occurred_at is not None:
+        return historical_counterparty_for_key(public_key, occurred_at)
+    user = actor_for_key(public_key)
+    if CommunityChatDevice.objects.filter(
+        public_key=public_key, verified_at__isnull=False,
+    ).exclude(user_id=user.pk).exists():
+        # Older collectors have no original target timestamp. Retry after the
+        # compatible collector supplies it; never pay a key's replacement owner.
+        raise VolunteerError("source_time_required", 409)
+    return user

@@ -16,8 +16,8 @@ from .access import (
     awards_enabled,
     channels,
     community_id,
+    counterparty_for_key,
     flag,
-    historical_counterparty_for_key,
     linked_member,
     occurrence,
     public_source,
@@ -129,9 +129,9 @@ def persist_receipt(payload):
             target_when = occurrence(metadata["target_occurred_at"])
             if target_when > when:
                 raise VolunteerError("invalid_receipt_metadata")
-            target = historical_counterparty_for_key(metadata["target_public_key"], target_when)
+            target = counterparty_for_key(metadata["target_public_key"], target_when)
         else:
-            target = actor_for_key(metadata["target_public_key"])
+            target = counterparty_for_key(metadata["target_public_key"])
     if metadata.get("target_bridge_source_id"):
         from .bridge_sources import imported_reward_root
         if (source.get("channel_id") != channels().get("boost_startup")
@@ -288,9 +288,9 @@ def _process_receipt(receipt_id):
             question = imported_reward_root(initial.metadata["question_bridge_source_id"], initial.source["channel_id"])
             questioner = initial.actor if root_owned_by(question, initial.actor, current_only=True) else None
         else:
-            questioner = (historical_counterparty_for_key(initial.metadata["question_public_key"],
+            questioner = (counterparty_for_key(initial.metadata["question_public_key"],
                 occurrence(initial.metadata["question_occurred_at"])) if initial.metadata.get("question_occurred_at")
-                else actor_for_key(initial.metadata["question_public_key"]))
+                else counterparty_for_key(initial.metadata["question_public_key"]))
         if (
             questioner is None or questioner.pk != initial.actor_id
             or not initial.target_id

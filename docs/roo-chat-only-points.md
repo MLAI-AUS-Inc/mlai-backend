@@ -126,3 +126,7 @@ handoff suites verify action-specific activation and cross-platform deduplicatio
 
 These suites require an approved disposable migration plan; no schema changes
 are introduced by this feature. Never run them against production data.
+
+Older receipt formats without original target times retry with `409 source_time_required`
+when a referenced signing key has changed account owners. The updated collector
+supplies the original timestamp; its replacement owner never inherits the award.

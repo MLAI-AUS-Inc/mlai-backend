@@ -227,6 +227,27 @@ class NativeRewardParityTests(NativeFixture, TestCase):
         self.assertEqual(result.status, 'ineligible')
         self.assertFalse(Ledger.objects.filter(user=self.user).exists())
 
+    def test_older_receipt_retries_a_reassigned_target_until_source_time_is_supplied(self):
+        now = timezone.now()
+        CommunityChatDevice.objects.filter(user=self.author, public_key='b' * 64).update(
+            status='revoked', revoked_at=now-timedelta(seconds=20))
+        replacement = get_user_model().objects.create_user(email='replacement-owner@example.test')
+        device = CommunityChatDevice.objects.create(user=replacement, public_key='b' * 64,
+            status='verified', verified_at=now-timedelta(seconds=10))
+        CommunityChatDevice.objects.filter(pk=device.pk).update(created_at=now-timedelta(seconds=11))
+        payload = self.payload('old-format-retry')
+        timestamp = payload['metadata'].pop('target_occurred_at')
+        with self.assertRaises(VolunteerError) as caught:
+            ingest_receipt(payload)
+        self.assertEqual((caught.exception.code, caught.exception.status), ('source_time_required', 409))
+        self.assertFalse(Ledger.objects.exists())
+        payload['metadata']['target_occurred_at'] = timestamp
+        result = ingest_receipt(payload)
+        self.assertEqual(result.status, 'processed', result.error)
+        self.assertEqual(result.target_id, self.author.pk)
+        self.assertEqual(Ledger.objects.filter(user=self.user).count(), 1)
+        self.assertFalse(Ledger.objects.filter(user=replacement).exists())
+
 
 @override_settings(**SETTINGS)
 class NativeRewardRaceTests(NativeFixture, TransactionTestCase):
