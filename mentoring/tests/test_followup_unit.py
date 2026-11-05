@@ -46,9 +46,9 @@ class MigrationTests(unittest.TestCase):
         for name in ('meeting_claimed_at', 'brief_answers', 'brief_questions', 'MentorInvite'):
             self.assertNotIn(name, text)
 
-    def test_only_one_new_migration(self):
+    def test_reviewed_migration_inventory(self):
         names = sorted(p.name for p in (Path(__file__).resolve().parents[1] / 'migrations').glob('0*.py'))
-        self.assertEqual(names, ['0001_initial.py', '0002_invites_brief_questions_followup.py'])
+        self.assertEqual(names, ['0001_initial.py', '0002_invites_brief_questions_followup.py', '0003_instant_bookings.py'])
 
 
 class InviteFixture(unittest.TestCase):

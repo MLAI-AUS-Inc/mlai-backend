@@ -65,6 +65,9 @@ class Base(unittest.TestCase):
             patch.object(service, 'PointsService', self.points),
             patch.object(service, 'transaction', self.txn),
             patch.object(service, '_lock_keys', self.lock_keys),
+            patch.object(service, '_lock_users'),
+            patch.object(service, '_reserve_session'),
+            patch.object(service, '_release_reservations'),
             patch.object(service, 'PointsAccount', self.account_cls),
             patch.object(service.timezone, 'now', side_effect=lambda: self.clock),
         ):
@@ -75,9 +78,10 @@ class Base(unittest.TestCase):
         self.actor_founder = SimpleNamespace(pk=1, slack_id='UFOUNDER')
 
     def load(self, session):
-        p = patch.object(MentoringService, '_load_for_update', return_value=session)
-        p.start()
-        self.addCleanup(p.stop)
+        for name in ('_load_for_update', '_load_session'):
+            p = patch.object(MentoringService, name, return_value=session)
+            p.start()
+            self.addCleanup(p.stop)
 
 
 class TransitionTests(Base):

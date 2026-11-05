@@ -63,6 +63,23 @@ from .mentoring_views import (
     MentoringAdminMentorsView,
     MentoringAdminSessionsView,
 )
+from .mentoring_booking_views import (
+    MentorBookingQuoteView,
+    MentorInstantBookingView,
+    MentorBookingAttemptView,
+    MentorBookingAttemptListView,
+    MentorBookingAttemptCancelView,
+)
+from .mentoring_calendar_views import (
+    MentorCalendarConnectionsView,
+    MentorCalendarAuthorizeView,
+    MentorCalendarCallbackView,
+    MentorCalendarListView,
+    MentorCalendarSelectionsView,
+    MentorCalendarDisconnectView,
+    MentorReadinessView,
+    MentorSettingsView,
+)
 from .home_views import CommunityHomeView
 from .event_discount_views import MyEventDiscountsView
 from .member_perks_views import MemberPerksView
@@ -86,6 +103,19 @@ from .usage_views import (
 
 
 urlpatterns = [
+    path("mentor/calendar-connections/", MentorCalendarConnectionsView.as_view(), name="community_chat_mentor_calendar_connections"),
+    path("mentor/calendar-connections/google/authorize/", MentorCalendarAuthorizeView.as_view(), name="community_chat_mentor_calendar_authorize"),
+    path("mentor/calendar-connections/google/callback/", MentorCalendarCallbackView.as_view(), name="community_chat_mentor_calendar_callback"),
+    path("mentor/calendar-connections/<int:connection_id>/calendars/", MentorCalendarListView.as_view(), name="community_chat_mentor_calendars"),
+    path("mentor/calendar-connections/<int:connection_id>/disconnect/", MentorCalendarDisconnectView.as_view(), name="community_chat_mentor_calendar_disconnect"),
+    path("mentor/calendar-selections/", MentorCalendarSelectionsView.as_view(), name="community_chat_mentor_calendar_selections"),
+    path("mentor/readiness/", MentorReadinessView.as_view(), name="community_chat_mentor_readiness"),
+    path("mentor/settings/", MentorSettingsView.as_view(), name="community_chat_mentor_settings"),
+    path("mentor/bookings/quote/", MentorBookingQuoteView.as_view(), name="community_chat_mentor_booking_quote"),
+    path("mentor/bookings/", MentorInstantBookingView.as_view(), name="community_chat_mentor_instant_booking"),
+    path("mentor/booking-attempts/", MentorBookingAttemptListView.as_view(), name="community_chat_mentor_booking_attempts"),
+    path("mentor/booking-attempts/<uuid:attempt_id>/", MentorBookingAttemptView.as_view(), name="community_chat_mentor_booking_attempt"),
+    path("mentor/booking-attempts/<uuid:attempt_id>/cancel/", MentorBookingAttemptCancelView.as_view(), name="community_chat_mentor_booking_attempt_cancel"),
     path("mentors/", MentorListView.as_view(), name="community_chat_mentors"),
     path("mentors/<int:mentor_id>/availability/", MentorAvailabilityView.as_view(), name="community_chat_mentor_availability"),
     path("mentor/profile/", MyMentorProfileView.as_view(), name="community_chat_mentor_profile"),
