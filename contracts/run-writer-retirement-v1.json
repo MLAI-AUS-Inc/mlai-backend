@@ -752,7 +752,7 @@
       "identity": "content_factory/island_research.py:adopt_researched_island:ac96393ad34d56730e1274363a09f2ff28837259241d37339e31568d57718d5b:1",
       "path": "content_factory/island_research.py",
       "function": "adopt_researched_island",
-      "line": 143,
+      "line": 145,
       "kind": "inferred_run_save",
       "fields": [],
       "statement_sha256": "ac96393ad34d56730e1274363a09f2ff28837259241d37339e31568d57718d5b",
@@ -762,18 +762,21 @@
         "island"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "db50e583ad253adf89c0b282394fc3f9688ad9481f9bd3120899c9449df43b2f",
+      "function_sha256": "ec1c4ddd36f7c81450549f48147696171d660b52bcf76e3b8fe683c94d4f509b",
       "classification": "non_cf_model",
-      "test_refs": [],
-      "reason": "Saved island receiver is ContentIsland, not the input Run; metric/keyword adoption is a separate backend domain.",
-      "guard": "Explicit ContentIsland query/constructor and island row saves.",
+      "test_refs": [
+        "content_factory/tests_island_research_unit.py",
+        "tests/test_content_islands.py"
+      ],
+      "reason": "Saved island receiver is ContentIsland, not the input Run; metric/keyword adoption and region refresh write separate island-domain models only.",
+      "guard": "Explicit ContentIsland query/constructor and island row saves; region rebuild writes ContentIslandRegion/ContentIsland under the organization lock without Run writes.",
       "pending_owner": null
     },
     {
       "identity": "content_factory/island_research.py:adopt_researched_island:ac96393ad34d56730e1274363a09f2ff28837259241d37339e31568d57718d5b:2",
       "path": "content_factory/island_research.py",
       "function": "adopt_researched_island",
-      "line": 169,
+      "line": 171,
       "kind": "inferred_run_save",
       "fields": [],
       "statement_sha256": "ac96393ad34d56730e1274363a09f2ff28837259241d37339e31568d57718d5b",
@@ -783,11 +786,14 @@
         "island"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "db50e583ad253adf89c0b282394fc3f9688ad9481f9bd3120899c9449df43b2f",
+      "function_sha256": "ec1c4ddd36f7c81450549f48147696171d660b52bcf76e3b8fe683c94d4f509b",
       "classification": "non_cf_model",
-      "test_refs": [],
-      "reason": "Saved island receiver is ContentIsland, not the input Run; metric/keyword adoption is a separate backend domain.",
-      "guard": "Explicit ContentIsland query/constructor and island row saves.",
+      "test_refs": [
+        "content_factory/tests_island_research_unit.py",
+        "tests/test_content_islands.py"
+      ],
+      "reason": "Saved island receiver is ContentIsland, not the input Run; metric/keyword adoption and region refresh write separate island-domain models only.",
+      "guard": "Explicit ContentIsland query/constructor and island row saves; region rebuild writes ContentIslandRegion/ContentIsland under the organization lock without Run writes.",
       "pending_owner": null
     },
     {
