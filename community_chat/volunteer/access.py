@@ -34,11 +34,13 @@ def flag(name):
 
 
 def awards_enabled(action_key):
-    """Permit advice and intro rewards without enabling unrelated credits."""
+    """Permit scoped objective rewards without enabling unrelated credits."""
     return flag("awards_enabled") or (
         action_key == "helpful_answer" and flag("advice_rewards_enabled")
     ) or (
         action_key == "introduce_yourself" and flag("intro_rewards_enabled")
+    ) or (
+        action_key == "boost_startup" and flag("boost_rewards_enabled")
     )
 
 

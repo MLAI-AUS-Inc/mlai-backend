@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, DecimalException
 from zoneinfo import ZoneInfo
 
-VERSION = "mlai-volunteer-v4"
+VERSION = "mlai-volunteer-v5"
 MICROROO = 1_000_000
 MELBOURNE = ZoneInfo("Australia/Melbourne")
 LEVELS = (
@@ -169,7 +169,7 @@ def catalogue(monthly_reward=20):
         (
             "boost_startup",
             "Engage with a startup post",
-            "React to another member's post in #boost-my-startup. Earn once for each post you engage with.",
+            "React positively to another member's post in #boost-my-startup, or reply done after supporting it. Earn once per post.",
             2,
             2,
             False,

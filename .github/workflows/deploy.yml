@@ -608,6 +608,7 @@ jobs:
           community_chat.tests.test_volunteer_presentation \
           community_chat.tests.test_volunteer_events \
           community_chat.tests.test_intro_award_handoff \
+          community_chat.tests.test_native_reward_parity \
           integrations.tests_bridge_roo_actor_database \
           roo.tests.StartupUpdateRewardServiceTests \
           roo.tests_api.FirstChannelPostAwardViewTests \

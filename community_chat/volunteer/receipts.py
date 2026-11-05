@@ -52,6 +52,11 @@ METADATA_FIELDS = {
     "fulfilled",
     "refunded",
     "deletion_kind",
+    "target_bridge_source_id",
+    "target_occurred_at",
+    "engagement_confirmed",
+    "question_bridge_source_id",
+    "question_occurred_at",
 }
 
 
@@ -83,10 +88,8 @@ def persist_receipt(payload):
         raise VolunteerError("invalid_receipt")
     when = occurrence(payload.get("occurred_at"))
     source = public_source(payload.get("source", {}))
-    intro_post = origin == "relay" and kind == "post" and source.get("channel_id") == channels().get("start_here")
     if origin == "relay":
-        user = (actor_for_key(payload.get("actor_public_key"), occurred_at=when)
-                if intro_post else actor_for_key(payload.get("actor_public_key")))
+        user = actor_for_key(payload.get("actor_public_key"), occurred_at=when)
     else:
         user = linked_member(payload.get("actor_id"))
     key = payload.get("source_key")
@@ -109,6 +112,7 @@ def persist_receipt(payload):
             "invalidated",
             "fulfilled",
             "refunded",
+            "engagement_confirmed",
         ):
             if not isinstance(value, bool):
                 raise VolunteerError("invalid_receipt_metadata")
@@ -119,10 +123,26 @@ def persist_receipt(payload):
         ):
             raise VolunteerError("invalid_receipt_metadata")
     target = (
-        actor_for_key(metadata["target_public_key"])
+        actor_for_key(metadata["target_public_key"], occurred_at=(
+            occurrence(metadata["target_occurred_at"]) if metadata.get("target_occurred_at") else None))
         if metadata.get("target_public_key")
         else None
     )
+    if metadata.get("target_bridge_source_id"):
+        from .bridge_sources import imported_reward_root
+        if (source.get("channel_id") != channels().get("boost_startup")
+                or metadata["target_bridge_source_id"] != source.get("source_id")
+                or target is not None):
+            raise VolunteerError("invalid_receipt_metadata")
+        imported_reward_root(metadata["target_bridge_source_id"], source["channel_id"])
+    if metadata.get("question_bridge_source_id"):
+        from .bridge_sources import imported_reward_root
+        if (kind != "reaction" or source.get("channel_id") != channels().get("help")
+                or metadata.get("reaction") != "✅" or not target
+                or metadata.get("question_public_key")
+                or metadata["question_bridge_source_id"] != source.get("thread_root_id")):
+            raise VolunteerError("invalid_receipt_metadata")
+        imported_reward_root(metadata["question_bridge_source_id"], source["channel_id"])
     # A questioner and helper can recognise each other concurrently. Acquire
     # both canonical account locks in a stable order, even inside ATOMIC_REQUESTS.
     participants = {user.pk: user}
@@ -130,7 +150,7 @@ def persist_receipt(payload):
         participants[target.pk] = target
     for member_id in sorted(participants):
         lock_member(participants[member_id])
-    if intro_post and actor_for_key(payload.get("actor_public_key"), occurred_at=when).pk != user.pk:
+    if origin == "relay" and actor_for_key(payload.get("actor_public_key"), occurred_at=when).pk != user.pk:
         raise VolunteerError("member_unavailable", 404)
     # Initialise before creating a qualifying source, preserving legacy totals.
     state_for(user)
@@ -256,12 +276,18 @@ def _process_receipt(receipt_id):
         initial.kind == "reaction"
         and initial.source.get("channel_id") == channels().get("help")
         and initial.metadata.get("reaction") == "✅"
-        and bool(initial.metadata.get("question_public_key"))
+        and bool(initial.metadata.get("question_public_key") or initial.metadata.get("question_bridge_source_id"))
     )
     if helpful:
-        questioner = actor_for_key(initial.metadata["question_public_key"])
+        if initial.metadata.get("question_bridge_source_id"):
+            from .bridge_sources import imported_reward_root, root_owned_by
+            question = imported_reward_root(initial.metadata["question_bridge_source_id"], initial.source["channel_id"])
+            questioner = initial.actor if root_owned_by(question, initial.actor, current_only=True) else None
+        else:
+            questioner = actor_for_key(initial.metadata["question_public_key"], occurred_at=(
+                occurrence(initial.metadata["question_occurred_at"]) if initial.metadata.get("question_occurred_at") else None))
         if (
-            questioner.pk != initial.actor_id
+            questioner is None or questioner.pk != initial.actor_id
             or not initial.target_id
             or initial.target_id == questioner.pk
             or not initial.source.get("thread_root_id")
@@ -312,15 +338,19 @@ def _process_receipt(receipt_id):
         and metadata.get("has_text") is True
     ):
         action_key = "introduce_yourself"
-    elif receipt.kind == "reaction" and source.get("channel_id") == channels().get(
+    elif (receipt.kind == "reaction" or receipt.kind == "reply" and metadata.get("engagement_confirmed") is True) and source.get("channel_id") == channels().get(
         "boost_startup"
     ):
-        if (
-            not receipt.target_id
-            or receipt.target_id == user.pk
-            or metadata.get("reaction")
-            not in getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_LIKE_REACTIONS", [])
-        ):
+        imported = metadata.get("target_bridge_source_id")
+        if imported:
+            from .bridge_sources import imported_reward_root, root_owned_by
+            root = imported_reward_root(imported, source["channel_id"])
+            self_engagement = root_owned_by(root, user)
+        else:
+            self_engagement = receipt.target_id == user.pk
+        if (not receipt.target_id and not imported or self_engagement
+                or receipt.kind == "reaction" and metadata.get("reaction")
+                not in getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_LIKE_REACTIONS", [])):
             raise VolunteerError("ineligible_source", 409)
         action_key = "boost_startup"
     elif receipt.kind == "monthly_update":
@@ -337,6 +367,8 @@ def _process_receipt(receipt_id):
         start = getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM", "")
         if action_key == "introduce_yourself" and flag("intro_rewards_enabled"):
             start = getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM", "")
+        elif action_key == "boost_startup" and flag("boost_rewards_enabled"):
+            start = getattr(settings, "COMMUNITY_CHAT_VOLUNTEER_BOOST_ACTIVE_FROM", "")
         try:
             boundary = parse_datetime(start) if isinstance(start, str) else start
         except (TypeError, ValueError):
@@ -355,7 +387,7 @@ def _process_receipt(receipt_id):
         ),
         trusted_receipt=receipt,
     )
-    if action_key == "introduce_yourself" and record.status not in ("pending", "approved"):
+    if record.status not in ("pending", "approved"):
         # A trusted source can complete an undecided introduction, but cannot
         # override a review, withdrawal or correction of its once-only outcome.
         receipt.recognition = record

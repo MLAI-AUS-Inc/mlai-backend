@@ -89,6 +89,32 @@ introduction and a bounded reviewed replay, after checking existing ledger and
 recognition records. Do not issue an unrelated manual credit and then replay
 the automatic introduction later.
 
+## Native startup support and useful answers
+
+Native support uses a separate `COMMUNITY_CHAT_VOLUNTEER_BOOST_REWARDS_ENABLED`
+gate and explicit aware `COMMUNITY_CHAT_VOLUNTEER_BOOST_ACTIVE_FROM` boundary.
+Configure `boost_startup` alongside existing `help` and `start_here` channel IDs.
+Keep general awards and milestone bonuses unchanged. Set the explicitly reviewed
+positive reaction list in `COMMUNITY_CHAT_VOLUNTEER_LIKE_REACTIONS`; an empty list
+means no reaction qualifies. A literal native `done`, `boosted`, `liked` or `shared`
+reply also qualifies. One canonical member receives two Roo once per root post,
+across reactions, confirmations, devices, later Slack linking and existing Roo
+link-love awards. Native-only accounting does not call AI or require AI consent.
+
+Imported Slack roots require the exact stored public channel/message link and a
+completed create delivery. A bridge tag or a bridge signing key alone grants no
+authority. Self-support checks compare canonical Slack aliases. Native answer
+rewards on imported questions similarly require the currently verified original
+questioner's useful mark; the bridge key never acts as that questioner. Source-time
+device ownership is checked for native actors, answers and native questions.
+Reviewed, withdrawn and reversed outcomes remain intact on automatic retries.
+
+The Chat startup collector uses a separate durable cursor and activation instant.
+Historical repairs must be an independently reviewed, source-backed finite batch;
+never rewind the advice or prospective startup cursor. Record its source proof,
+prior ledger aliases, exact delta and resulting ledger IDs. The original Abraham
+two-point replay is part of historical recovery, never an extra entitlement.
+
 ## Verification
 
 `roo.tests_manual_awards` covers real wallet credits without Slack, private

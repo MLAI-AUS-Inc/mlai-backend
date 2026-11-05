@@ -24,6 +24,10 @@ class SystemRewardTests(SimpleTestCase):
         self.consent = self.enterContext(patch(f"{MODULE}.has_ai_consent", return_value=True))
         self.ledger = self.enterContext(patch(f"{MODULE}.Ledger.objects"))
         self.ledger.filter.return_value.order_by.return_value.first.return_value = None
+        self.ledger.filter.return_value.first.return_value = None
+        self.enterContext(patch(f"{MODULE}._bridge_root_ids", return_value=[]))
+        # API unit tests isolate the transaction wrapper; database suites retain it.
+        self.enterContext(patch.object(SystemAwardView, "post", SystemAwardView.post.__wrapped__))
 
     def test_native_recipient_needs_canonical_id_device_consent_and_fixed_reward(self):
         self.assertIs(native_reward_user(PROFILE, points=2, reason="link-love", idempotency_key=KEY), self.user)

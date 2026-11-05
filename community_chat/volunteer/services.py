@@ -806,6 +806,11 @@ def decision(record, actor, payload, *, automatic=False, existing_ledger=None):
                 ):
                     raise VolunteerError("invalid_ledger")
                 record.ledger = existing_ledger
+            elif amount and record.action_key == "boost_startup":
+                from roo.system_rewards import award_native_boost
+                if amount != 2_000_000:
+                    raise VolunteerError("invalid_reward")
+                record.ledger, _ = award_native_boost(user, record.source)
             elif amount:
                 record.ledger, _ = PointsService.credit_volunteer(
                     user,
