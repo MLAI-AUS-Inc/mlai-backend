@@ -129,11 +129,12 @@ class Command(BaseCommand):
             ("website_connection_operations", process_website_connection_operations),
             ("website_consistency", run_website_consistency_sweep),
             ("article_dispatch_outbox", process_dispatch_outbox),
-            ("mentor_booking_operations", process_due_bookings),
             # P2 self-heal sweeps (policy, refunds, merge worker, notifications,
             # alert rules). Not gated by the founder-journey switch: each sweep
             # checks its own flag, and a missing or failing one never stops the next.
             ("self_heal_sweeps", scheduled_self_heal_sweeps),
+            # Paid booking recovery continues even when new instant admission is off.
+            ("mentor_booking_operations", lambda: {"status": "completed", **process_due_bookings()}),
             # Refreshes the durable Stripe payout ledger once per local day.
             # This never posts to Xero; posting always requires admin approval.
             ("stripe_payout_reconciliation", run_daily_payout_reconciliation),
