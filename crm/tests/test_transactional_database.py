@@ -63,6 +63,14 @@ class TransactionalDatabaseTests(TestCase):
         self.assertEqual(observation['customerio_delivery_status'], 'unknown')
         self.assertEqual(observation['customerio_dkim'], 'unknown')
 
+    def test_system_transport_receipts_do_not_replace_staff_contact_activity(self):
+        from crm.queries import recent_activity
+        self.attempts(20, 2)
+        visible = CrmAuditEvent.objects.create(action='edit', target_type='contact', target_id='synthetic')
+        rows, _ = recent_activity()
+        self.assertIn(visible.pk, [row.pk for row in rows])
+        self.assertFalse(any(row.target_type == 'transactional_mail' for row in rows))
+
     def event(self, identifier, kind, at, **values):
         return EmailEvent.objects.create(source='resend', event_type=kind, provider_message_id=identifier,
             receipt=uuid4().hex, sender='notifications@notify.mlai.au', recipient='synthetic@example.test',

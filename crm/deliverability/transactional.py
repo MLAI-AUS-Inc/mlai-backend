@@ -25,7 +25,7 @@ def _measure(stream, now):
     from .guardian import Signal
     limit = policy.value('CRM_TRANSACTIONAL_MAX_ROWS')
     cutoff = now - timedelta(minutes=policy.value('CRM_TRANSACTIONAL_WINDOW_MINUTES'))
-    rows = list(CrmAuditEvent.objects.filter(target_type='transactional_mail', detail__phase='result',
+    rows = list(CrmAuditEvent.objects.filter(action='send', target_type='transactional_mail', detail__phase='result',
         created_at__gte=cutoff, created_at__lte=now).order_by('-pk')[:limit + 1])
     if len(rows) > limit:
         return {'status': 'unknown', 'reason': 'observation_limit'}, []

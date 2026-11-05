@@ -370,3 +370,11 @@ subsequent notification response-shape adjustment is covered by the seven
 transactional pure tests plus eight deployment-configuration checks. The
 approved migration graph remains exactly 384 unchanged hashes. No live
 provider call, inbox access, DNS update, deployment or send was performed.
+
+Final source qualification, after the response-shape and staff-activity
+checks: **945 tests passed** on the frozen combined PostgreSQL selection
+(287.257 seconds). All frozen source hashes matched the working source
+before this documentation update. System-mail receipts are excluded from
+the Contacts activity feed, and the monitor uses the existing action/time
+audit index. The seven transactional pure tests and eight deployment
+configuration tests also pass. The schema remains the approved graph only.
