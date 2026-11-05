@@ -95,23 +95,44 @@ Listmonk admin/API paths remain private.
 
 Subscribe to `email.sent`, `email.delivered`, `email.bounced`,
 `email.complained`, `email.failed`, `email.delivery_delayed` and
-`email.suppressed`. Only exact addresses in `CRM_RESEND_MONITORED_SENDERS`
-are handled. One SMTP recipient per message is required. The signing secret
-is host configuration; it is never a sending API key.
+`email.suppressed`. All configured stream domains and protected domains are
+observed. `CRM_RESEND_MONITORED_SENDERS` adds legacy pilot addresses; it no
+longer filters out other stream or system senders. One SMTP recipient per
+message is required. The signing secret is never a sending API key.
 
-Feedback receipts are append-only `CrmAuditEvent` rows (`resend_event`),
-deduplicated by the hash of Svix's message ID under sender row locks.
-Receipts store the provider email ID, sender, event and optional delivery ID,
-not the webhook body or recipient. Delivery correlation uses provider ID,
-then an unambiguous recent address/sender/subject match. Late success never
-erases a bounce or complaint. Bounces and complaints suppress the CRM contact
-and blocklist the listmonk subscriber. Suppression is retried even on duplicate
-events if the listmonk API was unavailable. Failures return 503 for Resend retry.
+`EmailEvent` stores bounded feedback, sender/recipient, message identity,
+masked diagnostics and delivery/blast/stream correlation. Its unique hashed
+Svix receipt deduplicates concurrent retries. Historical `resend_event`
+audit receipts remain replay barriers; replaying one never reapplies a
+consent or streak change. The callback uses no sender row locks. Late success
+never restores a hard bounce or complaint. Permanent bounces and complaints
+suppress the contact and blocklist its listmonk subscriber; blocklisting is
+retried on duplicate negative feedback after an outage. Storage or suppression
+failures return 503 for provider retry.
 
-For this small initial audience, **one real bounce, complaint, failure or
-suppressed send disables both monitored mailboxes**. Provider simulator
-addresses at `resend.dev` are explicitly excluded from this stop rule.
-Re-enabling requires operator investigation; the automation never does so.
+Temporary bounces are `undelivered` with `soft_bounce`, counted once per
+contact per blast. Three successive affected blasts suppress the address; a
+later delivered event resets the streak without restoring consent or undoing
+permanent suppression. Out-of-order older feedback cannot reset a newer
+bounce streak. Listmonk engagement sync treats only hard bounces as permanent;
+Resend supplies the temporary-bounce classification.
+
+A feedback callback never disables senders or pauses campaigns. The
+`crm_deliverability_guard` scheduler runner evaluates rate/minimum-sample
+rules before blast dispatch. One hard bounce among 1,000 attempted messages
+does not pause a blast; a hard-bounce rate of 5% or more at sample 100+ does.
+Complaint rates require at least two complaints. Three provider policy
+rejections stop the affected campaign stream. Simulator recipients are
+excluded. Repeated detections refresh one open incident, automatic decisions
+are audited, and a failed provider pause is retried with admission already
+paused. A recent completed guardian pass and verified sending-domain checks
+are required for new stream campaign starts. The runner never raises into
+the shared scheduler. Its flag defaults off; production refuses dry-run
+admission. Transactional streams are excluded from campaign rules.
+
+The finite legacy warm-up retains its own bounded admission and stop policy;
+it is not the bulk stream's rate policy. Do not extend or retire that pilot
+before its final check on 17 November 2026.
 
 `crm_warmup` uses ordinary draft `Blast` rows with immutable planned metadata
 in `stats.warmup`. There is no new database table or migration. The single
@@ -319,7 +340,7 @@ access rules are in `crm/queries.py`, `crm/segments.py` and `crm/access.py`.
 | `GET`, `POST segments/`; `GET`, `PATCH`, `DELETE segments/{id}/` | Saved segments |
 | `POST segments/preview/` | Count, a sample of 20 and exclusion counts for a definition |
 | `GET segments/catalog/` | Rule types, fields, attribute keys, registration questions and tags for the builder |
-| `GET`, `POST mailboxes/`; `GET`, `PATCH mailboxes/{id}/` | From addresses (senders) with their `domain`, daily cap, `sent_last_24h` and `remaining_today`; add one (`email`, `display_name`, `reply_to`, `daily_limit`, `enabled`) or edit one (the address is fixed). The address must be on a `CRM_SENDING_DOMAINS` domain (400 `sending_domain_not_configured` with `domain`), which also sets `route`; a taken address is 409 `mailbox_exists`; switching a sender on needs its domain `verified` (400 `sending_domain_unverified`). Switching one off holds its blasts that haven't started; listmonk finishes ones already running |
+| `GET`, `POST mailboxes/`; `GET`, `PATCH mailboxes/{id}/` | From addresses (senders); writes require a deliverability owner. Responses include `domain`, daily cap, `sent_last_24h` and `remaining_today`; add one (`email`, `display_name`, `reply_to`, `daily_limit`, `enabled`) or edit one (the address is fixed). The address must be on a `CRM_SENDING_DOMAINS` domain (400 `sending_domain_not_configured` with `domain`), which also sets `route`; a taken address is 409 `mailbox_exists`; switching a sender on needs its domain `verified` (400 `sending_domain_unverified`). Switching one off holds its blasts that haven't started; listmonk finishes ones already running |
 | `GET sending-domains/?refresh=1` | Each `CRM_SENDING_DOMAINS` domain with `route`, `status` (`verified`, `failing` or `unknown` when DNS didn't answer), `checked_at`, `mailbox_count` and its `records` (`key`, `label`, `type`, `host`, `expected`, `required`, `status` `pass`/`fail`/`error`, `detail`, `found`). Domains only a stored sender still names follow with `configured: false` and status `not_configured`. Answers are cached for five minutes; `refresh=1` checks again |
 | `GET whatsapp-templates/` | Approved, enabled WhatsApp templates and their slot mapping |
 | `GET`, `POST blasts/`; `GET`, `PATCH blasts/{id}/` | Blasts (filters `status`, `event_id`, `channel`); create and edit drafts |
@@ -540,7 +561,7 @@ Steps B4 and B5 of `mlai-chat/docs/mlai/CONTACTS_UI_PLAN_2026-10-23.md`. Domain 
 | `LISTMONK_BASE_URL` | listmonk on the `mlai-shared` network, e.g. `http://listmonk:9000`. Never hard-coded |
 | `LISTMONK_API_USER`, `LISTMONK_API_TOKEN` | The listmonk API user, sent as HTTP Basic auth. Email is `not_configured` without all three |
 | `LISTMONK_TEMPLATE_ID` | The MLAI campaign template's id; blank uses listmonk's default |
-| `CRM_SENDING_DOMAINS` | Comma-separated `domain:route` pairs senders may use; route is `resend` or `google_relay` (default `mlai.au:resend,mlai-aus.com:resend,mlai.org.au:resend`). Bad entries are logged and skipped |
+| `CRM_SENDING_DOMAINS` | Comma-separated `domain:route` pairs senders may use; route is `resend` or `google_relay` (default `news.mlai.au:resend`). Bad entries are logged and skipped |
 | `CRM_BLAST_DISPATCH_INTERVAL_SECONDS` | Dispatcher pass interval (default 60) |
 | `CRM_LISTMONK_SYNC_INTERVAL_SECONDS` | Feedback sync interval (default 300) |
 
@@ -655,3 +676,51 @@ consent. Preferences, unsubscribes and holds remain independent of engagement.
 Selecting CRM calendars does not combine financial metrics or alter report
 account choices. A calendar API key does not discover all events hosted by a
 person outside that calendar; a separately authenticated host source is needed.
+
+## Campaign stream foundations (one-click plan, Phase 1)
+
+See [the audit, exact schema proposal and phase gates](crm-deliverability-implementation.md).
+The schema requires explicit migration approval before creation or application.
+A production rollout also requires the source plan's Phase 0 provider/DNS/SMTP
+checks; code and synthetic tests do not prove those checks passed.
+
+- `CRM_STREAMS` maps purpose to identity. Default `news.mlai.au` serves
+  marketing and event updates; `notify.mlai.au` is transactional. CRM blasts
+  refuse transactional streams. Staff draft saves and queueing choose the
+  stream's mailbox; old clients' mailbox IDs are ignored for staff.
+- The root `mlai.au` is always protected, even if omitted from
+  `CRM_PROTECTED_DOMAINS`; that setting may protect additional exact domains.
+  Mailbox writes return 400 `mailbox_domain_protected`, direct root campaign
+  queueing returns 409 `protected_domain`, and dispatch refuses root starts.
+- `crm_streams sync` creates the configured stream records and disabled
+  mailboxes idempotently. It never enables mailboxes, resets incidents or
+  ramp state, or overwrites an existing identity that differs. Run it only
+  against an approved schema/environment. It does not call any provider.
+- `CRM_DELIVERABILITY_OWNERS` defaults to `tech@mlai.au`. Owners must also
+  pass the existing MLAI admin and verified installation gates. Mailbox
+  writes and incident acknowledgement require owner capability.
+- `GET access/` includes `can_manage_deliverability`. Owner-only routes are
+  `GET deliverability/`, `GET deliverability/incidents/?state=`,
+  `GET deliverability/incidents/{id}/` and
+  `POST deliverability/incidents/{id}/acknowledge/`.
+- Acknowledgement accepts `resolution` (`resume_slow`, `resume`, `stop_blast`,
+  `keep_stopped`) and optional `note`. Recovery refuses other open red
+  incidents, disabled sending or unverified domain checks. It demotes the
+  ramp two stages; `resume_slow` records a 48-hour recovery window. Staff
+  pauses remain paused. The owner decision commits a pending recovery before
+  any provider restart; the dispatcher rechecks admission and resumes the same
+  campaign. Timeouts or lost database acknowledgements reconcile the existing
+  campaign state without creating another send. Unchanged acknowledged evidence does not reopen an
+  incident; new negative evidence can. Every choice is audited.
+- `CRM_DELIVERABILITY_SLACK_CHANNEL` enables aggregate-only alerts and
+  four-hour red reminders. No recipient addresses appear in these alerts.
+  Transactional email alerts, full monitors and the health UI follow in
+  Phase 5. Phase 2 implements the volume effect of slowed/recovery state;
+  the Phase 1 flag must remain off until its release gates are approved.
+- Numeric guard defaults live only in `crm/deliverability/policy.py` and are
+  read through settings. The deploy validator, workflow and host upsert
+  inventory carry the same keys; empty release values preserve host values.
+
+Database-free acceptance: `scripts/test_without_database.py crm.tests.test_deliverability_unit`.
+Synthetic database acceptance (specific migration approval first):
+`manage.py test crm.tests.test_deliverability_database`.

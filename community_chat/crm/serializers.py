@@ -760,6 +760,8 @@ def blast_progress(blast, rows: dict) -> dict:
 
 def blast_detail(blast, stats: Optional[dict] = None) -> dict:
     stats = stats or {"channels": {}, "replies": 0}
+    from crm.deliverability.copy import status_message
+    stream = blast.stream if getattr(blast, "stream_id", None) else None
     return {
         **blast_summary(blast, stats),
         "sms_only_without_whatsapp": blast.sms_only_without_whatsapp,
@@ -780,6 +782,12 @@ def blast_detail(blast, stats: Optional[dict] = None) -> dict:
         "last_error": blast.last_error or None,
         "created_at": iso(blast.created_at),
         "updated_at": iso(blast.updated_at),
+        "stream": {"label": stream.label, "from": blast.mailbox.email,
+                   "reply_to": blast.mailbox.reply_to} if stream else None,
+        "pause": {"state": getattr(blast, "pause_state", ""),
+                  "reason": getattr(blast, "pause_reason", ""),
+                  "at": iso(getattr(blast, "paused_at", None))},
+        "status_message": status_message(blast),
     }
 
 

@@ -3,7 +3,7 @@ name: Deploy to Digital Ocean
 on:
   pull_request:
     # Stacked implementation PRs need the same validation lanes.
-    branches: [ main, "codex/articles-*", "codex/slack-*", "fix/admin-brain-deploy-decoupling", "feat/goal-wakeups", "feat/deploy-detection", "feat/first-article-goal" ]
+    branches: [ main, "codex/one-click-campaign-*", "codex/articles-*", "codex/slack-*", "fix/admin-brain-deploy-decoupling", "feat/goal-wakeups", "feat/deploy-detection", "feat/first-article-goal" ]
   push:
     branches: [ main ]
   workflow_dispatch:
@@ -128,7 +128,7 @@ jobs:
       run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit crm.tests.test_audience_contract_unit crm.tests.test_segment_trees_unit crm.tests.test_audience_profiles_unit crm.tests.test_audience_rules_unit crm.tests.test_admin_gate_unit
 
     - name: Check CRM blasts, sending domains and the listmonk client without database access
-      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit
+      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit crm.tests.test_deliverability_unit
 
     - name: Verify event discounts against disposable migration state
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency
@@ -774,7 +774,7 @@ jobs:
       run: python manage.py test crm.tests.test_api_database crm.tests.test_segments_database crm.tests.test_segment_builder_database crm.tests.test_audience_catalog_database crm.tests.test_audience_profile_database crm.tests.test_admin_gate_database --verbosity 2
 
     - name: Verify CRM blasts, senders and listmonk feedback on PostgreSQL
-      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database --verbosity 2
+      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database crm.tests.test_deliverability_database --verbosity 2
 
     - name: Verify Founder recovery policy and authority on PostgreSQL
       run: |
@@ -1295,6 +1295,34 @@ jobs:
         CRM_WARMUP_ENABLED: ${{ vars.CRM_WARMUP_ENABLED || '' }}
         CRM_WARMUP_RUN_ID: ${{ vars.CRM_WARMUP_RUN_ID || '' }}
         CRM_RESEND_MONITORED_SENDERS: ${{ vars.CRM_RESEND_MONITORED_SENDERS || '' }}
+        CRM_GUARDIAN_ENABLED: ${{ vars.CRM_GUARDIAN_ENABLED || '' }}
+        CRM_GUARDIAN_DRY_RUN: ${{ vars.CRM_GUARDIAN_DRY_RUN || '' }}
+        CRM_SENDING_DOMAINS: ${{ vars.CRM_SENDING_DOMAINS || '' }}
+        CRM_STREAMS: ${{ vars.CRM_STREAMS || '' }}
+        CRM_PROTECTED_DOMAINS: ${{ vars.CRM_PROTECTED_DOMAINS || '' }}
+        CRM_DELIVERABILITY_OWNERS: ${{ vars.CRM_DELIVERABILITY_OWNERS || '' }}
+        CRM_DELIVERABILITY_SLACK_CHANNEL: ${{ vars.CRM_DELIVERABILITY_SLACK_CHANNEL || '' }}
+        CRM_GUARD_INTERVAL_SECONDS: ${{ vars.CRM_GUARD_INTERVAL_SECONDS || '' }}
+        CRM_GUARD_HEARTBEAT_SECONDS: ${{ vars.CRM_GUARD_HEARTBEAT_SECONDS || '' }}
+        CRM_GUARD_LOOKBACK_DAYS: ${{ vars.CRM_GUARD_LOOKBACK_DAYS || '' }}
+       : ${{ vars.CRM_GUARD_MAX_BLASTS_PER_TICK || '' }}
+        CRM_GUARD_HARD_BOUNCE_MIN_SAMPLE: ${{ vars.CRM_GUARD_HARD_BOUNCE_MIN_SAMPLE || '' }}
+        CRM_GUARD_HARD_BOUNCE_AMBER: ${{ vars.CRM_GUARD_HARD_BOUNCE_AMBER || '' }}
+        CRM_GUARD_HARD_BOUNCE_RED: ${{ vars.CRM_GUARD_HARD_BOUNCE_RED || '' }}
+        CRM_GUARD_COMPLAINT_MIN_COUNT: ${{ vars.CRM_GUARD_COMPLAINT_MIN_COUNT || '' }}
+        CRM_GUARD_COMPLAINT_RED_MIN_COUNT: ${{ vars.CRM_GUARD_COMPLAINT_RED_MIN_COUNT || '' }}
+        CRM_GUARD_COMPLAINT_MIN_SAMPLE: ${{ vars.CRM_GUARD_COMPLAINT_MIN_SAMPLE || '' }}
+        CRM_GUARD_COMPLAINT_AMBER: ${{ vars.CRM_GUARD_COMPLAINT_AMBER || '' }}
+        CRM_GUARD_COMPLAINT_RED: ${{ vars.CRM_GUARD_COMPLAINT_RED || '' }}
+        CRM_GUARD_COMPLAINT_HIGH: ${{ vars.CRM_GUARD_COMPLAINT_HIGH || '' }}
+        CRM_GUARD_POLICY_BLOCK_MIN_COUNT: ${{ vars.CRM_GUARD_POLICY_BLOCK_MIN_COUNT || '' }}
+        CRM_GUARD_SOFT_BOUNCE_LIMIT: ${{ vars.CRM_GUARD_SOFT_BOUNCE_LIMIT || '' }}
+        CRM_GUARD_ALERT_REMINDER_HOURS: ${{ vars.CRM_GUARD_ALERT_REMINDER_HOURS || '' }}
+        CRM_GUARD_RESUME_DEMOTION: ${{ vars.CRM_GUARD_RESUME_DEMOTION || '' }}
+        CRM_GUARD_RESUME_SLOW_HOURS: ${{ vars.CRM_GUARD_RESUME_SLOW_HOURS || '' }}
+        CRM_GUARD_POLICY_WINDOW_HOURS: ${{ vars.CRM_GUARD_POLICY_WINDOW_HOURS || '' }}
+        CRM_FEEDBACK_MATCH_DAYS: ${{ vars.CRM_FEEDBACK_MATCH_DAYS || '' }}
+        CRM_FEEDBACK_DIAGNOSTIC_LENGTH: ${{ vars.CRM_FEEDBACK_DIAGNOSTIC_LENGTH || '' }}
         CRM_RESEND_WEBHOOK_SECRET: ${{ secrets.CRM_RESEND_WEBHOOK_SECRET || '' }}
         CRM_SMS_ENABLED: ${{ vars.CRM_SMS_ENABLED || '' }}
         CRM_WHATSAPP_ENABLED: ${{ vars.CRM_WHATSAPP_ENABLED || '' }}

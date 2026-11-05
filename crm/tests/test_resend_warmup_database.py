@@ -10,7 +10,7 @@ from django.utils import timezone
 from community_chat.onboarding_models import CommunityMemberConsent, CommunityMemberProfile
 from core.models import User
 from crm.community_optins import sync_community_optins
-from crm.models import Blast, BlastDelivery, Contact, ContactConsentEvent, CrmAuditEvent, SenderMailbox
+from crm.models import Blast, BlastDelivery, Contact, ContactConsentEvent, CrmAuditEvent, EmailEvent, SenderMailbox
 from crm.resend_feedback import record_event
 from crm.warmup import _tick, admission_block, audit_state, plan_run, run_state
 
@@ -117,8 +117,8 @@ class ResendWarmupDatabaseTests(TestCase):
         delivery.refresh_from_db(); contact.refresh_from_db()
         self.assertEqual(delivery.error_code, "resend_complained")
         self.assertEqual((contact.email_status, contact.marketing_consent), ("complained", "withdrawn"))
-        self.assertFalse(SenderMailbox.objects.filter(enabled=True).exists())
-        self.assertEqual(CrmAuditEvent.objects.filter(target_type="resend_event").count(), 2)
+        self.assertEqual(SenderMailbox.objects.filter(enabled=True).count(), 2)
+        self.assertEqual(EmailEvent.objects.count(), 2)
 
     def test_provider_simulator_event_does_not_pause_real_senders(self):
         event = {"type": "email.bounced", "sender": SENDERS[0], "recipient": "bounced+crm@resend.dev",

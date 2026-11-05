@@ -135,6 +135,7 @@ class Contact(TimestampedRecord):
     events_registered_count = models.PositiveIntegerField(default=0)
     events_attended_count = models.PositiveIntegerField(default=0)
     listmonk_subscriber_id = models.PositiveIntegerField(null=True, blank=True)
+    soft_bounce_streak = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
         constraints = [
@@ -272,6 +273,34 @@ class MessageTemplate(TimestampedRecord):
         return self.name
 
 
+class SendingStream(TimestampedRecord):
+    """An isolated email identity and its durable admission/reputation state."""
+
+    class State(models.TextChoices):
+        WARMING = "warming", "Starting gradually"
+        ACTIVE = "active", "Healthy"
+        SLOWED = "slowed", "Sending slowly"
+        HELD = "held", "Waiting for checks"
+        STOPPED = "stopped", "Stopped"
+
+    key = models.SlugField(max_length=40, unique=True)
+    label = models.CharField(max_length=100)
+    domain = models.CharField(max_length=253, unique=True)
+    mailbox = models.ForeignKey(SenderMailbox, on_delete=models.PROTECT, related_name="streams")
+    purposes = models.JSONField(default=list, blank=True)
+    transactional = models.BooleanField(default=False)
+    state = models.CharField(max_length=16, choices=State.choices, default=State.WARMING)
+    state_reason = models.CharField(max_length=64, blank=True)
+    state_detail = models.JSONField(default=dict, blank=True)
+    state_changed_at = models.DateTimeField(null=True, blank=True)
+    ramp_stage = models.PositiveSmallIntegerField(default=0)
+    ramp_updated_at = models.DateTimeField(null=True, blank=True)
+    daily_budget_override = models.PositiveIntegerField(null=True, blank=True)
+    last_send_day = models.DateField(null=True, blank=True)
+    peak_healthy_daily_volume = models.PositiveIntegerField(default=0)
+    policy_overrides = models.JSONField(default=dict, blank=True)
+
+
 class Blast(TimestampedRecord):
     """One send to many people over email, SMS and WhatsApp.
 
@@ -305,6 +334,18 @@ class Blast(TimestampedRecord):
     mailbox = models.ForeignKey(
         SenderMailbox, on_delete=models.PROTECT, null=True, blank=True, related_name="blasts"
     )
+    stream = models.ForeignKey(
+        SendingStream, on_delete=models.PROTECT, null=True, blank=True, related_name="blasts"
+    )
+    pause_state = models.CharField(
+        max_length=8, choices=(("", ""), ("staff", "Paused by staff"), ("system", "Paused automatically")),
+        blank=True,
+    )
+    pause_reason = models.CharField(max_length=500, blank=True)
+    paused_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    paused_at = models.DateTimeField(null=True, blank=True)
     subject = models.CharField(max_length=300, blank=True)
     body_markdown = models.TextField(blank=True)
     sms_body = models.TextField(blank=True)
@@ -373,6 +414,9 @@ class BlastDelivery(models.Model):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.QUEUED)
     provider_id = models.CharField(max_length=64, blank=True)
     error_code = models.CharField(max_length=32, blank=True)
+    bounce_kind = models.CharField(
+        max_length=4, choices=(("", ""), ("hard", "Hard bounce"), ("soft", "Soft bounce")), blank=True
+    )
     segments = models.PositiveSmallIntegerField(null=True, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
     price_unit = models.CharField(max_length=3, blank=True)
@@ -490,3 +534,57 @@ class CrmAuditEvent(models.Model):
         indexes = [
             models.Index(fields=("action", "created_at"), name="crm_audit_action_idx"),
         ]
+
+
+class EmailEvent(models.Model):
+    """Bounded provider feedback with a database-enforced replay receipt."""
+
+    source = models.CharField(max_length=16, choices=(("resend", "Resend"), ("listmonk", "listmonk"), ("seed", "Inbox test")))
+    event_type = models.CharField(max_length=40)
+    provider_message_id = models.CharField(max_length=64, blank=True, db_index=True)
+    receipt = models.CharField(max_length=64, unique=True)
+    recipient = models.EmailField(max_length=254)
+    sender = models.EmailField(max_length=254)
+    recipient_provider = models.CharField(max_length=16, blank=True)
+    stream = models.ForeignKey(SendingStream, on_delete=models.SET_NULL, null=True, blank=True, related_name="email_events")
+    blast = models.ForeignKey(Blast, on_delete=models.SET_NULL, null=True, blank=True, related_name="email_events")
+    delivery = models.ForeignKey(BlastDelivery, on_delete=models.SET_NULL, null=True, blank=True, related_name="email_events")
+    bounce_type = models.CharField(max_length=24, blank=True)
+    bounce_subtype = models.CharField(max_length=64, blank=True)
+    smtp_code = models.CharField(max_length=3, blank=True)
+    enhanced_code = models.CharField(max_length=16, blank=True)
+    diagnostic = models.CharField(max_length=500, blank=True)
+    occurred_at = models.DateTimeField()
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=("stream", "event_type", "received_at"), name="crm_email_event_stream_idx")]
+
+
+class DeliverabilityIncident(TimestampedRecord):
+    """One actionable signal, refreshed while open and retained after resolution."""
+
+    stream = models.ForeignKey(SendingStream, on_delete=models.PROTECT, related_name="incidents")
+    blast = models.ForeignKey(Blast, on_delete=models.SET_NULL, null=True, blank=True, related_name="incidents")
+    recipient_provider = models.CharField(max_length=16, blank=True)
+    signal = models.CharField(max_length=64)
+    severity = models.CharField(max_length=8, choices=(("amber", "Attention"), ("red", "Stopped")))
+    value = models.FloatField()
+    threshold = models.FloatField()
+    sample = models.PositiveIntegerField()
+    action = models.CharField(max_length=32)
+    state = models.CharField(max_length=16, choices=(("open", "Open"), ("resolved", "Resolved"), ("acknowledged", "Acknowledged")), default="open")
+    fingerprint = models.CharField(max_length=64)
+    opened_at = models.DateTimeField()
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    acknowledged_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+    resolution = models.CharField(max_length=32, blank=True)
+    notes = models.CharField(max_length=2000, blank=True)
+    last_detected_at = models.DateTimeField()
+    last_alerted_at = models.DateTimeField(null=True, blank=True)
+    action_applied_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("fingerprint",), condition=Q(state="open"), name="crm_incident_open_unique")]
+        indexes = [models.Index(fields=("state", "severity", "opened_at"), name="crm_incident_state_idx")]

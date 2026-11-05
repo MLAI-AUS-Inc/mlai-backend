@@ -146,7 +146,7 @@ class RouteAuditDatabaseTests(CrmApiMixin, TestCase):
     def test_the_open_views_reveal_nothing_to_members(self):
         self.assertEqual(
             self.member_client.get(PREFIX + "access/").json(),
-            {"enabled": True, "can_view": False, "can_send": False, "luma_sync": None, "channels": None},
+            {"enabled": True, "can_view": False, "can_send": False, "can_manage_deliverability": False, "luma_sync": None, "channels": None},
         )
         self.assertEqual(self.member_client.get(ADMIN_ACCESS).json(), {"is_admin": False, "sections": []})
 

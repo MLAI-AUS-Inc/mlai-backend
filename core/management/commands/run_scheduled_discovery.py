@@ -24,6 +24,7 @@ from crm.blasts import run_blast_dispatch_scheduler
 from crm.listmonk_sync import run_listmonk_sync_scheduler
 from crm.luma_sync import run_luma_guest_sync_scheduler
 from crm.warmup import run_warmup_scheduler
+from crm.deliverability.guardian import run_deliverability_guard
 from crm.engagement_refresh import run_engagement_refresh_scheduler
 from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
@@ -169,6 +170,7 @@ class Command(BaseCommand):
             # through Twilio. Off unless a blast channel is enabled, and
             # cache-throttled to CRM_BLAST_DISPATCH_INTERVAL_SECONDS.
             ("crm_warmup", run_warmup_scheduler),
+            ("crm_deliverability_guard", run_deliverability_guard),
             ("crm_blast_dispatch", run_blast_dispatch_scheduler),
             # Polls listmonk for campaign progress, opens, clicks, bounces and
             # unsubscribes. Runs whenever listmonk is configured, throttled to

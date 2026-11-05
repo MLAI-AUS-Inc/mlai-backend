@@ -1,0 +1,65 @@
+{
+  "checked_at": "2026-11-05T00:53:47.091077+00:00",
+  "source": "Google Public DNS JSON API",
+  "checks": [
+    {
+      "name": "resend._domainkey.news.mlai.au",
+      "type": "TXT",
+      "dns_status": 3,
+      "answers": []
+    },
+    {
+      "name": "send.news.mlai.au",
+      "type": "TXT",
+      "dns_status": 3,
+      "answers": []
+    },
+    {
+      "name": "send.news.mlai.au",
+      "type": "MX",
+      "dns_status": 3,
+      "answers": []
+    },
+    {
+      "name": "_dmarc.news.mlai.au",
+      "type": "TXT",
+      "dns_status": 3,
+      "answers": []
+    },
+    {
+      "name": "resend._domainkey.notify.mlai.au",
+      "type": "TXT",
+      "dns_status": 3,
+      "answers": []
+    },
+    {
+      "name": "send.notify.mlai.au",
+      "type": "TXT",
+      "dns_status": 3,
+      "answers": []
+    },
+    {
+      "name": "send.notify.mlai.au",
+      "type": "MX",
+      "dns_status": 3,
+      "answers": []
+    },
+    {
+      "name": "_dmarc.notify.mlai.au",
+      "type": "TXT",
+      "dns_status": 3,
+      "answers": []
+    },
+    {
+      "name": "_dmarc.mlai.au",
+      "type": "TXT",
+      "dns_status": 0,
+      "answers": [
+        {
+          "type": 16,
+          "data": "v=DMARC1; p=none; rua=mailto:team@mlai.au; adkim=r; aspf=r"
+        }
+      ]
+    }
+  ]
+}

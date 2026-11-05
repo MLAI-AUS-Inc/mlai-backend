@@ -120,7 +120,7 @@ class AccessTests(SimpleTestCase):
     def test_flag_off_denies_everyone_without_reading_roles(self):
         with patch("community_chat.admin_access.is_mlai_admin_user") as role:
             self.assertEqual(
-                crm_access(signed_in()), {"enabled": False, "can_view": False, "can_send": False}
+                crm_access(signed_in()), {"enabled": False, "can_view": False, "can_send": False, "can_manage_deliverability": False}
             )
         role.assert_not_called()
 
@@ -137,7 +137,7 @@ class AccessTests(SimpleTestCase):
                 patch("community_chat.admin_access.is_mlai_admin_user", return_value=is_admin),
             ):
                 self.assertEqual(
-                    crm_access(request), {"enabled": True, "can_view": allowed, "can_send": allowed}
+                    crm_access(request), {"enabled": True, "can_view": allowed, "can_send": allowed, "can_manage_deliverability": False}
                 )
                 device.assert_called_once_with(
                     request.user,
@@ -184,6 +184,7 @@ class GateTests(SimpleTestCase):
                 "enabled": False,
                 "can_view": False,
                 "can_send": False,
+                "can_manage_deliverability": False,
                 "luma_sync": None,
                 "channels": None,
             },

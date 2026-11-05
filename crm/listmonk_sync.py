@@ -188,10 +188,10 @@ def sync_engagement(blast, *, since, now) -> Counter:
 
     bounced = _subscribers(
         "subscribers.id IN (SELECT subscriber_id FROM bounces"
-        f" WHERE campaign_id = {campaign_id} AND type IN ('hard', 'soft') AND created_at >= {stamp})"
+        f" WHERE campaign_id = {campaign_id} AND type = 'hard' AND created_at >= {stamp})"
     )
     counts["bounced"] += _update_rows(
-        rows.filter(status__in=_SENT_ROWS), bounced, status=Status.BOUNCED, updated_at=now
+        rows.filter(status__in=_SENT_ROWS), bounced, status=Status.BOUNCED, bounce_kind="hard", updated_at=now
     )
 
     if blast.listmonk_list_id:

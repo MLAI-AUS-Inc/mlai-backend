@@ -163,7 +163,7 @@ def blast_summaries(blasts):
     return [wire.blast_summary(blast, stats.get(blast.pk)) for blast in blasts]
 
 
-BLAST_RELATIONS = ("event", "segment", "created_by", "whatsapp_template", "mailbox")
+BLAST_RELATIONS = ("event", "segment", "created_by", "whatsapp_template", "mailbox", "stream")
 
 
 def blast_detail(blast_id):

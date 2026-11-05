@@ -40,7 +40,7 @@ class AccessDatabaseTests(CrmApiMixin, TestCase):
         self.assertEqual(member.status_code, 200)
         self.assertEqual(
             member.json(),
-            {"enabled": True, "can_view": False, "can_send": False, "luma_sync": None, "channels": None},
+            {"enabled": True, "can_view": False, "can_send": False, "can_manage_deliverability": False, "luma_sync": None, "channels": None},
         )
         self.assertEqual(APIClient().get(PREFIX + "access/").status_code, 401)
 

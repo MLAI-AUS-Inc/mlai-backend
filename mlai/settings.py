@@ -2360,6 +2360,9 @@ CRM_RESEND_MONITORED_SENDERS = tuple(
     value.strip().lower() for value in os.environ.get('CRM_RESEND_MONITORED_SENDERS', '').split(',')
     if value.strip()
 )
+# Defaults and tunable thresholds have a single owning module.
+from crm.deliverability.policy import environment_settings as _crm_delivery_settings
+globals().update(_crm_delivery_settings(os.environ))
 CRM_WARMUP_ENABLED = _env_is_true('CRM_WARMUP_ENABLED', False)
 CRM_WARMUP_RUN_ID = os.environ.get('CRM_WARMUP_RUN_ID', '').strip()
 LISTMONK_BASE_URL = os.environ.get('LISTMONK_BASE_URL', '').strip().rstrip('/')
@@ -2374,7 +2377,7 @@ LISTMONK_TEMPLATE_ID = int(_LISTMONK_TEMPLATE_ID) if _LISTMONK_TEMPLATE_ID.isdig
 CRM_SENDING_DOMAINS = [
     entry.strip()
     for entry in os.environ.get(
-        'CRM_SENDING_DOMAINS', 'mlai.au:resend,mlai-aus.com:resend,mlai.org.au:resend'
+        'CRM_SENDING_DOMAINS', 'news.mlai.au:resend'
     ).split(',')
     if entry.strip()
 ]

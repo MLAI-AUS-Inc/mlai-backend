@@ -69,7 +69,7 @@ On the droplet, run this project from `/root/mlai-listmonk`, next to `/root/mlai
    - Resend has no listmonk bounce webhook; Resend suppresses bounced addresses itself;
    - mail sent through Google's relay bounces back to the sending mailbox, and listmonk can scan one POP mailbox for those.
 7. **SMTP servers** (Admin → Settings → SMTP). Add **one server per sending domain**, and put that domain in the server's **Domains** field. Since v6.2, listmonk picks the server whose domain matches the From address. Two servers on one domain are picked at random, so never add two.
-   - **Google Workspace domains, through Google's SMTP relay.** This lets any mailbox on the domain be the From address.
+   - **Other verified sending domains, through Google's SMTP relay.** Protected root domains cannot be campaign From addresses.
      - In the Google Admin console, open Apps → Google Workspace → Gmail → Routing → SMTP relay service, and add a rule:
        - allowed senders: **only addresses in my domains**;
        - **require SMTP authentication**;
@@ -217,3 +217,40 @@ References:
 - [listmonk configuration and HTTP routes](https://listmonk.app/docs/configuration/)
 - [installation](https://listmonk.app/docs/installation/)
 - [roles and permissions](https://listmonk.app/docs/roles-and-permissions/)
+
+## One-click campaign streams: Phase 1 rollout gate
+
+The backend now prepares protected stream identities and rate-based feedback
+protection. This is a phased implementation; see
+[`docs/crm-deliverability-implementation.md`](../../docs/crm-deliverability-implementation.md).
+The existing listmonk instance and finite pilot must be preserved. Do not
+restart or recreate listmonk as part of this code change.
+
+Before any production enablement, verify the source plan's Phase 0 checklist:
+
+1. Verify `news.mlai.au` and `notify.mlai.au` with provider-issued DNS records,
+   separate scoped sending keys, and a decision on separate marketing-team
+   suppression. Do not infer provider account quota from the ramp ladder.
+2. Add the news SMTP domain route; retain the pilot's existing routes. Keep
+   account/day/month limits and the pilot's reserved capacity intact.
+3. Check the public root URL, unsubscribe headers and signed one-click
+   headers using real seed headers. Enable `settings:get` on the backend role
+   for the later config monitor. The template must identify MLAI, give a
+   contact address, include `{{ UnsubscribeURL }}`, and eventually print the
+   per-recipient consent reason.
+4. Subscribe the signed callback to all seven documented delivery events for
+   stream and system domains. Verify real signed simulator feedback. Storing
+   an event is not proof that a message reached the inbox.
+5. After the exact schema migration is separately approved, sync stream
+   records. New mailboxes stay disabled. Verify the owner list and alert
+   channel before enabling the guardian. Dry-run is staging only.
+6. Inspect Postmaster, DMARC reporting, reputation and seed prerequisites.
+   Do not tighten DMARC or switch transactional identities in this phase.
+
+Phase 1's callback records feedback and suppresses individual bad addresses;
+it never disables the two pilot senders after one event. The finite pilot
+still applies its own admission/stop policy through its scheduler. The new
+guardian pauses campaign blasts only on sample-qualified rates or repeated
+policy rejections; marketing incidents never act on the notify stream.
+Owner acknowledgement is required for red recovery. Provider pause failures
+remain durably blocked and retry on the next guardian pass.

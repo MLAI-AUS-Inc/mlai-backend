@@ -54,6 +54,10 @@ class CrmDeployConfigTests(unittest.TestCase):
             (root / "scripts").mkdir()
             for name in ("upsert_env_value_from_stdin.sh", "validate_crm_deploy_config.py"):
                 shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+            (root / "crm" / "deliverability").mkdir(parents=True)
+            (root / "crm" / "__init__.py").touch()
+            (root / "crm" / "deliverability" / "__init__.py").touch()
+            shutil.copy2(ROOT / "crm" / "deliverability" / "policy.py", root / "crm" / "deliverability" / "policy.py")
             env_file = root / ".env"
             env_file.write_text("REDIS_URL=redis://synthetic\nCRM_SMS_ENABLED=false\n")
 

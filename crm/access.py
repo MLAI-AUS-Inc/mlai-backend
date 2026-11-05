@@ -35,7 +35,9 @@ def crm_access(request) -> dict:
     enabled = crm_enabled()
     allowed = enabled and is_crm_admin(request)
     # Sending has no separate role yet; the blast phases gate each channel.
-    return {"enabled": enabled, "can_view": allowed, "can_send": allowed}
+    from .deliverability.streams import is_owner
+    return {"enabled": enabled, "can_view": allowed, "can_send": allowed,
+            "can_manage_deliverability": allowed and is_owner(request.user)}
 
 
 def channel_availability() -> dict:

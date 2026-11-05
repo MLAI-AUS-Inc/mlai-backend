@@ -13,20 +13,21 @@ from crm.models import CrmAuditEvent, SenderMailbox
 from .api_fixtures import PREFIX, CrmApiMixin, crm_enabled
 from .test_sending_domains_unit import resend_zone, zone_lookup
 
-DOMAINS = override_settings(CRM_SENDING_DOMAINS=["mlai.au:resend", "mlai-aus.com:resend"])
+DOMAINS = override_settings(CRM_SENDING_DOMAINS=["news.mlai.au:resend", "mlai-aus.com:resend"])
 
 
 @crm_enabled
 @DOMAINS
+@override_settings(CRM_DELIVERABILITY_OWNERS=("admin@example.test",))
 class SendingApiDatabaseTests(CrmApiMixin, TestCase):
     def setUp(self):
         super().setUp()
-        zone = {**resend_zone("mlai.au"), **resend_zone("mlai-aus.com")}
+        zone = {**resend_zone("news.mlai.au"), **resend_zone("mlai-aus.com")}
         zone[("resend._domainkey.mlai-aus.com", "TXT")] = []
         self.lookup = self.enterContext(patch("crm.sending_domains.lookup", side_effect=zone_lookup(zone)))
 
     def create(self, **fields):
-        body = {"email": "hey@mlai.au", "display_name": "MLAI", **fields}
+        body = {"email": "hey@news.mlai.au", "display_name": "MLAI", **fields}
         return self.client.post(PREFIX + "mailboxes/", body, format="json")
 
     def test_members_are_refused(self):
@@ -53,7 +54,7 @@ class SendingApiDatabaseTests(CrmApiMixin, TestCase):
         self.assertEqual(
             [(item["domain"], item["configured"], item["status"], item["mailbox_count"]) for item in results],
             [
-                ("mlai.au", True, "verified", 1),
+                ("news.mlai.au", True, "verified", 1),
                 ("mlai-aus.com", True, "failing", 0),
                 ("legacy.example", False, "not_configured", 1),
             ],
@@ -72,16 +73,16 @@ class SendingApiDatabaseTests(CrmApiMixin, TestCase):
         self.assertEqual(self.lookup.call_count, calls * 2)
 
     def test_a_sender_is_added_on_a_listed_domain_with_its_route(self):
-        response = self.create(email="Hey@MLAI.au", reply_to="hi@mlai.au", daily_limit=50, enabled=True)
+        response = self.create(email="Hey@NEWS.MLAI.au", reply_to="hi@mlai.au", daily_limit=50, enabled=True)
 
         self.assertEqual(response.status_code, 201)
         body = response.json()
         self.assertEqual(
             {key: body[key] for key in ("email", "display_name", "domain", "route", "reply_to", "daily_limit", "enabled")},
             {
-                "email": "hey@mlai.au",
+                "email": "hey@news.mlai.au",
                 "display_name": "MLAI",
-                "domain": "mlai.au",
+                "domain": "news.mlai.au",
                 "route": "resend",
                 "reply_to": "hi@mlai.au",
                 "daily_limit": 50,
@@ -96,7 +97,7 @@ class SendingApiDatabaseTests(CrmApiMixin, TestCase):
             event.detail,
             {"operation": "create", "fields": ["daily_limit", "display_name", "email", "enabled", "reply_to"]},
         )
-        self.assertEqual(self.client.get(PREFIX + f"mailboxes/{body['id']}/").json()["email"], "hey@mlai.au")
+        self.assertEqual(self.client.get(PREFIX + f"mailboxes/{body['id']}/").json()["email"], "hey@news.mlai.au")
 
     def test_unlisted_and_duplicate_addresses_are_refused(self):
         unlisted = self.create(email="hey@gmail.com")
@@ -105,7 +106,7 @@ class SendingApiDatabaseTests(CrmApiMixin, TestCase):
             (400, {"error": "sending_domain_not_configured", "outcome": "sending_domain_not_configured", "domain": "gmail.com"}),
         )
         self.create()
-        duplicate = self.create(email="HEY@mlai.au")
+        duplicate = self.create(email="HEY@news.mlai.au")
         self.assertEqual((duplicate.status_code, duplicate.json()["error"]), (409, "mailbox_exists"))
         self.assertEqual(SenderMailbox.objects.count(), 1)
 
@@ -125,7 +126,7 @@ class SendingApiDatabaseTests(CrmApiMixin, TestCase):
         edited = self.client.patch(
             PREFIX + f"mailboxes/{mailbox_id}/", {"display_name": "Team MLAI", "reply_to": ""}, format="json"
         )
-        moved = self.client.patch(PREFIX + f"mailboxes/{mailbox_id}/", {"email": "x@mlai.au"}, format="json")
+        moved = self.client.patch(PREFIX + f"mailboxes/{mailbox_id}/", {"email": "x@news.mlai.au"}, format="json")
         missing = self.client.patch(PREFIX + f"mailboxes/{uuid.uuid4()}/", {"enabled": False}, format="json")
 
         self.assertEqual(edited.status_code, 200)

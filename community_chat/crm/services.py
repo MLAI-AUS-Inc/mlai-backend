@@ -15,6 +15,7 @@ from django.db.models.functions import Lower
 from core.models import AccountBan
 from crm import sending_domains
 from crm.blasts import check_channel_rules
+from crm.deliverability.streams import assign_stream, is_owner, protected_domain
 from crm.engagement import RESERVED_ATTRIBUTE_KEYS
 from crm.luma_sync import users_by_email
 from crm.models import (
@@ -258,6 +259,11 @@ def save_mailbox(mailbox: Optional[SenderMailbox], data: dict, *, actor) -> Send
 
     require_mlai_admin(actor)
     creating = mailbox is None
+    domain = sending_domains.domain_of(data["email"]) if creating else mailbox.domain
+    if protected_domain(domain) or (mailbox is not None and protected_domain(sending_domains.domain_of(mailbox.email))):
+        raise CrmError("mailbox_domain_protected")
+    if not is_owner(actor):
+        raise CrmError("owner_required", 403)
     if creating:
         email = data["email"]
         domain = sending_domains.domain_of(email)
@@ -335,7 +341,7 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
     if "sms_only_without_whatsapp" in data:
         blast.sms_only_without_whatsapp = data["sms_only_without_whatsapp"]
     email = data.get("email") or {}
-    if "mailbox_id" in email:
+    if "mailbox_id" in email and is_owner(actor):
         blast.mailbox = (
             None
             if email["mailbox_id"] is None
@@ -359,6 +365,7 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
     if "variables" in whatsapp:
         blast.whatsapp_variables = whatsapp["variables"]
     check_channel_rules(blast)
+    assign_stream(blast, actor=actor, mailbox=blast.mailbox if is_owner(actor) else None)
     with transaction.atomic():
         blast.save()
         audit(

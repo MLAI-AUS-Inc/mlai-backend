@@ -166,6 +166,11 @@ def activate_run(run_id):
         receipts = CrmAuditEvent.objects.filter(target_type="resend_event", detail__test=True,
                                                  created_at__gte=timezone.now() - timedelta(hours=24))
         proven = {(r.detail.get("sender"), r.detail.get("event")) for r in receipts}
+        from .models import EmailEvent
+        proven.update(EmailEvent.objects.filter(
+            sender__in=monitored_senders(), recipient__iendswith="@resend.dev",
+            received_at__gte=timezone.now() - timedelta(hours=24),
+        ).values_list("sender", "event_type"))
         for sender in monitored_senders():
             for event in ("email.delivered", "email.bounced", "email.complained"):
                 if (sender, event) not in proven:

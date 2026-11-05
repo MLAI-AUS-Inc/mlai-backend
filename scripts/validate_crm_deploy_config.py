@@ -10,8 +10,11 @@ from __future__ import annotations
 import os
 import re
 import sys
+from pathlib import Path
 from urllib.parse import urlsplit
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from crm.deliverability.policy import DEFAULTS as DELIVERY_DEFAULTS, environment_settings
 
 FLAG_KEYS = (
     "COMMUNITY_CHAT_CRM_ENABLED",
@@ -22,12 +25,15 @@ FLAG_KEYS = (
     "CRM_WARMUP_ENABLED",
     "CRM_ENGAGEMENT_REFRESH_ENABLED",
     "CRM_SUBSTACK_ACTIVITY_ENABLED",
+    "CRM_GUARDIAN_ENABLED",
+    "CRM_GUARDIAN_DRY_RUN",
 )
 LISTMONK_BASE_URL = "LISTMONK_BASE_URL"
 LISTMONK_API_USER = "LISTMONK_API_USER"
 MESSAGING_SERVICE = "TWILIO_MESSAGING_SERVICE_SID"
 KEYS = (*FLAG_KEYS, LISTMONK_BASE_URL, LISTMONK_API_USER, MESSAGING_SERVICE,
-        "CRM_RESEND_MONITORED_SENDERS", "CRM_WARMUP_RUN_ID", "CRM_ENGAGEMENT_REFRESH_HOUR")
+        "CRM_RESEND_MONITORED_SENDERS", "CRM_WARMUP_RUN_ID", "CRM_ENGAGEMENT_REFRESH_HOUR",
+        "CRM_SENDING_DOMAINS", *(key for key in DELIVERY_DEFAULTS if key not in FLAG_KEYS))
 
 
 def validate_single(key: str, value: str, *, optional: bool = False) -> None:
@@ -39,6 +45,31 @@ def validate_single(key: str, value: str, *, optional: bool = False) -> None:
     if key in FLAG_KEYS:
         if value not in {"true", "false"}:
             raise ValueError(f"{key} must be true or false")
+    elif key in DELIVERY_DEFAULTS:
+        try:
+            environment_settings({key: value})
+            if key == "CRM_DELIVERABILITY_OWNERS" and not all(
+                re.fullmatch(r"[a-z0-9._+-]+@[a-z0-9.-]+\.[a-z]{2,}", item) for item in value.split(",")
+            ):
+                raise ValueError
+            if key == "CRM_PROTECTED_DOMAINS" and not all(
+                re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", item) for item in value.split(",")
+            ):
+                raise ValueError
+            if key == "CRM_STREAMS":
+                for entry in value.split(";"):
+                    parts = entry.split(":")
+                    if (len(parts) != 4 or not re.fullmatch(r"[a-z0-9_-]{1,40}", parts[0])
+                            or not re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", parts[1])
+                            or not re.fullmatch(r"[a-z0-9._+-]+@" + re.escape(parts[1]), parts[2])
+                            or parts[3] not in ("marketing", "event_update", "marketing|event_update", "transactional")
+                            or (parts[1] == "mlai.au" and parts[3] != "transactional")):
+                        raise ValueError
+        except (ValueError, TypeError, OverflowError):
+            raise ValueError(f"{key} is not a valid delivery policy value") from None
+    elif key == "CRM_SENDING_DOMAINS":
+        if not all(re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}:(resend|google_relay)", item) for item in value.split(",")):
+            raise ValueError(f"{key} must be comma-separated domain:route pairs")
     elif key == LISTMONK_BASE_URL:
         # listmonk's origin on the private mlai-shared network, e.g. http://listmonk:9000.
         try:

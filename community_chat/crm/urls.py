@@ -3,9 +3,14 @@
 from django.urls import path
 
 from . import views
+from .deliverability_views import DeliverabilityView, IncidentAcknowledgeView, IncidentsView
 from .profile_views import AudienceProfileMappingApplyView, AudienceProfileMappingPreviewView, AudienceProfileView
 
 urlpatterns = [
+    path("deliverability/", DeliverabilityView.as_view(), name="community_chat_crm_deliverability"),
+    path("deliverability/incidents/", IncidentsView.as_view(), name="community_chat_crm_deliverability_incidents"),
+    path("deliverability/incidents/<uuid:incident_id>/", IncidentsView.as_view(), name="community_chat_crm_deliverability_incident"),
+    path("deliverability/incidents/<uuid:incident_id>/acknowledge/", IncidentAcknowledgeView.as_view(), name="community_chat_crm_deliverability_acknowledge"),
     path("access/", views.AccessView.as_view(), name="community_chat_crm_access"),
     path("overview/", views.OverviewView.as_view(), name="community_chat_crm_overview"),
     path("events/", views.EventsView.as_view(), name="community_chat_crm_events"),
