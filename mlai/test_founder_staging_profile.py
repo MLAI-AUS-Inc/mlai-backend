@@ -15,12 +15,19 @@ class FounderProfileTests(unittest.TestCase):
 import json
 from unittest.mock import patch
 with patch("dotenv.load_dotenv", side_effect=AssertionError("dotenv forbidden")), \\
+     patch("socket.getaddrinfo", side_effect=AssertionError("DNS forbidden")), \\
      patch("socket.socket.connect", side_effect=AssertionError("network forbidden")), \\
+     patch("psycopg.connect", side_effect=AssertionError("direct database forbidden")), \\
      patch("django.db.backends.base.base.BaseDatabaseWrapper.ensure_connection", side_effect=AssertionError("database forbidden")):
     import mlai.settings_staging_founder as s
     import django
     django.setup()
     import core.firebase_utils, core.email_utils
+    # URL resolution imports the real composition root and its view modules.
+    # Checking settings alone misses module-level credential-file discovery.
+    from django.urls import resolve
+    assert resolve("/healthz/live").func.__name__ == "health_live"
+    assert resolve("/api/v1/community-chat/account/").func.view_class.__name__ == "AccountView"
     from community_chat.founder_staging_email import fixture_scope
     from mlai.staging_integrations import is_isolated_staging
     scope = fixture_scope()
