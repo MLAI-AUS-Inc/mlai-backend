@@ -8,6 +8,7 @@ already holds, so a release never switches the CRM off by omission.
 from __future__ import annotations
 
 import os
+import json
 import re
 import sys
 from pathlib import Path
@@ -28,6 +29,7 @@ FLAG_KEYS = (
     "CRM_GUARDIAN_ENABLED",
     "CRM_GUARDIAN_DRY_RUN",
     "CRM_WAVES_ENABLED",
+    "CRM_PREFLIGHT_ENABLED",
 )
 LISTMONK_BASE_URL = "LISTMONK_BASE_URL"
 LISTMONK_API_USER = "LISTMONK_API_USER"
@@ -49,6 +51,27 @@ def validate_single(key: str, value: str, *, optional: bool = False) -> None:
     elif key in DELIVERY_DEFAULTS:
         try:
             environment_settings({key: value})
+            if key in ("RSPAMD_URL", "CRM_LISTMONK_PUBLIC_URL"):
+                parsed = urlsplit(value)
+                parsed.port
+                if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password
+                        or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or any(c.isspace() for c in value)):
+                    raise ValueError
+            if key == "CRM_SEED_MAILBOXES":
+                entries = json.loads(value)
+                fields = {"provider", "address", "imap_host", "imap_port", "auth", "secret_env", "enabled"}
+                if not isinstance(entries, list):
+                    raise ValueError
+                for entry in entries:
+                    if (not isinstance(entry, dict) or set(entry) - fields
+                            or entry.get("provider") not in ("gmail", "google_workspace", "outlook", "microsoft365", "yahoo", "icloud", "other")
+                            or entry.get("auth") not in ("app_password", "xoauth2")
+                            or not re.fullmatch(r"CRM_SEED_[A-Z0-9_]+", entry.get("secret_env", ""))
+                            or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", entry.get("address", ""))
+                            or not re.fullmatch(r"[a-zA-Z0-9.-]+", entry.get("imap_host", ""))
+                            or type(entry.get("imap_port", 993)) is not int or not 1 <= entry.get("imap_port", 993) <= 65535
+                            or type(entry.get("enabled", False)) is not bool):
+                        raise ValueError
             if key == "CRM_DELIVERABILITY_OWNERS" and not all(
                 re.fullmatch(r"[a-z0-9._+-]+@[a-z0-9.-]+\.[a-z]{2,}", item) for item in value.split(",")
             ):

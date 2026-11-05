@@ -622,6 +622,7 @@ class BlastSendView(CrmView):
             actor=request.user,
             definition_hash_confirm=data.get("definition_hash"),
             recipient_fingerprint_confirm=data.get("recipient_fingerprint"),
+            preflight_hash=data.get('preflight_hash'),
         )
         return Response(blast_detail(blast.pk), status=202)
 

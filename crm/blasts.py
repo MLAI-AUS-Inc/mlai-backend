@@ -513,6 +513,7 @@ def queue_blast(
     blast_id, *, confirm: dict, idempotency_key: str, actor, now=None,
     definition_hash_confirm=None,
     recipient_fingerprint_confirm=None,
+    preflight_hash=None,
 ) -> Blast:
     """Check, recount and snapshot a draft, then queue it. The same key returns the same blast.
 
@@ -534,6 +535,17 @@ def queue_blast(
     # from current contact data under the lock; never save an old preview.
     preview = Blast.objects.select_related('stream', 'mailbox', 'event', 'segment').get(pk=blast_id)
     from .deliverability import policy
+    preflight_template = None
+    if (policy.value('CRM_PREFLIGHT_ENABLED') and Channel.EMAIL in (preview.channels or [])
+            and not (preview.stats or {}).get('warmup')):
+        from .deliverability.streams import assign_stream, protected_domain
+        from .deliverability.preflight import service as preflight
+        if preview.mailbox_id and protected_domain(preview.mailbox.domain):
+            raise BlastError('protected_domain', 409)
+        assign_stream(preview, actor=actor, mailbox=preview.mailbox)
+        check_channels_available(preview.channels or [], status=403)
+        check_ready(preview)
+        preflight_template = preflight.queue_context(preview, now=now)
     if (policy.value('CRM_WAVES_ENABLED') and Channel.EMAIL in (preview.channels or [])
             and not (preview.stats or {}).get('warmup')):
         from .deliverability.streams import assign_stream
@@ -558,6 +570,8 @@ def queue_blast(
                     assign_stream(blast, actor=actor, mailbox=blast.mailbox)
             check_channels_available(blast.channels or [], status=403)
             check_ready(blast)
+            if preflight_template is not None:
+                preflight.require(blast, preflight_hash, now=now, template=preflight_template)
             audience, prepared = planned_audience(blast, now, cached_only=True)
             resolved_hash = definition_hash(audience.definition) if audience.definition is not None else None
             if (

@@ -13,6 +13,7 @@ Email deliveries move ``queued`` → ``submitting`` (on the listmonk list) →
 from __future__ import annotations
 
 import logging
+import html
 import re
 from collections import Counter
 from datetime import datetime, timezone as dt_timezone
@@ -142,6 +143,11 @@ def subscriber_name(contact) -> str:
 
 def campaign_body(blast) -> str:
     body = listmonk_text(blast.body_markdown, blast.event, markdown=True)
+    if getattr(blast, 'sign_off_name', ''):
+        body += '\n\n— ' + listmonk_text(html.escape(blast.sign_off_name), blast.event, markdown=True)
+    if getattr(blast, 'preview_text', ''):
+        preview = listmonk_text(html.escape(blast.preview_text), blast.event, markdown=True)
+        body = '<div style="display:none;max-height:0;overflow:hidden;mso-hide:all" aria-hidden="true">' + preview + '</div>\n\n' + body
     return body if (getattr(blast, "stats", None) or {}).get("warmup") else track_links(body)
 
 

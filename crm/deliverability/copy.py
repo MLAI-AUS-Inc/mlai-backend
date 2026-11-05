@@ -14,6 +14,12 @@ def status_message(blast):
         return {"tone": "stop", "text": f"Paused to protect MLAI's email reputation: {reason}. The email team will decide what happens next."}
     if getattr(blast, "pause_state", "") == "staff":
         return {"tone": "warn", "text": "Paused by staff. Nothing more goes out until someone resumes it."}
+    preflight = getattr(blast, 'preflight', None) or {}
+    if getattr(blast, 'status', '') in ('queued', 'sending') and preflight:
+        if (preflight.get('seed_test') or {}).get('status') in ('sending', 'waiting'):
+            return {'tone': 'info', 'text': "Starting soon. We're running a quick inbox test first, usually within 10 minutes."}
+        if 'seed_test' in (preflight.get('blocking') or []):
+            return {'tone': 'stop', 'text': 'The inbox check found a problem. The email team needs to review it before sending.'}
     if getattr(blast, "stream_id", None) and blast.stream.state == "stopped":
         return {"tone": "stop", "text": "Sending is paused while the email team checks a problem."}
     if getattr(blast, "stream_id", None) and blast.stream.state == "held":

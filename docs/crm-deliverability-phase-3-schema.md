@@ -44,7 +44,10 @@ The 383 existing migrations are recorded in
 381 files plus the separately approved 0002 and 0003. In particular, 0003 has
 SHA-256 `816786a2fe343bee10ab13a0b9a69d0978c6b9cf64ba7cc7c10a458b26fb3b49`.
 
-Requested approval: create only the specified 0004 and test this graph in
+The user approved this exact creation and disposable test scope on
+5 November 2026. Created migration file SHA-256:
+`0208ab2c000aeeb6a52b4a23e78a087dd1ccd8057a602f018c26ec31ab3ad181`.
+The approval covers only the specified 0004 and testing this graph in
 disposable local/CI databases containing synthetic data, including reversal
 and reapplication of 0004. The test runner will pin every migration hash.
 Production and connected staging migrations, deployment, provider writes,

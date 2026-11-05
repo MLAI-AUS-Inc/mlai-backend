@@ -138,6 +138,7 @@ class Contact(TimestampedRecord):
     listmonk_subscriber_id = models.PositiveIntegerField(null=True, blank=True)
     soft_bounce_streak = models.PositiveSmallIntegerField(default=0)
     last_active_at = models.DateTimeField(null=True, blank=True)
+    consent_reconfirmed_at = models.DateTimeField(null=True, blank=True)
     email_domain = models.CharField(max_length=253, blank=True, db_index=True)
 
     class Meta:
@@ -357,6 +358,8 @@ class Blast(TimestampedRecord):
     paused_at = models.DateTimeField(null=True, blank=True)
     subject = models.CharField(max_length=300, blank=True)
     body_markdown = models.TextField(blank=True)
+    preview_text = models.CharField(max_length=200, blank=True)
+    sign_off_name = models.CharField(max_length=120, blank=True)
     sms_body = models.TextField(blank=True)
     sms_only_without_whatsapp = models.BooleanField(default=True)
     whatsapp_template = models.ForeignKey(
@@ -380,6 +383,7 @@ class Blast(TimestampedRecord):
     sent_at = models.DateTimeField(null=True, blank=True)
     last_error = models.TextField(blank=True)
     plan = models.JSONField(default=dict, blank=True)
+    preflight = models.JSONField(default=dict, blank=True)
 
     class Meta:
         constraints = [
@@ -673,3 +677,43 @@ class MailDomainInfo(models.Model):
     has_mx = models.BooleanField(null=True)
     disposable = models.BooleanField(default=False)
     checked_at = models.DateTimeField()
+
+
+class SeedMailbox(TimestampedRecord):
+    """An inbox probe's identity and credential reference, never its secret."""
+
+    provider = models.CharField(max_length=24, choices=((key, key) for key in (
+        'gmail', 'google_workspace', 'outlook', 'microsoft365', 'yahoo', 'icloud', 'other')))
+    address = models.EmailField(max_length=254, unique=True)
+    imap_host = models.CharField(max_length=253)
+    imap_port = models.PositiveIntegerField(default=993)
+    auth = models.CharField(max_length=16, choices=(('app_password', 'App password'), ('xoauth2', 'OAuth2')))
+    secret_env = models.CharField(max_length=128)
+    enabled = models.BooleanField(default=False)
+
+
+class SeedTest(TimestampedRecord):
+    """A content-bound inbox probe with recoverable provider submission metadata."""
+
+    blast = models.ForeignKey(Blast, on_delete=models.SET_NULL, null=True, blank=True, related_name='seed_tests')
+    stream = models.ForeignKey(SendingStream, on_delete=models.CASCADE, related_name='seed_tests')
+    content_hash = models.CharField(max_length=64, db_index=True)
+    token = models.UUIDField(default=uuid.uuid4, unique=True)
+    status = models.CharField(max_length=10, default='sending', choices=((key, key) for key in (
+        'sending', 'waiting', 'complete', 'timeout', 'error')))
+    sent_at = models.DateTimeField(null=True, blank=True)
+    results = models.JSONField(default=dict, blank=True)
+
+
+class ReputationCheck(models.Model):
+    """One domain reputation observation; refused or missing answers stay unknown."""
+
+    subject = models.CharField(max_length=253, db_index=True)
+    source = models.CharField(max_length=24, choices=((key, key) for key in (
+        'spamhaus_dbl', 'surbl', 'uribl', 'safe_browsing')))
+    listed = models.BooleanField(null=True)
+    detail = models.JSONField(default=dict, blank=True)
+    checked_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        indexes = [models.Index(fields=('subject', 'source', 'checked_at'), name='crm_reputation_history_idx')]

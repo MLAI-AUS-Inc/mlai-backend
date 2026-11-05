@@ -277,3 +277,28 @@ account's current rate and quota. The generated campaign supplies fixed MLAI
 From identity, Reply-To, readable `altbody`, X-MLAI-Blast, X-MLAI-Wave and
 Feedback-ID. Actual DKIM coverage of those headers and one-click unsubscribe
 still needs real seed-header acceptance before production rollout.
+
+## Preflight resources and Phase 3 gate
+
+Preflight owns empty `crm-blast-<uuid>-preflight-<content-hash>` resources and
+seed checks own `crm-seed-<uuid>` resources. They are separate from campaign
+waves and manual tests. Never start a preflight or seed campaign through the
+UI: only listmonk's test endpoint delivers the dedicated seed snapshot. The
+backend commits a submission marker before the test call, then polls after an
+uncertain response rather than risking a second submission.
+
+Enable `settings:get` for the backend role. Read-only checks require the exact
+news SMTP `from_addresses` route, verified STARTTLS/TLS, unsubscribe headers,
+the public lists URL, bounded account message rate and permanent-bounce/
+complaint blocklisting. Temporary bounces are managed by the backend streak
+policy and must not be globally blocklisted after a single occurrence. The
+template must include MLAI, its contact address, `{{ UnsubscribeURL }}` and
+the consent-reason attribute. Provider settings responses and masked SMTP
+credentials are never retained in preflight results.
+
+The [internal content checker](../spamcheck/README.md) is prepared separately.
+Keep `CRM_PREFLIGHT_ENABLED=false` until the selected scanner image has passed
+configuration/scoring fixtures and an authorized staging send proves actual
+Gmail/Outlook/Yahoo placement and signed one-click headers. Neither these files
+nor the disposable test approval authorize starting this stack, changing live
+listmonk settings, real inbox access or sending a seed message.

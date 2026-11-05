@@ -225,6 +225,8 @@ def _channel_list(**kwargs):
 class BlastEmailInput(StrictSerializer):
     mailbox_id = serializers.UUIDField(allow_null=True, required=False)
     subject = serializers.CharField(max_length=300, allow_blank=True, required=False)
+    preview_text = serializers.CharField(max_length=200, allow_blank=True, required=False)
+    sign_off_name = serializers.CharField(max_length=120, allow_blank=True, required=False)
     body_markdown = serializers.CharField(
         max_length=MAX_BLAST_BODY, allow_blank=True, required=False, trim_whitespace=False
     )
@@ -317,6 +319,7 @@ class BlastSendInput(StrictSerializer):
     idempotency_key = serializers.CharField(max_length=64)
     definition_hash = serializers.RegexField(r"^[0-9a-f]{64}$", required=False)
     recipient_fingerprint = serializers.RegexField(r"^[0-9a-f]{64}$", required=False)
+    preflight_hash = serializers.RegexField(r"^[0-9a-f]{64}$", required=False)
 
     def validate_confirm(self, value):
         if any(key not in Channel.values for key in value):
@@ -765,6 +768,7 @@ class BlastPauseInput(serializers.Serializer):
 def blast_detail(blast, stats: Optional[dict] = None) -> dict:
     stats = stats or {"channels": {}, "replies": 0}
     from crm.deliverability.copy import status_message
+    from crm.deliverability.preflight.presentation import result_dto
     stream = blast.stream if getattr(blast, "stream_id", None) else None
     return {
         **blast_summary(blast, stats),
@@ -773,6 +777,8 @@ def blast_detail(blast, stats: Optional[dict] = None) -> dict:
             "mailbox_id": str(blast.mailbox_id) if blast.mailbox_id else None,
             "subject": blast.subject,
             "body_markdown": blast.body_markdown,
+            "preview_text": blast.preview_text,
+            "sign_off_name": blast.sign_off_name,
         },
         "sms": {"body": blast.sms_body},
         "whatsapp": {
@@ -793,6 +799,7 @@ def blast_detail(blast, stats: Optional[dict] = None) -> dict:
                   "at": iso(getattr(blast, "paused_at", None))},
         "status_message": status_message(blast),
         "plan": blast.plan or {},
+        "preflight": result_dto(blast.preflight),
         "waves": [{"index": wave.index, "kind": wave.kind, "status": wave.status, "size": wave.size,
                    "started_at": iso(wave.started_at), "finished_at": iso(wave.finished_at), "stats": wave.stats}
                   for wave in blast.waves.all()] if not blast._state.adding else [],

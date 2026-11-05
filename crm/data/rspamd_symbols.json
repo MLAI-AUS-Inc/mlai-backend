@@ -1,0 +1,12 @@
+{
+  "SUBJ_ALL_CAPS": "The subject uses too many capitals.",
+  "MANY_EXCLAMATIONS": "The message uses repeated exclamation marks.",
+  "MIME_HTML_ONLY": "The message needs a readable plain-text version.",
+  "MISSING_MID": "The email service did not add a message identifier.",
+  "MISSING_DATE": "The email service did not add a date.",
+  "R_SPF_FAIL": "The sending address did not pass an identity check.",
+  "R_DKIM_REJECT": "The message signature did not pass its identity check.",
+  "DMARC_POLICY_REJECT": "The message did not pass the sender's identity policy.",
+  "SUSPICIOUS_URL_IN_SUSPICIOUS_MESSAGE": "A link looks unusual.",
+  "FORGED_SENDER": "The sender identity needs checking."
+}

@@ -41,13 +41,15 @@ class Signal:
     action: str
 
 
-def evaluate(metrics, *, canary=False):
+def evaluate(metrics, *, canary=False, min_sample=None):
     """Thresholds are inclusive; one address-level event never stops a blast."""
     p = policy.value
     signals = []
-    if metrics.attempted >= p("CRM_CANARY_MIN_SAMPLE" if canary else "CRM_GUARD_HARD_BOUNCE_MIN_SAMPLE"):
+    minimum = min_sample if canary and type(min_sample) is int and min_sample > 0 else p("CRM_CANARY_MIN_SAMPLE" if canary else "CRM_GUARD_HARD_BOUNCE_MIN_SAMPLE")
+    absolute = canary and metrics.hard_bounces >= p('CRM_CANARY_HARD_BOUNCE_COUNT')
+    if metrics.attempted and (metrics.attempted >= minimum or absolute):
         rate = metrics.hard_bounces / metrics.attempted
-        if rate >= p("CRM_GUARD_HARD_BOUNCE_RED") or (canary and metrics.hard_bounces >= p('CRM_CANARY_HARD_BOUNCE_COUNT')):
+        if rate >= p("CRM_GUARD_HARD_BOUNCE_RED") or absolute:
             signals.append(Signal("hard_bounce_rate", "red", rate, p("CRM_GUARD_HARD_BOUNCE_RED"), metrics.attempted, "pause_blast"))
         elif rate >= p("CRM_GUARD_HARD_BOUNCE_AMBER"):
             signals.append(Signal("hard_bounce_rate", "amber", rate, p("CRM_GUARD_HARD_BOUNCE_AMBER"), metrics.attempted, "slow_stream"))
@@ -295,7 +297,8 @@ def run_deliverability_guard(*, now=None):
                 Q(status__in=('running', 'paused')) | Q(finished_at__gte=now - timedelta(days=1)))]
             for wave in scopes:
                 canary = bool(wave and wave.kind == 'canary' and not wave.stats.get('legacy_adopted'))
-                for signal in evaluate(blast_metrics(blast, now=now, wave=wave), canary=canary):
+                for signal in evaluate(blast_metrics(blast, now=now, wave=wave), canary=canary,
+                        min_sample=wave.stats.get('canary_min_sample') if wave else None):
                     incident = detect(blast, signal, now=now, wave=wave)
                     if incident:
                         enforce(incident, now=now)

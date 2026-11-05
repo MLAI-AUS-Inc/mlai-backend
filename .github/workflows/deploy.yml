@@ -128,7 +128,7 @@ jobs:
       run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit crm.tests.test_audience_contract_unit crm.tests.test_segment_trees_unit crm.tests.test_audience_profiles_unit crm.tests.test_audience_rules_unit crm.tests.test_admin_gate_unit
 
     - name: Check CRM blasts, sending domains and the listmonk client without database access
-      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit crm.tests.test_deliverability_unit crm.tests.test_deliverability_planner_unit
+      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit crm.tests.test_deliverability_unit crm.tests.test_deliverability_planner_unit crm.tests.test_preflight_content_unit crm.tests.test_preflight_seed_unit
 
     - name: Verify event discounts against disposable migration state
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency
@@ -774,7 +774,7 @@ jobs:
       run: python manage.py test crm.tests.test_api_database crm.tests.test_segments_database crm.tests.test_segment_builder_database crm.tests.test_audience_catalog_database crm.tests.test_audience_profile_database crm.tests.test_admin_gate_database --verbosity 2
 
     - name: Verify CRM blasts, senders and listmonk feedback on PostgreSQL
-      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database crm.tests.test_deliverability_database crm.tests.test_campaign_waves_database crm.tests.test_campaign_wave_migration_database --verbosity 2
+      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database crm.tests.test_deliverability_database crm.tests.test_campaign_waves_database crm.tests.test_campaign_wave_migration_database crm.tests.test_preflight_database crm.tests.test_preflight_migration_database --verbosity 2
 
     - name: Verify Founder recovery policy and authority on PostgreSQL
       run: |
@@ -1374,6 +1374,47 @@ jobs:
         CRM_DAY_CLOSE_INTERVAL_SECONDS: ${{ vars.CRM_DAY_CLOSE_INTERVAL_SECONDS || '' }}
         CRM_RAMP_AMBER_DAYS: ${{ vars.CRM_RAMP_AMBER_DAYS || '' }}
         CRM_RAMP_AMBER_DEMOTION: ${{ vars.CRM_RAMP_AMBER_DEMOTION || '' }}
+        CRM_PREFLIGHT_ENABLED: ${{ vars.CRM_PREFLIGHT_ENABLED || '' }}
+        CRM_PREFLIGHT_MAX_AGE_HOURS: ${{ vars.CRM_PREFLIGHT_MAX_AGE_HOURS || '' }}
+        CRM_SUBJECT_MIN_LENGTH: ${{ vars.CRM_SUBJECT_MIN_LENGTH || '' }}
+        CRM_SUBJECT_MAX_LENGTH: ${{ vars.CRM_SUBJECT_MAX_LENGTH || '' }}
+        CRM_SUBJECT_CAPS_RATE: ${{ vars.CRM_SUBJECT_CAPS_RATE || '' }}
+        CRM_ALLOWED_ACRONYMS: ${{ vars.CRM_ALLOWED_ACRONYMS || '' }}
+        CRM_BODY_MIN_WORDS: ${{ vars.CRM_BODY_MIN_WORDS || '' }}
+        CRM_BODY_MAX_WORDS: ${{ vars.CRM_BODY_MAX_WORDS || '' }}
+        CRM_HTML_WARN_KB: ${{ vars.CRM_HTML_WARN_KB || '' }}
+        CRM_HTML_BLOCK_KB: ${{ vars.CRM_HTML_BLOCK_KB || '' }}
+        CRM_LINKS_WARN: ${{ vars.CRM_LINKS_WARN || '' }}
+        CRM_LINKS_BLOCK: ${{ vars.CRM_LINKS_BLOCK || '' }}
+        CRM_LINK_TIMEOUT_SECONDS: ${{ vars.CRM_LINK_TIMEOUT_SECONDS || '' }}
+        CRM_LINK_WORKERS: ${{ vars.CRM_LINK_WORKERS || '' }}
+        CRM_LINK_MAX_REDIRECTS: ${{ vars.CRM_LINK_MAX_REDIRECTS || '' }}
+        CRM_LINK_MAX_LENGTH: ${{ vars.CRM_LINK_MAX_LENGTH || '' }}
+        CRM_SPAM_WARN_SCORE: ${{ vars.CRM_SPAM_WARN_SCORE || '' }}
+        CRM_SPAM_BLOCK_SCORE: ${{ vars.CRM_SPAM_BLOCK_SCORE || '' }}
+        CRM_LONG_SEND_DAYS: ${{ vars.CRM_LONG_SEND_DAYS || '' }}
+        CRM_DUPLICATE_CONTENT_DAYS: ${{ vars.CRM_DUPLICATE_CONTENT_DAYS || '' }}
+        CRM_PREFLIGHT_FEEDBACK_HOURS: ${{ vars.CRM_PREFLIGHT_FEEDBACK_HOURS || '' }}
+        CRM_WEBHOOK_TEST_MAX_AGE_DAYS: ${{ vars.CRM_WEBHOOK_TEST_MAX_AGE_DAYS || '' }}
+        CRM_PREFLIGHT_POSTMASTER_WARN: ${{ vars.CRM_PREFLIGHT_POSTMASTER_WARN || '' }}
+        CRM_PREFLIGHT_POSTMASTER_BLOCK: ${{ vars.CRM_PREFLIGHT_POSTMASTER_BLOCK || '' }}
+        CRM_POSTMASTER_MAX_AGE_DAYS: ${{ vars.CRM_POSTMASTER_MAX_AGE_DAYS || '' }}
+        CRM_TEMPLATE_CACHE_SECONDS: ${{ vars.CRM_TEMPLATE_CACHE_SECONDS || '' }}
+        CRM_FOOTER_CONTACT_ADDRESS: ${{ vars.CRM_FOOTER_CONTACT_ADDRESS || '' }}
+        RSPAMD_URL: ${{ vars.RSPAMD_URL || '' }}
+        CRM_SPAMCHECK_TIMEOUT_SECONDS: ${{ vars.CRM_SPAMCHECK_TIMEOUT_SECONDS || '' }}
+        CRM_SEED_TIMEOUT_MINUTES: ${{ vars.CRM_SEED_TIMEOUT_MINUTES || '' }}
+        CRM_SEED_POLL_SECONDS: ${{ vars.CRM_SEED_POLL_SECONDS || '' }}
+        CRM_SEED_IMAP_TIMEOUT_SECONDS: ${{ vars.CRM_SEED_IMAP_TIMEOUT_SECONDS || '' }}
+        CRM_SEED_MAX_MESSAGE_BYTES: ${{ vars.CRM_SEED_MAX_MESSAGE_BYTES || '' }}
+        CRM_SEED_MAX_MATCHES: ${{ vars.CRM_SEED_MAX_MATCHES || '' }}
+        CRM_SEED_CANARY_FACTOR: ${{ vars.CRM_SEED_CANARY_FACTOR || '' }}
+        CRM_SEED_SPAM_BLOCK_PROVIDERS: ${{ vars.CRM_SEED_SPAM_BLOCK_PROVIDERS || '' }}
+        CRM_SEED_MAILBOXES: ${{ vars.CRM_SEED_MAILBOXES || '' }}
+        CRM_LISTMONK_MAX_RATE: ${{ vars.CRM_LISTMONK_MAX_RATE || '' }}
+        CRM_LISTMONK_PUBLIC_URL: ${{ vars.CRM_LISTMONK_PUBLIC_URL || '' }}
+        CRM_CONFIG_CHECK_SECONDS: ${{ vars.CRM_CONFIG_CHECK_SECONDS || '' }}
+        CRM_REPUTATION_MAX_AGE_HOURS: ${{ vars.CRM_REPUTATION_MAX_AGE_HOURS || '' }}
         CRM_RESEND_WEBHOOK_SECRET: ${{ secrets.CRM_RESEND_WEBHOOK_SECRET || '' }}
         CRM_SMS_ENABLED: ${{ vars.CRM_SMS_ENABLED || '' }}
         CRM_WHATSAPP_ENABLED: ${{ vars.CRM_WHATSAPP_ENABLED || '' }}

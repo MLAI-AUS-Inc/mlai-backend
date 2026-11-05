@@ -163,9 +163,11 @@ def promote_stage(stage, sent, day_budget, healthy):
     return stage
 
 
-def estimate(stream, people, now, *, used_today=0, used_hour=0, canary_started_at=None, critical=False):
+def estimate(stream, people, now, *, used_today=0, used_hour=0, canary_started_at=None, critical=False, canary_factor=1):
     """Simulate the same allocation rules, assuming healthy feedback and promotions."""
     simulated = copy.copy(stream)
+    if not 0 < canary_factor <= 1:
+        raise ValueError('Invalid initial batch factor')
     simulated.ramp_stage = decay_stage(stream.ramp_stage, (now.astimezone(MELBOURNE).date() - stream.last_send_day).days) if stream.last_send_day else stream.ramp_stage
     if simulated.ramp_stage != stream.ramp_stage and simulated.state == 'active':
         simulated.state = 'warming'
@@ -197,6 +199,8 @@ def estimate(stream, people, now, *, used_today=0, used_hour=0, canary_started_a
             wait = policy.value('CRM_EVENT_CANARY_WAIT_MINUTES' if critical else 'CRM_CANARY_WAIT_MINUTES')
             gate_clear = first or gate is None or clock >= gate + timedelta(minutes=wait)
             allowance, cap = slot_allowance(budget(simulated), spent, hourly_used, bounds['slots'], bounds['left'], canary=first)
+            if first:
+                allowance = math.ceil(allowance * canary_factor)
             n = min(remaining, allowance) if gate_clear else 0
             if n and (first or n >= policy.value('CRM_MIN_WAVE') or n == remaining):
                 hours.append({'at': clock.isoformat(), 'count': n, 'hour_cap': cap, 'day_budget': budget(simulated)})

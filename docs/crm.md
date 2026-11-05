@@ -777,3 +777,56 @@ checks; code and synthetic tests do not prove those checks passed.
 Database-free acceptance: `scripts/test_without_database.py crm.tests.test_deliverability_unit`.
 Synthetic database acceptance (specific migration approval first):
 `manage.py test crm.tests.test_deliverability_database`.
+
+## Campaign preflight (Phase 3)
+
+`CRM_PREFLIGHT_ENABLED` is false by default. With it enabled, email draft
+checks bind the message, event substitutions, actual stream identity, template
+ID and template bytes to a SHA-256 hash. Send requires that hash, checks
+younger than 24 hours, no blocking items and fresh provider configuration.
+Draft/content/template/policy changes require another check. Campaigns already
+queued may span days; their content and template must still match before each
+new wave. Staff can queue while the inbox check runs; no audience wave starts
+until it completes without a block or reaches the timeout. The finite pilot
+retains its separately constrained path.
+
+Verified admins use `POST blasts/{id}/preflight/`, poll the same route with
+GET, and use `POST blasts/{id}/preflight/fix/` with `expand_short_links`,
+`upgrade_https`, `add_preview_text` or `remove_subject_prefix`. Fixes apply
+only to drafts, detect competing edits, clear old results, and are audited.
+Draft saves accept `preview_text` (200 characters) and `sign_off_name` (120).
+`POST blasts/{id}/send/` accepts `preflight_hash`. General staff responses
+omit owner diagnostics and seed mailbox identities; every response is no-store.
+
+Checks cover message content, bounded public link inspection, list/template
+configuration, audience exclusions/timing/frequency/duplicates, recent delivery
+feedback, reputation and Postmaster evidence. Unknown reputation and missing or
+stale Postmaster data remain warnings. A known listing, invalid identity,
+unsigned one-click unsubscribe or unavailable spam score blocks. DNS is
+validated again on every redirect and connections are pinned to the validated
+public IP, with TLS checked against the original hostname. Rendered previews
+use private empty resources and never load or send the intended audience.
+
+`ops/spamcheck/` prepares the internal Rspamd content service. It is not
+automatically started by the backend release. Its runtime image/profile and
+real seed delivery remain staging gates, not results established by fixtures.
+The content scan does not pretend to authenticate an unsigned pre-send MIME.
+
+Dedicated seeds are enrolled explicitly with `crm_seed_mailboxes` from
+`CRM_SEED_MAILBOXES` JSON. That command neither reads secrets nor sends mail.
+Rows store only `CRM_SEED_*` environment-variable references; `xoauth2` expects
+an access token maintained by the host secret manager. Enabled seed addresses
+are the only recipients of the separate listmonk test call. CRM contact status,
+consent and audience lists are not modified. An immutable message snapshot is
+retained for recovery; a timed-out/uncertain test submission is never repeated
+blindly. Polling is read-only IMAP with special-use folders and Gmail category
+search. Receiver-added authentication must prove an aligned DKIM signature
+covering both one-click headers in the same passing signature.
+
+Two distinct major providers reporting spam blocks; one warns. At 15 minutes,
+missing results warn, create an amber incident, and halve only the first
+canary with its matching sample threshold. The configured 45-minute wait and
+all later stream capacity limits remain in force. Synthetic tests cover every
+check, binding/config changes, fixes, seed recovery, authenticated header
+proofs, timeout pacing and migration 0004 reversal/reapplication. Real inbox
+access and real seed/campaign sends are excluded from the local test approval.

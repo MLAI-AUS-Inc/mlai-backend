@@ -164,6 +164,33 @@ configuration tests, model/migration drift, workflow YAML parsing, shell
 syntax, diff whitespace and the CI assignment audit also passed. No
 production configuration, provider resources or recipient data were used.
 
+## Phase 3: bound checks and dedicated inbox probes
+
+The approved [0004 schema](crm-deliverability-phase-3-schema.md) was created
+without changing any existing migration. The preflight routes and automatic
+fixes, spam-check MIME client, internal Rspamd deployment files and read-only
+IMAP adapter are implemented with flags off. Every content/audience/system
+check has a synthetic fixture. The check binds more than the source plan's
+minimum: it also includes actual template bytes, the selected From/Reply-To
+and event substitutions, preventing changed provider templates or event data
+from reusing an old check. Send refreshes critical system configuration before
+the database transaction and validates the current hash inside it.
+
+Probes have their own empty resources, snapshot, token and dedicated inbox
+recipients. Submission is recorded before listmonk's non-idempotent test call;
+unknown results are polled, never resubmitted blindly. Tests prove that edits
+cannot alter the old probe or authorize new content, and that contact consent
+and status remain unchanged. A timeout halves the first canary only and records
+an amber incident. Owner fields do not reach general staff responses.
+
+Remaining release evidence is explicit: no Rspamd container has been started,
+no actual inbox has been accessed, no real seed has been sent and no provider
+or production configuration has changed. The selected immutable image must
+pass its own configuration/scoring checks; a separately authorized staging
+rehearsal must prove receiver authentication and real signed unsubscribe
+headers. OAuth seed access tokens are supplied by host secrets and must be
+refreshed there; this adapter does not claim to manage OAuth grants.
+
 ## Provider contract checked during implementation
 
 Resend's current event references document `bounce.type`, `bounce.subType`

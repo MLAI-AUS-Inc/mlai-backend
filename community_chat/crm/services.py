@@ -351,6 +351,9 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
         blast.subject = " ".join(email["subject"].split())
     if "body_markdown" in email:
         blast.body_markdown = email["body_markdown"]
+    for field in ('preview_text', 'sign_off_name'):
+        if field in email:
+            setattr(blast, field, ' '.join(email[field].split()))
     if "body" in (data.get("sms") or {}):
         blast.sms_body = data["sms"]["body"].strip()
     whatsapp = data.get("whatsapp") or {}
