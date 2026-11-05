@@ -556,13 +556,18 @@ class ProfileValidationTests(unittest.TestCase):
             service.validate_profile_update(payload, current or self.cur)
 
     def test_length_bounds_and_price(self):
-        self.bad({'session_minutes': 10})
-        self.bad({'session_minutes': 125})
+        self.bad({'session_minutes': 15})
+        self.bad({'session_minutes': 65})
         self.bad({'session_minutes': 33})
         self.bad({'price_roo': 0})
         self.bad({'price_roo': True})
         self.assertEqual(service.validate_profile_update({'session_minutes': 45, 'price_roo': 60}, self.cur),
                          {'session_minutes': 45, 'price_roo': 60})
+
+    def test_existing_mentor_can_keep_a_length_outside_the_limits(self):
+        self.assertEqual(service.validate_profile_update({'session_minutes': 15}, {'session_minutes': 15}),
+                         {'session_minutes': 15})
+        self.bad({'session_minutes': 20}, {'session_minutes': 15})
 
     def test_location_type_and_no_mentor_supplied_video_link(self):
         self.bad({'location_type': 'either'})

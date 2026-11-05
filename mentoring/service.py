@@ -346,7 +346,9 @@ def validate_profile_update(payload, current):
         minutes = payload['session_minutes']
         if (
             isinstance(minutes, bool) or not isinstance(minutes, int)
-            or not MIN_SESSION_MINUTES <= minutes <= MAX_SESSION_MINUTES or minutes % 5
+            # An existing mentor can keep a saved length from before these limits.
+            or (minutes != current.get('session_minutes')
+                and (not MIN_SESSION_MINUTES <= minutes <= MAX_SESSION_MINUTES or minutes % 5))
         ):
             raise MentoringError(
                 'invalid_field',
@@ -761,7 +763,8 @@ class MentoringService:
         initial = MentorProfile.objects.select_related('user').filter(user=user).first()
         if initial is None:
             raise MentoringError('not_a_mentor', 'Your account is not set up as a mentor.', 404)
-        clean_initial = validate_profile_update(payload, {'location_type': initial.location_type})
+        clean_initial = validate_profile_update(
+            payload, {'location_type': initial.location_type, 'session_minutes': initial.session_minutes})
         if clean_initial.get('accepting_bookings') and not initial.accepting_bookings and 'meeting_artifact_policy' not in payload:
             from .meeting_policy import REQUIRED_POLICY
             payload = {**payload, 'meeting_artifact_policy': dict(REQUIRED_POLICY)}
@@ -801,7 +804,7 @@ class MentoringService:
                     setattr(candidate, field, value)
                 if profile.booking_revision != preflight_revision or calendar_target(candidate, verify=False) != preflight_target:
                     raise MentoringError('settings_changed', 'Calendar settings changed. Refresh before saving.', 409)
-            current = {'location_type': profile.location_type}
+            current = {'location_type': profile.location_type, 'session_minutes': profile.session_minutes}
             clean = validate_profile_update(payload, current)
             windows = validate_availability(payload['availability']) if 'availability' in payload else None
             for field, value in clean.items():

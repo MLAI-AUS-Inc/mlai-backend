@@ -29,6 +29,8 @@ class MentorProfileAdminForm(forms.ModelForm):
 
     def clean_session_minutes(self):
         minutes = self.cleaned_data['session_minutes']
+        if self.instance.pk and minutes == self.instance.session_minutes:
+            return minutes  # an existing mentor can keep a saved length from before these limits
         if not MIN_SESSION_MINUTES <= minutes <= MAX_SESSION_MINUTES or minutes % 5:
             raise forms.ValidationError(
                 f'Session length must be a multiple of 5 from {MIN_SESSION_MINUTES} to {MAX_SESSION_MINUTES} minutes.'

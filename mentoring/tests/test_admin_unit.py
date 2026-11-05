@@ -327,15 +327,26 @@ class ProfileAdminFormTests(unittest.TestCase):
         from mentoring.admin import MentorProfileAdminForm
         form = MentorProfileAdminForm.__new__(MentorProfileAdminForm)
         form.cleaned_data = cleaned
+        form.instance = SimpleNamespace(pk=None, session_minutes=None)
         return form
 
-    def test_session_minutes_must_be_15_to_120_in_steps_of_5(self):
+    def test_session_minutes_must_be_30_to_60_in_steps_of_5(self):
         from django import forms
-        for bad in (0, 5, 14, 17, 125, 200):
+        for bad in (0, 5, 15, 25, 33, 65, 120):
             with self.subTest(minutes=bad), self.assertRaises(forms.ValidationError):
                 self.form(session_minutes=bad).clean_session_minutes()
-        for good in (15, 30, 45, 120):
+        for good in (30, 45, 60):
             self.assertEqual(self.form(session_minutes=good).clean_session_minutes(), good)
+
+    def test_existing_mentor_can_keep_a_length_outside_the_limits(self):
+        from django import forms
+        form = self.form(session_minutes=15)
+        form.instance = SimpleNamespace(pk=1, session_minutes=15)
+        self.assertEqual(form.clean_session_minutes(), 15)
+        form = self.form(session_minutes=20)
+        form.instance = SimpleNamespace(pk=1, session_minutes=15)
+        with self.assertRaises(forms.ValidationError):
+            form.clean_session_minutes()
 
     def test_price_must_be_1_to_1000(self):
         from django import forms
