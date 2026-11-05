@@ -826,6 +826,15 @@ uncertain attempts expire before Resend's 24-hour deduplication window. No
 marketing credential fallback is allowed. See `ops/listmonk/README.md` for
 credential setup and the remaining operational release gates.
 
+`manage.py crm_simulate_send --scenario healthy --recipients 5000 --days 8`
+qualifies the real campaign path with fake providers and a fixed clock. It
+requires an empty PostgreSQL `test_*` database, `APP_ENV=test`, and an exact
+`CRM_SIMULATION_DATABASE` name opt-in. It applies no migrations, blocks outbound
+network and rolls back all rows. The database tests execute all twelve plan
+scenarios and verify the 150/300/600/1,000/1,500/1,450 healthy ramp, protections,
+recovery, priority, idle decay and capacity ceilings. Prepare the disposable
+schema only within the specifically approved migration scope.
+
 ## Campaign preflight (Phase 3)
 
 `CRM_PREFLIGHT_ENABLED` is false by default. With it enabled, email draft

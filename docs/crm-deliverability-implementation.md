@@ -92,7 +92,7 @@ corrections: Postmaster's scope is `postmaster.traffic.readonly`; Resend has no
 documented read-only key permission; Safe Browsing is noncommercial; seven seed
 mailboxes across two streams can generate fourteen daily test messages.
 Operational setup and real staging evidence are still required. The simulation
-command and Phase 6/7 work remain tracked under the original implementation goal.
+command qualification and Phase 6/7 work remain tracked under the original implementation goal.
 
 The frozen monitoring source passed all **799 CRM tests** on the approved
 384-migration disposable PostgreSQL graph, including 16 monitor database tests
@@ -100,6 +100,38 @@ and every admin route. The 91 focused database-free guard/monitor/preflight
 checks and eight deployment-configuration checks passed. CI assignment reports
 zero new omissions. Shell syntax and diff whitespace checks passed. External
 network access was denied throughout synthetic backend qualification.
+
+## Simulation command
+
+`crm_simulate_send --scenario <name> --recipients 5000 --days 8` drives the real
+planner, slot allocator, dispatcher, guardian, recovery and day-close code with
+a fixed Melbourne clock and fake listmonk adapter. Fault scenarios inject
+synthetic provider events and monitor observations. Every run rolls back.
+
+The command refuses unless `APP_ENV=test`, the PostgreSQL database name starts
+with `test_`, `CRM_SIMULATION_DATABASE` matches that exact database name, and
+the CRM contains no contacts, streams, seed mailboxes, campaigns or events.
+It never creates a database, applies a migration, reads an inbox or contacts a
+provider. HTTP and new socket connections are denied for the entire fixture
+transaction. No existing database is inferred to be disposable from its URL.
+
+All twelve plan scenarios are implemented: healthy six-day ramp, canary bounce,
+complaint recovery, Microsoft deferral, Google policy rejection, feedback
+outage, DNS drift, listmonk outage, late Postmaster spam, staff pause/resume,
+event priority, and idle decay. Reports contain aggregate handoffs, incident
+states and invariant outcomes, without recipient addresses. The command checks
+both daily and hourly ceilings, one initial start per provider campaign, and
+one delivery snapshot per person. A staff resume uses the same campaign.
+Time-critical events take priority at the next available slot; an already
+handed-off batch retains its original resource and capacity accounting.
+
+Qualification passed: **813 CRM tests**, including all twelve 5,000-recipient
+scenarios and the command's refusal/rollback checks, on the approved disposable
+PostgreSQL graph (321.460 seconds). The lock was regenerated from both inputs;
+all pre-existing package pins were retained. The 91 focused pure checks and 30
+simulation/monitor database checks also passed with the newly hash-locked
+monitor dependencies. This is synthetic evidence, not a live send or staging
+rehearsal. No migration or connected environment was changed.
 
 ## Current verification
 

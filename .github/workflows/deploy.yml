@@ -774,7 +774,7 @@ jobs:
       run: python manage.py test crm.tests.test_api_database crm.tests.test_segments_database crm.tests.test_segment_builder_database crm.tests.test_audience_catalog_database crm.tests.test_audience_profile_database crm.tests.test_admin_gate_database --verbosity 2
 
     - name: Verify CRM blasts, senders and listmonk feedback on PostgreSQL
-      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database crm.tests.test_deliverability_database crm.tests.test_deliverability_monitors_database crm.tests.test_campaign_waves_database crm.tests.test_campaign_wave_migration_database crm.tests.test_preflight_database crm.tests.test_preflight_migration_database crm.tests.test_campaign_ui_database --verbosity 2
+      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database crm.tests.test_deliverability_database crm.tests.test_deliverability_monitors_database crm.tests.test_send_simulation_database crm.tests.test_campaign_waves_database crm.tests.test_campaign_wave_migration_database crm.tests.test_preflight_database crm.tests.test_preflight_migration_database crm.tests.test_campaign_ui_database --verbosity 2
 
     - name: Verify Founder recovery policy and authority on PostgreSQL
       run: |
