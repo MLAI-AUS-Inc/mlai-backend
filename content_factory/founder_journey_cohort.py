@@ -532,14 +532,11 @@ def _published_articles(organization):
 def legacy_reasons(organization, config=None) -> list[str]:
     """Why the report keeps an organisation on today's path (empty when nothing does)."""
     from .first_article_entitlement import is_established_publisher
-    from .hosted_article_models import HostedArticleSite
     from .website_models import WebsiteConnection
     config = _config_for(organization, config)
     reasons = []
     if WebsiteConnection.objects.filter(organization_id=organization.pk).exists():
         reasons.append("website_connection")
-    if HostedArticleSite.objects.filter(organization_id=organization.pk).exists():
-        reasons.append("hosted_site")
     if _published_articles(organization).exists():
         reasons.append("published_article")
     if _runs(organization).filter(workflow__in=SETUP_WORKFLOWS,

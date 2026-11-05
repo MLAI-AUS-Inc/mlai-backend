@@ -1204,15 +1204,6 @@ ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS = tuple(
     identifier.strip() for identifier in os.getenv('ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS', '').split(',')
     if identifier.strip()
 )
-# MLAI-hosted article sites: owners publish repo-free drafts that MLAI serves on their own domain.
-ARTICLES_HOSTED_SITES_ENABLED = os.getenv('ARTICLES_HOSTED_SITES_ENABLED', 'false').lower() == 'true'
-# Hosted publish also requires Content Factory's previewedRevision (a rendered
-# preview of exactly the reviewed revision). Enable only after the portable
-# preview ladder is verified in production, clients bind viewedRevision, and
-# Content Factory's snapshot rungs (CONTENT_FACTORY_SNAPSHOT_PREVIEW) cover every
-# hosted domain: the saved-HTML shell, the last rung while they are off, never
-# counts, so a hosted site whose own build fails could not publish at all.
-HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW = os.getenv('HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW', 'false').lower() == 'true'
 CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE = os.getenv(
     'CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE',
     'review_draft',
@@ -2662,9 +2653,6 @@ ARTICLES_GITHUB_INSTALLATION_WAKES_ENABLED = _env_is_true("ARTICLES_GITHUB_INSTA
 ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED", False)
 MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
 MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)
-ARTICLES_HOSTED_AUTO_REGISTER_ENABLED = _env_is_true("ARTICLES_HOSTED_AUTO_REGISTER_ENABLED", False)
-# Comma-separated organisation ids, or * for every P2-cohort organisation.
-ARTICLES_HOSTED_RUNG_ORGANIZATIONS = os.getenv("ARTICLES_HOSTED_RUNG_ORGANIZATIONS", "").strip()
 ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED = _env_is_true("ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED", False)
 # Startup team (held until its security sign-off; declared here so the block is complete).
 MY_STARTUP_TEAM_ENABLED = _env_is_true("MY_STARTUP_TEAM_ENABLED", False)

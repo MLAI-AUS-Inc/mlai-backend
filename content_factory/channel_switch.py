@@ -20,28 +20,16 @@ def _enabled(organization):
                 and policy_mode(organization) == 'policy')
 
 
-def _hosted(run):
-    """Retired hosting never intercepts copy-ready delivery."""
-    return None
 
 
 def switch_to_copy_ready(*, run, reason, now=None):
     """Switch the same run's delivery without replacing its consent or billing."""
-    def allowed(current):
-        if _enabled(current.organization):
-            return True
-        if reason != "hosting_retired":
-            return False
-        from .hosted_article_models import HostedArticlePublication
-        from django.db.models import Q
-        return HostedArticlePublication.objects.filter(site__organization=current.organization).filter(
-            Q(run_id=current.run_id) | Q(written_article__source_run_id=current.run_id)).exists()
-    if not allowed(run):
+    if not _enabled(run.organization):
         return {'status': 'refused', 'detail': 'Not available yet.'}
     now = now or timezone.now()
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update(of=('self',)).select_related('organization').get(pk=run.pk)
-        if not allowed(current) or current.status in {'cancelled', 'denied'}:
+        if not _enabled(current.organization) or current.status in {'cancelled', 'denied'}:
             return {'status': 'refused', 'detail': 'This article cannot change delivery.'}
         old = mapping(mapping(current.result).get('channel_v1'))
         if old.get('version') == 1 and old.get('dispatch_state') == 'accepted':

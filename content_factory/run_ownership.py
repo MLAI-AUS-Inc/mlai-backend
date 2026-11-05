@@ -6,8 +6,6 @@ authorized execution generation. Legacy records are deliberately not enrolled.
 """
 from copy import deepcopy
 import json
-from urllib.parse import urlsplit
-from uuid import UUID
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -63,31 +61,12 @@ def admission_enabled():
     return getattr(settings, "ARTICLES_RUN_OWNERSHIP_ENABLED", False) is True
 
 
-def is_hosted_proxy_request(request):
-    """Recognize the saved server-owned proxy recipe, never an arbitrary setup."""
-    if not isinstance(request, dict):
-        return False
-    try:
-        site = UUID(request.get("hosted_site_id"))
-        worker = urlsplit(request.get("worker_url") or "")
-        port = worker.port
-    except (ValueError, TypeError, AttributeError):
-        return False
-    generation = request.get("connection_generation")
-    return (type(generation) is int and generation > 0 and request.get("hosted_site_id") == str(site)
-            and request.get("run_id") == f"hosted-proxy-{site.hex}-{generation}"
-            and request.get("merge_policy") == "backend_worker"
-            and worker.scheme == "https" and bool(worker.hostname)
-            and worker.hostname.endswith(".workers.dev") and not worker.username and not worker.password
-            and port in (None, 443) and worker.path in {"", "/"} and not worker.query and not worker.fragment)
 
 
 def worker_workflow_allowed(admitted, actual, *, request=None):
     """Check only verified backend-to-worker aliases; never rewrite admission."""
     return type(admitted) is str and type(actual) is str and (
-        actual == admitted or actual in WORKER_WORKFLOW_ALIASES.get(admitted, ())
-        or admitted == "article_system_setup" and actual == "hosted_native_verification"
-        and is_hosted_proxy_request(request))
+        actual == admitted or actual in WORKER_WORKFLOW_ALIASES.get(admitted, ()))
 
 
 def public_run_value(value):

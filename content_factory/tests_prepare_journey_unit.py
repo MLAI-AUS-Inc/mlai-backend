@@ -164,10 +164,8 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.assertEqual((captured[0]["article_surface_mode"], captured[0]["article_surface_url"]), ("none", "/articles"))
 
     def test_legacy_hosted_site_still_dispatches_repository_setup(self):
-        site = SimpleNamespace(domain="fixture.test", base_path="/blog/")
         setup = Mock(return_value={"run_id": "setup-child"})
-        with patch("content_factory.hosted_articles.active_site", return_value=site):
-            self.advance({"setup": setup, "scan": setup, "verify-access": setup})
+        self.advance({"setup": setup, "scan": setup, "verify-access": setup})
         setup.assert_called_once()
         self.assertEqual(self.op.state, "pending")
         self.assertEqual(self.op.receipt["setup_run_id"], "setup-child")

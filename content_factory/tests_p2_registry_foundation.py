@@ -50,7 +50,7 @@ class P2SettingsTests(SimpleTestCase):
         block = _settings_block()
         booleans = set(re.findall(r'^([A-Z][A-Z0-9_]+) = _env_is_true\("\1", False\)$', block, flags=re.M))
         self.assertEqual(booleans, set(ALL_P2_FLAGS_ON))
-        self.assertEqual(len(booleans), 23)
+        self.assertEqual(len(booleans), 22)
         others = set(re.findall(r'^([A-Z][A-Z0-9_]+) = (?:int\()?os\.getenv\("\1"', block, flags=re.M))
         self.assertEqual(booleans | others, set(P2_SETTING_DEFAULTS))
         self.assertTrue(all(value is True for value in ALL_P2_FLAGS_ON.values()))

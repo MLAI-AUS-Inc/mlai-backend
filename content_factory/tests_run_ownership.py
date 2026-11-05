@@ -16,7 +16,7 @@ from .run_ownership import (
     EVENT_RESULT_KEY, OWNER_EXECUTION_KEY, OWNER_RESULT_KEY, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY,
     RunOwnershipConflict, admitted_run_for_key, authorized_event_generation, bind_admitted_run,
     current_execution_ticket, owner_receipt, prepare_owned_callback, require_event_execution,
-    is_hosted_proxy_request, require_event_identity, reserve_admitted_run, scheduler_principal,
+    require_event_identity, reserve_admitted_run, scheduler_principal,
     seal_new_run_admission, user_principal, worker_workflow_allowed,
 )
 
@@ -183,13 +183,12 @@ class RunAdmissionTests(TestCase):
             with self.subTest(value=value), self.assertRaises(RunOwnershipConflict):
                 user_principal(value, "actor")
 
-    def test_hosted_proxy_alias_requires_exact_saved_server_recipe_context(self):
+    def test_retired_hosted_proxy_recipe_never_grants_a_workflow_alias(self):
         from uuid import UUID
         site = UUID("12121212-1212-4212-8212-121212121212")
         proxy = {"hosted_site_id": str(site), "worker_url": "https://r3-owned.example.workers.dev",
             "run_id": f"hosted-proxy-{site.hex}-3", "connection_generation": 3, "merge_policy": "backend_worker"}
-        self.assertTrue(is_hosted_proxy_request(proxy))
-        self.assertTrue(worker_workflow_allowed("article_system_setup", "hosted_native_verification", request=proxy))
+        self.assertFalse(worker_workflow_allowed("article_system_setup", "hosted_native_verification", request=proxy))
         self.assertFalse(worker_workflow_allowed("article_system_setup", "hosted_native_verification"))
         for change in ({"hosted_site_id": None}, {"worker_url": "https://customer.example"},
                        {"worker_url": "https://r3-owned.example.workers.dev:bad"},

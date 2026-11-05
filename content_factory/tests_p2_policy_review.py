@@ -130,16 +130,14 @@ class PolicyReviewTests(TransactionTestCase):
             self.assertFalse(engine.owns_recovery(run))
         self.assertTrue(engine.owns_recovery(run))
 
-    def test_hosted_without_article_consent_falls_back_to_portable_delivery(self):
+    def test_no_article_consent_falls_back_to_portable_delivery(self):
         from . import channel_switch
         from .self_heal_testing import fake_provider
         from .publish_reviewed_draft import PublishReviewedError
         run = self.helper.run_for('PUBLISHING_ADAPTER_REQUIRED')
         reply = {'channel_switch': {'version': 1, 'run_id': run.run_id, 'key': f'{run.run_id}:copy-ready',
                                    'state': 'applied', 'delivery_mode': 'content_only'}}
-        with patch('content_factory.hosted_articles.active_site', return_value=object()), \
-                fake_provider('content_factory.hosted_auto_register', publish_via_hosted=lambda run: (_ for _ in ()).throw(PublishReviewedError('not_allowed', 'Article approval is missing.'))), \
-                patch('content_factory.vibe_marketing_views._call_content_factory_run_action', return_value=reply) as remote:
+        with patch('content_factory.vibe_marketing_views._call_content_factory_run_action', return_value=reply) as remote:
             receipt = channel_switch.switch_to_copy_ready(run=run, reason='strategy', now=self.now)
         self.assertEqual(receipt['channel'], 'copy_ready')
         self.assertEqual(receipt['dispatch_state'], 'accepted')

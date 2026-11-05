@@ -12,13 +12,12 @@ from core.actor_ids import preferred_actor_id_for_user
 from roo.models import Ledger
 from workflow_runs.models import ContentFactoryRun
 
-from . import hosted_auto_register as auto, publish_reviewed_draft as publish
+from . import publish_reviewed_draft as publish
 from . import website_goal as goals, website_hosted_verification as verifier
-from .hosted_article_models import HostedArticleSite
 from .run_ownership import (OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY,
                             RunOwnershipConflict, owner_receipt, worker_workflow_allowed)
 from .self_heal_testing import ALL_FLAGS_ON, fake_provider, make_p2_org
-from .tests import test_p2_publish_reviewed as reviewed_fixture, test_p2_hosted_registration as hosted_fixture
+from .tests import test_p2_publish_reviewed as reviewed_fixture
 from .tests_one_click_database import OneClickBillingFixture
 from .website_contract import WebsiteAuthorityError, evidence_digest
 from .website_models import WebsiteConnectionOperation
@@ -161,12 +160,6 @@ class NamedPublishingAdmissionTests(TransactionTestCase):
         self.assertEqual(ContentFactoryRun.objects.count(), 2)
 
 
-class NamedHostedProxyAdmissionTests(SimpleTestCase):
-    def test_legacy_proxy_admission_is_inert(self):
-        with patch.object(auto, '_remote') as remote:
-            self.assertFalse(auto._proxy(None, None, None))
-            self.assertEqual(auto.run_hosted_sweep(), {'status': 'retired'})
-        remote.assert_not_called()
 
 
 @override_settings(**R3, ARTICLES_PUBLISHING_INPUTS_V3_ENABLED=False, ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=False)

@@ -169,12 +169,10 @@ def make_named_legacy_org(name, *, marker=True, domain=None, owner_email=None) -
     - TalaThrive and Vyavos: verified GitHub publishers (connected
       ``WebsiteConnection`` with a verified target) with delivered
       review_draft articles.
-    - PawShare: an active ``HostedArticleSite`` alongside its repository
-      connection.
+    - PawShare: its repository connection and saved article history after hosting retirement.
     - La Vie: an adopted-registry connection with a verified target.
     - mlai.au: the free Content Factory domain with published articles.
     """
-    from .hosted_article_models import HostedArticleSite
     if name not in NAMED_LEGACY_ORGS:
         raise ValueError(f"Unknown named legacy org: {name}")
     domain = domain or NAMED_LEGACY_ORGS[name]
@@ -189,10 +187,6 @@ def make_named_legacy_org(name, *, marker=True, domain=None, owner_email=None) -
             built.articles.append(_article(org, slug=f"{name}-article-{index}", published=index == 0, run=run))
     elif name == "pawshare":
         built.connection, built.target = _connect(org, config, repo="example-pawshare/website")
-        built.hosted_site = HostedArticleSite.objects.create(
-            organization=org, domain=org.domain, base_path="/blog/", state=HostedArticleSite.State.ACTIVE,
-            worker_name="pawshare-articles", proxy_verified_at=timezone.now() - timedelta(days=4),
-            last_deployed_at=timezone.now() - timedelta(days=1))
         run = _review_draft_run(org)
         built.runs.append(run)
         built.articles.append(_article(org, slug="pawshare-article-0", run=run))
