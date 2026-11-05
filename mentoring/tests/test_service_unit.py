@@ -236,6 +236,16 @@ class TransitionTests(Base):
         self.assertEqual(kw['reference_type'], 'MENTOR_SESSION')
         self.assertEqual(s.status, 'completed')
 
+    def test_payout_is_not_stamped_with_the_mentors_slack_id(self):
+        # The weekly points-admin allowance sums EARN rows by created_by_slack_id.
+        s = make_session('accepted')
+        self.load(s)
+        self.clock = s.ends_at
+        MentoringService.complete(SID, self.actor_mentor)
+        actor = self.points.award.call_args.kwargs['created_by_slack_id']
+        self.assertEqual(actor, 'MENTORING')
+        self.assertNotEqual(actor, s.mentor.user.slack_id)
+
     def test_complete_before_the_session_ends_is_refused(self):
         s = make_session('accepted')
         for when in (NOW, START, s.ends_at - timedelta(seconds=1)):

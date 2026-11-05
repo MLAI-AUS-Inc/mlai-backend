@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 LEDGER_SOURCE = 'MANUAL'
 LEDGER_REFERENCE_TYPE = 'MENTOR_SESSION'
 MAX_PRICE_ROO = 1000
+PAYOUT_ACTOR = 'MENTORING'
 MAX_AVAILABILITY_WINDOWS = 28
 MAX_AWAY_RANGES = 20
 # A pending meeting claim older than this is stale (the process died) and may be reclaimed.
@@ -541,7 +542,9 @@ def _pay_mentor(session):
         delta=session.price_roo,
         source=LEDGER_SOURCE,
         description=f'Mentor session {session.pk} completed',
-        created_by_slack_id=session.mentor.user.slack_id or '',
+        # A fixed label, not the mentor's Slack id: the weekly points-admin
+        # allowance sums EARN rows by this field, and a payout is not a manual award.
+        created_by_slack_id=PAYOUT_ACTOR,
         idempotency_key=f'mentor_payout:{session.pk}',
         reference_type=LEDGER_REFERENCE_TYPE,
         reference_id=str(session.pk),

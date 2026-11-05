@@ -124,7 +124,9 @@ All movements use `PointsService`, ledger source `MANUAL`, reference type
    a request that was never accepted moves no points.
 5. Completion (mentor marks done after the session ends, or automatically 24 hours
    after the end): the price is awarded to the mentor as plain Roo points through
-   `award()`, key `mentor_payout:{session id}`.
+   `award()`, key `mentor_payout:{session id}`. The ledger row carries the fixed label
+   `MENTORING` in `created_by_slack_id`, not the mentor's Slack id, so a payout never
+   counts against a points-admin weekly allowance (rows paid earlier keep the old value).
 
 Known side effect: `PointsService.award` raises the mentor's lifetime earned
 total, which also gates the Conference Room and committee eligibility. Maintainers
