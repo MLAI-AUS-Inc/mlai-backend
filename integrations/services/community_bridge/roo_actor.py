@@ -86,7 +86,7 @@ class BridgeActorError(ValueError):
         self.status = status
 
 
-def resolve_roo_actor(*, workspace_id, channel_id, message_id, thread_ts, bridge_user_id):
+def resolve_roo_actor(*, workspace_id, channel_id, message_id, thread_ts, bridge_user_id, purpose="mention"):
     """Resolve an exact Slack message; caller text and display names confer no authority.
 
     Only public bridge records are supported here. Private mirrors have their own
@@ -101,6 +101,13 @@ def resolve_roo_actor(*, workspace_id, channel_id, message_id, thread_ts, bridge
     }
     if any(not isinstance(value, str) or not re.fullmatch(pattern, value)
            for value, pattern in fields.values()):
+        raise BridgeActorError("invalid_bridge_context", 400)
+    if purpose not in {"mention", "link_love"}:
+        raise BridgeActorError("invalid_bridge_context", 400)
+    if purpose == "link_love" and (
+        channel_id != getattr(settings, "ROO_LINK_LOVE_SLACK_CHANNEL_ID", "")
+        or thread_ts == message_id
+    ):
         raise BridgeActorError("invalid_bridge_context", 400)
     expected_bot = str(getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "") or "")
     target = public_roo_target()
@@ -154,6 +161,31 @@ def resolve_roo_actor(*, workspace_id, channel_id, message_id, thread_ts, bridge
         posting_mode = "bot"
     else:
         raise BridgeActorError("unknown_bridge_sender", 404)
+    if purpose == "link_love":
+        # Automatic rewards need the completed delivery receipt, even for legacy
+        # bot links. This grants no general Roo or points-admin authority.
+        if not isinstance(poster, dict) or poster.get("user_id") is None:
+            raise BridgeActorError("bridge_actor_unverified", 403)
+        _acknowledged_create(link, poster)
+        if getattr(settings, "COMMUNITY_CHAT_AI_CONSENT_REQUIRED", True) and not has_ai_consent(account["user_id"]):
+            raise BridgeActorError("bridge_actor_consent_required", 403)
+        root_link = CommunityBridgeMessageLink.objects.filter(
+            source_platform=CommunityBridgePlatform.BUZZ,
+            destination_platform=CommunityBridgePlatform.SLACK,
+            destination_channel_id=channel_id, destination_message_id=thread_ts,
+            channel_id=link.channel_id,
+        ).first()
+        root_account = community_account_for_key(
+            slack_workspace_id=workspace_id, buzz_pubkey=root_link.source_author_id,
+        ) if root_link else None
+        return {
+            **{key: value for key, (value, _) in fields.items()},
+            "purpose": "link_love", "actor_profile_id": account["user_profile_id"],
+            "actor_slack_user_id": account["slack_user_id"],
+            "source_event_id": link.source_message_id,
+            "is_root_author": bool(root_account and root_account["user_id"] == account["user_id"]),
+            "text": str((link.source_payload or {}).get("text") or ""),
+        }
     identity = verified_identity_for_buzz(
         slack_workspace_id=workspace_id, buzz_pubkey=link.source_author_id,
     )
