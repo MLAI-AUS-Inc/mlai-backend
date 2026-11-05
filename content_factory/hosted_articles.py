@@ -53,15 +53,20 @@ def normalized_domain(value) -> str:
     return domain[4:] if domain.startswith("www.") else domain
 
 
+def hosting_retired() -> bool:
+    """MLAI never hosts founder blogs; hosted sites exist only until migrated off."""
+    return True
+
+
 def enabled() -> bool:
+    """Legacy reporting remains enabled during the migration window."""
     from django.conf import settings
     return getattr(settings, "ARTICLES_HOSTED_SITES_ENABLED", False) is True
 
 
 def active_site(organization) -> Optional[HostedArticleSite]:
-    if organization is None or not enabled():
-        return None
-    return HostedArticleSite.objects.filter(organization=organization, state=HostedArticleSite.State.ACTIVE).first()
+    """Compatibility seam: retired blogs never take priority over founder delivery."""
+    return None
 
 
 def publication_payload(publication: HostedArticlePublication) -> dict:
@@ -180,25 +185,8 @@ def site_source(site: HostedArticleSite) -> dict:
 
 
 def register_site(*, organization, profile, update_existing=True):
-    """Shared admin/automatic registration path; draft sites never imply publication consent."""
-    if not isinstance(profile, dict) or not isinstance(profile.get("build"), dict):
-        raise HostedPublishError("hosted_profile_invalid", "A hosted site needs a build contract.")
-    domain = normalized_domain(profile.get("domain"))
-    from .preview_domain_claim import public_host
-    if not domain or public_host(domain) != public_host(organization.domain):
-        raise HostedPublishError("hosted_site_mismatch", "The hosted profile belongs to another startup.")
-    base_path = profile.get("base_path")
-    if not isinstance(base_path, str) or not re.fullmatch(r"/(?:[A-Za-z0-9_-]+/)+", base_path):
-        raise HostedPublishError("hosted_profile_invalid", "Use a relative hosted directory path.")
-    with transaction.atomic():
-        site, created = HostedArticleSite.objects.get_or_create(domain=domain,
-            defaults={"organization": organization, "base_path": profile["base_path"], "profile": profile})
-        if site.organization_id != organization.pk:
-            raise HostedPublishError("hosted_site_mismatch", "This domain belongs to another startup.")
-        if not created and update_existing:
-            site.base_path, site.profile = profile["base_path"], profile
-            site.save(update_fields=["base_path", "profile", "updated_at"])
-    return site, created
+    """Refuse both manual and automatic registration of founder blogs."""
+    raise HostedPublishError("hosting_retired", "MLAI no longer hosts blogs. Publish this article to your own website.", status=410)
 
 
 def require_current_publish_rights(organization, actor_id):
@@ -262,33 +250,8 @@ def _require_publication_active(site, run):
 
 
 def request_publication(*, site: HostedArticleSite, run, user, allow_continuation=False) -> HostedArticlePublication:
-    """Queue the exact reviewed run only while its approver still has publish rights."""
-    with transaction.atomic():
-        organization, site = _locked_publication_site(site_id=site.pk)
-        run = _publication_run(site, run.run_id)
-        _require_publication_active(site, run)
-        user = require_current_publish_rights(organization, getattr(user, 'pk', None))
-        _require_approval_actor(run, user.pk)
-        result = run.result if isinstance(run.result, dict) else {}
-        continuation = (allow_continuation and run.workflow == "direct_generate" and
-                        isinstance(result.get("article_approval_v1"), dict) and
-                        result["article_approval_v1"].get("source") == "publish_reviewed" and
-                        isinstance(result.get("publish_reviewed_v1"), dict))
-        if str(run.status) != "completed" and not continuation:
-            raise HostedPublishError("article_not_ready", "Finish the article before publishing it.")
-        publication, created = HostedArticlePublication.objects.select_for_update().get_or_create(
-            site=site, run_id=run.run_id, defaults={"requested_by": user})
-        if not created and publication.status in {Status.PENDING, Status.RENDERING}:
-            if publication.requested_by_id != user.pk:
-                raise HostedPublishError("hosted_publish_not_allowed", "This publication needs a new review.", status=403)
-            return publication
-        if publication.status == Status.WITHDRAWN:
-            raise HostedPublishError("hosted_publication_withdrawn", "This article was taken down. Publish a new revision instead.")
-        publication.status = Status.PENDING
-        publication.requested_by = user
-        publication.failure_reason = publication.error = ""
-        publication.save(update_fields=["status", "requested_by", "failure_reason", "error", "updated_at"])
-    return publication
+    """No direct or queued caller may start another hosted publication."""
+    raise HostedPublishError("hosting_retired", "MLAI no longer hosts blogs. Publish this article to your own website.", status=410)
 
 
 def _clean_article(article) -> dict:
@@ -469,6 +432,8 @@ def record_site_deployment(*, domain: str, data: dict) -> HostedArticleSite:
         site = HostedArticleSite.objects.select_for_update().filter(domain=normalized_domain(domain)).first()
         if site is None:
             raise HostedPublishError("hosted_site_not_found", "No hosted site for this domain.", status=404)
+        if site.state == HostedArticleSite.State.RETIRED:
+            return site
         fields = {"updated_at"}
         deployment = data.get("deployment") if isinstance(data.get("deployment"), dict) else {}
         if deployment:
@@ -490,15 +455,8 @@ def hosted_site_active(config) -> bool:
 
 
 def hosted_capabilities(config) -> dict:
-    """Hosted publishing fields for the capability projection; none while the rollout is off."""
-    if not enabled():
-        return {}
-    site = active_site(getattr(config, "organization", None)) if config is not None else None
-    if site is None:
-        return {"canPublishHostedArticle": False, "hostedSite": None}
-    return {"canPublishHostedArticle": True,
-            "hostedSite": {"state": site.state, "baseUrl": f"https://{site.domain}{site.base_path}",
-                           "proxyVerified": site.proxy_verified_at is not None}}
+    """Retired blog hosting contributes no capabilities."""
+    return {}
 
 
 def hosted_publish_step(run, config):

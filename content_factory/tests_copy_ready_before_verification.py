@@ -259,7 +259,7 @@ class LegacyDeliveryModeTests(_StartHarness, TestCase):
             for marker in (True, False):
                 built = make_named_legacy_org(name, marker=marker, domain=f"{name.replace('_', '-')}-{marker}.example.test")
                 today = self.results(built)
-                self.assertEqual(today, expected["hosted" if name == "pawshare" else "connected"], name)
+                self.assertEqual(today, expected["connected"], name)
                 for label, flags in FLAG_SETS:
                     with self.subTest(name=name, marker=marker, flags=label), override_settings(**flags):
                         self.assertEqual(self.results(built), today)

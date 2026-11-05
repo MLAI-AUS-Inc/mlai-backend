@@ -27,6 +27,7 @@ TODAY_REASONS = {
     "free_cap_spike": "Free first-article reservations spiked",
 }
 P2_REASONS = {
+    "hosting_retired": "Move retired blog URLs to the startup website; see the site retirement receipt",
     "our_team_item": "A startup has an item no automatic path can finish",
     "unregistered_failure_code": "A run reported a failure code the registry does not know",
     "codeless_terminal": "A run stopped without a failure code",
@@ -61,7 +62,7 @@ class AlertReasonTests(SimpleTestCase):
     """IF-P2-23: the 19 reasons and labels exist and the 8 existing ones are unchanged."""
 
     def test_reasons_and_labels(self):
-        self.assertEqual(len(P2_REASONS), 19)
+        self.assertEqual(len(P2_REASONS), 20)
         for reason, label in TODAY_REASONS.items():
             self.assertIn(reason, alerts.ALERT_REASONS)
             self.assertEqual(alerts.REASON_LABELS[reason], label)

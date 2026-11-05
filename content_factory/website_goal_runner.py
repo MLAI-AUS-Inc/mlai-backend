@@ -163,10 +163,6 @@ def goal_journey(op, context, config, journey, *, now):
             stop_goal(op, goal, reason=reason, now=now)
             op._goal_wait = True
             return {**journey, "capabilities": {**goals.mapping(journey.get("capabilities")), "canPublishArticle": False}, "nextAction": None}
-    if milestone and goals.mapping(goal.get("strategy_pin")).get("rung") == "hosted":
-        wait_for_channel(op, goal)
-        op._goal_wait = True
-        return {**journey, "capabilities": {**goals.mapping(journey.get("capabilities")), "canPublishArticle": False}, "nextAction": None}
     if milestone and not action:
         raise WebsiteAuthorityError("website_prepare_blocked", "This goal's article publication handler is not available yet.", status=422)
     if milestone in {"approved", "merged"}:
@@ -260,11 +256,8 @@ def finish_goal(op, *, now=None):
             elif fresh and strategy.enabled() and effective == "strategy" and goal.get("strategy_pin"):
                 goal = strategy.advance(goal, source=goal.get("current_source_sha"), now=now, reason="strategy_exhausted")
                 goal["strategy_requires_candidate"] = True
-                if goal["strategy_pin"]["rung"] == "hosted":
-                    wait_for_channel(op, goal)
-                else:
-                    goal = retry_goal_action(op, goal, now=now, occurrence=occurrence, step="setup")
-                    op.receipt["message"] = "Trying the next articles integration strategy."
+                goal = retry_goal_action(op, goal, now=now, occurrence=occurrence, step="setup")
+                op.receipt["message"] = "Trying the next articles integration strategy."
             elif fresh and strategy.enabled() and effective == "unsupported" and classification in {"transient", "repairable", "strategy"} and strategy.valid_pin(goal.get("strategy_pin")):
                 goal = strategy.set_pin(goal, len(strategy.RUNGS) - 1, source=goal.get("current_source_sha"),
                     fingerprint=goal["strategy_pin"]["fingerprint_digest"], now=now, reason="fingerprint_guard")
@@ -325,7 +318,7 @@ def wake_goal_for_source(config, *, company_id, user, now):
 
 
 def wait_for_channel(op, goal):
-    """Keep unavailable hosted fallback explicit until E5 supplies its handler."""
+    """Offer copy-ready delivery when repository setup is exhausted."""
     from .channel_switch import _enabled, ladder_exhausted, switch_to_copy_ready
     if _enabled(getattr(op.connection, 'organization', None)):
         from django.db import transaction
@@ -344,7 +337,7 @@ def wait_for_channel(op, goal):
             transaction.on_commit(lambda: switch_to_copy_ready(run=run, reason='ladder_exhausted'))
         return
     op.state, op.next_attempt_at = "needs_user", None
-    op.receipt = {**op.receipt, "goal": goal, "status": "needs_you", "channel_options": ["hosted", "portable"],
+    op.receipt = {**op.receipt, "goal": goal, "status": "needs_you", "channel_options": ["portable"],
         "message": "The repository strategies are exhausted. Choose an articles channel.",
         "user_action": {"id": "choose_article_channel", "label": "Choose articles channel"}}
 

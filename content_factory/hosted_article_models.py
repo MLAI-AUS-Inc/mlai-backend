@@ -18,6 +18,7 @@ class HostedArticleSite(models.Model):
         DRAFT = "draft", "Being set up"
         ACTIVE = "active", "Publishing"
         PAUSED = "paused", "Paused"
+        RETIRED = "retired", "Retired"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     organization = models.ForeignKey("organizations.Organization", on_delete=models.CASCADE, related_name="hosted_article_sites")

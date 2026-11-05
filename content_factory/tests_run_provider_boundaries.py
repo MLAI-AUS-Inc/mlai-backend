@@ -34,7 +34,8 @@ class OwnedHostedProviderTests(TestCase):
             "article_approval_v1": {"source": "publish_reviewed", "approved_by_user_id": self.user.pk},
             "publish_reviewed_v1": {"source_run_id": "original-reviewed"}})
         self.run.refresh_from_db()
-        hosted.request_publication(site=self.site, run=self.run, user=self.user, allow_continuation=True)
+        from .hosted_article_models import HostedArticlePublication
+        HostedArticlePublication.objects.create(site=self.site, run_id=self.run.run_id, requested_by=self.user)
         self.before = ContentFactoryRun.objects.values().get(pk=self.run.pk)
 
     def assert_execution_retained(self):

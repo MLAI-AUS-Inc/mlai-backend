@@ -46,7 +46,7 @@ R3_BACKEND_RESULT_KEYS = frozenset({OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, EVENT
                                   HOSTED_PUBLICATION_OBSERVATION_KEY})
 R3_BACKEND_REQUEST_KEYS = frozenset({WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY})
 SCOPE_FIELDS = (*CONNECTION_FIELDS, *OPERATION_FIELDS, "expected_source_sha", "source_run_id")
-SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation", "hosted_auto_register"})
+SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation"})
 WORKER_WORKFLOW_ALIASES = {
     "article_generation": frozenset({"direct_generate", "confirmed_topic"}),
     "scaffold_articles": frozenset({"article_system_setup"}),

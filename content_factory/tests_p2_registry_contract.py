@@ -22,10 +22,10 @@ from .self_heal_testing import ALL_FLAGS_ON, make_named_legacy_org, make_p2_org
 
 ROOT = Path(__file__).resolve().parents[1]
 # cf-registry's bytes, checked with cmp when vendored. Merge provenance is checked remotely.
-# Current registry/envelope bytes: reviewed CF cd96e480, merged as 7802ef60.
+# Registry/envelope bytes: combined retirement and quality changes at CF e2bc8265.
 VENDORED_SHA256 = {
-    "contracts/failure-codes.json": "e6eec1954a3171015615eb8a323158b193977c62818ffd909dd686b7ce0669ff",
-    "contracts/failure-envelope-v1.schema.json": "c59ae4b5fd3001d78b4a6e215994b4057b42b7183f6708d929fca22dd9c30961",
+    "contracts/failure-codes.json": "ca4426fd35383de1f6430d9ec8872889a4c37e7bfbdaf1bf255f295f1256241d",
+    "contracts/failure-envelope-v1.schema.json": "5aabfb4e8a2bb811ed80d1c0dba065bade14fb6aa8d89bd9048e1c6fbf5723b2",
     "contracts/setup-delivery-v1.schema.json": "6a604e610716ba45c6c1e8491daae94cc51ece99e8e3d6c693ac378674581069",
     "content_factory/failure_registry_pre_p2.json": "f8ca80a13c17497fc2dab0f2bfc2cb3f8c08840c09737e6082d52022ebbd5cc2",
     "content_factory/tests/fixtures/p2/failure-codes.pre-p2.json": "5dc161ae1f02212f3898ec0a2bc4bee347ccbc0cf8c26cf640ced545dd4d8b3e",

@@ -573,30 +573,53 @@
       "pending_owner": null
     },
     {
-      "identity": "content_factory/hosted_articles.py:request_publication:c673d5c85e57e58c34b4d8ab4d61e752936edeb462f20f54f3be6cc3bb3913af:1",
-      "path": "content_factory/hosted_articles.py",
-      "function": "request_publication",
-      "line": 290,
+      "identity": "content_factory/founder_review_commands.py:_claim:b29cee1baed23cedf640e34925bec3c037e013f6be93d5b461701ce52ea3257d:1",
+      "path": "content_factory/founder_review_commands.py",
+      "function": "_claim",
+      "line": 152,
       "kind": "inferred_run_save",
       "fields": [
-        "status",
-        "error",
         "updated_at"
       ],
-      "statement_sha256": "c673d5c85e57e58c34b4d8ab4d61e752936edeb462f20f54f3be6cc3bb3913af",
+      "statement_sha256": "b29cee1baed23cedf640e34925bec3c037e013f6be93d5b461701ce52ea3257d",
       "duplicate_ordinal": 1,
       "direct_model_chain": false,
       "inferred_receivers": [
-        "publication"
+        "config"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "3d181a9951768abc44b8960f57ab7069a4a7ff32e01a95aa8c4ddd04e66ed70d",
+      "function_sha256": "87f0f78049aeb107baeb0d86b5d77757ed3d40a08a64c06c680b95942a5167d3",
       "classification": "non_cf_model",
       "test_refs": [
-        "content_factory/tests_hosted_publish_authority.py"
+        "content_factory/tests_founder_review_commands.py"
       ],
-      "reason": "This saved receiver is HostedArticlePublication, not Run; the run argument is publication source.",
-      "guard": "Explicit HostedArticlePublication get_or_create; publication actor/body/site authority independently checked.",
+      "reason": "The saved config receiver is OrganizationContentConfig, not ContentFactoryRun. This is bounded private HTTP command acceptance metadata only.",
+      "guard": "Exact original body/key/company/principal/ticket, fresh current permission; no Run lifecycle or execution clock writes.",
+      "pending_owner": null
+    },
+    {
+      "identity": "content_factory/founder_review_commands.py:execute_comment:b29cee1baed23cedf640e34925bec3c037e013f6be93d5b461701ce52ea3257d:1",
+      "path": "content_factory/founder_review_commands.py",
+      "function": "execute_comment",
+      "line": 370,
+      "kind": "inferred_run_save",
+      "fields": [
+        "updated_at"
+      ],
+      "statement_sha256": "b29cee1baed23cedf640e34925bec3c037e013f6be93d5b461701ce52ea3257d",
+      "duplicate_ordinal": 1,
+      "direct_model_chain": false,
+      "inferred_receivers": [
+        "config"
+      ],
+      "local_guard_mentioned": false,
+      "function_sha256": "6850e0ae45d53754f7dd230c1a4f8c5f75ec68b0a02d66f6b7c88e514b954c81",
+      "classification": "non_cf_model",
+      "test_refs": [
+        "content_factory/tests_founder_review_commands.py"
+      ],
+      "reason": "The saved config receiver is OrganizationContentConfig, not ContentFactoryRun. This is bounded private HTTP command acceptance metadata only.",
+      "guard": "Exact original body/key/company/principal/ticket, fresh current permission; no Run lifecycle or execution clock writes.",
       "pending_owner": null
     },
     {
@@ -675,27 +698,6 @@
       ],
       "reason": "Verified hosted provider facts remain publication/site metadata; event-owned Run branch stores protected observation/result only. Raw hosted status can affect legacy Run lifecycle only.",
       "guard": "event_owned(run) split after current publication/site/body/revision/principal admission.",
-      "pending_owner": null
-    },
-    {
-      "identity": "content_factory/hosted_auto_register.py:_proxy:3314e96549216a44af521bda0fc7ec67b97b5f51f3a51dfdb1986781a8c84881:1",
-      "path": "content_factory/hosted_auto_register.py",
-      "function": "_proxy",
-      "line": 162,
-      "kind": "model_get_or_create",
-      "fields": [],
-      "statement_sha256": "3314e96549216a44af521bda0fc7ec67b97b5f51f3a51dfdb1986781a8c84881",
-      "duplicate_ordinal": 1,
-      "direct_model_chain": true,
-      "inferred_receivers": [],
-      "local_guard_mentioned": true,
-      "function_sha256": "eccd907c3667bf23f55498a6a382bcffa8ff39e90b010598e82c0062b33844a9",
-      "classification": "new_admission",
-      "test_refs": [
-        "content_factory/tests_r3_named_admission.py"
-      ],
-      "reason": "Named hosted proxy creates a new Run, seals scheduler admission, or verifies existing exact original admitted request before dispatch.",
-      "guard": "seal_new_run_admission only created; existing owner reserve_admitted_run exact identity.",
       "pending_owner": null
     },
     {
@@ -1014,27 +1016,30 @@
       "pending_owner": null
     },
     {
-      "identity": "content_factory/publish_reviewed_draft.py:start_publish:efd83913c155c534f2fa0ef1ba83d345b132de072f364fb9fe2a23508e786b40:1",
+      "identity": "content_factory/publish_reviewed_draft.py:start_publish:03e56de93fd972534a5d1b8aa425f530e5327ed24a6eb1c868ba2913c5a759c4:1",
       "path": "content_factory/publish_reviewed_draft.py",
       "function": "start_publish",
-      "line": 284,
+      "line": 269,
       "kind": "model_create",
       "fields": [
         "status",
         "run_request"
       ],
-      "statement_sha256": "efd83913c155c534f2fa0ef1ba83d345b132de072f364fb9fe2a23508e786b40",
+      "statement_sha256": "03e56de93fd972534a5d1b8aa425f530e5327ed24a6eb1c868ba2913c5a759c4",
       "duplicate_ordinal": 1,
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "e8d6f55daed13516c9069398efb7f0813366863364ef0235955ec4adebb1bef1",
+      "function_sha256": "1d420d0650b94f0a049c57a7557e71e035b24804654e043419477c3c5da8ffa5",
       "classification": "new_admission",
       "test_refs": [
-        "content_factory/tests_r3_named_admission.py"
+        "content_factory/tests_r3_named_admission.py",
+        "content_factory/tests/test_p2_publish_reviewed.py",
+        "content_factory/tests_hosting_retirement_unit.py",
+        "content_factory/tests_p2_merge_worker.py"
       ],
-      "reason": "Creates independent approved-body child, carries original charge while unadmitted, then seals original child admission before dispatch. Source offer is fresh locked result-only.",
-      "guard": "Current same-company publish grant/body/revision/destination; created-only seal; no original request mutation.",
+      "reason": "Creates an independently admitted repository-only approved-body child, carries the original charge and seals admission before dispatch. Retirement slugs must match the same-organization saved publication and explicitly require founder merge.",
+      "guard": "Existing same-company current publish consent/body/revision/verified destination plus same-publication slug; no hosted destination or grant manufacture.",
       "pending_owner": null
     },
     {
@@ -4239,38 +4244,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "7a57c3bf40ec3706cb5869efc8b5027d8c782f9bf99f2f0222b7a8048baa6649",
+      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
       "classification": "non_cf_model",
       "test_refs": [
-        "content_factory/tests_website_first_article_billing_unit.py"
+        "content_factory/tests_website_first_article_billing_unit.py",
+        "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof.",
-      "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
-      "pending_owner": null
-    },
-    {
-      "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:9423b1f8690090a8baf05e42fe9dd91d7ba8532be4ec3f57f0420595bcbced79:1",
-      "path": "content_factory/website_prepare.py",
-      "function": "_advance_claimed_prepare",
-      "line": 923,
-      "kind": "model_update",
-      "fields": [
-        "status",
-        "current_step"
-      ],
-      "statement_sha256": "9423b1f8690090a8baf05e42fe9dd91d7ba8532be4ec3f57f0420595bcbced79",
-      "duplicate_ordinal": 1,
-      "direct_model_chain": false,
-      "inferred_receivers": [
-        "op"
-      ],
-      "local_guard_mentioned": true,
-      "function_sha256": "7a57c3bf40ec3706cb5869efc8b5027d8c782f9bf99f2f0222b7a8048baa6649",
-      "classification": "non_cf_model",
-      "test_refs": [
-        "content_factory/tests_website_first_article_billing_unit.py"
-      ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4278,7 +4258,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:4758533f8b3da0df3160a618e903ebdf6827677f3217dbf1b86c5831d943d64f:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 936,
+      "line": 926,
       "kind": "model_update",
       "fields": [
         "status",
@@ -4291,12 +4271,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "7a57c3bf40ec3706cb5869efc8b5027d8c782f9bf99f2f0222b7a8048baa6649",
+      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
       "classification": "non_cf_model",
       "test_refs": [
-        "content_factory/tests_website_first_article_billing_unit.py"
+        "content_factory/tests_website_first_article_billing_unit.py",
+        "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4304,7 +4285,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:e0f6dc9a8b4e36827f0f0b6dd598f821f3c7219a519e129bd5d062ff6a2c438a:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1065,
+      "line": 1055,
       "kind": "model_update",
       "fields": [
         "current_step",
@@ -4317,12 +4298,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "7a57c3bf40ec3706cb5869efc8b5027d8c782f9bf99f2f0222b7a8048baa6649",
+      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
       "classification": "non_cf_model",
       "test_refs": [
-        "content_factory/tests_website_first_article_billing_unit.py"
+        "content_factory/tests_website_first_article_billing_unit.py",
+        "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4330,7 +4312,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:a8cabcadb8e0fa3cb68cc74238cfdb2c6b9b1e84dcd32c57caa5e8bc9ac13304:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 978,
+      "line": 968,
       "kind": "model_update",
       "fields": [
         "status"
@@ -4342,12 +4324,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "7a57c3bf40ec3706cb5869efc8b5027d8c782f9bf99f2f0222b7a8048baa6649",
+      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
       "classification": "non_cf_model",
       "test_refs": [
-        "content_factory/tests_website_first_article_billing_unit.py"
+        "content_factory/tests_website_first_article_billing_unit.py",
+        "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4355,7 +4338,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:d422bdb8d43e50d6cf617d30aaa5bdd656e9c8ecd495c20a6cf44abd04f4d81e:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1053,
+      "line": 1043,
       "kind": "model_update",
       "fields": [
         "current_step"
@@ -4367,12 +4350,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "7a57c3bf40ec3706cb5869efc8b5027d8c782f9bf99f2f0222b7a8048baa6649",
+      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
       "classification": "non_cf_model",
       "test_refs": [
-        "content_factory/tests_website_first_article_billing_unit.py"
+        "content_factory/tests_website_first_article_billing_unit.py",
+        "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4380,7 +4364,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:4758533f8b3da0df3160a618e903ebdf6827677f3217dbf1b86c5831d943d64f:2",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1092,
+      "line": 1082,
       "kind": "model_update",
       "fields": [
         "status",
@@ -4393,12 +4377,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "7a57c3bf40ec3706cb5869efc8b5027d8c782f9bf99f2f0222b7a8048baa6649",
+      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
       "classification": "non_cf_model",
       "test_refs": [
-        "content_factory/tests_website_first_article_billing_unit.py"
+        "content_factory/tests_website_first_article_billing_unit.py",
+        "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4406,7 +4391,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:7df6aacf491799a4394ea8be30fd75d393e852241163057d8b859237c1d3aabe:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1004,
+      "line": 994,
       "kind": "model_update",
       "fields": [
         "status"
@@ -4418,12 +4403,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "7a57c3bf40ec3706cb5869efc8b5027d8c782f9bf99f2f0222b7a8048baa6649",
+      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
       "classification": "non_cf_model",
       "test_refs": [
-        "content_factory/tests_website_first_article_billing_unit.py"
+        "content_factory/tests_website_first_article_billing_unit.py",
+        "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4431,7 +4417,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:ef4dffd46122ec23aeb6f61b7685382377b67a830b501d53bae43c712ab415d0:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1023,
+      "line": 1013,
       "kind": "model_update",
       "fields": [
         "status",
@@ -4444,12 +4430,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "7a57c3bf40ec3706cb5869efc8b5027d8c782f9bf99f2f0222b7a8048baa6649",
+      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
       "classification": "non_cf_model",
       "test_refs": [
-        "content_factory/tests_website_first_article_billing_unit.py"
+        "content_factory/tests_website_first_article_billing_unit.py",
+        "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -5724,56 +5711,6 @@
       "reason": "Saved run is AutomationRun, not CF execution. Dispatch child admission is separately audited at actual CF callers.",
       "guard": "AutomationRun constructor/query/type and status enum.",
       "pending_owner": null
-    },
-    {
-      "identity": "content_factory/founder_review_commands.py:_claim:b29cee1baed23cedf640e34925bec3c037e013f6be93d5b461701ce52ea3257d:1",
-      "path": "content_factory/founder_review_commands.py",
-      "function": "_claim",
-      "line": 152,
-      "kind": "inferred_run_save",
-      "fields": [
-        "updated_at"
-      ],
-      "statement_sha256": "b29cee1baed23cedf640e34925bec3c037e013f6be93d5b461701ce52ea3257d",
-      "duplicate_ordinal": 1,
-      "direct_model_chain": false,
-      "inferred_receivers": [
-        "config"
-      ],
-      "local_guard_mentioned": false,
-      "function_sha256": "87f0f78049aeb107baeb0d86b5d77757ed3d40a08a64c06c680b95942a5167d3",
-      "classification": "non_cf_model",
-      "test_refs": [
-        "content_factory/tests_founder_review_commands.py"
-      ],
-      "reason": "The saved config receiver is OrganizationContentConfig, not ContentFactoryRun. This is bounded private HTTP command acceptance metadata only.",
-      "guard": "Exact original body/key/company/principal/ticket, fresh current permission; no Run lifecycle or execution clock writes.",
-      "pending_owner": null
-    },
-    {
-      "identity": "content_factory/founder_review_commands.py:execute_comment:b29cee1baed23cedf640e34925bec3c037e013f6be93d5b461701ce52ea3257d:1",
-      "path": "content_factory/founder_review_commands.py",
-      "function": "execute_comment",
-      "line": 370,
-      "kind": "inferred_run_save",
-      "fields": [
-        "updated_at"
-      ],
-      "statement_sha256": "b29cee1baed23cedf640e34925bec3c037e013f6be93d5b461701ce52ea3257d",
-      "duplicate_ordinal": 1,
-      "direct_model_chain": false,
-      "inferred_receivers": [
-        "config"
-      ],
-      "local_guard_mentioned": false,
-      "function_sha256": "6850e0ae45d53754f7dd230c1a4f8c5f75ec68b0a02d66f6b7c88e514b954c81",
-      "classification": "non_cf_model",
-      "test_refs": [
-        "content_factory/tests_founder_review_commands.py"
-      ],
-      "reason": "The saved config receiver is OrganizationContentConfig, not ContentFactoryRun. This is bounded private HTTP command acceptance metadata only.",
-      "guard": "Exact original body/key/company/principal/ticket, fresh current permission; no Run lifecycle or execution clock writes.",
-      "pending_owner": null
     }
   ],
   "control_contexts": [
@@ -5966,8 +5903,8 @@
     {
       "path": "content_factory/founder_journey_contract.py",
       "function": "enrich_journey",
-      "function_sha256": "45d8d951ed599f313f2743e7793116de2c754e3d525df654456c9bbf446c9fec",
-      "reason": "Canonical current article DTO calls the read-only rights, verified review/resume and stop-control projections; no local lifecycle or monetary effects.",
+      "function_sha256": "65b9c1122a67246267f7e21ad046b6070cccbe2f6f6d47e8a83fdaa9b583e2dd",
+      "reason": "Canonical current article DTO calls the read-only rights, verified review/resume and stop-control projections; no local lifecycle or monetary effects. Retired hosted delivery maps to contentOnly and emits no hosting capabilities.",
       "test_refs": [
         "content_factory.tests_founder_article_contract",
         "content_factory.tests_founder_article_controls"
@@ -7096,6 +7033,54 @@
       "test_refs": [
         "content_factory/tests_run_publish_observations.py",
         "content_factory/tests_run_provider_boundaries.py"
+      ]
+    },
+    {
+      "identity": "content_factory/hosted_articles.py:request_publication:c673d5c85e57e58c34b4d8ab4d61e752936edeb462f20f54f3be6cc3bb3913af:1",
+      "path": "content_factory/hosted_articles.py",
+      "function": "request_publication",
+      "classification": "retired_blog_hosting_path",
+      "reason": "Blog hosting retirement removes this publication/proxy write, hosted destination variant, or hosted setup-cancellation receipt. Repository setup/publishing retains its existing authority checks.",
+      "test_refs": [
+        "content_factory/tests_hosted_articles.py",
+        "content_factory/tests/test_p2_publish_reviewed.py",
+        "content_factory/tests_prepare_journey_unit.py"
+      ]
+    },
+    {
+      "identity": "content_factory/hosted_auto_register.py:_proxy:3314e96549216a44af521bda0fc7ec67b97b5f51f3a51dfdb1986781a8c84881:1",
+      "path": "content_factory/hosted_auto_register.py",
+      "function": "_proxy",
+      "classification": "retired_blog_hosting_path",
+      "reason": "Blog hosting retirement removes this publication/proxy write, hosted destination variant, or hosted setup-cancellation receipt. Repository setup/publishing retains its existing authority checks.",
+      "test_refs": [
+        "content_factory/tests_hosted_articles.py",
+        "content_factory/tests/test_p2_publish_reviewed.py",
+        "content_factory/tests_prepare_journey_unit.py"
+      ]
+    },
+    {
+      "identity": "content_factory/publish_reviewed_draft.py:start_publish:efd83913c155c534f2fa0ef1ba83d345b132de072f364fb9fe2a23508e786b40:1",
+      "path": "content_factory/publish_reviewed_draft.py",
+      "function": "start_publish",
+      "classification": "retired_blog_hosting_path",
+      "reason": "Blog hosting retirement removes this publication/proxy write, hosted destination variant, or hosted setup-cancellation receipt. Repository setup/publishing retains its existing authority checks.",
+      "test_refs": [
+        "content_factory/tests_hosted_articles.py",
+        "content_factory/tests/test_p2_publish_reviewed.py",
+        "content_factory/tests_prepare_journey_unit.py"
+      ]
+    },
+    {
+      "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:9423b1f8690090a8baf05e42fe9dd91d7ba8532be4ec3f57f0420595bcbced79:1",
+      "path": "content_factory/website_prepare.py",
+      "function": "_advance_claimed_prepare",
+      "classification": "retired_blog_hosting_path",
+      "reason": "Blog hosting retirement removes this publication/proxy write, hosted destination variant, or hosted setup-cancellation receipt. Repository setup/publishing retains its existing authority checks.",
+      "test_refs": [
+        "content_factory/tests_hosted_articles.py",
+        "content_factory/tests/test_p2_publish_reviewed.py",
+        "content_factory/tests_prepare_journey_unit.py"
       ]
     }
   ]

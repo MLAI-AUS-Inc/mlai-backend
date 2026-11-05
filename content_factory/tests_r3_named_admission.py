@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.db import connection
-from django.test import TransactionTestCase, override_settings
+from django.test import SimpleTestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from core.actor_ids import preferred_actor_id_for_user
@@ -161,44 +161,12 @@ class NamedPublishingAdmissionTests(TransactionTestCase):
         self.assertEqual(ContentFactoryRun.objects.count(), 2)
 
 
-@override_settings(**{**hosted_fixture.HostedRegistrationTests._overridden_settings, **R3})
-class NamedHostedProxyAdmissionTests(TransactionTestCase):
-    setUp = hosted_fixture.HostedRegistrationTests.setUp
-
-    def hosted_site(self):
-        return HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain, state="draft",
-            worker_url="https://r3-owned.example.workers.dev")
-
-    def test_proxy_is_fixed_and_sealed_with_scheduler_principal_before_http(self):
-        site = self.hosted_site()
-        seen = []
-
-        def remote(path, payload):
-            self.assertFalse(connection.in_atomic_block)
-            run = ContentFactoryRun.objects.get(run_id=payload["run_id"])
-            receipt = owner_receipt(run)
-            self.assertEqual(receipt["identity"]["principal"], {"kind": "scheduler", "service": "hosted_auto_register"})
-            self.assertEqual(payload[WIRE_REQUEST_KEY], run.run_request[WIRE_REQUEST_KEY])
-            self.assertTrue(worker_workflow_allowed(run.workflow, "hosted_native_verification", request=run.run_request))
-            seen.append(deepcopy(payload))
-            return {"run_id": run.run_id, "status": "queued"}
-
-        with fake_provider("content_factory.failure_policy_engine", claim_pull_request_slot=lambda *a, **k: True), \
-                patch.object(auto, "_remote", side_effect=remote):
-            self.assertTrue(auto._proxy(site, self.site, self.built.config))
-            self.assertTrue(auto._proxy(site, self.site, self.built.config))
-        self.assertEqual(seen[0], seen[1])
-        self.assertEqual(ContentFactoryRun.objects.filter(run_id=seen[0]["run_id"]).count(), 1)
-
-    def test_changed_scope_cannot_reuse_proxy_admission(self):
-        site = self.hosted_site()
-        with fake_provider("content_factory.failure_policy_engine", claim_pull_request_slot=lambda *a, **k: True), \
-                patch.object(auto, "_remote", return_value={"status": "queued"}) as remote:
-            self.assertTrue(auto._proxy(site, self.site, self.built.config))
-            self.site.github_repo = "foreign/repository"
-            with self.assertRaises(RunOwnershipConflict):
-                auto._proxy(site, self.site, self.built.config)
-        self.assertEqual(remote.call_count, 1)
+class NamedHostedProxyAdmissionTests(SimpleTestCase):
+    def test_legacy_proxy_admission_is_inert(self):
+        with patch.object(auto, '_remote') as remote:
+            self.assertFalse(auto._proxy(None, None, None))
+            self.assertEqual(auto.run_hosted_sweep(), {'status': 'retired'})
+        remote.assert_not_called()
 
 
 @override_settings(**R3, ARTICLES_PUBLISHING_INPUTS_V3_ENABLED=False, ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=False)
