@@ -2662,7 +2662,7 @@ def _island_graph_for_bootstrap(organization, topic_pillars):
     islands = list(
         ContentIsland.objects.filter(
             organization=organization, status=ContentIslandStatus.VISIBLE
-        ).order_by("-opportunity_score", "slug")
+        ).select_related("region").order_by("-opportunity_score", "slug")
     )
     if not islands:
         return None
@@ -12555,7 +12555,9 @@ def _bootstrap_state_fingerprint(organization, company, config) -> str:
     islands = ContentIsland.objects.filter(organization=organization, origin="manual").aggregate(c=Count("id"), m=Max("updated_at"))
     island_members = {"c": None, "m": None}
     if _content_islands_enabled():
-        islands = ContentIsland.objects.filter(organization=organization).aggregate(c=Count("id"), m=Max("updated_at"))
+        islands = ContentIsland.objects.filter(organization=organization).aggregate(
+            c=Count("id"), m=Max("updated_at"), r=Max("region__updated_at")
+        )
         island_members = ContentIslandKeyword.objects.filter(island__organization=organization).aggregate(
             c=Count("id"), m=Max("created_at")
         )
@@ -12566,7 +12568,7 @@ def _bootstrap_state_fingerprint(organization, company, config) -> str:
         feedback["c"], feedback["m"],
         articles["c"], articles["m"],
         channels["c"], channels["m"],
-        islands["c"], islands["m"],
+        islands["c"], islands["m"], islands.get("r"),
         island_members["c"], island_members["m"],
         baseline_updated,
         # Already-loaded identity fields (no extra query) so company/profile edits —
