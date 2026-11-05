@@ -69,3 +69,10 @@ class SystemRewardTests(SimpleTestCase):
             self.assertEqual(self.post({**data, "target_slack_id": "USAM"}).status_code, 400)
             self.assertEqual(self.post({**data, "idempotency_key": ""}).status_code, 400)
             award.assert_not_called()
+
+    def test_legacy_empty_slack_mention_preserves_existing_error_contract(self):
+        with patch("roo.views.PointsService.award") as award:
+            result = self.post(dict(target_slack_id="<@>", points=2, reason="link-love"))
+        self.assertEqual(result.status_code, 400)
+        self.assertEqual(result.data["error"], "target_slack_id and points are required")
+        award.assert_not_called()
