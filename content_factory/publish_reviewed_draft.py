@@ -190,15 +190,9 @@ def _send_dispatch(source, run, *, retry=False):
             'publish_dispatch_v1': {'accepted_at': timezone.now().isoformat()}})
 
 
-def start_publish(*, context, source_run, user, retirement_slug=None):
+def start_publish(*, context, source_run, user):
     """Reserve a deterministic publish continuation, carry its charge, then dispatch."""
     organization = context.organization
-    if retirement_slug is not None:
-        from .hosted_article_models import HostedArticlePublication
-        if not HostedArticlePublication.objects.filter(site__organization=organization,
-                slug=retirement_slug).filter(
-                models.Q(run_id=source_run.run_id) | models.Q(written_article__source_run_id=source_run.run_id)).exists():
-            raise PublishReviewedError('not_offered', 'This saved URL does not belong to the article.')
     if source_run.organization_id != organization.pk:
         raise PublishReviewedError('not_found', 'Not found.', 404)
     if not may_publish(user, organization):
@@ -264,8 +258,6 @@ def start_publish(*, context, source_run, user, retirement_slug=None):
                        'approval': {'by_user_id': user.pk, 'at': now}, 'merge_policy': 'backend_worker',
                        'self_heal_policy_v1': {'version': 1, 'cohort': 'p2', 'failure_policy': 'v2'},
                        'source_revision': revision}
-            if retirement_slug is not None:
-                request.update(retirement_slug=retirement_slug, retirement_requires_owner_merge=True)
             run = ContentFactoryRun.objects.create(run_id=run_id, organization=organization, domain=locked.domain,
                 github_repo=connection.github_repo, workflow='direct_generate', status='queued', run_request=request,
                 result={'article_approval_v1': approval, 'publish_reviewed_v1': {'source_run_id': locked.run_id, 'approved_body_sha256': digest}})

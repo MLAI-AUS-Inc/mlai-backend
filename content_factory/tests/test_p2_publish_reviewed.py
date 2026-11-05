@@ -191,22 +191,7 @@ class ReviewedPublishingTests(TransactionTestCase):
         self.assertEqual(ContentFactoryRun.objects.count(), 1)
         self.remote.assert_not_called()
 
-    @override_settings(ARTICLES_HOSTED_SITES_ENABLED=True)
-    def test_active_hosted_uses_existing_hosted_pipeline_without_repository_dispatch_and_records_live(self):
-        from content_factory.hosted_article_models import HostedArticleSite
-        HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain, state='active')
-        child, created = service.start_publish(context=self.context, source_run=self.run, user=self.user)
-        self.assertTrue(created)
-        self.assertNotIn('hosted_site_id', child.run_request)
-        self.assertEqual(child.github_repo, self.connection.github_repo)
-        self.assertIn('/publish-reviewed-draft', self.posts[0][0])
 
-    @override_settings(ARTICLES_HOSTED_SITES_ENABLED=True, HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW=True)
-    def test_hosted_publish_requires_the_current_rendered_revision_when_gate_on(self):
-        from content_factory.hosted_article_models import HostedArticleSite
-        HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain, state='active')
-        child, _ = service.start_publish(context=self.context, source_run=self.run, user=self.user)
-        self.assertNotIn('hosted_site_id', child.run_request)
 
     def test_same_run_switched_channel_with_delivered_evidence_is_offered_without_mutating_bound_request(self):
         self.run.run_request['delivery_mode'] = 'review_draft'
@@ -255,10 +240,3 @@ class ReviewedPublishingTests(TransactionTestCase):
         article.refresh_from_db()
         self.assertEqual(article.source_run_id, self.run.run_id)
         self.assertEqual(article.live_url, run.result["deploy_v1"]["url"])
-
-    @override_settings(ARTICLES_HOSTED_SITES_ENABLED=True)
-    def test_an_already_live_hosted_article_is_not_offered_a_duplicate_publish(self):
-        from content_factory.hosted_article_models import HostedArticleSite, HostedArticlePublication
-        site = HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain, state='active')
-        HostedArticlePublication.objects.create(site=site, run_id=self.run.run_id, slug='old', status='live')
-        self.assertIsNotNone(service.publish_offer(self.run))

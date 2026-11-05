@@ -314,11 +314,9 @@ def _join(roster, user, *, state, via, actor, now):
 def _auto_join(user, organization):
     if not getattr(settings, 'MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED', False):
         return False
-    from content_factory.hosted_article_models import HostedArticleSite
     from content_factory.website_models import WebsiteConnection
     from content_factory.models import WrittenArticle
     if (organization.billing_user_id or WebsiteConnection.objects.filter(organization=organization).exists()
-            or HostedArticleSite.objects.filter(organization=organization).exists()
             or WrittenArticle.objects.filter(organization=organization).filter(Q(published_at__isnull=False)
                 | Q(publish_status__in=['merged', 'live'])).exists()
             or VibeRaisingCompany.objects.filter(organization=organization).count() != 1):

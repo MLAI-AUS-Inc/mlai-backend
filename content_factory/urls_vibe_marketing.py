@@ -3,7 +3,6 @@ from .company_billing import CompanyBillingView
 from .article_preview_lease import ArticlePreviewLeaseView, ArticlePreviewLeaseProxyView
 from .article_review_views import VibeMarketingArticleReviewView
 from .founder_draft_views import FounderDraftCopiedView, FounderDraftDownloadView, FounderDraftPostedLinkView
-from .hosted_article_views import HostedArticlePublishView
 from .website_views import WebsiteConnectionView, WebsiteConnectionActionView, WebsiteConnectionOperationView, WebsiteCostUsageView
 from django.urls import include, path
 
@@ -82,8 +81,6 @@ urlpatterns = [
     path("runs/<str:run_id>/article-review/preview-lease", ArticlePreviewLeaseView.as_view()),
     path("article-preview/<str:token>/<str:run_id>/", ArticlePreviewLeaseProxyView.as_view()),
     path("article-preview/<str:token>/<str:run_id>/<path:proxy_path>", ArticlePreviewLeaseProxyView.as_view()),
-    path("runs/<str:run_id>/hosted-publish", HostedArticlePublishView.as_view(), name="vibe-hosted-publish"),
-    path("runs/<str:run_id>/hosted-publish/", HostedArticlePublishView.as_view()),
     # P1.10 draft tools (IF-P1-13). They sit above the runs/<run_id>/<action>
     # catch-all so they never reach VibeMarketingRunControlView.
     path("runs/<str:run_id>/copied", FounderDraftCopiedView.as_view(), name="vibe-founder-draft-copied-no-slash"),

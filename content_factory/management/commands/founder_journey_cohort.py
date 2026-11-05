@@ -81,7 +81,6 @@ def prior_state(organization, cutoff) -> list[str]:
     channels, paid jobs), so it separates history from state a founder added
     on the new journey after the cohort was decided.
     """
-    from content_factory.hosted_article_models import HostedArticleSite
     from content_factory.models import ContentFactoryJob, NotificationChannel, WrittenArticle
     from content_factory.website_models import WebsiteConnection, WebsiteConnectionOperation
     signals = []
@@ -91,7 +90,6 @@ def prior_state(organization, cutoff) -> list[str]:
     before = {"created_at__lte": cutoff}
     checks = (
         ("website_connection", WebsiteConnection.objects.filter(organization_id=organization.pk, **before)),
-        ("hosted_site", HostedArticleSite.objects.filter(organization_id=organization.pk, **before)),
         ("written_article", WrittenArticle.objects.filter(organization_id=organization.pk, **before)),
         ("article_run", cohorts._runs(organization).filter(workflow__in=ARTICLE_WORKFLOWS, **before)),
         ("setup_run", cohorts._runs(organization).filter(workflow__in=cohorts.SETUP_WORKFLOWS, **before)),

@@ -71,14 +71,6 @@ class ClosedExecutionAuthorityTests(TransactionTestCase):
         self.assertEqual(result.data["code"], "run_execution_closed")
         self.assertNotIn("permission_mode", result.data)
 
-    @override_settings(ARTICLES_HOSTED_SITES_ENABLED=True)
-    def test_hosted_provider_gate_refuses_settled_work_without_reopening_receipt(self):
-        run = self.settled()
-        from .hosted_articles import HostedPublishError, _require_publication_active
-        before = deepcopy(run.result)
-        with self.assertRaises(HostedPublishError):
-            _require_publication_active(SimpleNamespace(state="active"), run)
-        self.assertEqual(run.result, before)
 
     @override_settings(CONTENT_FACTORY_URL="https://cf.fixture.invalid", CONTENT_FACTORY_API_KEY="synthetic-closed-preview")
     def test_preview_post_cannot_renew_settled_original(self):
