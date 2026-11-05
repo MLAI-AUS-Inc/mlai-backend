@@ -392,6 +392,94 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.assertNotIn("child_run_id", self.op.receipt)
         queue.assert_called_once()
 
+    def test_late_approval_success_clears_parent_error_and_reuses_exact_setup_pr(self):
+        from . import vibe_marketing_views as views
+        from .website_contract import WebsiteAuthorityError
+
+        run, queue = self._queue_ambiguous_choice()
+        prepare.prepare_failure(self.op, "setup", WebsiteAuthorityError(
+            "setup_approval_unavailable", "Setup approval response was unavailable.", retryable=True))
+        previous_failures = dict(self.op.receipt["step_failures"])
+        original_window = self.op.receipt["transient_started_at"]
+        self.op.receipt.update(failure={"code": "setup_approval_unavailable"},
+            failure_fingerprint="original-fingerprint", failure_occurrence_id="original-occurrence")
+        run.status, run.approval_state = "completed", "approved"
+        run.result = {"status": "pr_created", "pr_number": 42,
+            "article_system_setup": {"status": "pr_created", "pr_number": 42}}
+
+        with patch.object(views.VibeMarketingRunControlView, "post") as control, \
+                patch.object(views, "_attempt_setup_publish_merge") as merge:
+            self.advance(child=run)
+
+        self.assertEqual(self.op.state, "needs_user")
+        self.assertEqual(self.op.receipt["child_run_id"], run.run_id)
+        self.assertEqual(self.op.receipt["current_step"], "merge")
+        self.assertEqual(self.op.receipt["user_action"]["pr_number"], 42)
+        self.assertEqual(self.op.receipt["user_action"]["run_id"], run.run_id)
+        self.assertEqual(self.op.receipt.get("reason_code"), "")
+        self.assertFalse(self.op.receipt.get("retryable"))
+        self.assertEqual(self.op.receipt["step_failures"], previous_failures)
+        self.assertEqual(self.op.receipt["transient_started_at"], original_window)
+        self.assertNotIn("failure", self.op.receipt)
+        self.assertEqual(self.op.receipt["resolved_setup_approval"]["failure_occurrence_id"], "original-occurrence")
+        self.assertNotIn("unavailable", self.op.receipt["message"])
+        control.assert_not_called()
+        merge.assert_not_called()
+        queue.assert_called_once()
+
+    def test_late_approval_cannot_clear_error_for_another_binding_or_unapproved_pr(self):
+        from copy import deepcopy
+        from .website_contract import WebsiteAuthorityError
+
+        run, _ = self._queue_ambiguous_choice()
+        prepare.prepare_failure(self.op, "setup", WebsiteAuthorityError(
+            "setup_approval_unavailable", "Setup approval response was unavailable.", retryable=True))
+        receipt, request = deepcopy(self.op.receipt), deepcopy(run.run_request)
+        run.result = {"status": "pr_created", "pr_number": 42,
+            "article_system_setup": {"status": "pr_created", "pr_number": 42}}
+        for changed in ("generation", "repository_id", "github_repo", "branch", "app_root", "unapproved", "child", "parent"):
+            with self.subTest(changed=changed):
+                self.op.receipt = deepcopy(receipt)
+                run.run_request = deepcopy(request)
+                run.status, run.approval_state = "completed", "approved"
+                self.op.generation = self.op.connection.generation
+                if changed == "generation":
+                    run.run_request["connection_generation"] -= 1
+                elif changed in {"repository_id", "github_repo", "branch", "app_root"}:
+                    run.run_request[changed] = 456 if changed == "repository_id" else "another"
+                elif changed == "unapproved":
+                    run.approval_state = "approval_required"
+                elif changed == "parent":
+                    self.op.generation -= 1
+                else:
+                    self.op.receipt["child_run_id"] = "another-child"
+                self.advance(child=run)
+                self.assertEqual(self.op.receipt["reason_code"], "setup_approval_unavailable")
+                self.assertNotIn("resolved_setup_approval", self.op.receipt)
+
+    def test_late_approval_advances_existing_automatic_pr_to_waiting_on_checks(self):
+        from . import vibe_marketing_views as views
+        from .website_contract import WebsiteAuthorityError
+
+        run, queue = self._queue_ambiguous_choice()
+        self.config.requires_review = False
+        prepare.prepare_failure(self.op, "setup", WebsiteAuthorityError(
+            "setup_approval_unavailable", "Setup approval response was unavailable.", retryable=True))
+        run.status, run.approval_state = "completed", "approved"
+        run.result = {"status": "pr_created", "pr_number": 42,
+            "article_system_setup": {"status": "pr_created", "pr_number": 42}}
+        with patch.object(views.VibeMarketingRunControlView, "post") as control, \
+                patch.object(views, "_attempt_setup_publish_merge", return_value={"outcome": "waiting"}) as merge:
+            self.advance(child=run)
+        self.assertEqual((self.op.state, self.op.receipt["current_step"]), ("pending", "merge"))
+        self.assertEqual(self.op.receipt["reason_code"], "")
+        self.assertEqual(self.op.receipt["child_run_id"], run.run_id)
+        self.assertIsNone(self.op.receipt["user_action"])
+        self.assertIsNotNone(self.op.next_attempt_at)
+        merge.assert_called_once_with(run=run, context=self.context, automatic=True)
+        control.assert_not_called()
+        queue.assert_called_once()
+
     def test_blocked_direct_choice_reports_its_child_failure_without_new_setup(self):
         run, queue = self._queue_ambiguous_choice(blocked=True)
         self.advance(child=run)

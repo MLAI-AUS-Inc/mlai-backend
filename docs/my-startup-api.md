@@ -130,3 +130,11 @@ Permanent repository-access failures wait for prerequisite repair while original
 refunds and service preview cleanup can continue. A newer connection supersedes
 old repository-removal work with an explicit retained outcome; it does not lend
 new consent to that old work. Original cleanup deadlines remain in force.
+
+When setup approval's response is lost, preparation can reconcile the same
+approved setup run's existing pull request. Its saved company, connection,
+generation, immutable repository, branch and root must still match. The parent
+clears the resolved active error and records a bounded `resolved_setup_approval`
+reference, retaining failure counters and the original retry window. Existing
+review, check and merge policy still decides the next action; reconciliation
+does not send another approval or create another setup run.
