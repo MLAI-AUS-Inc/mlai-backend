@@ -133,6 +133,55 @@ simulation/monitor database checks also passed with the newly hash-locked
 monitor dependencies. This is synthetic evidence, not a live send or staging
 rehearsal. No migration or connected environment was changed.
 
+## Phase 6 lifecycle implementation
+
+The lifecycle branch reuses the approved `last_active_at`,
+`consent_reconfirmed_at`, domain cache and JSON metadata; no new schema is
+required. `CRM_LIFECYCLE_ENABLED` defaults false. Its deployment settings are
+source wiring only, with no connected environment changed.
+
+- A resumable daily batch takes the latest valid login, attendance,
+  registration, click, reply and dated Substack click. It ignores opens,
+  undated aggregates and future timestamps. Contact locks preserve concurrent
+  preference changes. A verified action lifts only the dormant flag.
+- Owners prepare a fixed-audience reconfirmation draft on an active stream.
+  Normal review/preflight/queue checks still apply. Only tier D, affirmative
+  permission within 36 calendar months, and no historical hard bounce qualify.
+  Checks use at most 10% of the shared daily stream budget and rank behind
+  ordinary news. The existing A/B/C delivery tier remains blank for these
+  checks; the plan reports D explicitly, avoiding a schema change.
+- Per-person signed links bind the current address, permission and delivery.
+  GET is read-only; CSRF-protected POST records explicit reconfirmation and
+  activity without changing the original consent date or any other hold.
+  Expiry, withdrawal, ban, address change or hard-bounce history refuses the
+  link. Test/seed buttons use a read-only preview URL. Thirty days without
+  an action adds `dormant_suppressed`, retaining the contact.
+- Cohorts with at least five negative outcomes and three times the overall
+  rate place only untouched people on review hold. Mature provider click
+  comparisons need 500 handoffs and at least three observed baseline days;
+  missing baselines remain unknown. Neither uses opens.
+- Import reports distinguish no-MX, disposable, likely typo and unknown.
+  At most one worker batch of new domains is inspected per chunk. A bounded
+  background pass advances past unknown answers and fills the remaining
+  cache. New imported contacts retain the first import's internal ID.
+- Known typo corrections require a human confirmation. They preserve all
+  consent/channel/delivery states and retain a protected original-address
+  alias. Luma/CSV reimports and late opt-outs resolve that alias; current
+  and future bans also follow the linked user and aliases. A committed audit
+  version prevents a stale alias cache from recreating the old identity.
+  Conflicts are refused rather than merged. This path requires PostgreSQL.
+
+New owner endpoint: `POST deliverability/reconfirmation/` with `{stream}`.
+Admin contact endpoint: `POST contacts/{id}/correct-email/` with
+`{expected, replacement}`. The public signed preference action is
+`/api/v1/crm/preferences/reconfirm/`. Tokens are redacted by request logging;
+responses are non-cacheable and disclose no recipient address.
+
+Optional DMARC XML ingestion and LLM copy suggestions remain deferred. The
+finite warm-up run is not retired before its planned 17 November end; verify
+its final state before a separate cleanup. No pilot run, audience permission
+or sender configuration was altered by this implementation.
+
 ## Current verification
 
 Phase 1 application code is prepared on `codex/one-click-campaign-phase-1`.

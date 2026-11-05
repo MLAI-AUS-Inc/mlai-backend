@@ -14,12 +14,15 @@ from .copy import REASONS
 def alert_text(incident):
     """A bounded explanation with evidence and a link to the owner-only record."""
     reason = REASONS.get(incident.signal, "the email system needs attention")
-    value = f"{incident.value:.2%}" if incident.signal.endswith("_rate") else str(int(incident.value))
+    value = f"{incident.value:.2%}" if incident.signal.endswith("_rate") or incident.signal in ('click_anomaly', 'cohort_quarantine') else str(int(incident.value))
     action = "Recorded for staging review" if policy.value("CRM_GUARDIAN_DRY_RUN") else {
         "stop_stream": "Campaign sending stopped; an owner must decide when it resumes",
         "pause_blast": "This campaign is paused; new campaign starts are on hold",
         "slow_stream": "Future campaign sending will slow down",
+        'throttle_provider': 'Sending to the affected inbox provider has slowed',
     }.get(incident.action, "The email team should review this")
+    if incident.signal == 'cohort_quarantine':
+        action = 'Untouched contacts in that group need review before receiving community email'
     link = f"{settings.DEFAULT_BACKEND_URL.rstrip('/')}/api/v1/community-chat/crm/deliverability/incidents/{incident.pk}/"
     health = settings.COMMUNITY_CHAT_FRONTEND_URL.rstrip("/") + f"/admin/sending?incident={incident.pk}"
     return f"MLAI email: {reason}.\nObserved {value} across {incident.sample} messages.\n{action}.\n{health}\n{link}"

@@ -30,6 +30,8 @@ from crm.deliverability.monitors.runner import run_deliverability_monitors
 from crm.deliverability.alerts import run_daily_digest
 from crm.deliverability.preflight.seeds import run_seed_checks
 from crm.engagement_refresh import run_engagement_refresh_scheduler
+from crm.deliverability.lifecycle import run_lifecycle_refresh
+from crm.deliverability.import_hygiene import run_domain_hygiene
 from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
     run_daily_discovery_scheduler,
@@ -186,6 +188,8 @@ class Command(BaseCommand):
             ("crm_listmonk_sync", run_listmonk_sync_scheduler),
             # Activity-only daily ratings. No consent or messaging side effects.
             ("crm_engagement_refresh", run_engagement_refresh_scheduler),
+            ("crm_lifecycle", run_lifecycle_refresh),
+            ("crm_domain_hygiene", run_domain_hygiene),
             # Releases expired, undispatched MLAI Coding reservations and
             # resolves calls whose provider usage could not be confirmed.
             # Authenticated request paths only reconcile their own account;

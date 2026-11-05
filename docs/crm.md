@@ -835,6 +835,30 @@ scenarios and verify the 150/300/600/1,000/1,500/1,450 healthy ramp, protections
 recovery, priority, idle decay and capacity ceilings. Prepare the disposable
 schema only within the specifically approved migration scope.
 
+## Dormant contacts and import hygiene (Phase 6)
+
+`CRM_LIFECYCLE_ENABLED=false` is the default. When enabled, the daily activity
+roll-up uses only observed logins, registrations, attendance, clicks and replies,
+including dated Substack exports. Opens and undated counts never reactivate a
+contact. Consent and channel preferences are not rewritten by the job.
+
+Owners prepare a reconfirmation draft from Sending → Health. The fixed audience
+contains dormant contacts with affirmative permission from the last 36 calendar
+months and no hard-bounce history. The stream must be active; the dispatcher
+shares its budget and limits preference checks to 10% per day. A normal review
+and explicit Send are still required. Unanswered requests add a dormant flag
+after 30 days. Nothing is deleted. Signed confirmation uses a read-only GET and
+an explicit CSRF-protected POST; opt-outs, bans and delivery/review holds remain
+authoritative. Reconfirmation does not invent a new original consent date.
+
+Import reports add independent `no_mx`, `disposable`, `likely_typo` and
+`domain_unverified` counts. Pending DNS work is bounded and completed by the
+background domain pass; unknown never means clean. The contact drawer offers
+known-domain suggestions and a separate manual confirmation. Corrections retain
+the original address internally for future imports, feedback and ban checks;
+they never clear opt-outs or delivery holds, and duplicate destinations require
+manual review. System lifecycle/import/alias attributes are not editable fields.
+
 ## Campaign preflight (Phase 3)
 
 `CRM_PREFLIGHT_ENABLED` is false by default. With it enabled, email draft

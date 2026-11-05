@@ -1,6 +1,7 @@
 """Consent-preserving hygiene, activity tiers and stable provider-interleaved snapshots."""
 
 import hashlib
+import math
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from datetime import timedelta
@@ -32,11 +33,9 @@ class Plan:
 
 
 def active_at(contact, now):
-    """Trust observed activity, never opens; Phase 6 will persist the daily roll-up."""
-    timestamps = [getattr(contact, key, None) for key in ('last_active_at', 'last_attended_at',
-        'latest_registration', 'latest_click', 'latest_reply')]
-    timestamps.append(getattr(getattr(contact, 'user', None), 'last_login', None))
-    return max((stamp for stamp in timestamps if stamp and stamp.tzinfo and stamp <= now), default=None)
+    """Read current observed activity as well as the daily persisted roll-up."""
+    from .lifecycle import observed_activity
+    return observed_activity(contact, now)
 
 
 def tier_for(contact, now, *, stars=None):
@@ -74,10 +73,10 @@ def interleave(recipients):
     return result
 
 
-def _activity_queryset(queryset):
-    registrations = EventRegistration.objects.filter(contact_id=OuterRef('pk'), removed_at__isnull=True, registered_at__isnull=False).order_by('-registered_at').values('registered_at')[:1]
-    clicks = BlastDelivery.objects.filter(contact_id=OuterRef('pk'), first_clicked_at__isnull=False).order_by('-first_clicked_at').values('first_clicked_at')[:1]
-    replies = InboundMessage.objects.filter(contact_id=OuterRef('pk')).order_by('-received_at').values('received_at')[:1]
+def _activity_queryset(queryset, *, now):
+    registrations = EventRegistration.objects.filter(contact_id=OuterRef('pk'), removed_at__isnull=True, registered_at__lte=now).order_by('-registered_at').values('registered_at')[:1]
+    clicks = BlastDelivery.objects.filter(contact_id=OuterRef('pk'), first_clicked_at__lte=now).order_by('-first_clicked_at').values('first_clicked_at')[:1]
+    replies = InboundMessage.objects.filter(contact_id=OuterRef('pk'), received_at__lte=now).order_by('-received_at').values('received_at')[:1]
     return queryset.select_related('user').annotate(latest_registration=Subquery(registrations, output_field=DateTimeField()),
         latest_click=Subquery(clicks, output_field=DateTimeField()), latest_reply=Subquery(replies, output_field=DateTimeField()))
 
@@ -86,7 +85,12 @@ def prepare(blast, now, *, audience=None, cached_only=False):
     """Compute a read-only plan from the existing purpose/consent/suppression resolver."""
     from crm.blasts import resolve_audience
     audience = audience or resolve_audience(blast, now=now)
-    contacts = list(_activity_queryset(audience.querysets['email']).order_by('pk'))
+    from . import reconfirmation
+    reconfirm = reconfirmation.is_reconfirmation(blast)
+    query = _activity_queryset(audience.querysets['email'], now=now)
+    if reconfirm:
+        query = reconfirmation.with_bounce_history(query)
+    contacts = list(query.order_by('pk'))
     infos = hygiene.domain_infos([contact.email for contact in contacts], now, cached_only=cached_only)
     excluded = Counter(audience.excluded.get('email') or {})
     by_tier = defaultdict(list)
@@ -96,8 +100,11 @@ def prepare(blast, now, *, audience=None, cached_only=False):
         reason = hygiene.exclusion(contact, info, blast.purpose)
         stars = (engagement_rating(contact.attributes) or {}).get('stars', 0)
         tier = 'A' if blast.purpose == 'event_update' else tier_for(contact, now, stars=stars)
-        if reason is None and tier == 'D':
-            reason = 'dormant'
+        if reason is None:
+            if reconfirm:
+                reason = 'not_dormant' if tier != 'D' else reconfirmation.exclusion(contact, now)
+            elif tier == 'D':
+                reason = 'dormant'
         if reason:
             excluded[reason] += 1
             continue
@@ -106,16 +113,23 @@ def prepare(blast, now, *, audience=None, cached_only=False):
         if contact.email.partition('@')[0].lower() in hygiene.WARN_ROLES:
             warnings['role_addresses'] += 1
     recipients = []
-    for tier in ('A', 'B', 'C'):
+    tiers = ('D',) if reconfirm else ('A', 'B', 'C')
+    for tier in tiers:
         ordered = sorted(by_tier[tier], key=lambda row: (-row.stars, -(row.active_at.timestamp() if row.active_at else 0),
             hashlib.sha256(str(row.contact.pk).encode()).hexdigest()))
         recipients.extend(interleave(ordered))
     stream = blast.stream
     used_today, used_hour = volume.usage(stream, now)
+    if reconfirm:
+        import copy
+        stream = copy.copy(stream)
+        stream.daily_budget_override = math.floor(volume.budget(stream) * policy.value('CRM_RECONFIRMATION_DAILY_FRACTION'))
+        used_today = reconfirmation.daily_used(blast.stream, now)
+        used_hour = min(used_hour, used_today)
     estimate = volume.estimate(stream, len(recipients), now, used_today=used_today, used_hour=used_hour,
         critical=volume.time_critical(blast, now))
     summary = {'people': len(recipients), 'excluded': dict(excluded),
-        'tiers': {tier: len(by_tier[tier]) for tier in ('A', 'B', 'C')},
+        'tiers': {tier: len(by_tier[tier]) for tier in tiers},
         'providers': dict(Counter(row.provider for row in recipients)), 'estimate': estimate,
         'warnings': [{'key': key, 'people': count} for key, count in warnings.items()]}
     if excluded['domain_unverified']:
@@ -136,9 +150,13 @@ def plan_preview(blast, now):
 def plan_snapshot(blast, now, *, prepared=None):
     """Write each ranked email row once inside queue_blast's existing transaction."""
     prepared = prepared or prepare(blast, now, cached_only=True)
+    from .reconfirmation import is_reconfirmation
+    # The existing delivery tier field describes ordinary A/B/C campaigns.
+    # Dormant preference checks retain their D counts in the plan and a blank row tier.
+    preference_check = is_reconfirmation(blast)
     rows = [BlastDelivery(blast=blast, contact=row.contact, address=row.contact.email, channel='email',
         consent_basis='event_registration' if blast.purpose == 'event_update' else 'explicit' if row.contact.marketing_consent == 'granted' else 'inferred_attendance',
-        send_rank=index, tier=row.tier, provider=row.provider) for index, row in enumerate(prepared.recipients)]
+        send_rank=index, tier='' if preference_check else row.tier, provider=row.provider) for index, row in enumerate(prepared.recipients)]
     BlastDelivery.objects.bulk_create(rows)
     hygiene.remember(prepared.infos)
     blast.plan = prepared.summary

@@ -8,6 +8,8 @@ REASONS = {
     'postmaster_spam_rate': 'more people than usual marked it as spam',
     'blocklist': 'an email provider started rejecting our messages',
     'seed_spam': 'our inbox checks found a problem',
+    'cohort_quarantine': 'one audience group had unusually high bounce or complaint rates',
+    'click_anomaly': 'fewer people followed links at an inbox provider',
 }
 
 

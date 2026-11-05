@@ -539,6 +539,13 @@ def queue_blast(
     # DNS is bounded and cached before entering the queue transaction. Recount
     # from current contact data under the lock; never save an old preview.
     preview = Blast.objects.select_related('stream', 'mailbox', 'event', 'segment').get(pk=blast_id)
+    from .deliverability import reconfirmation
+    if reconfirmation.is_reconfirmation(preview) and not reconfirmation.is_owner(actor):
+        raise BlastError('owner_required', 403)
+    if reconfirmation.is_reconfirmation(preview):
+        block = reconfirmation.admission(preview)
+        if block:
+            raise BlastError(block, 409)
     from .deliverability import policy
     preflight_template = None
     if (policy.value('CRM_PREFLIGHT_ENABLED') and Channel.EMAIL in (preview.channels or [])

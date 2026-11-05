@@ -70,6 +70,9 @@ def record_email_opt_out(email: str, kind: str, *, source: str, now, detail=None
     bounce only marks the address undeliverable. Returns whether anything changed.
     """
 
+    from .email_aliases import canonical_emails
+    email = str(email).lower()
+    email = canonical_emails([email]).get(email, email)
     status, consent_kind, withdraws = _OPT_OUTS[kind]
     with transaction.atomic():
         contact = Contact.objects.select_for_update().filter(email=str(email).lower()).first()
