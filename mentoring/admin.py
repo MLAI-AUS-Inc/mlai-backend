@@ -5,7 +5,7 @@ from django.contrib import admin, messages
 from django.utils import timezone
 
 from .models import (  # noqa: F401  (invite_link is re-exported for callers of this module)
-    INVITE_TTL_DAYS, MAX_SESSION_MINUTES, MIN_SESSION_MINUTES, MentorAvailabilityRule, MentorInvite,
+    INVITE_TTL_DAYS, MAX_SESSION_MINUTES, NEW_MENTOR_PRICE_ROO, NEW_MENTOR_SESSION_MINUTES, MIN_SESSION_MINUTES, MentorAvailabilityRule, MentorInvite,
     MentorProfile, MentorSession, invite_link,
 )
 from .service import MAX_PRICE_ROO  # the bound the mentor API enforces
@@ -54,6 +54,15 @@ class MentorProfileAdmin(admin.ModelAdmin):
     search_fields = ('user__email', 'user__first_name', 'user__last_name')
     raw_id_fields = ('user',)
     inlines = [AvailabilityInline]
+
+    def get_changeform_initial_data(self, request):
+        # A new mentor starts at 30 Roo for 30 minutes. The stored model defaults stay as
+        # they are: changing them would need a migration.
+        return {
+            'price_roo': NEW_MENTOR_PRICE_ROO,
+            'session_minutes': NEW_MENTOR_SESSION_MINUTES,
+            **super().get_changeform_initial_data(request),
+        }
 
     def get_changelist_form(self, request, **kwargs):
         # The inline-editable price on the list page must follow the same rules.

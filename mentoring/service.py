@@ -37,7 +37,8 @@ from roo.services import PointsService
 from . import google, scheduling
 from .models import (
     hash_invite_token,
-    DEFAULT_PRICE_ROO,
+    NEW_MENTOR_PRICE_ROO,
+    NEW_MENTOR_SESSION_MINUTES,
     LOCATION_MLAI_SPACE,
     LOCATION_VIDEO,
     MAX_SESSION_MINUTES,
@@ -855,7 +856,8 @@ class MentoringService:
         return {
             'state': 'ready',
             'expires_at': invite.expires_at.isoformat(),
-            'default_price_roo': DEFAULT_PRICE_ROO,
+            'default_price_roo': NEW_MENTOR_PRICE_ROO,
+            'default_session_minutes': NEW_MENTOR_SESSION_MINUTES,
         }
 
     @classmethod
@@ -873,7 +875,8 @@ class MentoringService:
             if profile is not None and profile.is_active:
                 raise MentoringError('already_a_mentor', 'You are already an active mentor.', 409)
             fields = {k: v for k, v in payload.items() if k not in ('token', 'away_dates', 'is_active', 'accepting_bookings', 'booking_revision')}
-            fields.setdefault('price_roo', DEFAULT_PRICE_ROO)
+            fields.setdefault('price_roo', NEW_MENTOR_PRICE_ROO)
+            fields.setdefault('session_minutes', NEW_MENTOR_SESSION_MINUTES)
             clean = validate_profile_update(fields, {})
             windows = validate_availability(fields.get('availability'))
             for name in ('headline', 'bio', 'topics', 'session_minutes', 'location_type'):

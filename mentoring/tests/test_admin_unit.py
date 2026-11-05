@@ -354,3 +354,12 @@ class ProfileAdminFormTests(unittest.TestCase):
         list_form = model_admin.get_changelist_form(MagicMock())
         self.assertTrue(issubclass(list_form, MentorProfileAdminForm))
 
+
+    def test_add_form_starts_at_30_roo_for_30_minutes(self):
+        from django.contrib import admin as dj_admin
+        from django.test import RequestFactory
+        from mentoring.admin import MentorProfileAdmin
+        from mentoring.models import MentorProfile
+        ma = MentorProfileAdmin(MentorProfile, dj_admin.site)
+        initial = ma.get_changeform_initial_data(RequestFactory().get('/'))
+        self.assertEqual((initial['price_roo'], initial['session_minutes']), (30, 30))
