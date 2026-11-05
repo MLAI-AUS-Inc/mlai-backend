@@ -26,6 +26,14 @@ class IslandRegionComputationTests(TestCase):
         self.assertEqual(len(set(region['color_key'] for region in regions)), 6)
         self.assertTrue(all(region['name'].startswith('Theme') for region in regions))
 
+    def test_shared_pillar_names_preserve_familiar_acronyms(self):
+        islands = fixture(groups=3, size=5)
+        prefixes = ('ai coding', 'abn seo', 'api b2b')
+        for index, island in enumerate(islands):
+            island.pillar_keyword = f'{prefixes[index // 5]} topic {index}'
+        names = {row['name'] for row in compute_island_regions(islands)}
+        self.assertEqual(names, {'AI Coding Topic', 'ABN SEO Topic', 'API B2B Topic'})
+
     def test_matched_identity_founder_name_and_color_survive_changed_score(self):
         islands = fixture()
         previous = compute_island_regions(islands)

@@ -11,6 +11,7 @@ from collections import Counter
 REGION_COLOR_KEYS = ('green', 'purple', 'blue', 'orange', 'teal', 'rose', 'amber', 'indigo')
 REGION_MIN_LINKAGE = 0.12
 REGION_MOVE_MARGIN = 0.05
+REGION_NAME_ACRONYMS = frozenset(('ai', 'abn', 'seo', 'api', 'b2b'))
 
 
 def _value(row, key, default=None):
@@ -81,7 +82,9 @@ def _fallback_name(members, by_slug):
             leading = leading[:length]
         if len(leading) < 2:
             break
-    name = ' '.join(leading).title() if len(leading) >= 2 else str(_value(by_slug[ordered[0]], 'name', ordered[0]))
+    name = (' '.join(word.upper() if word.casefold() in REGION_NAME_ACRONYMS else word.title()
+                     for word in leading) if len(leading) >= 2
+            else str(_value(by_slug[ordered[0]], 'name', ordered[0])))
     return name[:80]
 
 
