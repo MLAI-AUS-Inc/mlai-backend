@@ -436,7 +436,7 @@ def run_alert_reasons(run, *, now) -> list[str]:
     if status == "blocked":
         reasons.append("startup_autofill_blocked" if run.workflow == "startup_autofill" else "run_blocked")
     waiting = status in YOUR_TURN_STATUSES or (status == "blocked" and bool(run_action_id(run.result)))
-    if waiting and run.updated_at and not is_automation_research(run) and run.updated_at <= now - YOUR_TURN_AFTER:
+    if waiting and run.updated_at and not is_automation_research(run) and not is_superseded(run) and run.updated_at <= now - YOUR_TURN_AFTER:
         reasons.append("your_turn_72h")
     return reasons
 
@@ -464,6 +464,22 @@ def is_automation_research(run) -> bool:
     """A topic batch from a research automation, which waits on the founder by design."""
     request = run.run_request if isinstance(run.run_request, dict) else {}
     return str(request.get("client_request_id") or "").startswith(AUTOMATION_RESEARCH_REQUEST_PREFIX)
+
+
+def _newer_runs():
+    """Runs of the same org and workflow created after the outer run (or ``run``)."""
+    return ContentFactoryRun.objects.filter(organization_id=OuterRef("organization_id"), workflow=OuterRef("workflow"),
+                                            created_at__gt=OuterRef("created_at"))
+
+
+def is_superseded(run) -> bool:
+    """A newer run of the same workflow replaced this one, so only the newest can be the founder's turn.
+
+    A founder who asks for topics three times in a few minutes is waiting on one
+    decision, not three (TalaThrive, 2 Nov).
+    """
+    return ContentFactoryRun.objects.filter(organization_id=run.organization_id, workflow=run.workflow,
+                                            created_at__gt=run.created_at).exists()
 
 
 def is_scheduler_run(run) -> bool:
@@ -546,7 +562,7 @@ def _detect(*, now, since, limit) -> dict:
                 Q(result__failure__action__has_key="id") | Q(result__failure__has_key="action_id")
                 | Q(result__has_key="action_id")))).filter(
             ~Q(run_request__has_key="client_request_id")
-            | ~Q(run_request__client_request_id__startswith=AUTOMATION_RESEARCH_REQUEST_PREFIX)),
+            | ~Q(run_request__client_request_id__startswith=AUTOMATION_RESEARCH_REQUEST_PREFIX)).exclude(Exists(_newer_runs())),
     }
     for reason, queryset in candidates.items():
         # Ids first: results can be large, and receipts are written while we walk.
