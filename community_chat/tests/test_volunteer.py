@@ -156,7 +156,10 @@ class VolunteerTests(TestCase):
         self.assertFalse(Ledger.objects.filter(reference_type="VOLUNTEER_CONTRIBUTION").exists())
 
     def test_questioners_other_verified_device_can_mark_answer_useful(self):
-        CommunityChatDevice.objects.create(user=self.member, public_key="d" * 64, status="verified")
+        enrolled = timezone.now() - timedelta(minutes=2)
+        device = CommunityChatDevice.objects.create(user=self.member, public_key="d" * 64,
+            status="verified", verified_at=enrolled)
+        CommunityChatDevice.objects.filter(pk=device.pk).update(created_at=enrolled)
         receipt = self.useful_answer(actor="d")
         self.assertEqual(receipt.status, "processed")
         self.assertEqual(receipt.recognition.user_id, self.other.pk)

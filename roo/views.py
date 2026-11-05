@@ -2893,6 +2893,7 @@ class SystemAwardView(APIView):
     """
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def post(self, request):
         created_by_slack_id = clean_slack_id(
             request.data.get('created_by_slack_id') or request.data.get('admin_slack_id') or 'SYSTEM'
@@ -2919,17 +2920,19 @@ class SystemAwardView(APIView):
             return Response({'error': 'System awards must be positive'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            from .system_rewards import canonical_link_love_key, native_reward_user
+            from .system_rewards import canonical_link_love_key, native_reward_user, prepare_link_love_award
             if target_profile_id:
                 if not HasStrictRooApiKey().has_permission(request, self):
                     return Response({'error': 'Roo service credential required'}, status=403)
                 user = native_reward_user(target_profile_id, points=points, reason=reason, idempotency_key=idempotency_key)
             else:
                 user = get_or_create_user_for_slack_id(target_slack_id)
+            User.objects.select_for_update().get(pk=user.pk)
             idempotency_key = canonical_link_love_key(
                 user, idempotency_key, recipient=f"profile:{target_profile_id}" if target_profile_id else target_slack_id,
                 points=points, reason=reason,
             )
+            prepare_link_love_award(user, idempotency_key, points=points, reason=reason)
         except ValueError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception:
@@ -2946,14 +2949,20 @@ class SystemAwardView(APIView):
             idempotency_key = f"system:{created_by_slack_id}:{target_slack_id}:{timezone.now().isoformat()}"
 
         try:
-            ledger, _ = PointsService.award(
-                user=user,
-                delta=points,
-                source='EVENT',
-                description=reason,
-                created_by_slack_id=created_by_slack_id,
-                idempotency_key=idempotency_key,
-            )
+            previous_boost = (Ledger.objects.filter(user=user, idempotency_key=idempotency_key,
+                kind="EARN", delta_microroo=2_000_000).first()
+                if reason == "link-love" and points == 2
+                and idempotency_key.startswith("volunteer:recognition:") else None)
+            ledger = previous_boost
+            if ledger is None:
+                ledger, _ = PointsService.award(
+                    user=user,
+                    delta=points,
+                    source='EVENT',
+                    description=reason,
+                    created_by_slack_id=created_by_slack_id,
+                    idempotency_key=idempotency_key,
+                )
             balance = PointsService.get_balance(user)
             return Response({
                 'success': True,

@@ -34,11 +34,13 @@ def flag(name):
 
 
 def awards_enabled(action_key):
-    """Permit advice and intro rewards without enabling unrelated credits."""
+    """Permit scoped objective rewards without enabling unrelated credits."""
     return flag("awards_enabled") or (
         action_key == "helpful_answer" and flag("advice_rewards_enabled")
     ) or (
         action_key == "introduce_yourself" and flag("intro_rewards_enabled")
+    ) or (
+        action_key == "boost_startup" and flag("boost_rewards_enabled")
     )
 
 
@@ -138,17 +140,45 @@ def actor_for_key(public_key, *, occurred_at=None):
     if device is None:
         raise VolunteerError("member_unavailable", 404)
     if occurred_at is not None:
-        # Signed relay timestamps have second precision. A key may be revoked
-        # and enrolled by another account; its latest owner cannot inherit an
-        # older introduction. Conflicting owners in one second stay unknown.
-        start = occurred_at.replace(microsecond=0)
-        end = start + timedelta(seconds=1)
-        owners = list(CommunityChatDevice.objects.filter(
-            public_key=public_key, status__in=("verified", "revoked"),
-            created_at__lt=end, verified_at__lt=end,
-        ).filter(Q(revoked_at__isnull=True) | Q(revoked_at__gte=start)).order_by().values_list(
-            "user_id", flat=True,
-        ).distinct()[:2])
-        if owners != [device.user_id]:
+        if historical_counterparty_for_key(public_key, occurred_at).pk != device.user_id:
             raise VolunteerError("member_unavailable", 404)
     return device.user
+
+
+def historical_counterparty_for_key(public_key, occurred_at):
+    """Identify an original post/answer owner, never authenticate an action.
+
+    Revoking or rotating a post author's key must not retarget their old work or
+    prevent another verified member engaging with it. The acting device still
+    goes through actor_for_key's current verification and source-time check.
+    """
+    from community_chat.models import CommunityChatDevice
+
+    start = occurred_at.replace(microsecond=0)
+    end = start + timedelta(seconds=1)
+    owners = list(CommunityChatDevice.objects.filter(
+        public_key=public_key, status__in=("verified", "revoked"),
+        created_at__lt=end, verified_at__lt=end,
+    ).filter(Q(revoked_at__isnull=True) | Q(revoked_at__gte=start)).order_by().values_list(
+        "user_id", flat=True,
+    ).distinct()[:2])
+    user = get_user_model().objects.filter(pk=owners[0], is_active=True).first() if len(owners) == 1 else None
+    if user is None:
+        raise VolunteerError("member_unavailable", 404)
+    return user
+
+
+def counterparty_for_key(public_key, occurred_at=None):
+    """Keep old receipt formats safe when a referenced key has changed owners."""
+    from community_chat.models import CommunityChatDevice
+
+    if occurred_at is not None:
+        return historical_counterparty_for_key(public_key, occurred_at)
+    user = actor_for_key(public_key)
+    if CommunityChatDevice.objects.filter(
+        public_key=public_key, verified_at__isnull=False,
+    ).exclude(user_id=user.pk).exists():
+        # Older collectors have no original target timestamp. Retry after the
+        # compatible collector supplies it; never pay a key's replacement owner.
+        raise VolunteerError("source_time_required", 409)
+    return user
