@@ -191,6 +191,20 @@ rehearsal must prove receiver authentication and real signed unsubscribe
 headers. OAuth seed access tokens are supplied by host secrets and must be
 refreshed there; this adapter does not claim to manage OAuth grants.
 
+Phase 3 final local verification: **748 CRM tests** passed on the frozen
+`9105d3d` source in disposable PostgreSQL with the approved 384 migration hashes
+checked. [Draft PR #1293](https://github.com/MLAI-AUS-Inc/mlai-backend/pull/1293)
+is stacked on Phase 2; no release action is implied.
+
+## Phase 4 API support
+
+The staff UI's presets, current source-permission predicate, masked preview
+list and full plain status catalogue are prepared on
+`codex/one-click-campaign-phase-4-contract`. This phase adds no schema.
+Access explicitly advertises the waves/preflight flags. Blasts return pause
+and status copy in list responses as well as detail. No contact permission is
+changed by these staff-composition operations.
+
 ## Provider contract checked during implementation
 
 Resend's current event references document `bounce.type`, `bounce.subType`

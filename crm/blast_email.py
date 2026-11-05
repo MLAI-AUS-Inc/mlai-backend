@@ -306,6 +306,12 @@ def _drop_reason(blast, contact, is_banned: bool) -> Optional[str]:
         return "consent_withdrawn"
     if blast.purpose == Blast.Purpose.MARKETING and marketing_review_hold(contact.attributes):
         return "marketing_review_hold"
+    if blast.purpose == Blast.Purpose.MARKETING and (
+            (((blast.stats or {}).get('audience_preset') or {}).get('kind') == 'opted_in')
+            or (getattr(contact, 'marketing_consent_source', '') or '').startswith('community_onboarding:')):
+        from .community_optins import contact_is_opted_in
+        if not contact_is_opted_in(contact):
+            return 'consent_withdrawn'
     return None
 
 

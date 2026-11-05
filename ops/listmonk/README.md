@@ -302,3 +302,11 @@ configuration/scoring fixtures and an authorized staging send proves actual
 Gmail/Outlook/Yahoo placement and signed one-click headers. Neither these files
 nor the disposable test approval authorize starting this stack, changing live
 listmonk settings, real inbox access or sending a seed message.
+
+The staff composer now receives only the stream-selected identity, plan and
+plain delivery status. There is no per-campaign From picker or speed control.
+The owner Sending view retains configuration and diagnostics. A staff pause
+may be resumed only by its actor; a system pause still requires an owner's
+incident acknowledgement. The API's current-consent preset also checks the
+source permission before handing off to listmonk, without changing subscriber
+status or consent itself.

@@ -124,7 +124,13 @@ def prepare(blast, now, *, audience=None, cached_only=False):
 
 
 def plan_preview(blast, now):
-    return prepare(blast, now).summary
+    from crm.blasts import mask_address
+    plan = prepare(blast, now)
+    # A small, masked display projection is returned only to verified admins.
+    # Never copy names/addresses into the persisted plan snapshot.
+    return {**plan.summary, 'people_preview': [{'id': str(row.contact.pk),
+        'name': row.contact.display_name or row.contact.first_name,
+        'address': mask_address('email', row.contact.email)} for row in plan.recipients[:50]]}
 
 
 def plan_snapshot(blast, now, *, prepared=None):

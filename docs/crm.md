@@ -830,3 +830,27 @@ all later stream capacity limits remain in force. Synthetic tests cover every
 check, binding/config changes, fixes, seed recovery, authenticated header
 proofs, timeout pacing and migration 0004 reversal/reapplication. Real inbox
 access and real seed/campaign sends are excluded from the local test approval.
+
+## Staff composer contract (Phase 4)
+
+Drafts accept `audience_preset: "opted_in"` or `"city"` with a reviewed
+`city_id`. The server infers community-news purpose and snapshots the rules;
+saved audiences and event guest choices retain their existing paths. Clearing
+a preset clears its definition, so it cannot silently become all contacts.
+The opted-in preset checks the member's current approval, verified matching
+email, active account, latest consent evidence and CRM suppressions. A source
+withdrawal is rechecked just before listmonk handoff even if a CRM sync has not
+run. Choosing a preset never changes consent or a contact record.
+
+`access/` returns fail-closed `campaign_features: {waves, preflight}` alongside
+the owner capability. Blast list responses include the same `pause` and
+plain `status_message` as detail. Preset metadata is returned in
+`audience_preset: {kind, city_id?}`. Plan responses add a bounded, masked
+`people_preview` for the staff list; it is never stored in `Blast.plan`.
+Staff copy covers inbox waits, scheduled batches, sending hours, slowing,
+provider delays, dependency holds, staff/system pauses, frequency waits and
+terminal outcomes without raw provider diagnostics. Terminal status wins
+over old pause/stream metadata. Stop records the acting staff name in audit
+and blast metadata. Draft saves take the stream/blast locks and recheck the
+current status, so a late editor cannot restore a queued campaign to draft.
+No new schema is required.

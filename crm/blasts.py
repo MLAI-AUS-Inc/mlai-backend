@@ -312,6 +312,11 @@ def resolve_audience(blast, *, now) -> Audience:
     querysets[Channel.EMAIL], excluded[Channel.EMAIL] = evaluate(
         definition, blast.purpose, blast.event, now=now
     )
+    if ((blast.stats or {}).get('audience_preset') or {}).get('kind') == 'opted_in':
+        from .community_optins import opted_in_q
+        before = querysets[Channel.EMAIL]
+        querysets[Channel.EMAIL] = before.filter(opted_in_q())
+        excluded[Channel.EMAIL]['no_consent'] += before.count() - querysets[Channel.EMAIL].count()
     if not twilio_allowed(blast):
         return Audience(querysets, excluded, definition)
 
@@ -892,6 +897,7 @@ def cancel_blast(blast_id, *, actor, now=None) -> Blast:
                 blast.last_error = "listmonk_cancel_pending"
         # Twilio sends stop between two messages: each claim skips a cancelled blast.
         blast.status = Blast.Status.CANCELLED
+        blast.stats = {**(blast.stats or {}), 'stopped_by': actor.full_name or 'staff', 'stopped_at': now.isoformat()}
         blast.save(update_fields=["status", "stats", "last_error", "updated_at"])
         CrmAuditEvent.objects.create(
             actor=actor,
