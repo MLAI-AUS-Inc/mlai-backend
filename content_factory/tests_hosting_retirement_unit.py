@@ -36,6 +36,21 @@ class BlogHostingRemovedTests(SimpleTestCase):
                 _send_dispatch(SimpleNamespace(), SimpleNamespace(run_request={'hosted_site_id':'old'}))
         remote.assert_not_called()
 
+    def test_worker_snapshot_cannot_erase_retired_destination_before_dispatch(self):
+        from .editorial_run_state import EditorialRunConflict
+        from .service_views import _merge_django_owned_run_request
+        original = {"hosted_site_id": "retired-site", "source_run_id": "saved-source"}
+        receipt = {"article_approval_v1": {"source": "publish_reviewed"}}
+        merged = _merge_django_owned_run_request(original, {}, backend_result=receipt)
+        self.assertEqual(merged, original)
+        for replacement in (None, "", "different-site"):
+            with self.subTest(replacement=replacement), self.assertRaises(EditorialRunConflict):
+                _merge_django_owned_run_request(original, {"hosted_site_id": replacement}, backend_result=receipt)
+        with patch('integrations.http_client.post') as remote:
+            with self.assertRaises(PublishReviewedError):
+                _send_dispatch(SimpleNamespace(), SimpleNamespace(run_request=merged))
+        remote.assert_not_called()
+
     def test_saved_hosted_strategy_uses_the_repository_ladder(self):
         self.assertNotIn('hosted', RUNGS)
         self.assertEqual(_rung({}, {'strategy_pin':'hosted'}), 'native_collection')
