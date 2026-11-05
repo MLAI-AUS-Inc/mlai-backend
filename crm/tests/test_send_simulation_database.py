@@ -14,6 +14,7 @@ from crm.deliverability import simulation
 from crm.models import Blast, Contact, EmailEvent, SendingStream
 
 
+@override_settings(APP_ENV='test')
 class CampaignSimulationDatabaseTests(TestCase):
     def test_command_refuses_non_test_environment_and_missing_exact_name_opt_in(self):
         with override_settings(APP_ENV='production'), self.assertRaises(CommandError):
