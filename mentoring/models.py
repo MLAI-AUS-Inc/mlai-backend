@@ -44,8 +44,17 @@ class MentorProfile(models.Model):
         default=list, blank=True,
         help_text='List of {"from": "YYYY-MM-DD", "to": "YYYY-MM-DD"} local date ranges with no bookings.',
     )
-    session_minutes = models.PositiveSmallIntegerField(default=30)
+    session_minutes = models.PositiveSmallIntegerField(default=15)
     price_roo = models.PositiveIntegerField(default=DEFAULT_PRICE_ROO)
+    # Staff approval stays separate from the mentor's explicit publication choice.
+    accepting_bookings = models.BooleanField(default=False)
+    booking_mode = models.CharField(max_length=16, default='legacy_request')
+    buffer_before_minutes = models.PositiveSmallIntegerField(default=15)
+    buffer_after_minutes = models.PositiveSmallIntegerField(default=15)
+    minimum_notice_minutes = models.PositiveIntegerField(default=240)
+    booking_horizon_days = models.PositiveSmallIntegerField(default=30)
+    start_increment_minutes = models.PositiveSmallIntegerField(default=15)
+    booking_revision = models.PositiveIntegerField(default=1)
     location_type = models.CharField(
         max_length=16, choices=LOCATION_CHOICES, default=LOCATION_VIDEO
     )
@@ -162,6 +171,7 @@ class MentorAvailabilityRule(models.Model):
 
 
 class MentorSession(models.Model):
+    STATUS_PROVISIONING = 'provisioning'
     STATUS_REQUESTED = 'requested'
     STATUS_ACCEPTED = 'accepted'
     STATUS_DECLINED = 'declined'
@@ -169,6 +179,7 @@ class MentorSession(models.Model):
     STATUS_EXPIRED = 'expired'
     STATUS_COMPLETED = 'completed'
     STATUS_CHOICES = (
+        (STATUS_PROVISIONING, 'Confirming'),
         (STATUS_REQUESTED, 'Requested'),
         (STATUS_ACCEPTED, 'Accepted'),
         (STATUS_DECLINED, 'Declined'),
@@ -176,7 +187,7 @@ class MentorSession(models.Model):
         (STATUS_EXPIRED, 'Expired'),
         (STATUS_COMPLETED, 'Completed'),
     )
-    ACTIVE_STATUSES = (STATUS_REQUESTED, STATUS_ACCEPTED)
+    ACTIVE_STATUSES = (STATUS_PROVISIONING, STATUS_REQUESTED, STATUS_ACCEPTED)
 
     MEETING_PENDING = 'pending'
     MEETING_CREATED = 'created'
@@ -212,6 +223,13 @@ class MentorSession(models.Model):
     )
     starts_at = models.DateTimeField()
     ends_at = models.DateTimeField()
+
+    booking_mode = models.CharField(max_length=16, default='legacy_request')
+    buffer_before_minutes = models.PositiveSmallIntegerField(default=0)
+    buffer_after_minutes = models.PositiveSmallIntegerField(default=0)
+    calendar_snapshot = models.JSONField(default=dict, blank=True)
+    booking_snapshot = models.JSONField(default=dict, blank=True)
+    failure_code = models.CharField(max_length=64, default='', blank=True)
 
     # Snapshots taken at request time so later profile edits change nothing.
     price_roo = models.PositiveIntegerField()
@@ -292,3 +310,51 @@ class MentorSession(models.Model):
             models.Index(fields=('mentor', 'status', 'starts_at'), name='mentor_sess_mentor_idx'),
             models.Index(fields=('founder', 'status', 'starts_at'), name='mentor_sess_founder_idx'),
         ]
+
+
+# Register the mentoring-owned personal calendar model.
+from .calendar_models import MentorCalendarConnection  # noqa: E402,F401
+
+
+class MentorBookingAttempt(models.Model):
+    """Durable provider-write outbox and provisional-debit recovery state."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.OneToOneField(MentorSession, on_delete=models.PROTECT, related_name='booking_attempt')
+    payload_digest = models.CharField(max_length=64)
+    status = models.CharField(max_length=16, default='provisioning')
+    deadline = models.DateTimeField()
+    generation = models.PositiveIntegerField(default=1)
+    lease_token = models.UUIDField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    next_attempt_at = models.DateTimeField(default=timezone.now)
+    provider_started = models.BooleanField(default=False)
+    cleanup_pending = models.BooleanField(default=False)
+    error_code = models.CharField(max_length=64, default='', blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=('status', 'next_attempt_at'), name='mentor_attempt_due_idx')]
+
+
+class MentorTimeReservation(models.Model):
+    """A principal's protected UTC interval; PostgreSQL excludes active overlaps.
+
+    The reviewed schema migration installs the vendor-specific btree_gist range
+    exclusion in addition to these portable checks. One merged interval per
+    session/principal prevents a host also attending another meeting.
+    """
+
+    session = models.ForeignKey(MentorSession, on_delete=models.PROTECT, related_name='time_reservations')
+    principal = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='+')
+    starts_at = models.DateTimeField()
+    ends_at = models.DateTimeField()
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=Q(ends_at__gt=F('starts_at')), name='mentor_reservation_end_after_start'),
+            models.UniqueConstraint(fields=('session', 'principal'), name='mentor_reservation_principal_unique'),
+        ]
+        indexes = [models.Index(fields=('principal', 'active', 'starts_at'), name='mentor_reservation_user_idx')]
