@@ -3,11 +3,15 @@
 from django.urls import path
 
 from . import views
-from .deliverability_views import DeliverabilityView, IncidentAcknowledgeView, IncidentsView
+from .deliverability_views import (DeliverabilityView, IncidentAcknowledgeView, IncidentsView,
+    StreamPolicyView, SelfCheckView, SeedHeartbeatView)
 from .profile_views import AudienceProfileMappingApplyView, AudienceProfileMappingPreviewView, AudienceProfileView
 from .preflight_views import PreflightFixView, PreflightView
 
 urlpatterns = [
+    path("deliverability/streams/<slug:key>/", StreamPolicyView.as_view(), name="community_chat_crm_stream_policy"),
+    path("deliverability/self-check/", SelfCheckView.as_view(), name="community_chat_crm_self_check"),
+    path("deliverability/seed-test/", SeedHeartbeatView.as_view(), name="community_chat_crm_seed_heartbeat"),
     path("deliverability/", DeliverabilityView.as_view(), name="community_chat_crm_deliverability"),
     path("deliverability/incidents/", IncidentsView.as_view(), name="community_chat_crm_deliverability_incidents"),
     path("deliverability/incidents/<uuid:incident_id>/", IncidentsView.as_view(), name="community_chat_crm_deliverability_incident"),

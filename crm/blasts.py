@@ -758,6 +758,12 @@ def dispatch_blast(blast_id, *, now=None, twilio_budget: Optional[int] = None) -
             # listmonk answered again, so an earlier outage note no longer applies.
             Blast.objects.filter(pk=blast.pk, last_error__in=_LISTMONK_OUTAGES).update(last_error="")
         except ListmonkError as exc:
+            if blast.stream_id:
+                from crm.deliverability import policy as delivery_policy
+                if delivery_policy.value('CRM_MONITORS_ENABLED') and exc.status_code == 429:
+                    CrmAuditEvent.objects.create(action='sync', target_type='deliverability_dependency',
+                        target_id=str(blast.stream_id), detail={'operation': 'rate_limit', 'status': 429,
+                            'blast_id': str(blast.pk), 'epoch': now.timestamp()})
             if exc.credentials_rejected:
                 raise
             if exc.transient:

@@ -128,7 +128,7 @@ jobs:
       run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit crm.tests.test_audience_contract_unit crm.tests.test_segment_trees_unit crm.tests.test_audience_profiles_unit crm.tests.test_audience_rules_unit crm.tests.test_admin_gate_unit
 
     - name: Check CRM blasts, sending domains and the listmonk client without database access
-      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit crm.tests.test_deliverability_unit crm.tests.test_deliverability_planner_unit crm.tests.test_preflight_content_unit crm.tests.test_preflight_seed_unit crm.tests.test_campaign_copy_unit
+      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit crm.tests.test_deliverability_unit crm.tests.test_deliverability_monitors_unit crm.tests.test_deliverability_planner_unit crm.tests.test_preflight_content_unit crm.tests.test_preflight_seed_unit crm.tests.test_campaign_copy_unit
 
     - name: Verify event discounts against disposable migration state
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency
@@ -774,7 +774,7 @@ jobs:
       run: python manage.py test crm.tests.test_api_database crm.tests.test_segments_database crm.tests.test_segment_builder_database crm.tests.test_audience_catalog_database crm.tests.test_audience_profile_database crm.tests.test_admin_gate_database --verbosity 2
 
     - name: Verify CRM blasts, senders and listmonk feedback on PostgreSQL
-      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database crm.tests.test_deliverability_database crm.tests.test_campaign_waves_database crm.tests.test_campaign_wave_migration_database crm.tests.test_preflight_database crm.tests.test_preflight_migration_database crm.tests.test_campaign_ui_database --verbosity 2
+      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database crm.tests.test_deliverability_database crm.tests.test_deliverability_monitors_database crm.tests.test_campaign_waves_database crm.tests.test_campaign_wave_migration_database crm.tests.test_preflight_database crm.tests.test_preflight_migration_database crm.tests.test_campaign_ui_database --verbosity 2
 
     - name: Verify Founder recovery policy and authority on PostgreSQL
       run: |
@@ -1415,7 +1415,55 @@ jobs:
         CRM_LISTMONK_PUBLIC_URL: ${{ vars.CRM_LISTMONK_PUBLIC_URL || '' }}
         CRM_CONFIG_CHECK_SECONDS: ${{ vars.CRM_CONFIG_CHECK_SECONDS || '' }}
         CRM_REPUTATION_MAX_AGE_HOURS: ${{ vars.CRM_REPUTATION_MAX_AGE_HOURS || '' }}
+        CRM_MONITORS_ENABLED: ${{ vars.CRM_MONITORS_ENABLED || '' }}
+        CRM_SEED_HEARTBEAT_ENABLED: ${{ vars.CRM_SEED_HEARTBEAT_ENABLED || '' }}
+        CRM_DELIVERABILITY_EMAIL_ALERTS_ENABLED: ${{ vars.CRM_DELIVERABILITY_EMAIL_ALERTS_ENABLED || '' }}
+        CRM_MONITOR_INTERVAL_SECONDS: ${{ vars.CRM_MONITOR_INTERVAL_SECONDS || '' }}
+        CRM_MONITOR_PASS_SECONDS: ${{ vars.CRM_MONITOR_PASS_SECONDS || '' }}
+        CRM_DNS_CHECK_SECONDS: ${{ vars.CRM_DNS_CHECK_SECONDS || '' }}
+        CRM_DNS_RECOVERY_PASSES: ${{ vars.CRM_DNS_RECOVERY_PASSES || '' }}
+        CRM_DNS_FAILURE_CHECKS: ${{ vars.CRM_DNS_FAILURE_CHECKS || '' }}
+        CRM_GUARD_UNSUBSCRIBE_MIN_SAMPLE: ${{ vars.CRM_GUARD_UNSUBSCRIBE_MIN_SAMPLE || '' }}
+        CRM_GUARD_UNSUBSCRIBE_AMBER: ${{ vars.CRM_GUARD_UNSUBSCRIBE_AMBER || '' }}
+        CRM_GUARD_UNSUBSCRIBE_RED: ${{ vars.CRM_GUARD_UNSUBSCRIBE_RED || '' }}
+        CRM_GUARD_DEFERRAL_MIN_SAMPLE: ${{ vars.CRM_GUARD_DEFERRAL_MIN_SAMPLE || '' }}
+        CRM_GUARD_DEFERRAL_AMBER: ${{ vars.CRM_GUARD_DEFERRAL_AMBER || '' }}
+        CRM_GUARD_DEFERRAL_RED: ${{ vars.CRM_GUARD_DEFERRAL_RED || '' }}
+        CRM_GUARD_PROVIDER_RATE_LIMIT_COUNT: ${{ vars.CRM_GUARD_PROVIDER_RATE_LIMIT_COUNT || '' }}
+        CRM_GUARD_SLOW_CLEAN_HOURS: ${{ vars.CRM_GUARD_SLOW_CLEAN_HOURS || '' }}
+        CRM_GUARD_PROVIDER_CLEAN_HOURS: ${{ vars.CRM_GUARD_PROVIDER_CLEAN_HOURS || '' }}
+        CRM_GUARD_PROVIDER_HOLD_HOURS: ${{ vars.CRM_GUARD_PROVIDER_HOLD_HOURS || '' }}
+        CRM_GUARD_POSTMASTER_AMBER: ${{ vars.CRM_GUARD_POSTMASTER_AMBER || '' }}
+        CRM_GUARD_POSTMASTER_RED: ${{ vars.CRM_GUARD_POSTMASTER_RED || '' }}
+        CRM_GUARD_ROOT_SPAM_RATE: ${{ vars.CRM_GUARD_ROOT_SPAM_RATE || '' }}
+        CRM_GUARD_POSTMASTER_SLOW_HOURS: ${{ vars.CRM_GUARD_POSTMASTER_SLOW_HOURS || '' }}
+        CRM_GUARD_FEEDBACK_MIN_SAMPLE: ${{ vars.CRM_GUARD_FEEDBACK_MIN_SAMPLE || '' }}
+        CRM_GUARD_FEEDBACK_MIN_AGE_MINUTES: ${{ vars.CRM_GUARD_FEEDBACK_MIN_AGE_MINUTES || '' }}
+        CRM_GUARD_FEEDBACK_LOOKBACK_HOURS: ${{ vars.CRM_GUARD_FEEDBACK_LOOKBACK_HOURS || '' }}
+        CRM_GUARD_RATE_LIMIT_HOURS: ${{ vars.CRM_GUARD_RATE_LIMIT_HOURS || '' }}
+        CRM_MONITOR_HISTORY_DAYS: ${{ vars.CRM_MONITOR_HISTORY_DAYS || '' }}
+        CRM_MONITOR_HTTP_SECONDS: ${{ vars.CRM_MONITOR_HTTP_SECONDS || '' }}
+        CRM_MONITOR_MAX_PAGES: ${{ vars.CRM_MONITOR_MAX_PAGES || '' }}
+        CRM_REPUTATION_MAX_SUBJECTS: ${{ vars.CRM_REPUTATION_MAX_SUBJECTS || '' }}
+        CRM_REPUTATION_DNS_SECONDS: ${{ vars.CRM_REPUTATION_DNS_SECONDS || '' }}
+        CRM_REPUTATION_NAMESERVERS: ${{ vars.CRM_REPUTATION_NAMESERVERS || '' }}
+        CRM_URIBL_ENABLED: ${{ vars.CRM_URIBL_ENABLED || '' }}
+        CRM_SURBL_ENABLED: ${{ vars.CRM_SURBL_ENABLED || '' }}
+        CRM_SAFE_BROWSING_NONCOMMERCIAL: ${{ vars.CRM_SAFE_BROWSING_NONCOMMERCIAL || '' }}
+        CRM_POSTMASTER_HOURS: ${{ vars.CRM_POSTMASTER_HOURS || '' }}
+        CRM_DIGEST_HOUR: ${{ vars.CRM_DIGEST_HOUR || '' }}
+        CRM_DIGEST_MINUTE: ${{ vars.CRM_DIGEST_MINUTE || '' }}
+        CRM_SEED_HEARTBEAT_HOUR: ${{ vars.CRM_SEED_HEARTBEAT_HOUR || '' }}
+        CRM_SEED_HEARTBEAT_MINUTE: ${{ vars.CRM_SEED_HEARTBEAT_MINUTE || '' }}
         CRM_RESEND_WEBHOOK_SECRET: ${{ secrets.CRM_RESEND_WEBHOOK_SECRET || '' }}
+        POSTMASTER_OAUTH_CLIENT_ID: ${{ secrets.POSTMASTER_OAUTH_CLIENT_ID || '' }}
+        POSTMASTER_OAUTH_CLIENT_SECRET: ${{ secrets.POSTMASTER_OAUTH_CLIENT_SECRET || '' }}
+        POSTMASTER_OAUTH_REFRESH_TOKEN: ${{ secrets.POSTMASTER_OAUTH_REFRESH_TOKEN || '' }}
+        SPAMHAUS_DQS_KEY: ${{ secrets.SPAMHAUS_DQS_KEY || '' }}
+        SAFE_BROWSING_API_KEY: ${{ secrets.SAFE_BROWSING_API_KEY || '' }}
+        WEB_RISK_API_KEY: ${{ secrets.WEB_RISK_API_KEY || '' }}
+        RESEND_READ_API_KEY: ${{ secrets.RESEND_READ_API_KEY || '' }}
+        CRM_NOTIFY_API_KEY: ${{ secrets.CRM_NOTIFY_API_KEY || '' }}
         CRM_SMS_ENABLED: ${{ vars.CRM_SMS_ENABLED || '' }}
         CRM_WHATSAPP_ENABLED: ${{ vars.CRM_WHATSAPP_ENABLED || '' }}
         LISTMONK_BASE_URL: ${{ vars.LISTMONK_BASE_URL || '' }}

@@ -2363,6 +2363,9 @@ CRM_RESEND_MONITORED_SENDERS = tuple(
 # Defaults and tunable thresholds have a single owning module.
 from crm.deliverability.policy import environment_settings as _crm_delivery_settings
 globals().update(_crm_delivery_settings(os.environ))
+from crm.deliverability.policy import SECRET_KEYS as _crm_delivery_secret_keys
+for _key in _crm_delivery_secret_keys:
+    globals()[_key] = os.environ.get(_key, '').strip()
 CRM_WARMUP_ENABLED = _env_is_true('CRM_WARMUP_ENABLED', False)
 CRM_WARMUP_RUN_ID = os.environ.get('CRM_WARMUP_RUN_ID', '').strip()
 LISTMONK_BASE_URL = os.environ.get('LISTMONK_BASE_URL', '').strip().rstrip('/')

@@ -1,5 +1,55 @@
 # listmonk email delivery
 
+## External monitoring setup (Phase 5, disabled by default)
+
+Source configuration is prepared; no account, DNS, host environment, deployment
+or real inbox has been changed by implementation. Review the staging results
+before enabling `CRM_MONITORS_ENABLED`, then separately authorize enrolled-seed
+delivery and owner emails. These are independent flags, all false by default.
+
+- Postmaster Tools v2 uses user OAuth with
+  `https://www.googleapis.com/auth/postmaster.traffic.readonly`, not a service
+  account. Store the client ID, secret and refresh token in the dedicated
+  `POSTMASTER_OAUTH_*` secrets. Verify ownership of the exact news/notify domain
+  and mlai.au. Sparse daily data stays unknown. Root-domain spam can alert but
+  never proves compliance for a sending subdomain.
+- `RESEND_READ_API_KEY` is a separate credential used only by GET requests for
+  domain, webhook and suppression inspection. Resend documents full-access and
+  sending-only keys; it does not document a read-only key permission. Review its
+  actual scope with an owner. The client never falls back to the sending key.
+  `CRM_NOTIFY_API_KEY` is a separate, domain-restricted notify sending key.
+- `SPAMHAUS_DQS_KEY` is a 26-character DQS subscription key. Daily positive and
+  negative resolver probes must both work before NXDOMAIN means clean. SURBL
+  and URIBL are opt-in and require suitable usage terms; URIBL also requires an
+  explicit permitted recursive resolver. Refused/error answers remain unknown.
+- Prefer `WEB_RISK_API_KEY` for commercial URL checks. Safe Browsing v4 requires
+  explicit `CRM_SAFE_BROWSING_NONCOMMERCIAL=true`; its noncommercial restriction
+  is not inferred from MLAI's organisation type. URL checks use full URLs, retain
+  only hashes and bounded outcomes, and never cache a partial result as clean.
+- Enrol the seven personal seed mailboxes and configure IMAP app credentials
+  before enabling the heartbeat. News and notify each send their own probe:
+  seven enrolled seeds across two streams means up to fourteen test messages
+  per day. Only the fixed seed snapshot is eligible. The daily request is
+  idempotent; an uncertain submission is not blindly resent. IMAP checks are
+  read-only. Notify checks authentication without marketing unsubscribe rules.
+- Set `CRM_DELIVERABILITY_OWNERS` and the Slack channel, verify notify DNS and
+  the dedicated key, then enable email alerts separately. A red alert uses the
+  same frozen body/key for retries for less than 24 hours. Credential rotation
+  or an expired uncertainty window requires owner review instead of a new send.
+
+Validate DNS, listmonk v6.2 SMTP/template settings, tracking disabled, the seven
+webhook event types, seed authentication and an actual staging message before
+production rollout. The owner Health tab and aggregate-only digest show check
+coverage; unknown observations are not release evidence. The existing migration
+approval covers only disposable synthetic databases, not these environments.
+
+Provider references: [Postmaster v2](https://developers.google.com/workspace/gmail/postmaster/reference/rest/v2/domains.domainStats/query),
+[Resend key permissions](https://resend.com/changelog/new-api-key-permissions),
+[Resend idempotency](https://resend.com/docs/dashboard/emails/idempotency-keys),
+[Spamhaus DQS](https://docs.spamhaus.com/datasets/docs/source/70-access-methods/data-query-service/040-dqs-queries.html),
+[Safe Browsing](https://developers.google.com/safe-browsing),
+[Web Risk](https://docs.cloud.google.com/web-risk/docs/reference/rest/v1/uris/search).
+
 This Compose project runs [listmonk](https://listmonk.app) v6.2 and its own
 PostgreSQL database, separate from `mlai-backend`. It is Phase 0 of the
 contacts and blasts plan (`mlai-chat/docs/mlai/CONTACTS_EVENTS_EMAIL_PLAN_2026-10-23.md`).

@@ -122,17 +122,64 @@ DEFAULTS = {
     "CRM_LISTMONK_PUBLIC_URL": 'https://lists.mlai.au',
     "CRM_CONFIG_CHECK_SECONDS": 3600,
     "CRM_REPUTATION_MAX_AGE_HOURS": 24,
+    "CRM_MONITORS_ENABLED": False,
+    "CRM_SEED_HEARTBEAT_ENABLED": False,
+    "CRM_DELIVERABILITY_EMAIL_ALERTS_ENABLED": False,
+    "CRM_MONITOR_INTERVAL_SECONDS": 55,
+    "CRM_MONITOR_PASS_SECONDS": 35,
+    "CRM_DNS_CHECK_SECONDS": 600,
+    "CRM_DNS_RECOVERY_PASSES": 2,
+    "CRM_DNS_FAILURE_CHECKS": 2,
+    "CRM_GUARD_UNSUBSCRIBE_MIN_SAMPLE": 200,
+    "CRM_GUARD_UNSUBSCRIBE_AMBER": 0.01,
+    "CRM_GUARD_UNSUBSCRIBE_RED": 0.025,
+    "CRM_GUARD_DEFERRAL_MIN_SAMPLE": 50,
+    "CRM_GUARD_DEFERRAL_AMBER": 0.05,
+    "CRM_GUARD_DEFERRAL_RED": 0.2,
+    "CRM_GUARD_PROVIDER_RATE_LIMIT_COUNT": 5,
+    "CRM_GUARD_SLOW_CLEAN_HOURS": 24,
+    "CRM_GUARD_PROVIDER_CLEAN_HOURS": 6,
+    "CRM_GUARD_PROVIDER_HOLD_HOURS": 24,
+    "CRM_GUARD_POSTMASTER_AMBER": 0.0008,
+    "CRM_GUARD_POSTMASTER_RED": 0.0015,
+    "CRM_GUARD_ROOT_SPAM_RATE": 0.001,
+    "CRM_GUARD_POSTMASTER_SLOW_HOURS": 48,
+    "CRM_GUARD_FEEDBACK_MIN_SAMPLE": 50,
+    "CRM_GUARD_FEEDBACK_MIN_AGE_MINUTES": 30,
+    "CRM_GUARD_FEEDBACK_LOOKBACK_HOURS": 2,
+    "CRM_GUARD_RATE_LIMIT_HOURS": 2,
+    "CRM_MONITOR_HISTORY_DAYS": 90,
+    "CRM_MONITOR_HTTP_SECONDS": 10,
+    "CRM_MONITOR_MAX_PAGES": 20,
+    "CRM_REPUTATION_MAX_SUBJECTS": 100,
+    "CRM_REPUTATION_DNS_SECONDS": 3,
+    "CRM_REPUTATION_NAMESERVERS": (),
+    "CRM_URIBL_ENABLED": False,
+    "CRM_SURBL_ENABLED": False,
+    "CRM_SAFE_BROWSING_NONCOMMERCIAL": False,
+    "CRM_POSTMASTER_HOURS": (10, 16),
+    "CRM_DIGEST_HOUR": 8,
+    "CRM_DIGEST_MINUTE": 30,
+    "CRM_SEED_HEARTBEAT_HOUR": 8,
+    "CRM_SEED_HEARTBEAT_MINUTE": 45,
 }
 
+# Only numeric thresholds and sending windows can be overridden by an owner.
+# Feature switches, protected identities and secret references remain deployment configuration.
+OVERRIDABLE = frozenset(name for name in DEFAULTS if name.startswith('CRM_GUARD_')
+    and name.endswith(('_SAMPLE', '_COUNT', '_AMBER', '_RED', '_HIGH'))
+    and type(DEFAULTS[name]) in (int, float)) | {'CRM_SEND_WINDOW', 'CRM_EVENT_SEND_WINDOW'}
+SECRET_KEYS = ('POSTMASTER_OAUTH_CLIENT_ID', 'POSTMASTER_OAUTH_CLIENT_SECRET',
+    'POSTMASTER_OAUTH_REFRESH_TOKEN', 'SPAMHAUS_DQS_KEY', 'SAFE_BROWSING_API_KEY',
+    'WEB_RISK_API_KEY', 'RESEND_READ_API_KEY', 'CRM_NOTIFY_API_KEY')
 
 def value(name, stream=None):
     """Read at use time so overrides and tests share the same policy."""
     from django.conf import settings
     result = getattr(settings, name, DEFAULTS[name])
     overrides = getattr(stream, "policy_overrides", None) or {}
-    if name in ("CRM_SEND_WINDOW", "CRM_EVENT_SEND_WINDOW") and name in overrides:
-        if not isinstance(overrides[name], str):
-            raise ValueError("Invalid stream window override")
+    if name in OVERRIDABLE and name in overrides:
+        environment_settings({name: str(overrides[name])})
         result = overrides[name]
     return result
 
@@ -156,7 +203,9 @@ def environment_settings(environ):
                     pieces = tuple(int(item) for item in pieces)
                 except ValueError:
                     raise ValueError(f"{name} must contain positive increasing integers") from None
-                if not pieces or any(item <= 0 for item in pieces) or any(a >= b for a, b in zip(pieces, pieces[1:])):
+                if (not pieces or any(item < (0 if name == 'CRM_POSTMASTER_HOURS' else 1) for item in pieces)
+                        or (name == 'CRM_POSTMASTER_HOURS' and any(item > 23 for item in pieces))
+                        or any(a >= b for a, b in zip(pieces, pieces[1:]))):
                     raise ValueError(f"{name} must contain positive increasing integers")
             result[name] = pieces
         elif isinstance(default, int):
@@ -164,7 +213,13 @@ def environment_settings(environ):
                 result[name] = int(raw)
             except (ValueError, TypeError):
                 raise ValueError(f"{name} must be an integer") from None
-            if result[name] < 1:
+            if name in ('CRM_DIGEST_HOUR', 'CRM_SEED_HEARTBEAT_HOUR'):
+                if not 0 <= result[name] <= 23:
+                    raise ValueError(f"{name} must be a local hour")
+            elif name in ('CRM_DIGEST_MINUTE', 'CRM_SEED_HEARTBEAT_MINUTE'):
+                if not 0 <= result[name] <= 59:
+                    raise ValueError(f"{name} must be a local minute")
+            elif result[name] < 1:
                 raise ValueError(f"{name} must be positive")
         elif isinstance(default, float):
             try:

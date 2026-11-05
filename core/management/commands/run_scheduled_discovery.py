@@ -26,6 +26,8 @@ from crm.luma_sync import run_luma_guest_sync_scheduler
 from crm.warmup import run_warmup_scheduler
 from crm.deliverability.guardian import run_deliverability_guard
 from crm.deliverability.day_close import run_stream_day_close
+from crm.deliverability.monitors.runner import run_deliverability_monitors
+from crm.deliverability.alerts import run_daily_digest
 from crm.deliverability.preflight.seeds import run_seed_checks
 from crm.engagement_refresh import run_engagement_refresh_scheduler
 from integrations.services.daily_discovery import (
@@ -172,7 +174,9 @@ class Command(BaseCommand):
             # through Twilio. Off unless a blast channel is enabled, and
             # cache-throttled to CRM_BLAST_DISPATCH_INTERVAL_SECONDS.
             ("crm_warmup", run_warmup_scheduler),
+            ("crm_deliverability_monitors", run_deliverability_monitors),
             ("crm_deliverability_guard", run_deliverability_guard),
+            ("crm_deliverability_digest", run_daily_digest),
             ("crm_seed_checks", run_seed_checks),
             ("crm_stream_day_close", run_stream_day_close),
             ("crm_blast_dispatch", run_blast_dispatch_scheduler),

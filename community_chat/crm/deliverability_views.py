@@ -35,14 +35,16 @@ class DeliverabilityOwnerView(CrmView):
 
 class DeliverabilityView(DeliverabilityOwnerView):
     def get(self, request):
+        from django.utils import timezone
+        from crm.deliverability.health import stream_dto
+        now = timezone.now()
         streams = SendingStream.objects.select_related("mailbox").order_by("key")
-        return Response({"streams": [{"key": stream.key, "label": stream.label, "domain": stream.domain,
-            "from": stream.mailbox.email, "reply_to": stream.mailbox.reply_to, "state": stream.state,
-            "state_reason": stream.state_reason, "ramp_stage": stream.ramp_stage,
-            "transactional": stream.transactional, "enabled": stream.mailbox.enabled} for stream in streams],
+        return Response({"streams": [stream_dto(stream, now=now) for stream in streams],
             "incidents": [incident_dto(incident) for incident in DeliverabilityIncident.objects.filter(
                 state="open").select_related("stream").order_by("-opened_at")[:30]],
             "guardian_enabled": policy.value("CRM_GUARDIAN_ENABLED"),
+            "monitors_enabled": policy.value("CRM_MONITORS_ENABLED"),
+            "seed_heartbeat_enabled": policy.value("CRM_SEED_HEARTBEAT_ENABLED"),
             "dry_run": policy.value("CRM_GUARDIAN_DRY_RUN")})
 
 
@@ -71,3 +73,64 @@ class IncidentAcknowledgeView(DeliverabilityOwnerView):
     def post(self, request, incident_id):
         data = validated(AcknowledgeInput, request)
         return Response(incident_dto(guardian.acknowledge(incident_id, actor=request.user, **data)))
+
+
+class StreamPolicyView(DeliverabilityOwnerView):
+    """Audited owner overrides; no identity or feature-switch changes."""
+
+    def patch(self, request, key):
+        from django.utils import timezone
+        from crm.deliverability.health import stream_dto, update_stream
+        get_object_or_404(SendingStream, key=key)
+        stream = update_stream(key, request.data, actor=request.user, now=timezone.now())
+        return Response(stream_dto(stream, now=timezone.now()))
+
+
+class CheckInput(StrictSerializer):
+    stream = serializers.SlugField(max_length=40)
+    kind = serializers.ChoiceField(choices=('dns', 'config', 'reputation', 'postmaster'), required=False, default='config')
+
+
+class SelfCheckView(DeliverabilityOwnerView):
+    """Explicit owner checks only; this endpoint never submits an inbox probe."""
+
+    def post(self, request):
+        from django.utils import timezone
+        from crm.deliverability import observations
+        from crm.deliverability.monitors import config_check, dns, postmaster, reputation
+        from crm.deliverability.monitors.http import budget
+        from crm.models import CrmAuditEvent
+        data = validated(CheckInput, request)
+        stream = get_object_or_404(SendingStream.objects.select_related('mailbox'), key=data['stream'])
+        if not policy.value('CRM_MONITORS_ENABLED'):
+            return Response({'status': 'disabled'})
+        now = timezone.now()
+        CrmAuditEvent.objects.create(actor=request.user, action='edit', target_type='sending_stream', target_id=str(stream.pk),
+            detail={'operation': 'self_check_requested', 'kind': data['kind']})
+        try:
+            with budget(policy.value('CRM_MONITOR_PASS_SECONDS')):
+                result = {'dns': dns.check, 'config': config_check.check, 'reputation': reputation.check,
+                    'postmaster': postmaster.check}[data['kind']](stream, now=now)
+        except Exception:
+            result = observations.record(stream, data['kind'], {'status': 'unavailable'}, now=now)
+        return Response(result)
+
+
+class HeartbeatInput(StrictSerializer):
+    stream = serializers.SlugField(max_length=40)
+
+
+class SeedHeartbeatView(DeliverabilityOwnerView):
+    """Submit at most one enrolled-seed heartbeat per stream/Melbourne day."""
+
+    def post(self, request):
+        from django.utils import timezone
+        from crm.deliverability.monitors.heartbeat import start
+        from crm.models import CrmAuditEvent
+        data = validated(HeartbeatInput, request)
+        stream = get_object_or_404(SendingStream.objects.select_related('mailbox'), key=data['stream'])
+        if not policy.value('CRM_SEED_HEARTBEAT_ENABLED'):
+            return Response({'status': 'disabled'})
+        CrmAuditEvent.objects.create(actor=request.user, action='edit', target_type='sending_stream', target_id=str(stream.pk),
+            detail={'operation': 'seed_heartbeat_requested'})
+        return Response(start(stream, now=timezone.now(), actor=request.user))

@@ -107,7 +107,12 @@ def allowance_for(blast, now):
         return 0, 0
     used_today, used_hour = usage(stream, now, slot_start=current['slot'])
     first = not blast.waves.filter(started_at__isnull=False).exists()
-    return slot_allowance(budget(stream), used_today, used_hour, current['slots'], current['left'], canary=first)
+    allowance, cap = slot_allowance(budget(stream), used_today, used_hour, current['slots'], current['left'], canary=first)
+    if not first and stream.incidents.filter(state='open', action='half_slot').exists():
+        allowance //= 2
+    if blast.incidents.filter(state='open', action='slow_blast').exists():
+        allowance = max(1, allowance // 2) if allowance else 0
+    return allowance, cap
 
 
 def provider_caps(allowance, shares, states=None):

@@ -152,14 +152,14 @@ def read_mailbox(mailbox, probe, *, now, token=None):
                 pass
 
 
-def grade(results, *, timed_out=False):
+def grade(results, *, timed_out=False, marketing=True):
     """Missing probes warn; observed identity/one-click failures always block."""
     observed = [row for row in results if row.get('arrived_at')]
     for row in observed:
         signed = set(row.get('dkim_signed_headers') or ())
         if (any(row.get(key) != 'pass' for key in ('spf', 'dkim', 'dmarc'))
-                or not row.get('list_unsubscribe') or not row.get('list_unsubscribe_post')
-                or not {'list-unsubscribe', 'list-unsubscribe-post'} <= signed or not row.get('one_click_signed')):
+                or (marketing and (not row.get('list_unsubscribe') or not row.get('list_unsubscribe_post')
+                    or not {'list-unsubscribe', 'list-unsubscribe-post'} <= signed or not row.get('one_click_signed')))):
             return 'block', 'identity_or_unsubscribe'
     spam = {('google' if row['provider'] in ('gmail', 'google_workspace') else 'microsoft' if row['provider'] in ('outlook', 'microsoft365') else row['provider'])
         for row in observed if row.get('folder') == 'spam'}
@@ -173,6 +173,32 @@ def grade(results, *, timed_out=False):
         for row in observed if row.get('folder') in ('inbox', 'promotions', 'updates')}
     if not {'google', 'microsoft', 'yahoo'} <= coverage:
         return 'warn', 'coverage_incomplete'
-    if any(not row.get('feedback_id_signed') for row in observed):
+    if marketing and any(not row.get('feedback_id_signed') for row in observed):
         return 'warn', 'feedback_header_unsigned'
     return 'pass', 'inboxes_reached'
+
+
+def login_check(mailbox):
+    """Verify only authentication; this config check never selects or reads an inbox."""
+    if not re.fullmatch(r'CRM_SEED_[A-Z0-9_]+', mailbox.secret_env):
+        return 'credential_reference_invalid'
+    credential = os.environ.get(mailbox.secret_env, '')
+    if not credential:
+        return 'not_configured'
+    client = None
+    try:
+        client = imaplib.IMAP4_SSL(mailbox.imap_host, mailbox.imap_port,
+            ssl_context=ssl.create_default_context(), timeout=policy.value('CRM_SEED_IMAP_TIMEOUT_SECONDS'))
+        if mailbox.auth == 'xoauth2':
+            client.authenticate('XOAUTH2', lambda _: f'user={mailbox.address}\x01auth=Bearer {credential}\x01\x01'.encode())
+        else:
+            client.login(mailbox.address, credential)
+        return 'pass'
+    except (OSError, imaplib.IMAP4.error):
+        return 'unavailable'
+    finally:
+        if client:
+            try:
+                client.logout()
+            except (OSError, imaplib.IMAP4.error):
+                pass

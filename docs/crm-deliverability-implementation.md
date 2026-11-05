@@ -73,6 +73,34 @@ This approval does not grant production migration, deployment or live sending pe
 | 6 | Activity lifecycle and reconfirmation | Existing pilot ends before warm-up retirement (17 November) |
 | 7 | Transactional identity and authentication hardening | Verified legitimate senders before DMARC changes |
 
+## Phase 5 implementation and remaining gates
+
+The monitoring branch adds exact-evidence recovery, provider and stream scopes,
+bounded Postmaster/DNS/reputation/config/suppression checks, enrolled-seed daily
+heartbeats, dedicated notify owner alerts, and aggregate health/policy APIs.
+It reuses the approved schema: no fifth migration is created. All new external
+monitoring/sending switches default false. Secrets are wired as secrets in the
+deployment source and are not assigned to any connected environment.
+
+The Chat health branch adds owner-only stream/provider graphs, check coverage,
+seed history, explicit check actions, an incident decision dialog and audited
+policy controls. Phase 4 remains separately reviewable in Chat PR #654 and
+backend PR #1295. Neither branch has been merged or deployed.
+
+Primary provider contracts were verified during implementation. Important plan
+corrections: Postmaster's scope is `postmaster.traffic.readonly`; Resend has no
+documented read-only key permission; Safe Browsing is noncommercial; seven seed
+mailboxes across two streams can generate fourteen daily test messages.
+Operational setup and real staging evidence are still required. The simulation
+command and Phase 6/7 work remain tracked under the original implementation goal.
+
+The frozen monitoring source passed all **799 CRM tests** on the approved
+384-migration disposable PostgreSQL graph, including 16 monitor database tests
+and every admin route. The 91 focused database-free guard/monitor/preflight
+checks and eight deployment-configuration checks passed. CI assignment reports
+zero new omissions. Shell syntax and diff whitespace checks passed. External
+network access was denied throughout synthetic backend qualification.
+
 ## Current verification
 
 Phase 1 application code is prepared on `codex/one-click-campaign-phase-1`.

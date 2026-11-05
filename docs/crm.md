@@ -767,7 +767,7 @@ checks; code and synthetic tests do not prove those checks passed.
   incident; new negative evidence can. Every choice is audited.
 - `CRM_DELIVERABILITY_SLACK_CHANNEL` enables aggregate-only alerts and
   four-hour red reminders. No recipient addresses appear in these alerts.
-  Transactional email alerts, full monitors and the health UI follow in
+  Transactional email alerts, full monitors and the health UI are described in
   Phase 5. Phase 2 implements the volume effect of slowed/recovery state;
   the Phase 1 flag must remain off until its release gates are approved.
 - Numeric guard defaults live only in `crm/deliverability/policy.py` and are
@@ -777,6 +777,54 @@ checks; code and synthetic tests do not prove those checks passed.
 Database-free acceptance: `scripts/test_without_database.py crm.tests.test_deliverability_unit`.
 Synthetic database acceptance (specific migration approval first):
 `manage.py test crm.tests.test_deliverability_database`.
+
+## Monitoring and owner health (Phase 5)
+
+All external checks default off (`CRM_MONITORS_ENABLED`); inbox probes and
+owner email alerts have separate switches (`CRM_SEED_HEARTBEAT_ENABLED` and
+`CRM_DELIVERABILITY_EMAIL_ALERTS_ENABLED`). The scheduler runs at most one
+due external check per pass, with a 35-second request budget. The command
+`crm_deliverability_monitors` uses the same runner. Missing configuration,
+provider errors and sparse Postmaster data remain unknown, never healthy.
+Observations are redacted, append-only CRM audits with a bounded cache.
+
+Owner endpoints, behind the verified-installation admin gate:
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET deliverability/` | Streams, 30 observed days, seven sending-day capacity estimates, seed history, checks and open incidents |
+| `PATCH deliverability/streams/{key}/` | Audited daily budget and bounded threshold/window overrides; rejects identity, flag and secret changes |
+| `POST deliverability/self-check/` | `{stream, kind}` for DNS, config, reputation or Postmaster; never sends a seed |
+| `POST deliverability/seed-test/` | Explicit enrolled-seed heartbeat; reuses the stream's daily probe |
+
+The owner-only Health tab in Chat consumes this contract. Staff do not request
+these endpoints. Recipient addresses and credentials are excluded from health
+responses, graphs, incident alerts and digest bodies. Forecast capacity assumes
+healthy feedback and sufficient demand; it is not promised campaign volume.
+
+Guard scopes include campaign/wave totals, stream 24-hour complaints, provider
+one-hour deferrals and policy codes, global service rate limits, and unresolved
+handoffs without feedback. Provider throttles leave other providers running.
+Only amber automation heals. A completed cohort's unchanged amber evidence may
+cool after 24 hours without a new failure; unresolved deliveries prevent this.
+Red incidents always require an owner decision. Acknowledgement accepts exactly
+the recorded negative message identities; new evidence reopens protection.
+Manual/staff pauses survive automatic recovery. Resumed capacity is never
+accumulated into a catch-up burst. Postmaster red demotes once per incident;
+its amber recovery prevents promotion for 48 hours.
+
+DNS requires two spaced failures and two spaced passing checks. Suppressions
+are reconciled in bounded pages; a bounce adds a suppression without inventing
+a withdrawal, a complaint records withdrawal, and a manual provider block adds
+a review hold. No reconciliation removes a suppression. The notify stream's
+incidents are alert-only and cannot stop transactional sends.
+
+Red incidents alert Slack and owner email, with four-hour reminders; amber
+alerts Slack and appears in the daily 08:30 Melbourne digest. Owner email uses
+the dedicated notify credential and durable, per-owner idempotency receipts;
+uncertain attempts expire before Resend's 24-hour deduplication window. No
+marketing credential fallback is allowed. See `ops/listmonk/README.md` for
+credential setup and the remaining operational release gates.
 
 ## Campaign preflight (Phase 3)
 
