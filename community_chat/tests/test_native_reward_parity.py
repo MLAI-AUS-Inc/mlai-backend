@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection, connections, transaction
@@ -12,18 +13,20 @@ from rest_framework.test import APIClient
 
 from community_chat.models import CommunityChatDevice
 from community_chat.volunteer.access import VolunteerError, awards_enabled
-from community_chat.volunteer.models import VolunteerRecognition
+from community_chat.volunteer.models import VolunteerRecognition, VolunteerMemberState
+from community_chat.volunteer.services import contribution_total
 from community_chat.volunteer.receipts import ingest_receipt, persist_receipt, process_receipt
 from integrations.models import CommunityBridgeChannel, CommunityBridgeDelivery, CommunityBridgeMessageLink
 from roo.models import Ledger
 from roo.services import PointsService
-from roo.system_rewards import award_native_boost, canonical_link_love_key
+from roo.system_rewards import award_native_boost, canonical_link_love_key, prepare_link_love_award
 
 CHANNEL = "00000000-0000-4000-8000-000000000001"
 ROOT = "c" * 64
 PREFIX = "link_love:CBOOST:1793842044.896789"
 SETTINGS = dict(
     COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TTEST",
+    ROO_LINK_LOVE_SLACK_CHANNEL_ID="CBOOST",
     COMMUNITY_CHAT_VOLUNTEER_COMMUNITY="native-reward-tests",
     COMMUNITY_CHAT_VOLUNTEER_ENABLED=True,
     COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED=False,
@@ -74,6 +77,37 @@ class NativeFixture:
 
 @override_settings(**SETTINGS)
 class NativeRewardParityTests(NativeFixture, TestCase):
+    def legacy_system_award(self):
+        payload = dict(target_profile_id=str(self.user.community_chat_profile_id), points=2,
+            reason='link-love', idempotency_key=f'{PREFIX}:profile:{self.user.community_chat_profile_id}')
+        with override_settings(ROO_API_KEY='synthetic-native-award-key'), patch('roo.system_rewards.has_ai_consent', return_value=True):
+            return APIClient().post('/api/v1/points/system/award/', payload, format='json',
+                HTTP_X_API_KEY='synthetic-native-award-key')
+
+    def test_first_legacy_boost_keeps_known_rank_before_and_after_native_mirroring(self):
+        result = self.legacy_system_award()
+        self.assertEqual(result.status_code, 200, result.data)
+        self.assertEqual(VolunteerMemberState.objects.get(user=self.user).historical_microroo, 0)
+        self.assertEqual(contribution_total(self.user), 2_000_000)
+        self.bridge_root()
+        receipt = ingest_receipt(self.payload('rank-mirror', imported=True))
+        self.assertEqual(receipt.status, 'processed', receipt.error)
+        self.assertEqual(receipt.recognition.ledger_id, result.data['ledger_id'])
+        self.assertEqual(contribution_total(self.user), 2_000_000)
+        self.assertEqual(Ledger.objects.filter(user=self.user).count(), 1)
+        self.assertEqual(self.legacy_system_award().status_code, 200)
+        self.assertEqual(contribution_total(self.user), 2_000_000)
+        self.assertEqual(Ledger.objects.filter(user=self.user).count(), 1)
+
+    def test_legacy_transport_preserves_a_withdrawn_native_outcome(self):
+        self.bridge_root()
+        VolunteerRecognition.objects.create(community='native-reward-tests', user=self.user,
+            action_key='boost_startup', outcome_key='withdrawn-startup-outcome', source={'source_id': ROOT},
+            policy_snapshot={}, occurred_at=self.when, status='withdrawn', reward_microroo=2_000_000)
+        result = self.legacy_system_award()
+        self.assertEqual(result.status_code, 400, result.data)
+        self.assertFalse(Ledger.objects.filter(user=self.user).exists())
+
     def test_chat_only_intro_without_ai_consent_is_paid_once_after_later_slack_link(self):
         payload = dict(source_key="intro", origin="relay", kind="post", actor_public_key="a" * 64,
             occurred_at=self.when.isoformat(), source={"channel_id": "start", "source_id": "intro"},
@@ -267,6 +301,7 @@ class NativeRewardRaceTests(NativeFixture, TransactionTestCase):
                     get_user_model().objects.select_for_update().get(pk=user.pk)
                     recipient = f"profile:{user.community_chat_profile_id}"
                     key = canonical_link_love_key(user, f"{PREFIX}:{recipient}", recipient=recipient, points=2, reason="link-love")
+                    prepare_link_love_award(user, key, points=2, reason="link-love")
                     return PointsService.award(user=user, delta=2, source="EVENT", description="link-love",
                         created_by_slack_id="SYSTEM", idempotency_key=key)[0].pk
             finally:
@@ -276,3 +311,4 @@ class NativeRewardRaceTests(NativeFixture, TransactionTestCase):
             self.assertEqual(a.result(timeout=30), b.result(timeout=30))
         self.assertEqual(Ledger.objects.filter(user=self.user).count(), 1)
         self.assertEqual(PointsService.get_balance(self.user)["balance"], 2)
+        self.assertEqual(contribution_total(self.user), 2_000_000)

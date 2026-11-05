@@ -130,3 +130,8 @@ are introduced by this feature. Never run them against production data.
 Older receipt formats without original target times retry with `409 source_time_required`
 when a referenced signing key has changed account owners. The updated collector
 supplies the original timestamp; its replacement owner never inherits the award.
+
+Fixed two-point link-love ledger entries also classify contribution progress
+before a native receipt arrives. Starting member history before either route
+pays keeps new accounts known; mirroring the same ledger never counts it twice.
+Existing withdrawals and corrections remain enforced across both routes.

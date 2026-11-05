@@ -65,6 +65,7 @@ def award_native_boost(user, source):
     root = source["source_id"]
     if not isinstance(root, str) or not 1 <= len(root) <= 255:
         raise ValueError("Canonical startup source required")
+    prepare_link_love_award(user, native_boost_key(user, root), points=2, reason="link-love")
     prefixes = set()
     for link in CommunityBridgeMessageLink.objects.filter(
         channel__slack_workspace_id=settings.COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID,
@@ -82,6 +83,37 @@ def award_native_boost(user, source):
         return prior, False
     return PointsService.award(user=user, delta=2, source="EVENT", description="link-love",
         created_by_slack_id="volunteer:verified_source", idempotency_key=native_boost_key(user, root))
+
+
+def legacy_boost_ledgers(user):
+    """Classify fixed programme credits without counting a mirrored ledger twice."""
+    from community_chat.volunteer.access import community_id
+
+    profile = r"profile:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    native = r"^native_boost:" + re.escape(community_id()) + r":[0-9a-f]{64}:" + profile + "$"
+    channel = re.escape(getattr(settings, "ROO_LINK_LOVE_SLACK_CHANNEL_ID", "C09BQAWJ66R"))
+    slack = r"^link_love:" + channel + r":[0-9]{10,}\.[0-9]+:(" + profile + r"|[UW][A-Z0-9]+)$"
+    return Ledger.objects.filter(user=user, kind="EARN", source="EVENT",
+        delta_microroo=2_000_000, description="link-love").filter(
+            Q(idempotency_key__regex=native) | Q(idempotency_key__regex=slack))
+
+
+def prepare_link_love_award(user, key, *, points, reason):
+    """Preserve reviews and initialise history before either transport pays."""
+    if points != 2 or reason != "link-love":
+        return
+    from community_chat.volunteer.access import community_id
+    from community_chat.volunteer.models import VolunteerRecognition
+    from community_chat.volunteer.services import state_for
+
+    native = re.fullmatch(r"native_boost:" + re.escape(community_id()) + r":([0-9a-f]{64}):profile:[0-9a-f-]{36}", key)
+    slack = re.match(r"(link_love:C[A-Z0-9]+:[0-9]{10,}\.[0-9]+):", key)
+    roots = [native[1]] if native else _bridge_root_ids(slack[1]) if slack else []
+    records = VolunteerRecognition.objects.filter(community=community_id(), user=user, action_key="boost_startup")
+    if records.filter(Q(source__source_id__in=roots) | Q(ledger__idempotency_key=key)).exclude(
+            status__in=("pending", "approved")).exists():
+        raise ValueError("The existing startup-support review or correction is preserved")
+    state_for(user)
 
 
 def native_reward_user(profile_id, *, points, reason, idempotency_key):

@@ -26,6 +26,7 @@ class SystemRewardTests(SimpleTestCase):
         self.ledger.filter.return_value.order_by.return_value.first.return_value = None
         self.ledger.filter.return_value.first.return_value = None
         self.enterContext(patch(f"{MODULE}._bridge_root_ids", return_value=[]))
+        self.enterContext(patch(f"{MODULE}.prepare_link_love_award"))
         # API unit tests isolate the transaction wrapper; database suites retain it.
         self.enterContext(patch.object(SystemAwardView, "post", SystemAwardView.post.__wrapped__))
 

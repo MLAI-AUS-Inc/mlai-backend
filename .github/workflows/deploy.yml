@@ -763,6 +763,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install --require-hashes -r requirements.lock
 
+    - name: Verify native reward parity and original-device authority on PostgreSQL
+      run: python manage.py test community_chat.tests.test_native_reward_parity community_chat.tests.test_volunteer.VolunteerTests.test_questioners_other_verified_device_can_mark_answer_useful --verbosity 2
+
     - name: Verify event discount row locks and service boundaries on PostgreSQL
       run: python manage.py test roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency --verbosity 2
 
@@ -927,7 +930,6 @@ jobs:
           integrations.tests_public_bridge_consent.PublicBridgeConsentConcurrencyTests \
           community_chat.tests.test_volunteer_backfill.HistoricalBonusBackfillTests \
           community_chat.tests.test_volunteer_concurrency \
-          community_chat.tests.test_native_reward_parity.NativeRewardRaceTests \
           roo.tests_api.FirstChannelPostAwardConcurrencyTests \
           community_chat.tests.test_slack_dm_io_authority.SlackDmIoAuthorityTransactionTests \
           community_chat.tests.test_slack_dm_registration_ledger.SlackDmDeliveryLeaseTransactionTests \

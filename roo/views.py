@@ -2920,7 +2920,7 @@ class SystemAwardView(APIView):
             return Response({'error': 'System awards must be positive'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            from .system_rewards import canonical_link_love_key, native_reward_user
+            from .system_rewards import canonical_link_love_key, native_reward_user, prepare_link_love_award
             if target_profile_id:
                 if not HasStrictRooApiKey().has_permission(request, self):
                     return Response({'error': 'Roo service credential required'}, status=403)
@@ -2932,6 +2932,7 @@ class SystemAwardView(APIView):
                 user, idempotency_key, recipient=f"profile:{target_profile_id}" if target_profile_id else target_slack_id,
                 points=points, reason=reason,
             )
+            prepare_link_love_award(user, idempotency_key, points=points, reason=reason)
         except ValueError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception:
