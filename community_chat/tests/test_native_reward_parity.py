@@ -199,6 +199,34 @@ class NativeRewardParityTests(NativeFixture, TestCase):
         self.assertEqual(result.status, "ineligible")
         self.assertFalse(Ledger.objects.filter(user__in=(self.user, self.author)).exists())
 
+    def test_rotated_then_reassigned_root_key_keeps_its_original_canonical_author(self):
+        now = timezone.now()
+        CommunityChatDevice.objects.filter(user=self.author, public_key='b' * 64).update(
+            status='revoked', revoked_at=now-timedelta(seconds=20))
+        replacement = get_user_model().objects.create_user(email='new-key-owner@example.test')
+        device = CommunityChatDevice.objects.create(user=replacement, public_key='b' * 64,
+            status='verified', verified_at=now-timedelta(seconds=10))
+        CommunityChatDevice.objects.filter(pk=device.pk).update(created_at=now-timedelta(seconds=11))
+        result = ingest_receipt(self.payload('old-root-new-key-owner'))
+        self.assertEqual(result.status, 'processed', result.error)
+        self.assertEqual(result.target_id, self.author.pk)
+        self.assertEqual(PointsService.get_balance(self.user)['balance'], 2)
+        self.assertFalse(Ledger.objects.filter(user=replacement).exists())
+
+    def test_rotating_ones_own_key_cannot_turn_self_support_into_a_reward(self):
+        now = timezone.now()
+        CommunityChatDevice.objects.filter(user=self.user, public_key='a' * 64).update(
+            status='revoked', revoked_at=now-timedelta(seconds=20))
+        device = CommunityChatDevice.objects.create(user=self.user, public_key='d' * 64,
+            status='verified', verified_at=now-timedelta(seconds=10))
+        CommunityChatDevice.objects.filter(pk=device.pk).update(created_at=now-timedelta(seconds=11))
+        payload=self.payload('self-after-rotation')
+        payload.update(actor_public_key='d' * 64,occurred_at=now.isoformat())
+        payload['metadata']['target_public_key']='a' * 64
+        result=ingest_receipt(payload)
+        self.assertEqual(result.status, 'ineligible')
+        self.assertFalse(Ledger.objects.filter(user=self.user).exists())
+
 
 @override_settings(**SETTINGS)
 class NativeRewardRaceTests(NativeFixture, TransactionTestCase):

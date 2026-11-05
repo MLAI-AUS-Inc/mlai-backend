@@ -17,6 +17,7 @@ from .access import (
     channels,
     community_id,
     flag,
+    historical_counterparty_for_key,
     linked_member,
     occurrence,
     public_source,
@@ -122,12 +123,15 @@ def persist_receipt(payload):
             or len(str(value)) > 255
         ):
             raise VolunteerError("invalid_receipt_metadata")
-    target = (
-        actor_for_key(metadata["target_public_key"], occurred_at=(
-            occurrence(metadata["target_occurred_at"]) if metadata.get("target_occurred_at") else None))
-        if metadata.get("target_public_key")
-        else None
-    )
+    target = None
+    if metadata.get("target_public_key"):
+        if metadata.get("target_occurred_at"):
+            target_when = occurrence(metadata["target_occurred_at"])
+            if target_when > when:
+                raise VolunteerError("invalid_receipt_metadata")
+            target = historical_counterparty_for_key(metadata["target_public_key"], target_when)
+        else:
+            target = actor_for_key(metadata["target_public_key"])
     if metadata.get("target_bridge_source_id"):
         from .bridge_sources import imported_reward_root
         if (source.get("channel_id") != channels().get("boost_startup")
@@ -284,8 +288,9 @@ def _process_receipt(receipt_id):
             question = imported_reward_root(initial.metadata["question_bridge_source_id"], initial.source["channel_id"])
             questioner = initial.actor if root_owned_by(question, initial.actor, current_only=True) else None
         else:
-            questioner = actor_for_key(initial.metadata["question_public_key"], occurred_at=(
-                occurrence(initial.metadata["question_occurred_at"]) if initial.metadata.get("question_occurred_at") else None))
+            questioner = (historical_counterparty_for_key(initial.metadata["question_public_key"],
+                occurrence(initial.metadata["question_occurred_at"])) if initial.metadata.get("question_occurred_at")
+                else actor_for_key(initial.metadata["question_public_key"]))
         if (
             questioner is None or questioner.pk != initial.actor_id
             or not initial.target_id
