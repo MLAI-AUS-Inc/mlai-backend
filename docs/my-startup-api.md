@@ -138,3 +138,12 @@ clears the resolved active error and records a bounded `resolved_setup_approval`
 reference, retaining failure counters and the original retry window. Existing
 review, check and merge policy still decides the next action; reconciliation
 does not send another approval or create another setup run.
+
+An active current preparation may also include `receipt.preview_build` with
+`runId`, `phase`, a safe build-check URL and the last confirmed progress time.
+Phases distinguish a runner wait, building, a pending callback and a terminal
+build failure. This optional projection reads only the original child's
+observation endpoint; it cannot start or recover a preview. Reads are cached
+and bounded, and an older worker's 404 leaves the ordinary preparation status
+intact. The frontend links to the owned setup run and keeps provider links in
+staff details. A successful build observation never establishes readiness.

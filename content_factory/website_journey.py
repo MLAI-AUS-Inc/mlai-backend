@@ -396,6 +396,10 @@ def journey_for_context(context, config, *, capabilities=None, owner_view=False)
             proof["hostedVerificationSelected"] = saved_goal["consent"]["answers"]["ci_mode"] == "hosted"
         operation = operation_summary(latest) if latest else None
         if owner_view:
+            from .website_preview_progress import prepare_build_progress
+            build_progress = prepare_build_progress(latest, connection)
+            if build_progress is not None and operation is not None:
+                operation["receipt"] = {**operation["receipt"], "preview_build": build_progress}
             source_check = source_check_in_flight(connection, latest, capabilities)
         epoch = deletion_epoch(connection)
         from workflow_runs.models import ContentFactoryRun
