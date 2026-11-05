@@ -758,6 +758,10 @@ def blast_progress(blast, rows: dict) -> dict:
     return progress
 
 
+class BlastPauseInput(serializers.Serializer):
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
 def blast_detail(blast, stats: Optional[dict] = None) -> dict:
     stats = stats or {"channels": {}, "replies": 0}
     from crm.deliverability.copy import status_message
@@ -788,6 +792,12 @@ def blast_detail(blast, stats: Optional[dict] = None) -> dict:
                   "reason": getattr(blast, "pause_reason", ""),
                   "at": iso(getattr(blast, "paused_at", None))},
         "status_message": status_message(blast),
+        "plan": blast.plan or {},
+        "waves": [{"index": wave.index, "kind": wave.kind, "status": wave.status, "size": wave.size,
+                   "started_at": iso(wave.started_at), "finished_at": iso(wave.finished_at), "stats": wave.stats}
+                  for wave in blast.waves.all()] if not blast._state.adding else [],
+        "results": {key: ((blast.stats or {}).get('email') or {}).get(key, 0) for key in
+                    ('sent', 'delivered', 'bounced_hard', 'bounced_soft', 'deferred', 'complained', 'unsubscribed', 'opened', 'clicked')},
     }
 
 

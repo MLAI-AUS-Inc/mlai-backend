@@ -99,6 +99,9 @@ urlpatterns = [
     ),
     path("blasts/", views.BlastsView.as_view(), name="community_chat_crm_blasts"),
     path("blasts/<uuid:blast_id>/", views.BlastsView.as_view(), name="community_chat_crm_blast"),
+    path("blasts/<uuid:blast_id>/plan/", views.BlastPlanView.as_view(), name="community_chat_crm_blast_plan"),
+    path("blasts/<uuid:blast_id>/pause/", views.BlastPauseView.as_view(), name="community_chat_crm_blast_pause"),
+    path("blasts/<uuid:blast_id>/resume/", views.BlastResumeView.as_view(), name="community_chat_crm_blast_resume"),
     path(
         "blasts/<uuid:blast_id>/audience/",
         views.BlastAudienceView.as_view(),

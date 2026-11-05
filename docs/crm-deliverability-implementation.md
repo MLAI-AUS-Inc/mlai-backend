@@ -84,10 +84,9 @@ SQLite and PostgreSQL databases. Phase 1 local acceptance has passed.
 - Seven deployment-configuration tests pass. Shell syntax, diff whitespace
   and the CI test-assignment audit pass (no newly omitted test modules).
 - All 17 new database acceptance tests pass on SQLite and PostgreSQL.
-- The wider PostgreSQL run covered 143 cases: 140 initially passed; three
-  old contract expectations were updated and their focused rerun passed.
-  Those updates cover owner-only mailbox choices, subdomain sender fixtures
-  and the new access capability. No production behavior was weakened.
+- The complete frozen Phase 1 source passed all 650 CRM tests on PostgreSQL.
+  The updated contract expectations cover owner-only mailbox choices,
+  subdomain sender fixtures and the new access capability.
 - Django model and migration-drift checks pass with no pending model changes.
 - No production schema/configuration, pilot, provider or live audience was
   changed. No deployment workflow or live send was invoked.
@@ -103,6 +102,60 @@ campaign before resuming it. A timeout or lost database acknowledgement can
 be retried without creating a campaign or restarting one already running.
 Stopping the blast or a new guardian hold blocks that pending recovery.
 Acknowledged incidents are rechecked under lock before sending reminders.
+
+## Phase 2: waves and planning
+
+Prepared on `codex/one-click-campaign-phase-2`, stacked on Phase 1 PR #1288.
+The user approved creation and disposable testing of the exact
+[0003 schema and adoption](crm-deliverability-phase-2-schema.md).
+No production migration or live send is included.
+
+- Consent-preserving domain hygiene and activity tiers produce a stable,
+  provider-interleaved snapshot. The disposable-domain dataset is pinned to
+  upstream CC0 revision `a72c0cecfcdd940d666265e44c0f661282e2d4aa`, with its
+  license and source checksum bundled. Unknown MX is a separate pending
+  check, never a false `no_mx` or a contact edit.
+- Stream locks reserve daily/hourly capacity before provider calls. Canary,
+  sending windows, event priority, provider caps, frequency caps and idle
+  decay use the same central policy as estimates. New campaigns can span
+  days without being rejected by the old per-mailbox campaign-size limit.
+- Each wave owns one deterministic list/campaign. A lost start response is
+  reconciled against that resource even after the slot changes. Positively
+  unstarted drafts may expire and release rows with their original ranks.
+- Final consent checks remove newly excluded people from this list only.
+  Staff controls commit intent before external effects; system recovery
+  remains owner-only. If listmonk refuses cancellation of a paused campaign,
+  it stays paused permanently and is locally cancelled; the backend never
+  resumes it merely to cancel it. Sync continues checking that retained pause.
+- Feedback maps to the correct wave even when its snapshot is over a week
+  old. Per-wave click URLs, bounce receipts, day totals and aggregate blast
+  outcomes are reconciled. Day close promotes only once, using actual volume
+  and known healthy feedback; missing feedback cannot promote.
+- The planner endpoint is read-only, and detail responses add plan, waves and
+  results. The finite warm-up keeps its existing dispatch path and limits.
+
+Acceptance covers a real dispatcher simulation of 5,000 synthetic recipients:
+150 / 300 / 600 / 1,000 / 1,500 / 1,450 across six sending days, skipping the
+weekend, obeying hourly caps and the 45-minute canary gate, with one provider
+start per wave. Further tests cover concurrent dispatchers, legacy completion,
+migration reversal/re-adoption, lost responses, consent races, frequency
+deferral, event priority, provider isolation, pause/resume/cancel, and stale
+or missing feedback. All provider effects are mocked.
+
+Two implementation clarifications are recorded explicitly:
+
+1. A new 150/day stream's minimum 50-person canary needs a bounded initial
+   allowance above the nominal 33-person hourly cap. Later slots use the
+   ordinary formula; the source plan's 100-person second-hour burst is not
+   permitted.
+2. A fully accounted-for batch can be followed by a quiet interval while
+   waiting for capacity. Unanswered sends still require recent feedback.
+   Otherwise a successfully delivered 50-person canary would deadlock
+   before its next permitted slot.
+
+`CRM_WAVES_ENABLED` remains false by default. Bound preflight, real inbox
+acceptance, staff UI, full monitors and lifecycle/transactional changes are
+later phases, not claims of production readiness.
 
 ## Provider contract checked during implementation
 

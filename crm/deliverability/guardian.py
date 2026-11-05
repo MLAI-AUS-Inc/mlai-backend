@@ -8,7 +8,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from crm import listmonk
@@ -41,13 +41,13 @@ class Signal:
     action: str
 
 
-def evaluate(metrics):
+def evaluate(metrics, *, canary=False):
     """Thresholds are inclusive; one address-level event never stops a blast."""
     p = policy.value
     signals = []
-    if metrics.attempted >= p("CRM_GUARD_HARD_BOUNCE_MIN_SAMPLE"):
+    if metrics.attempted >= p("CRM_CANARY_MIN_SAMPLE" if canary else "CRM_GUARD_HARD_BOUNCE_MIN_SAMPLE"):
         rate = metrics.hard_bounces / metrics.attempted
-        if rate >= p("CRM_GUARD_HARD_BOUNCE_RED"):
+        if rate >= p("CRM_GUARD_HARD_BOUNCE_RED") or (canary and metrics.hard_bounces >= p('CRM_CANARY_HARD_BOUNCE_COUNT')):
             signals.append(Signal("hard_bounce_rate", "red", rate, p("CRM_GUARD_HARD_BOUNCE_RED"), metrics.attempted, "pause_blast"))
         elif rate >= p("CRM_GUARD_HARD_BOUNCE_AMBER"):
             signals.append(Signal("hard_bounce_rate", "amber", rate, p("CRM_GUARD_HARD_BOUNCE_AMBER"), metrics.attempted, "slow_stream"))
@@ -79,25 +79,34 @@ def policy_block(event):
     return False
 
 
-def blast_metrics(blast, *, now):
+def blast_metrics(blast, *, now, wave=None):
     """Deduplicate by recipient message, including complaints after a delivery status changed."""
     rows = blast.deliveries.filter(channel="email").exclude(address__iendswith="@resend.dev")
-    attempted = rows.filter(Q(status__in=("submitting", "sent", "delivered", "read", "bounced", "undelivered", "unknown")) | ~Q(provider_id=""))
-    delivered = rows.filter(Q(delivered_at__isnull=False) | Q(status__in=("delivered", "read")) | Q(error_code="resend_complained")).count()
-    hard = rows.filter(bounce_kind="hard", status="bounced").count()
-    complaints = rows.filter(error_code="resend_complained").count()
+    if wave:
+        rows = rows.filter(wave=wave)
+    counts = rows.aggregate(
+        attempted=Count('pk', filter=Q(status__in=("submitting", "sent", "delivered", "read", "bounced", "undelivered", "unknown")) | ~Q(provider_id="")),
+        delivered=Count('pk', filter=Q(delivered_at__isnull=False) | Q(status__in=("delivered", "read")) | Q(error_code="resend_complained")),
+        hard=Count('pk', filter=Q(bounce_kind='hard', status='bounced')),
+        complaints=Count('pk', filter=Q(error_code='resend_complained')))
     events = EmailEvent.objects.filter(blast=blast).exclude(recipient__iendswith="@resend.dev")
+    if wave:
+        events = events.filter(wave=wave)
     # Legacy rows may have provider feedback without populated bounce_kind yet.
-    hard = max(hard, events.filter(event_type="email.bounced").exclude(bounce_type="Transient").values("provider_message_id").distinct().count())
-    complaints = max(complaints, events.filter(event_type="email.complained").values("provider_message_id").distinct().count())
+    receipts = events.aggregate(
+        hard=Count('provider_message_id', distinct=True, filter=Q(event_type='email.bounced') & ~Q(bounce_type='Transient')),
+        complaints=Count('provider_message_id', distinct=True, filter=Q(event_type='email.complained')))
+    hard = max(counts['hard'], receipts['hard'])
+    complaints = max(counts['complaints'], receipts['complaints'])
     recent = events.filter(received_at__gte=now - timedelta(hours=policy.value("CRM_GUARD_POLICY_WINDOW_HOURS")), event_type__in=("email.bounced", "email.failed"))
     blocked_ids = {event.provider_message_id for event in recent if policy_block(event)}
-    return Metrics(attempted.count(), max(delivered, complaints), hard, complaints, len(blocked_ids))
+    return Metrics(counts['attempted'], max(counts['delivered'], complaints), hard, complaints, len(blocked_ids))
 
 
-def fingerprint(stream_id, blast_id, signal):
+def fingerprint(stream_id, blast_id, signal, wave_id=None):
     """Stable across repeated detections; severity escalation updates the same incident."""
-    return hashlib.sha256(f"{stream_id}:{blast_id}:{signal}".encode()).hexdigest()
+    scope = f"{stream_id}:{blast_id}:{signal}" + (f':{wave_id}' if wave_id else '')
+    return hashlib.sha256(scope.encode()).hexdigest()
 
 
 def _audit(incident, operation, *, actor=None, **extra):
@@ -107,7 +116,7 @@ def _audit(incident, operation, *, actor=None, **extra):
             "value": incident.value, "threshold": incident.threshold, **extra})
 
 
-def detect(blast, signal, *, now):
+def detect(blast, signal, *, now, wave=None):
     """Durably pause admission before attempting the external campaign pause."""
     dry_run = policy.value("CRM_GUARDIAN_DRY_RUN")
     with transaction.atomic():
@@ -115,15 +124,15 @@ def detect(blast, signal, *, now):
         if stream.transactional:
             return None
         prior = DeliverabilityIncident.objects.filter(
-            fingerprint=fingerprint(stream.pk, blast.pk, signal.key)
+            fingerprint=fingerprint(stream.pk, blast.pk, signal.key, wave.pk if wave else None)
         ).order_by("-opened_at", "-pk").first()
         if (prior and prior.state == "acknowledged"
                 and signal.value * signal.sample <= prior.value * prior.sample):
             # Owner recovery acknowledges this evidence, not future negative feedback.
             return None
         incident, created = DeliverabilityIncident.objects.get_or_create(
-            fingerprint=fingerprint(stream.pk, blast.pk, signal.key), state="open", defaults={
-                "stream": stream, "blast": blast, "signal": signal.key, "severity": signal.severity,
+            fingerprint=fingerprint(stream.pk, blast.pk, signal.key, wave.pk if wave else None), state="open", defaults={
+                "stream": stream, "blast": blast, "wave": wave, "signal": signal.key, "severity": signal.severity,
                 "value": signal.value, "threshold": signal.threshold, "sample": signal.sample,
                 "action": signal.action, "opened_at": now, "last_detected_at": now,
             })
@@ -186,10 +195,14 @@ def enforce(incident, *, now):
             if current.state != "open":
                 return
             target = Blast.objects.select_for_update().get(pk=target.pk)
-            if target.pause_state and target.listmonk_campaign_id:
-                campaign = listmonk.get_campaign(target.listmonk_campaign_id)
-                if campaign.get("status") == listmonk.RUNNING:
-                    listmonk.set_campaign_status(target.listmonk_campaign_id, "paused")
+            if target.pause_state:
+                wave_ids = list(target.waves.filter(status__in=('loading', 'running', 'paused'),
+                    listmonk_campaign_id__isnull=False).values_list('listmonk_campaign_id', flat=True))
+                campaign_ids = wave_ids or ([target.listmonk_campaign_id] if target.listmonk_campaign_id else [])
+                for campaign_id in campaign_ids:
+                    campaign = listmonk.get_campaign(campaign_id)
+                    if campaign.get("status") == listmonk.RUNNING:
+                        listmonk.set_campaign_status(campaign_id, "paused")
     with transaction.atomic():
         current = DeliverabilityIncident.objects.select_for_update().get(pk=incident.pk)
         if current.state == "open" and current.action_applied_at is None:
@@ -240,7 +253,7 @@ def acknowledge(incident_id, *, actor, resolution, note="", now=None):
                         or protected_domain(blast.mailbox.email.rsplit("@", 1)[-1])
                         or blast.mailbox.domain != stream.domain):
                     raise BlastError("mailbox_stream_mismatch", 409)
-                if blast.listmonk_campaign_id:
+                if blast.listmonk_campaign_id or blast.waves.filter(status='paused').exists():
                     from crm.blast_email import with_email_stats
                     # Commit the owner's decision before the dispatcher resumes any provider.
                     # A later row validation or DB failure cannot roll back an external send.
@@ -278,11 +291,15 @@ def run_deliverability_guard(*, now=None):
         ).order_by("updated_at", "pk")
         detected = 0
         for blast in blasts:
-            for signal in evaluate(blast_metrics(blast, now=now)):
-                incident = detect(blast, signal, now=now)
-                if incident:
-                    enforce(incident, now=now)
-                    detected += 1
+            scopes = [None, *blast.waves.filter(started_at__isnull=False).filter(
+                Q(status__in=('running', 'paused')) | Q(finished_at__gte=now - timedelta(days=1)))]
+            for wave in scopes:
+                canary = bool(wave and wave.kind == 'canary' and not wave.stats.get('legacy_adopted'))
+                for signal in evaluate(blast_metrics(blast, now=now, wave=wave), canary=canary):
+                    incident = detect(blast, signal, now=now, wave=wave)
+                    if incident:
+                        enforce(incident, now=now)
+                        detected += 1
         from .alerts import alert_open_incidents
         alert_open_incidents(now=now)
         cache.set("crm:deliverability:healthy", True, timeout=policy.value("CRM_GUARD_HEARTBEAT_SECONDS"))

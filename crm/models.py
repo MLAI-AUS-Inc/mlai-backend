@@ -11,6 +11,7 @@ from django.conf import settings
 from django.db import models
 from django.db.models import Q
 from django.db.models.functions import Lower
+from django.utils import timezone
 
 
 class Channel(models.TextChoices):
@@ -136,6 +137,8 @@ class Contact(TimestampedRecord):
     events_attended_count = models.PositiveIntegerField(default=0)
     listmonk_subscriber_id = models.PositiveIntegerField(null=True, blank=True)
     soft_bounce_streak = models.PositiveSmallIntegerField(default=0)
+    last_active_at = models.DateTimeField(null=True, blank=True)
+    email_domain = models.CharField(max_length=253, blank=True, db_index=True)
 
     class Meta:
         constraints = [
@@ -153,6 +156,12 @@ class Contact(TimestampedRecord):
 
     def __str__(self):
         return self.email
+
+    def save(self, *args, **kwargs):
+        self.email_domain = self.email.rpartition("@")[2].lower()
+        if kwargs.get("update_fields") is not None:
+            kwargs["update_fields"] = set(kwargs["update_fields"]) | {"email_domain"}
+        return super().save(*args, **kwargs)
 
 
 class EventRegistration(TimestampedRecord):
@@ -370,6 +379,7 @@ class Blast(TimestampedRecord):
     queued_at = models.DateTimeField(null=True, blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
     last_error = models.TextField(blank=True)
+    plan = models.JSONField(default=dict, blank=True)
 
     class Meta:
         constraints = [
@@ -405,6 +415,7 @@ class BlastDelivery(models.Model):
         # The provider call timed out: it may or may not have been sent, so
         # a person decides rather than an automatic retry.
         UNKNOWN = "unknown", "Unknown"
+        CANCELLED = "cancelled", "Not sent (stopped)"
 
     blast = models.ForeignKey(Blast, on_delete=models.CASCADE, related_name="deliveries")
     contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name="blast_deliveries")
@@ -417,6 +428,10 @@ class BlastDelivery(models.Model):
     bounce_kind = models.CharField(
         max_length=4, choices=(("", ""), ("hard", "Hard bounce"), ("soft", "Soft bounce")), blank=True
     )
+    wave = models.ForeignKey("BlastWave", on_delete=models.SET_NULL, null=True, blank=True, related_name="deliveries")
+    send_rank = models.PositiveIntegerField(default=0)
+    tier = models.CharField(max_length=1, choices=(("A", "Most active"), ("B", "Active"), ("C", "Occasionally active")), blank=True)
+    provider = models.CharField(max_length=16, blank=True)
     segments = models.PositiveSmallIntegerField(null=True, blank=True)
     price = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
     price_unit = models.CharField(max_length=3, blank=True)
@@ -441,6 +456,7 @@ class BlastDelivery(models.Model):
         indexes = [
             models.Index(fields=("contact", "created_at"), name="crm_delivery_history_idx"),
             models.Index(fields=("channel", "created_at"), name="crm_delivery_channel_idx"),
+            models.Index(fields=("blast", "status", "send_rank"), name="crm_delivery_rank_idx"),
         ]
 
 
@@ -549,6 +565,7 @@ class EmailEvent(models.Model):
     stream = models.ForeignKey(SendingStream, on_delete=models.SET_NULL, null=True, blank=True, related_name="email_events")
     blast = models.ForeignKey(Blast, on_delete=models.SET_NULL, null=True, blank=True, related_name="email_events")
     delivery = models.ForeignKey(BlastDelivery, on_delete=models.SET_NULL, null=True, blank=True, related_name="email_events")
+    wave = models.ForeignKey("BlastWave", on_delete=models.SET_NULL, null=True, blank=True, related_name="email_events")
     bounce_type = models.CharField(max_length=24, blank=True)
     bounce_subtype = models.CharField(max_length=64, blank=True)
     smtp_code = models.CharField(max_length=3, blank=True)
@@ -566,6 +583,7 @@ class DeliverabilityIncident(TimestampedRecord):
 
     stream = models.ForeignKey(SendingStream, on_delete=models.PROTECT, related_name="incidents")
     blast = models.ForeignKey(Blast, on_delete=models.SET_NULL, null=True, blank=True, related_name="incidents")
+    wave = models.ForeignKey("BlastWave", on_delete=models.SET_NULL, null=True, blank=True, related_name="incidents")
     recipient_provider = models.CharField(max_length=16, blank=True)
     signal = models.CharField(max_length=64)
     severity = models.CharField(max_length=8, choices=(("amber", "Attention"), ("red", "Stopped")))
@@ -588,3 +606,70 @@ class DeliverabilityIncident(TimestampedRecord):
     class Meta:
         constraints = [models.UniqueConstraint(fields=("fingerprint",), condition=Q(state="open"), name="crm_incident_open_unique")]
         indexes = [models.Index(fields=("state", "severity", "opened_at"), name="crm_incident_state_idx")]
+
+
+class BlastWave(TimestampedRecord):
+    """One reserved batch, owning exactly one provider list and campaign."""
+
+    class Status(models.TextChoices):
+        LOADING = "loading", "Preparing"
+        RUNNING = "running", "Sending"
+        PAUSED = "paused", "Paused"
+        FINISHED = "finished", "Finished"
+        CANCELLED = "cancelled", "Cancelled"
+        FAILED = "failed", "Failed"
+
+    blast = models.ForeignKey(Blast, on_delete=models.CASCADE, related_name="waves")
+    index = models.PositiveIntegerField()
+    kind = models.CharField(max_length=8, choices=(("canary", "Inbox check batch"), ("regular", "Regular batch")))
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.LOADING)
+    size = models.PositiveIntegerField()
+    reserved_at = models.DateTimeField(default=timezone.now, db_index=True)
+    listmonk_list_id = models.PositiveIntegerField(null=True, blank=True)
+    listmonk_campaign_id = models.PositiveIntegerField(null=True, blank=True, unique=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    stats = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ("index",)
+        constraints = [
+            models.UniqueConstraint(fields=("blast", "index"), name="crm_wave_index_unique"),
+            models.UniqueConstraint(fields=("blast",), condition=Q(status__in=("loading", "running", "paused")), name="crm_wave_one_active"),
+        ]
+
+
+class StreamDay(models.Model):
+    """A Melbourne-day budget and observed outcomes, closed exactly once."""
+
+    stream = models.ForeignKey(SendingStream, on_delete=models.CASCADE, related_name="days")
+    day = models.DateField()
+    budget = models.PositiveIntegerField()
+    ramp_stage = models.PositiveIntegerField()
+    sent = models.PositiveIntegerField(default=0)
+    delivered = models.PositiveIntegerField(default=0)
+    bounced_hard = models.PositiveIntegerField(default=0)
+    bounced_soft = models.PositiveIntegerField(default=0)
+    deferred = models.PositiveIntegerField(default=0)
+    complained = models.PositiveIntegerField(default=0)
+    unsubscribed = models.PositiveIntegerField(default=0)
+    opened = models.PositiveIntegerField(default=0)
+    clicked = models.PositiveIntegerField(default=0)
+    by_provider = models.JSONField(default=dict, blank=True)
+    postmaster = models.JSONField(default=dict, blank=True)
+    healthy = models.BooleanField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-day",)
+        constraints = [models.UniqueConstraint(fields=("stream", "day"), name="crm_stream_day_unique")]
+
+
+class MailDomainInfo(models.Model):
+    """Cached recipient-domain routing; an unanswered lookup remains unknown."""
+
+    domain = models.CharField(max_length=253, unique=True)
+    provider = models.CharField(max_length=16, blank=True)
+    mx = models.JSONField(default=list, blank=True)
+    has_mx = models.BooleanField(null=True)
+    disposable = models.BooleanField(default=False)
+    checked_at = models.DateTimeField()

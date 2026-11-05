@@ -211,6 +211,15 @@ def add_subscribers_to_list(subscriber_ids: Iterable[int], list_id: int) -> None
     )
 
 
+def remove_subscribers_from_list(subscriber_ids: Iterable[int], list_id: int) -> None:
+    """Remove only this campaign's membership; this is not an unsubscribe."""
+    ids = sorted(set(subscriber_ids))
+    if ids:
+        _request("PUT", "/api/subscribers/lists", payload={
+            "ids": ids, "action": "remove", "target_list_ids": [int(list_id)],
+        })
+
+
 def blocklist_subscribers(subscriber_ids: Iterable[int]) -> None:
     """Blocklist everywhere: listmonk also unsubscribes them from every list."""
 

@@ -14,6 +14,7 @@ from email.utils import parseaddr
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework.response import Response
@@ -159,8 +160,9 @@ def _match_delivery(event, now):
     if delivery is None:
         candidates = list(rows.filter(channel=Channel.EMAIL, address=event["recipient"],
             blast__mailbox__email=event["sender"], blast__subject=event["subject"], provider_id="",
-            created_at__gte=now - timedelta(days=policy.value("CRM_FEEDBACK_MATCH_DAYS")),
-        ).exclude(status=BlastDelivery.Status.QUEUED).order_by("-pk")[:2])
+        ).filter(Q(wave__started_at__gte=now - timedelta(days=policy.value("CRM_FEEDBACK_MATCH_DAYS")))
+            | Q(wave__isnull=True, created_at__gte=now - timedelta(days=policy.value("CRM_FEEDBACK_MATCH_DAYS"))))
+            .exclude(status=BlastDelivery.Status.QUEUED).order_by("-pk")[:2])
         delivery = candidates[0] if len(candidates) == 1 else None
     if delivery and (delivery.address != event["recipient"] or not delivery.blast.mailbox_id
                      or delivery.blast.mailbox.email != event["sender"]):
@@ -219,12 +221,17 @@ def record_event(event, message_id, *, now=None):
             **{key: event.get(key, "") for key in ("bounce_type", "bounce_subtype", "smtp_code", "enhanced_code", "diagnostic")},
         })
         if created:
+            # Dispatch locks contacts before delivery rows. Keep the same order
+            # when feedback arrives while the final consent check is running.
+            Contact.objects.select_for_update().filter(email=event["recipient"]).first()
             delivery = _match_delivery(event, now)
             stored.stream = SendingStream.objects.filter(domain=event["sender"].rsplit("@", 1)[-1]).first()
             if delivery:
                 stored.delivery, stored.blast = delivery, delivery.blast
                 stored.stream_id = delivery.blast.stream_id or (stored.stream.pk if stored.stream else None)
-            stored.save(update_fields=["stream", "blast", "delivery"])
+                stored.wave_id = delivery.wave_id
+                stored.recipient_provider = delivery.provider or stored.recipient_provider
+            stored.save(update_fields=["stream", "blast", "delivery", "wave", "recipient_provider"])
             if not legacy:
                 if delivery:
                     delivery.provider_id = event["email_id"]

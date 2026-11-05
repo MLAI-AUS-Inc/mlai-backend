@@ -134,23 +134,27 @@ def _blocklist(subscriber_ids: Iterable[int]) -> int:
 def blasts_to_sync(now) -> list:
     recent = now - timedelta(days=ENGAGEMENT_DAYS)
     return list(
-        Blast.objects.filter(listmonk_campaign_id__isnull=False)
+        Blast.objects.filter(Q(listmonk_campaign_id__isnull=False) | Q(waves__listmonk_campaign_id__isnull=False)
+            | Q(waves__status__in=('loading', 'running', 'paused')))
         .filter(
             Q(status__in=(Blast.Status.QUEUED, Blast.Status.SENDING))
             | Q(queued_at__gte=recent)
             | Q(sent_at__gte=recent)
             | Q(stats__email__cancel_pending=True)
         )
-        .order_by("-queued_at", "-pk")[:MAX_BLASTS]
+        .order_by("-queued_at", "-pk").distinct()[:MAX_BLASTS]
     )
 
 
-def sync_engagement(blast, *, since, now) -> Counter:
+def sync_engagement(blast, *, since, now, wave=None) -> Counter:
     """Opens, clicks, tracked links, bounces and list unsubscribes for one campaign."""
 
-    campaign_id = int(blast.listmonk_campaign_id)
+    campaign_id = int(wave.listmonk_campaign_id if wave else blast.listmonk_campaign_id)
+    list_id = wave.listmonk_list_id if wave else blast.listmonk_list_id
     stamp = sql_timestamp(since)
     rows = BlastDelivery.objects.filter(blast=blast, channel=Channel.EMAIL)
+    if wave:
+        rows = rows.filter(wave=wave)
     counts: Counter = Counter()
 
     opened = _subscribers(
@@ -169,7 +173,8 @@ def sync_engagement(blast, *, since, now) -> Counter:
         rows.filter(first_clicked_at__isnull=True), clicked, first_clicked_at=now, updated_at=now
     )
     if clicked:
-        for url in blast_email.email_stats(blast).get("tracked_urls") or []:
+        tracked = wave.stats if wave else blast_email.email_stats(blast)
+        for url in tracked.get("tracked_urls") or []:
             try:
                 literal = sql_string(url)
             except ListmonkError:
@@ -193,13 +198,21 @@ def sync_engagement(blast, *, since, now) -> Counter:
     counts["bounced"] += _update_rows(
         rows.filter(status__in=_SENT_ROWS), bounced, status=Status.BOUNCED, bounce_kind="hard", updated_at=now
     )
+    if wave:
+        from .deliverability.wave_sync import record_smtp_feedback
+        for delivery in rows.filter(address__in=bounced).select_related('contact'):
+            record_smtp_feedback(delivery, 'hard', now)
+        soft = _subscribers('subscribers.id IN (SELECT subscriber_id FROM bounces'
+            f" WHERE campaign_id = {campaign_id} AND type = 'soft' AND created_at >= {stamp})")
+        for delivery in rows.filter(address__in=soft).select_related('contact'):
+            record_smtp_feedback(delivery, 'soft', now)
 
-    if blast.listmonk_list_id:
+    if list_id:
         # Blocklisting unsubscribes someone from every list, so it says
         # nothing about this blast; those are handled by ``sync_opt_outs``.
         unsubscribed = _subscribers(
             "subscribers.status != 'blocklisted' AND subscribers.id IN (SELECT subscriber_id"
-            f" FROM subscriber_lists WHERE list_id = {int(blast.listmonk_list_id)}"
+            f" FROM subscriber_lists WHERE list_id = {int(list_id)}"
             f" AND status = 'unsubscribed' AND updated_at >= {stamp})"
         )
         counts["unsubscribed"] += _update_rows(
@@ -223,6 +236,9 @@ def sync_engagement(blast, *, since, now) -> Counter:
 
 
 def sync_blast(blast, *, since, now) -> Counter:
+    if blast.waves.exists() and not (blast.stats or {}).get('warmup'):
+        from .deliverability.wave_sync import sync_blast as sync_waves
+        return sync_waves(blast, since=since, now=now)
     counts: Counter = Counter()
     if blast_email.email_stats(blast).get("cancel_pending"):
         blast_email.retry_cancel(blast.pk, now=now)

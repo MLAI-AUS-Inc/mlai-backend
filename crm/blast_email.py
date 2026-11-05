@@ -358,7 +358,7 @@ def _record_id(record: dict) -> int:
     return value
 
 
-def _refresh_name(record: dict, name: str, list_id: int) -> None:
+def _refresh_name(record: dict, name: str, list_id: int, attribs=None) -> None:
     """Update the name, keeping every list, the status and the attributes.
 
     listmonk's subscriber update replaces the list memberships, so all the
@@ -372,14 +372,14 @@ def _refresh_name(record: dict, name: str, list_id: int) -> None:
             "email": record.get("email"),
             "name": name,
             "status": record.get("status") or "enabled",
-            "attribs": record.get("attribs") if isinstance(record.get("attribs"), dict) else {},
+            "attribs": {**(record.get("attribs") if isinstance(record.get("attribs"), dict) else {}), **(attribs or {})},
             "lists": sorted(lists | {int(list_id)}),
             "preconfirm_subscriptions": True,
         },
     )
 
 
-def _load_batch(blast, list_id: int, deliveries: list, now) -> Counter:
+def _load_batch(blast, list_id: int, deliveries: list, now, *, consent_reasons=False) -> Counter:
     """Put one batch on the blast's list; every row leaves ``queued``."""
 
     outcome: dict[int, tuple[str, str]] = {}
@@ -399,13 +399,17 @@ def _load_batch(blast, list_id: int, deliveries: list, now) -> Counter:
     for delivery in live:
         record = found.get(delivery.address)
         name = subscriber_name(delivery.contact)
+        attribs = {"crm_contact_id": str(delivery.contact_id)}
+        if consent_reasons:
+            from .deliverability.waves import consent_reason
+            attribs["consent_reason"] = consent_reason(delivery)
         if record is None:
             try:
                 record = listmonk.create_subscriber(
                     delivery.address,
                     name,
                     lists=[list_id],
-                    attribs={"crm_contact_id": str(delivery.contact_id)},
+                    attribs=attribs,
                 )
                 subscriber_ids[delivery.pk] = _record_id(record)
                 outcome[delivery.pk] = (Status.SUBMITTING, "")
@@ -422,12 +426,16 @@ def _load_batch(blast, list_id: int, deliveries: list, now) -> Counter:
             continue
         subscriber_ids[delivery.pk] = _record_id(record)
         outcome[delivery.pk] = (Status.SUBMITTING, "")
-        if name and record.get("name") != name:
+        if (name and record.get("name") != name) or (consent_reasons and any(
+                (record.get("attribs") or {}).get(key) != value for key, value in attribs.items())):
             try:
-                _refresh_name(record, name, list_id)
+                _refresh_name(record, name, list_id, attribs if consent_reasons else None)
                 continue
             except ListmonkError as exc:
                 if exc.transient or exc.credentials_rejected:
+                    raise
+                if consent_reasons:
+                    # A mandatory consent footer must never use a stale reason.
                     raise
         to_add.append(subscriber_ids[delivery.pk])
     listmonk.add_subscribers_to_list(to_add, list_id)
@@ -538,6 +546,9 @@ def apply_campaign(blast_id, campaign: dict, *, now) -> str:
 def dispatch_email(blast, *, now) -> dict:
     """One tick of a blast's email: load recipients, then create and start the campaign."""
 
+    from .deliverability import waves
+    if waves.managed(blast):
+        return waves.dispatch(blast.pk, now=now)
     if getattr(blast, "pause_state", ""):
         return {"blocked": "blast_paused"}
     if email_stats(blast).get("resume_pending"):
@@ -611,6 +622,10 @@ def fail_email(blast_id, code: str, *, now) -> None:
     """listmonk refused this blast's email: rows it may have sent become ``unknown``."""
 
     blast = Blast.objects.only("stats").get(pk=blast_id)
+    from .deliverability import waves
+    if waves.managed(blast):
+        waves.fail(blast_id, code, now)
+        return
     status = Status.UNKNOWN if email_started(blast) else Status.FAILED
     _email_rows(blast_id, Status.QUEUED, Status.SUBMITTING).update(
         status=status, error_code=code[:32], updated_at=now
@@ -657,8 +672,13 @@ def send_test_email(blast_id, user) -> str:
     email = normalize_contact_email(getattr(user, "email", ""))
     if not email:
         raise ListmonkError("no_test_address")
-    list_id = ensure_list(blast_id)
-    campaign_id = ensure_campaign(blast_id, list_id)
+    blast = Blast.objects.select_related("event", "mailbox").get(pk=blast_id)
+    name = resource_name(blast_id) + '-test'
+    list_id = listmonk.find_list(name) or listmonk.create_list(name, tags=['crm', 'test'])
+    payload = campaign_payload(blast, list_id)
+    payload['name'] = name
+    existing = listmonk.find_campaign(name)
+    campaign_id = int((existing or listmonk.create_campaign(payload))['id'])
     if _find_one(email) is None:
         contact = Contact.objects.filter(email=email).first()
         try:
@@ -666,6 +686,5 @@ def send_test_email(blast_id, user) -> str:
         except ListmonkError as exc:
             if not exc.conflict:
                 raise
-    blast = Blast.objects.select_related("event", "mailbox").get(pk=blast_id)
-    listmonk.test_campaign(campaign_id, campaign_payload(blast, list_id), [email])
+    listmonk.test_campaign(campaign_id, payload, [email])
     return email

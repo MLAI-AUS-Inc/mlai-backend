@@ -5,7 +5,7 @@ PostgreSQL database, separate from `mlai-backend`. It is Phase 0 of the
 contacts and blasts plan (`mlai-chat/docs/mlai/CONTACTS_EVENTS_EMAIL_PLAN_2026-10-23.md`).
 
 listmonk only **delivers email blasts**:
-- `mlai-backend` (the `crm` app) is the source of truth for contacts, consent and blasts. It creates one listmonk list and campaign per email blast, and reads opens, clicks, unsubscribes and bounces back every few minutes.
+- `mlai-backend` (the `crm` app) is the source of truth for contacts, consent and blasts. Wave-enabled sending creates one list/campaign per reserved batch; legacy sending keeps one per blast. It reads opens, clicks, unsubscribes and bounces back every few minutes.
 - SMS and WhatsApp blasts don't touch listmonk. `mlai-backend` sends them through Twilio (see [Twilio](#twilio-sms-and-whatsapp)).
 
 Don't add, edit or delete subscribers, lists or campaigns in the listmonk UI. `mlai-backend` manages them, and unsubscribes made in listmonk are copied back to the contact in MLAI.
@@ -236,8 +236,8 @@ Before any production enablement, verify the source plan's Phase 0 checklist:
 3. Check the public root URL, unsubscribe headers and signed one-click
    headers using real seed headers. Enable `settings:get` on the backend role
    for the later config monitor. The template must identify MLAI, give a
-   contact address, include `{{ UnsubscribeURL }}`, and eventually print the
-   per-recipient consent reason.
+   contact address, include `{{ UnsubscribeURL }}`, and print the per-recipient
+   `{{ .Subscriber.Attribs.consent_reason }}` written by wave loading.
 4. Subscribe the signed callback to all seven documented delivery events for
    stream and system domains. Verify real signed simulator feedback. Storing
    an event is not proof that a message reached the inbox.
@@ -254,3 +254,26 @@ guardian pauses campaign blasts only on sample-qualified rates or repeated
 policy rejections; marketing incidents never act on the notify stream.
 Owner acknowledgement is required for red recovery. Provider pause failures
 remain durably blocked and retry on the next guardian pass.
+
+## Campaign waves: Phase 2 rollout gate
+
+`CRM_WAVES_ENABLED` stays false until schema and acceptance gates are reviewed.
+The backend owns `crm-blast-<uuid>-w<index>` resources and separate
+`crm-blast-<uuid>-test` resources. Never edit their lists or restart a completed
+campaign manually. Unknown starts are reconciled by exact name and retained ID.
+When staff cancel a paused wave, it remains paused in listmonk and is locally
+cancelled. listmonk only allows a running campaign to transition to cancelled;
+the backend never resumes a paused campaign just to satisfy that restriction.
+
+Migration 0003 adopts live campaign IDs into wave zero without calling this
+service or changing consent, status or recipients. Existing running campaigns
+can finish through their original resources. This is not permission to restart
+listmonk, migrate production, extend the finite pilot, or enable a sender.
+
+The backend's stream/day/hour allowances are the primary pacing control.
+Keep listmonk's account rate and sliding window as provider-aligned backstops;
+do not raise them from a theoretical ramp maximum without verifying the
+account's current rate and quota. The generated campaign supplies fixed MLAI
+From identity, Reply-To, readable `altbody`, X-MLAI-Blast, X-MLAI-Wave and
+Feedback-ID. Actual DKIM coverage of those headers and one-click unsubscribe
+still needs real seed-header acceptance before production rollout.

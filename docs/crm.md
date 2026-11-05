@@ -345,9 +345,11 @@ access rules are in `crm/queries.py`, `crm/segments.py` and `crm/access.py`.
 | `GET whatsapp-templates/` | Approved, enabled WhatsApp templates and their slot mapping |
 | `GET`, `POST blasts/`; `GET`, `PATCH blasts/{id}/` | Blasts (filters `status`, `event_id`, `channel`); create and edit drafts |
 | `POST blasts/{id}/audience/` | People and reach per channel, exclusions, SMS segments and cost, caps |
+| `POST blasts/{id}/plan/` | Read-only email hygiene, activity tiers, provider mix and expected sending-day schedule |
 | `POST blasts/{id}/test/` | Send the draft to the caller's own email and `User.phone` |
 | `POST blasts/{id}/send/` | Queue it (`confirm` counts and `idempotency_key`) |
 | `POST blasts/{id}/cancel/` | Cancel a draft, queued or sending blast |
+| `POST blasts/{id}/pause/`, `POST blasts/{id}/resume/` | Staff pause and resume their own pause; a system pause requires owner incident acknowledgement |
 | `GET blasts/{id}/deliveries/?channel=&status=` | One row per person per channel, addresses masked |
 | `GET blasts/{id}/replies/` | Replies linked to the blast |
 
@@ -558,6 +560,7 @@ Steps B4 and B5 of `mlai-chat/docs/mlai/CONTACTS_UI_PLAN_2026-10-23.md`. Domain 
 | Setting | Purpose |
 | --- | --- |
 | `CRM_SENDING_ENABLED` | Email kill switch (default off). The dispatcher also runs while SMS or WhatsApp is on |
+| `CRM_WAVES_ENABLED` | Stream waves and planner (default off); requires the approved 0003 schema and a live guardian |
 | `LISTMONK_BASE_URL` | listmonk on the `mlai-shared` network, e.g. `http://listmonk:9000`. Never hard-coded |
 | `LISTMONK_API_USER`, `LISTMONK_API_TOKEN` | The listmonk API user, sent as HTTP Basic auth. Email is `not_configured` without all three |
 | `LISTMONK_TEMPLATE_ID` | The MLAI campaign template's id; blank uses listmonk's default |
@@ -590,12 +593,57 @@ A DMARC record with `p=none` or no `rua=` passes with a note. A check whose reso
 
 - **Drafts:** `POST blasts/` takes `purpose`, `event_id`, `quick_segment` (`going`, `checked_in`, `no_show`, `waitlist`) or `segment_id`, `channels`, `sms_only_without_whatsapp`, and the `email`, `sms` and `whatsapp` parts. SMS and WhatsApp need an `event_update` blast with an event (400 `channel_not_allowed`). Merge tags are checked on every save (400 `unsupported_merge_tag` with `field`; event tags without an event are 400 `merge_tag_needs_event`). A draft follows its saved segment until it is queued.
 - **Audience:** email follows the segment's suppression and purpose rules (`segments.evaluate`). SMS and WhatsApp count people registered for the event: SMS needs an active mobile on an allowed prefix, WhatsApp needs opt-in and a number. With `sms_only_without_whatsapp`, anyone WhatsApp reaches gets no SMS (`covered_by_whatsapp`). Each excluded person is counted once, under the first reason. SMS segments and cost are counted with merge tags rendered for each recipient.
-- **Caps:** email allows a mailbox's `daily_limit` minus its email deliveries in the last 24 hours (rows still waiting on a live blast count). SMS and WhatsApp use `CRM_SMS_DAILY_LIMIT` / `CRM_WHATSAPP_DAILY_LIMIT`.
+- **Caps:** wave-enabled email may queue a campaign spanning several days; the stream's daily/hourly reservations control handoff. Legacy email uses the mailbox's rolling daily cap. SMS and WhatsApp use `CRM_SMS_DAILY_LIMIT` / `CRM_WHATSAPP_DAILY_LIMIT`.
 - **`send/`** checks, in order: the blast is a draft (409 `blast_not_draft`); every channel is available (403 `channel_disabled` with `channel` and `reason`); the draft is complete (400, e.g. `mailbox_required`, `subject_required`, `sms_body_required`, `template_variable_missing`, `audience_required`); the counts equal `confirm` (409 `count_changed` with the fresh `audience/` body); and the caps (409 `daily_limit` with `limits`). It then snapshots one `BlastDelivery` per person per channel (lowercase email or E.164, with the consent basis: `event_registration`, `explicit` or `inferred_attendance`), sets `queued`, and writes a `send` audit row. The same `idempotency_key` returns the same blast; a key used by another blast is 409 `idempotency_key_reused`.
-- **`test/`** sends only to the caller: email through listmonk's campaign test endpoint (the draft's list and campaign are created once and reused), SMS and WhatsApp through Twilio to the caller's `User.phone`. An unavailable channel answers 409 `channel_disabled`; no phone is 400 `test_phone_missing`.
+- **`test/`** sends only to the caller: email through listmonk's campaign test endpoint using separate `crm-blast-<id>-test` resources, SMS and WhatsApp through Twilio to the caller's `User.phone`. Tests never take ownership of the blast's or a wave's campaign. An unavailable channel answers 409 `channel_disabled`; no phone is 400 `test_phone_missing`.
 - **`cancel/`** works on drafts, queued and sending blasts. Twilio stops between two messages. A running listmonk campaign is cancelled; its rows become `unknown`, since some may have gone. If listmonk can't be reached the blast is still cancelled and the sync retries the listmonk cancel (`last_error=listmonk_cancel_pending`).
 
 ### Runner `crm_blast_dispatch`
+
+With `CRM_WAVES_ENABLED`, email uses `crm/deliverability/waves.py`:
+
+- The planner preserves the existing consent/suppression resolver, excludes
+  unverified/no-MX, disposable, likely-typo, prohibited role, repeatedly soft
+  bounced and dormant marketing contacts, and snapshots stable ranks, activity
+  tiers and provider mix. Opens never count as activity. Unanswered MX checks
+  remain unknown and never change an address or its consent.
+- The stream row lock reserves capacity before provider calls. The ramp starts
+  at 150/day and uses Melbourne sending windows, hourly caps, provider caps,
+  campaign priority and a first canary. The default canary is 50, with at least
+  45 minutes before later waves (20 for an imminent event). The initial 50 is
+  an explicit first-canary allowance because the nominal 150/day hourly cap
+  is only 33; later waves obey the ordinary formula, without a 100-person burst.
+- New lists/campaigns are `crm-blast-<id>-w<index>`. A loading reservation must
+  reconcile its exact campaign before expiring. A lost start response never
+  creates a replacement send. Consent and current list membership are checked
+  again under contact locks immediately before start. Removed people leave
+  only this list; frequency deferral does not unsubscribe them globally.
+- Marketing frequency caps are three days between sends and at most two in
+  seven days. Blocked rows retain rank and become `cancelled/frequency_cap`
+  after seven queued days. Event updates have a separate per-event 24-hour cap.
+- Staff pause/cancel intent commits before provider effects, which are retried
+  safely. Owner recovery resumes the same campaign. A feature rollback still
+  reconciles existing waves and prevents fresh starts.
+  listmonk cannot cancel a paused campaign, so cancelling one retains its
+  provider pause permanently and records local cancellation, without resuming
+  it. Sync continues checking that pause and preserves campaign analytics.
+- `crm_listmonk_sync` reconciles engagement per wave and aggregates outcomes
+  into wave/day/blast counts. Known listmonk hard/soft bounces become deduplicated
+  `EmailEvent`s; missing SMTP diagnostics are not invented. Click URLs stay
+  scoped to the wave that actually sent them.
+- `crm_stream_day_close` promotes at most once per day after sufficient actual
+  use and healthy feedback, maintains the 30-day healthy peak, and applies
+  consecutive amber-day demotion. Missing feedback is unknown and cannot
+  promote. It also removes provider events older than the configured retention.
+
+The estimate assumes healthy feedback and promotions and is refreshed by sync.
+After a fully accounted-for small wave, a quiet gap is allowed; unanswered
+sends require recent signed feedback. This avoids deadlocking a 50-person
+canary while its next permitted slot is hours away. The full monitoring and
+preflight phases remain separately gated; none of this enables live sending.
+
+Without waves (including the finite legacy warm-up), the original dispatcher
+continues as follows.
 
 Cache-throttled to `CRM_BLAST_DISPATCH_INTERVAL_SECONDS`; off unless `CRM_SENDING_ENABLED`, `CRM_SMS_ENABLED` or `CRM_WHATSAPP_ENABLED` is on. Each pass claims up to 10 queued or sending blasts with `select_for_update(skip_locked=True)` and, for each:
 
@@ -617,7 +665,7 @@ Cache-throttled to `CRM_BLAST_DISPATCH_INTERVAL_SECONDS`; off unless `CRM_SENDIN
 Runs whenever listmonk is configured, cache-throttled to `CRM_LISTMONK_SYNC_INTERVAL_SECONDS`. listmonk has no webhooks, so it polls:
 
 - **Campaigns** of live blasts and of blasts queued or sent in the last 30 days: status and counts into `Blast.stats["email"]`; `finished` marks email rows `sent`.
-- **Engagement**, for 30 days after a campaign starts: opens into `first_opened_at`, clicks into `first_clicked_at` and the tracked link into `clicked_urls`, hard and soft bounces into `bounced`, and unsubscribes from that blast's list into `unsubscribed`. Times are when the sync first saw the event, so they are accurate to the interval.
+- **Engagement**, for 30 days after a campaign starts: opens into `first_opened_at`, clicks into `first_clicked_at` and `clicked_urls`, hard bounces into `bounced`, and list unsubscribes into `unsubscribed`. Wave soft bounces use `undelivered/soft_bounce`; only the third affected blast suppresses the address. Times are when sync first saw the event, accurate to the interval.
 - **Opt-outs since the last pass:** blocklisted subscribers become `complained` (a complaint), `bounced` (a bounce) or `unsubscribed`; unsubscribes from any `crm-blast-*` list become `unsubscribed`. Each change writes an email `ContactConsentEvent` (source `listmonk:…`); unsubscribes and complaints also withdraw marketing consent; a bounce does not. A stronger status is never weakened.
 - **Global blocklist:** unsubscribes are then blocklisted in listmonk, so unsubscribing means every list. Contacts opted out in MLAI Chat are blocklisted too.
 - **Cursor:** the last pass time, kept in the cache and in a `sync` audit row (`target_type=listmonk`) whenever something changed. Each pass re-reads five minutes before it.
@@ -649,7 +697,12 @@ A channel switched on without its credentials shows as "not configured" and send
 - `crm.tests.test_luma_guests_unit`, `crm.tests.test_luma_sync_unit` (the pass budget), `crm.tests.test_contact_import_unit`, `crm.tests.test_phones_unit`, `crm.tests.test_api_unit`, `crm.tests.test_segments_unit`, `crm.tests.test_messaging_unit`, `crm.tests.test_blasts_unit` and `crm.tests.test_listmonk_unit` run without a database.
 - `crm.tests.test_contact_store_database`, `crm.tests.test_api_database`, `crm.tests.test_segments_database`, `crm.tests.test_messaging_database` and `crm.tests.test_blasts_database` run in the CI PostgreSQL job.
 
-Blasts and listmonk need no schema change: they use the tables in `crm.0001_initial`.
+Legacy blasts use `crm.0001_initial`. Stream/event/incident foundations use
+`crm.0002_deliverability_foundations`; waves, day budgets and domain cache use
+`crm.0003_campaign_waves_and_planner`. Creation and synthetic disposable tests
+of 0002/0003 were approved separately. Production migration and enablement
+remain unapproved. See [the implementation record](crm-deliverability-implementation.md)
+and [the exact Phase 2 schema](crm-deliverability-phase-2-schema.md).
 
 ## Ownership
 
