@@ -294,13 +294,43 @@ def cleanup_history(rows):
     result = []
     for row in rows:
         receipt = mapping(row.get("receipt"))
-        if receipt.get("remote_cleanup_pending") is not True or row.get("state") == "completed":
+        retained = (mapping(receipt.get("repository_cleanup")).get("status") == "superseded"
+            and mapping(receipt.get("repository_cleanup")).get("retained") is True)
+        pending = receipt.get("remote_cleanup_pending") is True and row.get("state") != "completed"
+        if not pending and not retained:
             continue
+        completed = receipt.get("completed_steps")
+        completed = completed if isinstance(completed, list) else []
+        failures = mapping(receipt.get("cleanup_step_failures"))
+        repository_failures = [mapping(failures.get(step)) for step in ("repository_refs", "cleanup_pr")
+            if step not in completed and mapping(failures.get(step))] if not retained else []
+        access_required = any(failure.get("code") == "GITHUB_ACCESS_REQUIRED"
+            and failure.get("http_status") in (401, 403, 404) for failure in repository_failures)
+        refunds = receipt.get("refund_pending_run_ids")
         result.append({"id": str(row["id"]), "action": row["action"], "state": row["state"],
-            "generation": row["generation"], "needsAttention": row["state"] == "needs_attention"})
+            "generation": row["generation"], "pending": pending,
+            "needsAttention": pending and row["state"] == "needs_attention",
+            "repositoryRemovalRetained": retained, "repositoryAccessRequired": access_required,
+            "repositoryServiceCheckRequired": bool(repository_failures) and not access_required,
+            "refundPending": bool(isinstance(refunds, list) and refunds)
+                or ("refunds" not in completed and bool(mapping(failures.get("refunds")))),
+            "previewCleanupStopped": pending and receipt.get("cleanup_stop_reason")
+                in ("preview_cleanup_abandoned", "preview_cleanup_budget_invalid")})
         if len(result) == 10:
             break
     return result
+
+
+def cleanup_history_for_connection(connection, latest):
+    """Keep old service failures and retained removals visible without new actions."""
+    from django.db.models import Q
+    pending = Q(receipt__remote_cleanup_pending=True) & ~Q(state="completed")
+    retained = Q(action="disconnect", receipt__repository_cleanup__status="superseded",
+        receipt__repository_cleanup__retained=True)
+    rows = connection.operations.filter(action__in=["disconnect", "reconnect", "rotate", "purge", "cancel-operation"]).filter(
+        pending | retained).exclude(pk=getattr(latest, "pk", None)).order_by("-created_at").values(
+            "id", "action", "state", "generation", "receipt")[:10]
+    return cleanup_history(rows)
 
 
 def source_check_in_flight(connection, latest, capabilities=None, *, now=None):
@@ -440,9 +470,7 @@ def journey_for_context(context, config, *, capabilities=None, owner_view=False)
         capabilities=capabilities, discovery=discovery, target=target, operation=operation, epoch=epoch, proof=proof, source_runs=source_runs, ci_source_runs=ci_source_runs, permissions=grants,
         setup_pull_request=setup_pull_request, source_check=source_check)
     if config.website_connection_id:
-        rows = config.website_connection.operations.filter(action__in=["disconnect", "reconnect", "rotate", "purge", "cancel-operation"],
-            receipt__remote_cleanup_pending=True).exclude(state="completed").exclude(pk=getattr(latest, "pk", None)).order_by("-created_at").values("id", "action", "state", "generation", "receipt")[:10]
-        journey["historicalCleanup"] = cleanup_history(rows)
+        journey["historicalCleanup"] = cleanup_history_for_connection(config.website_connection, latest)
         journey["revision"] = evidence_digest({"current": journey["revision"], "cleanup": journey["historicalCleanup"]})
     from .founder_journey_cohort import is_new_journey
     if is_new_journey(context.organization, config):

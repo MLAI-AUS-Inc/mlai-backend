@@ -12,6 +12,30 @@ from .website_reconciliation import process_website_connection_operations
 
 
 class CleanupPersistenceTests(WebsiteDatabaseFixture, TransactionTestCase):
+    def test_history_reads_retained_and_pending_outcomes_only_for_this_connection(self):
+        from organizations.models import Organization
+        from .website_models import WebsiteConnection
+        from .website_journey import cleanup_history_for_connection
+        retained = WebsiteConnectionOperation.objects.create(connection=self.website, generation=1, action="disconnect",
+            idempotency_key="retained-history", state="completed", receipt={"remote_cleanup_pending": False,
+                "repository_cleanup": {"status": "superseded", "retained": True}})
+        pending = WebsiteConnectionOperation.objects.create(connection=self.website, generation=1, action="purge",
+            idempotency_key="pending-history", receipt={"remote_cleanup_pending": True})
+        WebsiteConnectionOperation.objects.create(connection=self.website, generation=1, action="purge",
+            idempotency_key="finished-history", state="completed", receipt={"remote_cleanup_pending": True})
+        current = WebsiteConnectionOperation.objects.create(connection=self.website, generation=2, action="prepare",
+            idempotency_key="current-prepare", receipt={"remote_cleanup_pending": True})
+        foreign_org = Organization.objects.create(domain="foreign-history.example.test", name="Foreign")
+        foreign = WebsiteConnection.objects.create(organization=foreign_org, github_repo="example/foreign", repository_id=456)
+        WebsiteConnectionOperation.objects.create(connection=foreign, generation=1, action="purge",
+            idempotency_key="foreign-history", receipt={"remote_cleanup_pending": True})
+        before = list(self.website.operations.values("id", "state", "receipt", "updated_at"))
+        with self.assertNumQueries(1):
+            result = cleanup_history_for_connection(self.website, current)
+        self.assertEqual({row["id"] for row in result}, {str(retained.pk), str(pending.pk)})
+        self.assertTrue(next(row for row in result if row["id"] == str(retained.pk))["repositoryRemovalRetained"])
+        self.assertEqual(list(self.website.operations.values("id", "state", "receipt", "updated_at")), before)
+
     def operation(self, generation):
         return WebsiteConnectionOperation.objects.create(connection=self.website, generation=generation,
             action="disconnect", idempotency_key="synthetic-cleanup", payload={"remove_setup": True,

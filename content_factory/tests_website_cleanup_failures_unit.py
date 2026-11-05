@@ -63,6 +63,40 @@ class CleanupFailureTests(SimpleTestCase):
         self.assertTrue(result[0]["needsAttention"])
         self.assertNotIn("secret", str(result))
 
+    def test_history_preserves_retained_removal_after_service_cleanup_finishes(self):
+        from .website_journey import cleanup_history
+        rows = [{"id": "retained", "action": "disconnect", "state": "completed", "generation": 2,
+            "receipt": {"remote_cleanup_pending": False,
+                "repository_cleanup": {"status": "superseded", "retained": True}, "provider_body": "secret"}}]
+        result = cleanup_history(rows)
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0]["repositoryRemovalRetained"])
+        self.assertFalse(result[0]["pending"])
+        self.assertFalse(result[0]["needsAttention"])
+        self.assertNotIn("secret", str(result))
+
+    def test_history_explains_known_unsettled_steps_without_reviving_superseded_access(self):
+        from .website_journey import cleanup_history
+        receipt = {"remote_cleanup_pending": True,
+            "repository_cleanup": {"status": "superseded", "retained": True},
+            "cleanup_stop_reason": "preview_cleanup_abandoned",
+            "cleanup_step_failures": {"repository_refs": {"code": "GITHUB_ACCESS_REQUIRED", "http_status": 403},
+                "refunds": {"code": "worker_unavailable", "provider_body": "secret"}}}
+        row = {"id": "old", "action": "disconnect", "state": "needs_attention", "generation": 2, "receipt": receipt}
+        result = cleanup_history([row])[0]
+        self.assertTrue(result["previewCleanupStopped"])
+        self.assertTrue(result["refundPending"])
+        self.assertFalse(result["repositoryAccessRequired"])
+        self.assertFalse(result["repositoryServiceCheckRequired"])
+        self.assertNotIn("secret", str(result))
+        receipt["repository_cleanup"] = {}
+        result = cleanup_history([row])[0]
+        self.assertTrue(result["repositoryAccessRequired"])
+        receipt["completed_steps"] = ["refunds", "repository_refs"]
+        result = cleanup_history([row])[0]
+        self.assertFalse(result["repositoryAccessRequired"])
+        self.assertFalse(result["refundPending"])
+
     def test_blocked_repository_does_not_repeat_calls_or_stop_original_refunds(self):
         from .website_cleanup_failures import settle_failure_state
         op = self.operation(generation=3)
