@@ -2407,6 +2407,7 @@ COMMUNITY_CHAT_DELETION_CONTACT = os.getenv("COMMUNITY_CHAT_DELETION_CONTACT", "
 # Public Roo's identity verified in the MLAI Slack workspace. Empty values pause
 # the first-party DM connection; no other bot is enabled by this setting.
 COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
+ROO_LINK_LOVE_SLACK_CHANNEL_ID = os.getenv("ROO_LINK_LOVE_SLACK_CHANNEL_ID", "C09BQAWJ66R")
 COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID", "U090FV0GTT4")
 
 # Optional startup-update editorial covers; all generation runs server-side.

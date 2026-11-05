@@ -17,7 +17,7 @@ class CommunityBridgeRooActorView(APIView):
     def get(self, request):
         """Resolve the original actor for an exact Slack app_mention."""
         try:
-            actor = resolve_roo_actor(**{
+            actor = resolve_roo_actor(purpose=request.query_params.get("purpose", "mention"), **{
                 name: request.query_params.get(name, "")
                 for name in ("workspace_id", "channel_id", "message_id", "thread_ts", "bridge_user_id")
             })
