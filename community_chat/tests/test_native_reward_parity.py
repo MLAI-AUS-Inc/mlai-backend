@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection, connections, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
+from rest_framework.test import APIClient
 
 from community_chat.models import CommunityChatDevice
 from community_chat.volunteer.access import VolunteerError, awards_enabled
@@ -34,6 +35,7 @@ SETTINGS = dict(
     COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED=False,
     COMMUNITY_CHAT_VOLUNTEER_CHANNELS={"boost_startup": CHANNEL, "start_here": "start"},
     COMMUNITY_CHAT_VOLUNTEER_LIKE_REACTIONS=["👍"],
+    COMMUNITY_CHAT_VOLUNTEER_RECEIPT_TOKEN="synthetic-receipt-service-token-32",
 )
 
 
@@ -121,6 +123,21 @@ class NativeRewardParityTests(NativeFixture, TestCase):
         self.link.channel.save(update_fields=("hold_reason",))
         with self.assertRaisesMessage(VolunteerError, "source_unavailable"):
             ingest_receipt(payload)
+        self.assertFalse(Ledger.objects.filter(user=self.user).exists())
+
+    def test_revoked_source_is_terminal_at_ingestion_without_acknowledging_bad_credentials(self):
+        self.bridge_root()
+        self.link.channel.hold_reason = "restricted"
+        self.link.channel.save(update_fields=("hold_reason",))
+        client = APIClient()
+        path = '/api/v1/community-chat/volunteer/internal/receipts/'
+        result = client.post(path, self.payload('revoked-root', imported=True), format='json',
+            HTTP_AUTHORIZATION='Bearer synthetic-receipt-service-token-32')
+        self.assertEqual(result.status_code, 202)
+        self.assertEqual(result.data['status'], 'ignored')
+        denied = client.post(path, self.payload('unauthorised', imported=True), format='json',
+            HTTP_AUTHORIZATION='Bearer invalid-service-key')
+        self.assertEqual(denied.status_code, 403)
         self.assertFalse(Ledger.objects.filter(user=self.user).exists())
 
     def test_imported_self_support_and_deleted_reply_cannot_pay(self):
