@@ -3,6 +3,7 @@
 from collections import Counter
 
 from django.db import transaction
+from django.db.models import Exists, OuterRef, Q, Subquery
 from django.utils import timezone
 
 from community_chat.onboarding_models import CommunityMemberConsent, CommunityMemberProfile
@@ -13,6 +14,17 @@ from .engagement import marketing_review_hold
 from .models import Contact, ContactConsentEvent, CrmAuditEvent
 
 SOURCE = "community_onboarding:"
+
+
+def opted_in_q():
+    """The current community permission as a bulk predicate, not a cached import flag."""
+    from .queries import marketing_eligible_q
+    latest = CommunityMemberConsent.objects.filter(user_id=OuterRef('user_id'), purpose='marketing_email').order_by(
+        '-created_at', '-pk').values('granted')[:1]
+    profiles = CommunityMemberProfile.objects.filter(user_id=OuterRef('user_id'), status='approved',
+        marketing_opt_in=True, user__is_active=True, user__email_verified_at__isnull=False,
+        user__email__iexact=OuterRef('email')).annotate(current_permission=Subquery(latest)).filter(current_permission=True)
+    return marketing_eligible_q(timezone.now()) & Q(marketing_consent='granted') & Q(Exists(profiles))
 
 
 def current_consent(profile):

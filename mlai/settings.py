@@ -1218,6 +1218,9 @@ CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS = int(
     os.getenv('CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS', str(48 * 60 * 60))
 )
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
+# Existing system mail keeps its configured sender: RESEND_FROM_EMAIL (host .env)
+# or main's verified root default. It never inherits the system_email app's
+# notify.mlai.au identity below, which is used only by that app's own sends.
 RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Roo <notifications@mlai.au>')
 # Transactional email sent by our own code through Resend (system_email app).
 # Separate key, domain and webhook from CRM sending; never uses CRM mailboxes or
@@ -2383,6 +2386,12 @@ CRM_RESEND_MONITORED_SENDERS = tuple(
     value.strip().lower() for value in os.environ.get('CRM_RESEND_MONITORED_SENDERS', '').split(',')
     if value.strip()
 )
+# Defaults and tunable thresholds have a single owning module.
+from crm.deliverability.policy import environment_settings as _crm_delivery_settings
+globals().update(_crm_delivery_settings(os.environ))
+from crm.deliverability.policy import SECRET_KEYS as _crm_delivery_secret_keys
+for _key in _crm_delivery_secret_keys:
+    globals()[_key] = os.environ.get(_key, '').strip()
 CRM_WARMUP_ENABLED = _env_is_true('CRM_WARMUP_ENABLED', False)
 CRM_WARMUP_RUN_ID = os.environ.get('CRM_WARMUP_RUN_ID', '').strip()
 LISTMONK_BASE_URL = os.environ.get('LISTMONK_BASE_URL', '').strip().rstrip('/')
@@ -2397,7 +2406,7 @@ LISTMONK_TEMPLATE_ID = int(_LISTMONK_TEMPLATE_ID) if _LISTMONK_TEMPLATE_ID.isdig
 CRM_SENDING_DOMAINS = [
     entry.strip()
     for entry in os.environ.get(
-        'CRM_SENDING_DOMAINS', 'mlai.au:resend,mlai-aus.com:resend,mlai.org.au:resend'
+        'CRM_SENDING_DOMAINS', 'news.mlai.au:resend'
     ).split(',')
     if entry.strip()
 ]

@@ -14,7 +14,8 @@ from django.db.models.functions import Lower
 
 from core.models import AccountBan
 from crm import sending_domains
-from crm.blasts import check_channel_rules
+from crm.blasts import BlastError, check_channel_rules
+from crm.deliverability.streams import assign_stream, is_owner, legacy_mailbox, legacy_path_enabled, protected_domain
 from crm.engagement import RESERVED_ATTRIBUTE_KEYS
 from crm.luma_sync import users_by_email
 from crm.models import (
@@ -119,6 +120,10 @@ def create_contact(data: dict, *, actor, now: datetime) -> Contact:
 
     require_mlai_admin(actor)
     email = data["email"]
+    from crm.email_aliases import canonical_emails
+    corrected = canonical_emails([email]).get(email)
+    if corrected:
+        raise _existing(corrected)
     if Contact.objects.filter(email=email).exists():
         raise _existing(email)
     if _is_banned(email):
@@ -258,6 +263,14 @@ def save_mailbox(mailbox: Optional[SenderMailbox], data: dict, *, actor) -> Send
 
     require_mlai_admin(actor)
     creating = mailbox is None
+    # Existing pre-stream mailboxes stay editable by admins exactly as on main
+    # (limits, switching off and on). New mailboxes always follow the stream rules.
+    if not (not creating and legacy_mailbox(mailbox)):
+        domain = sending_domains.domain_of(data["email"]) if creating else mailbox.domain
+        if protected_domain(domain) or (mailbox is not None and protected_domain(sending_domains.domain_of(mailbox.email))):
+            raise CrmError("mailbox_domain_protected")
+        if not is_owner(actor):
+            raise CrmError("owner_required", 403)
     if creating:
         email = data["email"]
         domain = sending_domains.domain_of(email)
@@ -296,6 +309,25 @@ def _found(model, pk, code: str, **filters):
 
 
 def _set_audience(blast: Blast, data: dict) -> None:
+    preset = data.get('audience_preset')
+    if preset:
+        from crm.audience_taxonomy import CITY_OPTIONS
+        if preset not in ('opted_in', 'city'):
+            raise CrmError('invalid_audience_preset')
+        if preset == 'city' and data.get('city_id') not in CITY_OPTIONS:
+            raise CrmError('city_required')
+        blast.event, blast.segment, blast.quick_segment, blast.purpose = None, None, '', 'marketing'
+        definition = ({'version': 2, 'include': {'kind': 'rule', 'rule': {'type': 'location_affinity',
+            'op': 'has_any', 'city_ids': [data['city_id']]}}, 'exclude': None} if preset == 'city' else
+            {'match': 'all', 'rules': [], 'exclude': []})
+        blast.segment_definition = validate_definition(definition)
+        blast.stats = {**(blast.stats or {}), 'audience_preset': {'kind': preset,
+            **({'city_id': data['city_id']} if preset == 'city' else {})}}
+        return
+    if 'audience_preset' in data and (blast.stats or {}).get('audience_preset'):
+        blast.segment_definition = {}
+    if 'audience_preset' in data or data.get('quick_segment') or data.get('segment_id'):
+        blast.stats = {key: value for key, value in (blast.stats or {}).items() if key != 'audience_preset'}
     if data.get("quick_segment"):
         blast.quick_segment = data["quick_segment"]
         blast.segment = None
@@ -317,34 +349,57 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
 
     require_mlai_admin(actor)
     creating = blast is None
+    original_stream_id = blast.stream_id if blast is not None else None
     if creating:
         if "purpose" not in data:
             raise CrmError("invalid_request", fields={"purpose": ["required"]})
         blast = Blast(created_by=actor)
     elif blast.status != Blast.Status.DRAFT:
         raise CrmError("blast_not_draft", 409, blast_status=blast.status)
+    from crm.deliverability.reconfirmation import is_reconfirmation
+    preference_check = is_reconfirmation(blast)
+    if preference_check:
+        if not is_owner(actor):
+            raise CrmError('owner_required', 403)
+        if (data.get('purpose', 'marketing') != 'marketing' or data.get('channels', ['email']) != ['email']
+                or any(data.get(key) for key in ('event_id', 'segment_id', 'quick_segment', 'audience_preset'))):
+            raise CrmError('reconfirmation_audience_fixed')
     if "purpose" in data:
         blast.purpose = data["purpose"]
     if "event_id" in data:
         blast.event = (
             None if data["event_id"] is None else _found(CrmEvent, data["event_id"], "event_not_found")
         )
-    _set_audience(blast, data)
+    if preference_check:
+        blast.event, blast.segment, blast.quick_segment = None, None, ''
+        blast.segment_definition = {'match': 'all', 'rules': [], 'exclude': []}
+    else:
+        _set_audience(blast, data)
     if "channels" in data:
         blast.channels = data["channels"]
     if "sms_only_without_whatsapp" in data:
         blast.sms_only_without_whatsapp = data["sms_only_without_whatsapp"]
     email = data.get("email") or {}
-    if "mailbox_id" in email:
+    if "mailbox_id" in email and is_owner(actor):
         blast.mailbox = (
             None
             if email["mailbox_id"] is None
             else _found(SenderMailbox, email["mailbox_id"], "mailbox_not_found")
         )
+    elif "mailbox_id" in email and legacy_path_enabled():
+        # Staff keep main's choice of an existing pre-stream mailbox. Any other
+        # id (a stream identity, or an old client's stale id) is ignored.
+        chosen = (None if email["mailbox_id"] is None
+                  else SenderMailbox.objects.filter(pk=email["mailbox_id"]).first())
+        if (email["mailbox_id"] is None) or legacy_mailbox(chosen):
+            blast.mailbox = chosen
     if "subject" in email:
         blast.subject = " ".join(email["subject"].split())
     if "body_markdown" in email:
         blast.body_markdown = email["body_markdown"]
+    for field in ('preview_text', 'sign_off_name'):
+        if field in email:
+            setattr(blast, field, ' '.join(email[field].split()))
     if "body" in (data.get("sms") or {}):
         blast.sms_body = data["sms"]["body"].strip()
     whatsapp = data.get("whatsapp") or {}
@@ -359,7 +414,28 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
     if "variables" in whatsapp:
         blast.whatsapp_variables = whatsapp["variables"]
     check_channel_rules(blast)
+    if Channel.EMAIL in (blast.channels or []) and legacy_mailbox(blast.mailbox if blast.mailbox_id else None):
+        blast.stream = None  # Main's pre-stream path: no stream, no root-domain refusal.
+    elif Channel.EMAIL in (blast.channels or []) and blast.mailbox_id is None and legacy_path_enabled():
+        # Main kept mailbox-less drafts; nothing can send until a mailbox is chosen.
+        try:
+            assign_stream(blast, actor=actor, mailbox=None)
+        except BlastError as exc:
+            if exc.code != "stream_not_configured":
+                raise
+            blast.stream = None
+    else:
+        assign_stream(blast, actor=actor, mailbox=blast.mailbox if is_owner(actor) else None)
     with transaction.atomic():
+        from crm.models import SendingStream
+        stream_ids = {original_stream_id, blast.stream_id}
+        list(SendingStream.objects.select_for_update().filter(pk__in=stream_ids - {None}).order_by('pk'))
+        if not creating:
+            current = Blast.objects.select_for_update().only('status', 'stream_id').get(pk=blast.pk)
+            if current.status != Blast.Status.DRAFT:
+                raise CrmError('blast_not_draft', 409, blast_status=current.status)
+            if current.stream_id not in stream_ids:
+                raise CrmError('draft_changed', 409)
         blast.save()
         audit(
             actor,

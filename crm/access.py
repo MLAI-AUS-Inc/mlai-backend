@@ -35,7 +35,12 @@ def crm_access(request) -> dict:
     enabled = crm_enabled()
     allowed = enabled and is_crm_admin(request)
     # Sending has no separate role yet; the blast phases gate each channel.
-    return {"enabled": enabled, "can_view": allowed, "can_send": allowed}
+    from .deliverability.streams import is_owner
+    from .deliverability import policy
+    return {"enabled": enabled, "can_view": allowed, "can_send": allowed,
+            "can_manage_deliverability": allowed and is_owner(request.user),
+            'campaign_features': {'waves': allowed and policy.value('CRM_WAVES_ENABLED'),
+                'preflight': allowed and policy.value('CRM_PREFLIGHT_ENABLED')}}
 
 
 def channel_availability() -> dict:

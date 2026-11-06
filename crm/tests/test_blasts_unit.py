@@ -46,9 +46,9 @@ Status = BlastDelivery.Status
 
 def mailbox(**fields):
     values = {
-        "email": "sam@mlai.au",
+        "email": "sam@news.mlai.au",
         "display_name": "Sam from MLAI",
-        "domain": "mlai.au",
+        "domain": "news.mlai.au",
         "route": "google_relay",
         "reply_to": "hello@mlai.au",
         "enabled": True,
@@ -127,10 +127,10 @@ class ListmonkContentTests(SimpleTestCase):
         self.assertEqual(blast_email.tracked_urls(body), ["https://luma.com/mlai", "https://x.test/a"])
 
     def test_from_address_is_quoted_where_needed(self):
-        self.assertEqual(blast_email.from_address("Sam from MLAI", "sam@mlai.au"), "Sam from MLAI <sam@mlai.au>")
-        self.assertEqual(blast_email.from_address("Sam, MLAI", "sam@mlai.au"), '"Sam, MLAI" <sam@mlai.au>')
-        self.assertEqual(blast_email.from_address("Sam\r\nBcc: x", "sam@mlai.au"), '"Sam Bcc: x" <sam@mlai.au>')
-        self.assertEqual(blast_email.from_address("", "sam@mlai.au"), "sam@mlai.au")
+        self.assertEqual(blast_email.from_address("Sam from MLAI", "sam@news.mlai.au"), "Sam from MLAI <sam@news.mlai.au>")
+        self.assertEqual(blast_email.from_address("Sam, MLAI", "sam@news.mlai.au"), '"Sam, MLAI" <sam@news.mlai.au>')
+        self.assertEqual(blast_email.from_address("Sam\r\nBcc: x", "sam@news.mlai.au"), '"Sam Bcc: x" <sam@news.mlai.au>')
+        self.assertEqual(blast_email.from_address("", "sam@news.mlai.au"), "sam@news.mlai.au")
 
     def test_subscriber_name_keeps_the_first_name_first(self):
         person = SimpleNamespace
@@ -144,7 +144,7 @@ class ListmonkContentTests(SimpleTestCase):
         payload = blast_email.campaign_payload(blast, 12)
         self.assertEqual(payload["name"], f"crm-blast-{blast.pk}")
         self.assertEqual(payload["lists"], [12])
-        self.assertEqual(payload["from_email"], "Sam from MLAI <sam@mlai.au>")
+        self.assertEqual(payload["from_email"], "Sam from MLAI <sam@news.mlai.au>")
         self.assertEqual((payload["type"], payload["content_type"], payload["messenger"]), ("regular", "markdown", "email"))
         self.assertEqual(payload["tags"], ["crm", f"blast:{blast.pk}"])
         self.assertEqual(payload["headers"], [{"Reply-To": "hello@mlai.au"}])

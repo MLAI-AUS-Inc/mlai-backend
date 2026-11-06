@@ -77,6 +77,10 @@ cookies.txt
 /*.md
 /docs/*.md
 /docs/**/*.md
+!/docs/crm-deliverability-implementation.md
+!/docs/crm-deliverability-phase-2-schema.md
+!/docs/crm-deliverability-phase-3-schema.md
+!/docs/crm-deliverability-phase-3-existing-migrations.json
 !/docs/studio-report-source.md
 !/docs/crm.md
 !/docs/system-email.md

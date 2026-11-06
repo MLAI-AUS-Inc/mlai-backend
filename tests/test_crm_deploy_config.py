@@ -1,6 +1,7 @@
 """CRM release switches reach the host only when a release sets them."""
 
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -48,12 +49,28 @@ class CrmDeployConfigTests(unittest.TestCase):
             with self.subTest(hour=hour), self.assertRaises(ValueError):
                 validate_single("CRM_ENGAGEMENT_REFRESH_HOUR", hour)
 
+    def test_preflight_configuration_accepts_secret_references_and_rejects_values(self):
+        seed = {'provider': 'gmail', 'address': 'seed@example.test', 'imap_host': 'imap.gmail.com',
+            'auth': 'xoauth2', 'secret_env': 'CRM_SEED_GMAIL_TOKEN', 'enabled': False}
+        validate_single('CRM_SEED_MAILBOXES', json.dumps([seed]))
+        validate_single('RSPAMD_URL', 'http://rspamd:11333')
+        for key, value in (('RSPAMD_URL', 'http://user:sensitive@rspamd:11333'),
+                ('CRM_SEED_MAILBOXES', json.dumps([{**seed, 'password': 'sensitive'}])),
+                ('CRM_SEED_MAILBOXES', json.dumps([{**seed, 'secret_env': 'RESEND_API_KEY'}]))):
+            with self.subTest(key=key), self.assertRaises(ValueError) as caught:
+                validate_single(key, value)
+            self.assertNotIn('sensitive', str(caught.exception))
+
     def test_host_upsert_accepts_crm_settings_and_keeps_the_rest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "scripts").mkdir()
             for name in ("upsert_env_value_from_stdin.sh", "validate_crm_deploy_config.py"):
                 shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+            (root / "crm" / "deliverability").mkdir(parents=True)
+            (root / "crm" / "__init__.py").touch()
+            (root / "crm" / "deliverability" / "__init__.py").touch()
+            shutil.copy2(ROOT / "crm" / "deliverability" / "policy.py", root / "crm" / "deliverability" / "policy.py")
             env_file = root / ".env"
             env_file.write_text("REDIS_URL=redis://synthetic\nCRM_SMS_ENABLED=false\n")
 

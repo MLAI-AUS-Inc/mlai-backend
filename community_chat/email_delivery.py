@@ -9,6 +9,7 @@ from datetime import timedelta
 from cryptography.fernet import Fernet, InvalidToken
 from customerio import APIClient
 from django.conf import settings
+from integrations import system_mail
 from django.db import connection, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -82,6 +83,7 @@ def send_community_chat_email_code(user, code, delivery_id=None):
     display_name = user.full_name or user.first_name or "MLAI member"
     request_body = {
         "transactional_message_id": message_id,
+        "tracked": False,
         "message_data": {
             "verification_code": code,
             "expires_minutes": max(
@@ -96,7 +98,13 @@ def send_community_chat_email_code(user, code, delivery_id=None):
         "to": user.email,
         "identifiers": {"id": str(user.id)} if user.id is not None else {"email": user.email},
     }
-    return APIClient(api_key).send_email(request_body)
+    from_email = str(getattr(settings, "CUSTOMERIO_FROM_EMAIL", "") or "").strip()
+    if from_email:  # Otherwise the Customer.io template keeps its own sender, as on main.
+        request_body["from"] = from_email
+    with system_mail.observe("customerio", "signin") as attempt:
+        response = APIClient(api_key).send_email(request_body)
+        attempt.accepted(response)
+        return response
 
 
 def _lock(queryset):

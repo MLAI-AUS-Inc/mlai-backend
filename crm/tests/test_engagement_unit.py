@@ -213,6 +213,7 @@ class ReviewHoldTests(SimpleTestCase):
             patch.object(blast_email.listmonk, "set_campaign_status") as start,
         ):
             blasts.select_for_update.return_value.get.return_value = blast
+            blasts.values_list.return_value.get.return_value = (None, {})
             self.assertEqual(blast_email.start_campaign(blast.pk, 123, now=NOW), "held")
         start.assert_not_called()
         contacts.select_for_update.assert_called_once_with()

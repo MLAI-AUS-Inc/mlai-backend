@@ -12,6 +12,7 @@ from urllib.parse import urlencode, urlparse
 from typing import Any, Optional
 
 from django.conf import settings
+from integrations import system_mail
 from django.core import signing
 from django.urls import reverse
 from django.utils import timezone
@@ -870,6 +871,7 @@ def _send_email_via_customerio(
     to_email = str(channel.route_id or "").strip()
     request_body: dict[str, Any] = {
         "to": to_email,
+        "tracked": False,
         # Customer.io requires a person identifier; route by user id when the
         # channel is user-linked (matches core/email_utils magic-link sends).
         "identifiers": {"id": str(channel.user_id)} if channel.user_id else {"email": to_email},
@@ -888,7 +890,9 @@ def _send_email_via_customerio(
     if from_email:
         request_body["from"] = from_email
     try:
-        response = client.send_email(request_body)
+        with system_mail.observe("customerio") as attempt:
+            response = client.send_email(request_body)
+            attempt.accepted(response)
     except Exception as exc:
         return False, "", {"error": str(exc)}
     response_payload = response if isinstance(response, dict) else {"response": str(response)}
@@ -903,8 +907,8 @@ def _send_email_via_resend(
     html_body: Optional[str],
     idempotency_key: str,
 ) -> tuple[bool, str, dict]:
-    api_key = str(getattr(settings, "RESEND_API_KEY", "") or "").strip()
-    from_email = str(getattr(settings, "RESEND_FROM_EMAIL", "") or "Roo <notifications@mlai.au>").strip()
+    api_key = system_mail.resend_key()
+    from_email = system_mail.sender()
     to_email = str(channel.route_id or "").strip()
     if not api_key:
         return False, "", {"error": "RESEND_API_KEY is not configured"}
@@ -916,23 +920,26 @@ def _send_email_via_resend(
     }
     if html_body:
         payload["html"] = html_body
-    response = http_client.post(
-        "https://api.resend.com/emails",
-        json=payload,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Idempotency-Key": idempotency_key,
-        },
-        timeout=(3, 8),
-    )
-    try:
-        response_payload = response.json()
-    except ValueError:
-        response_payload = {"text": response.text}
-    if response.status_code >= 300:
-        return False, "", response_payload
-    return True, str(response_payload.get("id") or ""), response_payload
+    with system_mail.observe("resend") as attempt:
+        response = http_client.post(
+            "https://api.resend.com/emails",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Idempotency-Key": idempotency_key,
+            },
+            timeout=(3, 8),
+        )
+        try:
+            response_payload = response.json()
+        except ValueError:
+            response_payload = {"text": response.text}
+        if response.status_code >= 300:
+            return False, "", response_payload
+        identifier = str(response_payload.get("id") or "")
+        attempt.accepted(response_payload)
+        return True, identifier, response_payload
 
 
 def _send_email_via_system_email(
@@ -1014,7 +1021,7 @@ def _send_email(
             message_data=message_data,
             transactional_message_id=transactional_message_id,
         )
-    if str(getattr(settings, "RESEND_API_KEY", "") or "").strip():
+    if system_mail.resend_key():
         return _send_email_via_resend(
             channel,
             subject=subject,

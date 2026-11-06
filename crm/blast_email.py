@@ -13,6 +13,7 @@ Email deliveries move ``queued`` → ``submitting`` (on the listmonk list) →
 from __future__ import annotations
 
 import logging
+import html
 import re
 from collections import Counter
 from datetime import datetime, timezone as dt_timezone
@@ -142,6 +143,14 @@ def subscriber_name(contact) -> str:
 
 def campaign_body(blast) -> str:
     body = listmonk_text(blast.body_markdown, blast.event, markdown=True)
+    from .deliverability import reconfirmation
+    if reconfirmation.is_reconfirmation(blast):
+        body += reconfirmation.BUTTON
+    if getattr(blast, 'sign_off_name', ''):
+        body += '\n\n— ' + listmonk_text(html.escape(blast.sign_off_name), blast.event, markdown=True)
+    if getattr(blast, 'preview_text', ''):
+        preview = listmonk_text(html.escape(blast.preview_text), blast.event, markdown=True)
+        body = '<div style="display:none;max-height:0;overflow:hidden;mso-hide:all" aria-hidden="true">' + preview + '</div>\n\n' + body
     return body if (getattr(blast, "stats", None) or {}).get("warmup") else track_links(body)
 
 
@@ -206,6 +215,29 @@ def email_block(blast) -> Optional[str]:
         return "not_configured"
     if blast.mailbox_id is None or not blast.mailbox.enabled:
         return "mailbox_disabled"
+    from .deliverability.streams import legacy_mailbox_path, protected_domain
+    if protected_domain(blast.mailbox.email.rsplit("@", 1)[-1]) and not legacy_mailbox_path(blast):
+        return "protected_domain"
+    if getattr(blast, "pause_state", ""):
+        return "blast_paused"
+    if getattr(blast, "stream_id", None):
+        from .deliverability.streams import stream_configured
+        if not stream_configured(blast.stream):
+            return "stream_not_configured"
+        if blast.stream.transactional:
+            return "stream_not_for_blasts"
+        if blast.stream.state in ("held", "stopped"):
+            return "stream_" + blast.stream.state
+        if not settings.CRM_GUARDIAN_ENABLED:
+            return "guardian_disabled"
+        if settings.CRM_GUARDIAN_DRY_RUN and settings.APP_ENV == "production":
+            return "guardian_dry_run"
+        from .deliverability.guardian import admission_ready
+        if not admission_ready():
+            return "guardian_unavailable"
+        from .sending_domains import is_verified
+        if not is_verified(blast.stream.domain):
+            return "sending_system_unverified"
     if (blast.stats or {}).get("warmup"):
         from .warmup import admission_block
         return admission_block(blast, timezone.now())
@@ -277,6 +309,21 @@ def _drop_reason(blast, contact, is_banned: bool) -> Optional[str]:
         return "consent_withdrawn"
     if blast.purpose == Blast.Purpose.MARKETING and marketing_review_hold(contact.attributes):
         return "marketing_review_hold"
+    if blast.purpose == Blast.Purpose.MARKETING:
+        from .deliverability.lifecycle import dormant_suppressed
+        if dormant_suppressed(contact.attributes):
+            return 'dormant'
+        from .deliverability import reconfirmation
+        if reconfirmation.is_reconfirmation(blast):
+            reason = reconfirmation.handoff_exclusion(contact, timezone.now())
+            if reason:
+                return reason
+    if blast.purpose == Blast.Purpose.MARKETING and (
+            (((blast.stats or {}).get('audience_preset') or {}).get('kind') == 'opted_in')
+            or (getattr(contact, 'marketing_consent_source', '') or '').startswith('community_onboarding:')):
+        from .community_optins import contact_is_opted_in
+        if not contact_is_opted_in(contact):
+            return 'consent_withdrawn'
     return None
 
 
@@ -335,7 +382,7 @@ def _record_id(record: dict) -> int:
     return value
 
 
-def _refresh_name(record: dict, name: str, list_id: int) -> None:
+def _refresh_name(record: dict, name: str, list_id: int, attribs=None) -> None:
     """Update the name, keeping every list, the status and the attributes.
 
     listmonk's subscriber update replaces the list memberships, so all the
@@ -349,14 +396,14 @@ def _refresh_name(record: dict, name: str, list_id: int) -> None:
             "email": record.get("email"),
             "name": name,
             "status": record.get("status") or "enabled",
-            "attribs": record.get("attribs") if isinstance(record.get("attribs"), dict) else {},
+            "attribs": {**(record.get("attribs") if isinstance(record.get("attribs"), dict) else {}), **(attribs or {})},
             "lists": sorted(lists | {int(list_id)}),
             "preconfirm_subscriptions": True,
         },
     )
 
 
-def _load_batch(blast, list_id: int, deliveries: list, now) -> Counter:
+def _load_batch(blast, list_id: int, deliveries: list, now, *, consent_reasons=False) -> Counter:
     """Put one batch on the blast's list; every row leaves ``queued``."""
 
     outcome: dict[int, tuple[str, str]] = {}
@@ -376,13 +423,20 @@ def _load_batch(blast, list_id: int, deliveries: list, now) -> Counter:
     for delivery in live:
         record = found.get(delivery.address)
         name = subscriber_name(delivery.contact)
+        attribs = {"crm_contact_id": str(delivery.contact_id)}
+        if consent_reasons:
+            from .deliverability.waves import consent_reason
+            attribs["consent_reason"] = consent_reason(delivery)
+        from .deliverability import reconfirmation
+        if reconfirmation.is_reconfirmation(blast):
+            attribs[reconfirmation.ATTRIBUTE] = reconfirmation.url_for(delivery, now=now)
         if record is None:
             try:
                 record = listmonk.create_subscriber(
                     delivery.address,
                     name,
                     lists=[list_id],
-                    attribs={"crm_contact_id": str(delivery.contact_id)},
+                    attribs=attribs,
                 )
                 subscriber_ids[delivery.pk] = _record_id(record)
                 outcome[delivery.pk] = (Status.SUBMITTING, "")
@@ -399,12 +453,16 @@ def _load_batch(blast, list_id: int, deliveries: list, now) -> Counter:
             continue
         subscriber_ids[delivery.pk] = _record_id(record)
         outcome[delivery.pk] = (Status.SUBMITTING, "")
-        if name and record.get("name") != name:
+        if (name and record.get("name") != name) or (consent_reasons and any(
+                (record.get("attribs") or {}).get(key) != value for key, value in attribs.items())):
             try:
-                _refresh_name(record, name, list_id)
+                _refresh_name(record, name, list_id, attribs if consent_reasons else None)
                 continue
             except ListmonkError as exc:
                 if exc.transient or exc.credentials_rejected:
+                    raise
+                if consent_reasons:
+                    # A mandatory consent footer must never use a stale reason.
                     raise
         to_add.append(subscriber_ids[delivery.pk])
     listmonk.add_subscribers_to_list(to_add, list_id)
@@ -448,9 +506,15 @@ def start_campaign(blast_id, campaign_id: int, *, now) -> str:
     """Set the campaign running unless the blast was cancelled; records ``started_at``."""
 
     with transaction.atomic():
-        from .resend_feedback import monitored_senders
-        # Feedback and admission take sender locks before blast/delivery locks.
-        list(SenderMailbox.objects.select_for_update().filter(email__in=monitored_senders()).order_by("pk"))
+        from .models import SendingStream
+        # Same stream → blast lock order as guardian action and owner acknowledgement.
+        stream_id, stats = Blast.objects.values_list("stream_id", "stats").get(pk=blast_id)
+        if stream_id:
+            SendingStream.objects.select_for_update().get(pk=stream_id)
+        elif (stats or {}).get("warmup"):
+            from .resend_feedback import monitored_senders
+            list(SenderMailbox.objects.select_for_update().filter(
+                email__in=monitored_senders()).order_by("pk"))
         blast = Blast.objects.select_for_update().get(pk=blast_id)
         if blast.status == Blast.Status.CANCELLED:
             return listmonk.CANCELLED
@@ -509,6 +573,13 @@ def apply_campaign(blast_id, campaign: dict, *, now) -> str:
 def dispatch_email(blast, *, now) -> dict:
     """One tick of a blast's email: load recipients, then create and start the campaign."""
 
+    from .deliverability import waves
+    if waves.managed(blast):
+        return waves.dispatch(blast.pk, now=now)
+    if getattr(blast, "pause_state", ""):
+        return {"blocked": "blast_paused"}
+    if email_stats(blast).get("resume_pending"):
+        return resume_campaign(blast.pk, now=now)
     started = email_started(blast)
     if started:
         if not blast.listmonk_campaign_id:
@@ -530,10 +601,58 @@ def dispatch_email(blast, *, now) -> dict:
     return result
 
 
+def resume_campaign(blast_id, *, now) -> dict:
+    """Reconcile a committed owner decision against the same provider campaign.
+
+    The pending marker survives timeouts and database failures. A retry observes
+    the provider's state first, so it never creates or restarts another campaign.
+    Stream and blast locks serialize resumption against a new guardian stop.
+    """
+    from .models import CrmAuditEvent, SendingStream
+
+    with transaction.atomic():
+        stream_id = Blast.objects.values_list("stream_id", flat=True).get(pk=blast_id)
+        if stream_id:
+            SendingStream.objects.select_for_update().get(pk=stream_id)
+        blast = Blast.objects.select_for_update().get(pk=blast_id)
+        if blast.status not in (Blast.Status.QUEUED, Blast.Status.SENDING):
+            return {"blocked": "blast_not_live"}
+        if not email_stats(blast).get("resume_pending"):
+            return {"campaign": email_stats(blast).get("listmonk_status") or "resume_not_pending"}
+        block = email_block(blast)
+        if block:
+            return {"blocked": block}
+        if not blast.listmonk_campaign_id:
+            return {"blocked": "campaign_missing"}
+        campaign_id = blast.listmonk_campaign_id
+        status = str(listmonk.get_campaign(campaign_id).get("status") or "")
+        restarted = status == "paused"
+        if restarted:
+            listmonk.set_campaign_status(campaign_id, listmonk.RUNNING)
+            status = listmonk.RUNNING
+        elif status not in (listmonk.RUNNING, listmonk.FINISHED, listmonk.CANCELLED, listmonk.DRAFT):
+            return {"blocked": "campaign_state_unknown"}
+        elif status == listmonk.DRAFT and email_started(blast):
+            # A previously started campaign reset to draft could resend its audience.
+            return {"blocked": "campaign_state_unknown"}
+        values = {"resume_pending": False, "listmonk_status": status, "synced_at": iso_z(now)}
+        if status != listmonk.DRAFT:
+            values["started_at"] = email_stats(blast).get("started_at") or iso_z(now)
+        blast.stats = with_email_stats(blast.stats, **values)
+        blast.save(update_fields=["stats", "updated_at"])
+        CrmAuditEvent.objects.create(action=CrmAuditEvent.Action.EDIT, target_type="blast", target_id=str(blast.pk),
+            detail={"operation": "resume_reconciled", "provider_status": status, "provider_resumed": restarted})
+    return {"campaign": status}
+
+
 def fail_email(blast_id, code: str, *, now) -> None:
     """listmonk refused this blast's email: rows it may have sent become ``unknown``."""
 
     blast = Blast.objects.only("stats").get(pk=blast_id)
+    from .deliverability import waves
+    if waves.managed(blast):
+        waves.fail(blast_id, code, now)
+        return
     status = Status.UNKNOWN if email_started(blast) else Status.FAILED
     _email_rows(blast_id, Status.QUEUED, Status.SUBMITTING).update(
         status=status, error_code=code[:32], updated_at=now
@@ -580,8 +699,13 @@ def send_test_email(blast_id, user) -> str:
     email = normalize_contact_email(getattr(user, "email", ""))
     if not email:
         raise ListmonkError("no_test_address")
-    list_id = ensure_list(blast_id)
-    campaign_id = ensure_campaign(blast_id, list_id)
+    blast = Blast.objects.select_related("event", "mailbox").get(pk=blast_id)
+    name = resource_name(blast_id) + '-test'
+    list_id = listmonk.find_list(name) or listmonk.create_list(name, tags=['crm', 'test'])
+    payload = campaign_payload(blast, list_id)
+    payload['name'] = name
+    existing = listmonk.find_campaign(name)
+    campaign_id = int((existing or listmonk.create_campaign(payload))['id'])
     if _find_one(email) is None:
         contact = Contact.objects.filter(email=email).first()
         try:
@@ -589,6 +713,5 @@ def send_test_email(blast_id, user) -> str:
         except ListmonkError as exc:
             if not exc.conflict:
                 raise
-    blast = Blast.objects.select_related("event", "mailbox").get(pk=blast_id)
-    listmonk.test_campaign(campaign_id, campaign_payload(blast, list_id), [email])
+    listmonk.test_campaign(campaign_id, payload, [email])
     return email

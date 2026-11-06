@@ -26,6 +26,7 @@ from crm.models import (
     InboundMessage,
     MessageTemplate,
     SenderMailbox,
+    SendingStream,
 )
 from roo.models import PointsAdmin
 
@@ -36,6 +37,7 @@ SENDING = {
     "COMMUNITY_CHAT_CRM_ENABLED": True,
     "CRM_LUMA_SYNC_ENABLED": False,
     "CRM_SENDING_ENABLED": True,
+    "CRM_GUARDIAN_ENABLED": True,
     "LISTMONK_BASE_URL": LISTMONK_URL,
     "LISTMONK_API_USER": "mlai-backend",
     "LISTMONK_API_TOKEN": "synthetic-token",
@@ -272,17 +274,20 @@ class BlastFixtures(CrmApiMixin):
         super().setUp()
         self.fake = FakeProviders()
         self.enterContext(patch("integrations.http_client.request", new=self.fake))
+        self.enterContext(patch("crm.sending_domains.is_verified", return_value=True))
+        self.enterContext(patch("crm.deliverability.guardian.admission_ready", return_value=True))
         self.now = timezone.now()
         self.event = make_event("evt-blast", start=self.now + timedelta(days=7), name="MLAI Meetup")
         self.mailbox = SenderMailbox.objects.create(
-            email="sam@mlai.au",
+            email="sam@news.mlai.au",
             display_name="Sam from MLAI",
-            domain="mlai.au",
+            domain="news.mlai.au",
             route=SenderMailbox.Route.GOOGLE_RELAY,
             reply_to="hello@mlai.au",
             daily_limit=500,
             enabled=True,
         )
+        self.stream = SendingStream.objects.create(key="news", label="Community email", domain="news.mlai.au", mailbox=self.mailbox, purposes=["marketing", "event_update"])
         self.template = MessageTemplate.objects.create(
             name="mlai_event_reminder",
             content_sid="HX1",
@@ -527,7 +532,7 @@ class BlastDispatchDatabaseTests(BlastFixtures, TestCase):
         self.assertEqual(self.fake.on_list(100), {"ada@example.com", "bob@example.com", "dan@example.com", "eve@example.com"})
         campaign = self.fake.campaigns[blast.listmonk_campaign_id]
         self.assertEqual(campaign["status"], "running")
-        self.assertEqual(campaign["from_email"], "Sam from MLAI <sam@mlai.au>")
+        self.assertEqual(campaign["from_email"], "Sam from MLAI <sam@news.mlai.au>")
         self.assertEqual(campaign["lists"], [100])
         self.assertEqual((campaign["content_type"], campaign["type"], campaign["template_id"]), ("markdown", "regular", 3))
         self.assertEqual(campaign["tags"], ["crm", f"blast:{blast.pk}"])
@@ -860,7 +865,8 @@ class BlastApiDatabaseTests(BlastFixtures, TestCase):
         self.assertEqual(patched["email"]["body_markdown"], self.draft_body()["email"]["body_markdown"])
         bad_tag = self.client.patch(PREFIX + f"blasts/{blast.pk}/", {"sms": {"body": "Hi {{ email }}"}}, format="json")
         self.assertEqual(bad_tag.json(), {"error": "unsupported_merge_tag", "outcome": "unsupported_merge_tag", "tags": ["email"], "field": "sms_body"})
-        missing = self.client.patch(PREFIX + f"blasts/{blast.pk}/", {"email": {"mailbox_id": str(uuid.uuid4())}}, format="json")
+        with self.settings(CRM_DELIVERABILITY_OWNERS=(self.admin.email,)):
+            missing = self.client.patch(PREFIX + f"blasts/{blast.pk}/", {"email": {"mailbox_id": str(uuid.uuid4())}}, format="json")
         self.assertEqual((missing.status_code, missing.json()["error"]), (404, "mailbox_not_found"))
         no_purpose = self.client.post(PREFIX + "blasts/", {"channels": ["email"]}, format="json")
         self.assertEqual(no_purpose.json()["fields"], {"purpose": ["required"]})
@@ -896,7 +902,7 @@ class BlastApiDatabaseTests(BlastFixtures, TestCase):
     def test_mailboxes_and_templates(self):
         MessageTemplate.objects.create(name="draft_template", content_sid="HX2", approved=False, enabled=True)
         mailboxes = self.client.get(PREFIX + "mailboxes/").json()["results"]
-        self.assertEqual(mailboxes[0]["email"], "sam@mlai.au")
+        self.assertEqual(mailboxes[0]["email"], "sam@news.mlai.au")
         self.assertEqual((mailboxes[0]["sent_last_24h"], mailboxes[0]["remaining_today"]), (0, 500))
         templates = self.client.get(PREFIX + "whatsapp-templates/").json()["results"]
         self.assertEqual([item["name"] for item in templates], ["mlai_event_reminder"])

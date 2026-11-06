@@ -1,7 +1,7 @@
 """Sending domains: which domains CRM email may come from, and whether their DNS agrees.
 
 ``CRM_SENDING_DOMAINS`` names each domain and the route that sends for it
-("mlai.au:resend"). A mailbox's address must be on a listed domain, and a
+("news.mlai.au:resend"). A mailbox's address must be on a listed domain, and a
 mailbox can only be switched on while its domain's required records check
 out. Lookups use DNS over HTTPS (Cloudflare, then Google) and are cached for
 ``CACHE_SECONDS``; nothing here holds credentials or reaches the provider.

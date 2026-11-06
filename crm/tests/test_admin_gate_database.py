@@ -27,7 +27,7 @@ def crm_routes():
     """(path, view) for every CRM route, with each URL parameter filled by a fresh UUID."""
 
     for pattern in crm_urls.urlpatterns:
-        path = re.sub(r"<uuid:\w+>", lambda _match: str(uuid.uuid4()), str(pattern.pattern))
+        path = re.sub(r"<uuid:\w+>", lambda _match: str(uuid.uuid4()), str(pattern.pattern)).replace("<slug:key>", "news")
         unfilled = re.search(r"<[^>]+>", path)
         assert unfilled is None, f"fill the {unfilled.group()} parameter in {pattern.pattern}"
         yield path, pattern.callback.view_class
@@ -146,7 +146,8 @@ class RouteAuditDatabaseTests(CrmApiMixin, TestCase):
     def test_the_open_views_reveal_nothing_to_members(self):
         self.assertEqual(
             self.member_client.get(PREFIX + "access/").json(),
-            {"enabled": True, "can_view": False, "can_send": False, "luma_sync": None, "channels": None},
+            {"enabled": True, "can_view": False, "can_send": False, "can_manage_deliverability": False,
+                'campaign_features': {'waves': False, 'preflight': False}, "luma_sync": None, "channels": None},
         )
         self.assertEqual(self.member_client.get(ADMIN_ACCESS).json(), {"is_admin": False, "sections": []})
 
