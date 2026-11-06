@@ -131,7 +131,7 @@ jobs:
       run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit
 
     - name: Check system email rendering, Resend transport, routing and webhook parsing without database access
-      run: python scripts/test_without_database.py system_email.tests.test_system_email_unit
+      run: python scripts/test_without_database.py system_email.tests.test_system_email_unit startup_updates.tests_reminder_admin_permissions_unit
 
     - name: Verify event discounts against disposable migration state
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency

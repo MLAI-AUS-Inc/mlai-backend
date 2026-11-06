@@ -239,10 +239,21 @@ class MonthlyUpdateReminderDeliveryAdmin(admin.ModelAdmin):
     def has_change_permission(self, request, obj=None):
         return False
 
-    @admin.action(description="Send held reminders (Resend)")
+    def has_send_permission(self, request):
+        """Releasing a held reminder sends real email, so it needs the model's
+        change permission, even though this admin's forms stay read-only."""
+        opts = self.opts
+        return request.user.has_perm(f"{opts.app_label}.change_{opts.model_name}")
+
+    @admin.action(description="Send held reminders (Resend)", permissions=["send"])
     def send_held_reminders(self, request, queryset):
+        from django.core.exceptions import PermissionDenied
+
         from .monthly_update_reminders import release_held_reminder
 
+        # Checked again here so a direct call or forged POST can't skip the filter.
+        if not self.has_send_permission(request):
+            raise PermissionDenied
         outcomes = [release_held_reminder(pk) for pk in queryset.values_list("pk", flat=True)]
         sent = sum(1 for outcome in outcomes if outcome.get("status") == "sent")
         skipped = sum(1 for outcome in outcomes if outcome.get("status") == "skipped")
