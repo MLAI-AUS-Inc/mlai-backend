@@ -203,6 +203,9 @@ class BookingDatabaseTests(TransactionTestCase):
         session.refresh_from_db()
         self.assertEqual(session.status, MentorSession.STATUS_COMPLETED)
         self.assertIsNotNone(session.payout_ledger_entry_id)
+        payout = session.payout_ledger_entry
+        self.assertEqual(payout.created_by_slack_id, 'MENTORING')
+        self.assertNotEqual(payout.created_by_slack_id, self.mentor_user.slack_id)
         self.assertEqual(self.balance(self.founder), 60)
         self.assertEqual(self.balance(self.mentor_user), 40)
 

@@ -28,6 +28,10 @@ class SlotTests(unittest.TestCase):
         self.assertEqual(len(self.slots(session_minutes=45)), 2)
         self.assertEqual(self.slots(session_minutes=180), [])
 
+    def test_zero_or_negative_length_returns_no_slots_and_does_not_loop(self):
+        self.assertEqual(self.slots(session_minutes=0), [])
+        self.assertEqual(self.slots(session_minutes=-15), [])
+
     def test_busy_intervals_remove_overlapping_slots(self):
         busy = [(datetime(2026, 11, 2, 22, 30, tzinfo=tz.utc), datetime(2026, 11, 2, 23, 0, tzinfo=tz.utc))]
         got = self.slots(busy=busy)
