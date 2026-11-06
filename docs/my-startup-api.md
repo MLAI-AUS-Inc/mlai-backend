@@ -115,3 +115,35 @@ tests also passed. The first full CI run exposed a missing `settings` import in
 Roo link issuance; that import is fixed and the new destination regression
 exercises the real API. Production already has migration 0024; this feature
 still introduces no migration.
+
+## Website cleanup status
+
+The company-scoped `websiteJourney` response includes optional `historicalCleanup`
+entries alongside the current operation. Each bounded entry contains `id`,
+`action`, `state`, `generation`, and `needsAttention`. It exposes no provider
+responses or retry/publication authority. The current operation is excluded;
+an older cleanup never replaces current preparation progress.
+
+Cleanup receipts retain closed per-step failures in `cleanup_step_failures`,
+including a canonical code, safe HTTP status when available, and retryability.
+Permanent repository-access failures wait for prerequisite repair while original
+refunds and service preview cleanup can continue. A newer connection supersedes
+old repository-removal work with an explicit retained outcome; it does not lend
+new consent to that old work. Original cleanup deadlines remain in force.
+
+When setup approval's response is lost, preparation can reconcile the same
+approved setup run's existing pull request. Its saved company, connection,
+generation, immutable repository, branch and root must still match. The parent
+clears the resolved active error and records a bounded `resolved_setup_approval`
+reference, retaining failure counters and the original retry window. Existing
+review, check and merge policy still decides the next action; reconciliation
+does not send another approval or create another setup run.
+
+An active current preparation may also include `receipt.preview_build` with
+`runId`, `phase`, a safe build-check URL and the last confirmed progress time.
+Phases distinguish a runner wait, building, a pending callback and a terminal
+build failure. This optional projection reads only the original child's
+observation endpoint; it cannot start or recover a preview. Reads are cached
+and bounded, and an older worker's 404 leaves the ordinary preparation status
+intact. The frontend links to the owned setup run and keeps provider links in
+staff details. A successful build observation never establishes readiness.

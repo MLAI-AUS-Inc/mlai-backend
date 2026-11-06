@@ -104,7 +104,7 @@ class InviteLifecycleTests(InviteFixture):
     def test_check_ready_for_the_invited_user(self):
         out = MentoringService.check_invite(self.user, TOKEN)
         self.assertEqual(out['state'], 'ready')
-        self.assertEqual(out['default_price_roo'], 40)
+        self.assertEqual(out['default_price_roo'], 30)
 
     def test_unknown_token_is_invalid(self):
         self.invites.objects.get.side_effect = MentorInvite.DoesNotExist
@@ -151,11 +151,11 @@ class InviteLifecycleTests(InviteFixture):
         self.assertIsNone(self.profile.paused_at)
         self.assertIsNone(self.profile.reviewed_by)
 
-    def test_price_defaults_to_40(self):
+    def test_price_defaults_to_30(self):
         body = form()
         del body['price_roo']
         MentoringService.submit_application(self.user, body)
-        self.assertEqual(self.profile.price_roo, 40)
+        self.assertEqual(self.profile.price_roo, 30)
 
     def test_reuse_is_refused_and_a_used_invite_shows_submitted(self):
         self.invite.used_at = NOW - timedelta(days=1)

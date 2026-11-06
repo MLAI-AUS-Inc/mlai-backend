@@ -41,8 +41,9 @@ def start_disconnect(config, *, user, data):
         if existing.generation != connection.generation or connection.state != "disconnected":
             raise WebsiteAuthorityError("website_connection_changed", "A newer connection superseded this disconnect.")
         if existing.state == "needs_attention":
+            from .website_cleanup_failures import retry_failure_steps
             existing.state, existing.next_attempt_at = "pending", timezone.now()
-            existing.receipt = {**existing.receipt, "cleanup_failures": 0, "status": "working", "user_action": None}
+            existing.receipt = {**retry_failure_steps(existing.receipt), "cleanup_failures": 0, "status": "working", "user_action": None}
             changed = WebsiteConnectionOperation.objects.filter(pk=existing.pk, state="needs_attention",
                 generation=existing.generation, connection__generation=existing.generation,
                 connection__state="disconnected").update(state=existing.state, next_attempt_at=existing.next_attempt_at,
@@ -217,23 +218,33 @@ def _open_cleanup(op):
 
 def advance_disconnect_steps(op):
     """Resume only missing composite steps; generic reconciler handles cancellation/tokens."""
-    _fence_disconnect(op)
+    from .website_cleanup_failures import blocked_step, record_failure, superseded_repository_work
     completed = list(op.receipt.get("completed_steps") or [])
     op.receipt["completed_steps"] = completed
-    if "refunds" not in completed and refund_cancelled_runs(op):
-        completed.append("refunds")
-    if "repository_refs" not in completed and close_owned_repository_refs(op):
-        completed.append("repository_refs")
-    if op.payload.get("remove_setup") and "cleanup_pr" not in completed:
-        cleanup = _open_cleanup(op)
-        op.receipt.update(cleanup_operation_id=str(cleanup.pk), cleanup_pr_url=cleanup.receipt.get("pr_url"),
-            cleanup_status=cleanup.receipt.get("status") or cleanup.state,
-            cleanup_required=cleanup.receipt.get("status") != "no_unchanged_owned_files",
-            cleanup_skipped_files=cleanup.receipt.get("conflicts", []), retained_files=cleanup.receipt.get("retained", []))
-        completed.append("cleanup_pr")
+    if "refunds" not in completed:
+        try:
+            if refund_cancelled_runs(op):
+                completed.append("refunds")
+        except Exception as exc:
+            record_failure(op, exc, step="refunds")
+    stale = superseded_repository_work(op)
+    if not stale and not blocked_step(op, "repository_refs") and not blocked_step(op, "cleanup_pr"):
+        try:
+            _fence_disconnect(op)
+            if "repository_refs" not in completed and close_owned_repository_refs(op):
+                completed.append("repository_refs")
+            if op.payload.get("remove_setup") and "cleanup_pr" not in completed:
+                cleanup = _open_cleanup(op)
+                op.receipt.update(cleanup_operation_id=str(cleanup.pk), cleanup_pr_url=cleanup.receipt.get("pr_url"),
+                    cleanup_status=cleanup.receipt.get("status") or cleanup.state,
+                    cleanup_required=cleanup.receipt.get("status") != "no_unchanged_owned_files",
+                    cleanup_skipped_files=cleanup.receipt.get("conflicts", []), retained_files=cleanup.receipt.get("retained", []))
+                completed.append("cleanup_pr")
+        except Exception as exc:
+            record_failure(op, exc, step="repository_refs" if "repository_refs" not in completed else "cleanup_pr")
     if not op.payload.get("remove_setup") and "pages_kept" not in completed:
         completed.append("pages_kept")
-    required = {"refunds", "repository_refs", "cleanup_pr" if op.payload.get("remove_setup") else "pages_kept"}
+    required = {"refunds"} if stale else {"refunds", "repository_refs", "cleanup_pr" if op.payload.get("remove_setup") else "pages_kept"}
     op.receipt.update(completed_steps=completed, disconnect_steps_pending=not required.issubset(set(completed)))
     return op
 

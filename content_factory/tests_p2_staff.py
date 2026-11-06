@@ -249,6 +249,20 @@ class StaffTests(TestCase):
         self.assertLess(monotonic()-start, 2)
         self.assertLessEqual(len(queries), 4)
 
+    def test_retry_now_rechecks_a_held_article_quality_check(self):
+        run = self.new_run(result={"article_preview_quality": {
+            "status": "blocking_findings", "self_heal_exhausted": True, "escalation": "safety_review"},
+            "approval_blocker": {"code": "article_preview_safety_review_required"}})
+        remote = {"article_preview_quality": {"status": "queued"}, "status": "quality_review_queued"}
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_action",
+                   return_value=remote) as call:
+            status, body, _ = self.action(run, "retry_now")
+        self.assertEqual((status, body["status"]), (200, "done"))
+        self.assertEqual(call.call_args.kwargs["action"], "retry-preview-quality")
+        run.refresh_from_db()
+        self.assertEqual(run.result["article_preview_quality"]["status"], "queued")
+        self.assertNotIn("approval_blocker", run.result)
+
     def test_missing_provider_refuses_each_action_and_audits_without_touching_stall_clock(self):
         run = self.new_run()
         before = run.updated_at

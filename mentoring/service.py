@@ -37,7 +37,8 @@ from roo.services import PointsService
 from . import google, scheduling
 from .models import (
     hash_invite_token,
-    DEFAULT_PRICE_ROO,
+    NEW_MENTOR_PRICE_ROO,
+    NEW_MENTOR_SESSION_MINUTES,
     LOCATION_MLAI_SPACE,
     LOCATION_VIDEO,
     MAX_SESSION_MINUTES,
@@ -53,6 +54,7 @@ logger = logging.getLogger(__name__)
 LEDGER_SOURCE = 'MANUAL'
 LEDGER_REFERENCE_TYPE = 'MENTOR_SESSION'
 MAX_PRICE_ROO = 1000
+PAYOUT_ACTOR = 'MENTORING'
 MAX_AVAILABILITY_WINDOWS = 28
 MAX_AWAY_RANGES = 20
 # A pending meeting claim older than this is stale (the process died) and may be reclaimed.
@@ -344,7 +346,9 @@ def validate_profile_update(payload, current):
         minutes = payload['session_minutes']
         if (
             isinstance(minutes, bool) or not isinstance(minutes, int)
-            or not MIN_SESSION_MINUTES <= minutes <= MAX_SESSION_MINUTES or minutes % 5
+            # An existing mentor can keep a saved length from before these limits.
+            or (minutes != current.get('session_minutes')
+                and (not MIN_SESSION_MINUTES <= minutes <= MAX_SESSION_MINUTES or minutes % 5))
         ):
             raise MentoringError(
                 'invalid_field',
@@ -543,7 +547,9 @@ def _pay_mentor(session):
         delta=session.price_roo,
         source=LEDGER_SOURCE,
         description=f'Mentor session {session.pk} completed',
-        created_by_slack_id=session.mentor.user.slack_id or '',
+        # A fixed label, not the mentor's Slack id: the weekly points-admin
+        # allowance sums EARN rows by this field, and a payout is not a manual award.
+        created_by_slack_id=PAYOUT_ACTOR,
         idempotency_key=f'mentor_payout:{session.pk}',
         reference_type=LEDGER_REFERENCE_TYPE,
         reference_id=str(session.pk),
@@ -762,7 +768,8 @@ class MentoringService:
         initial = MentorProfile.objects.select_related('user').filter(user=user).first()
         if initial is None:
             raise MentoringError('not_a_mentor', 'Your account is not set up as a mentor.', 404)
-        clean_initial = validate_profile_update(payload, {'location_type': initial.location_type})
+        clean_initial = validate_profile_update(
+            payload, {'location_type': initial.location_type, 'session_minutes': initial.session_minutes})
         if clean_initial.get('accepting_bookings') and not initial.accepting_bookings and 'meeting_artifact_policy' not in payload:
             from .meeting_policy import REQUIRED_POLICY
             payload = {**payload, 'meeting_artifact_policy': dict(REQUIRED_POLICY)}
@@ -802,7 +809,7 @@ class MentoringService:
                     setattr(candidate, field, value)
                 if profile.booking_revision != preflight_revision or calendar_target(candidate, verify=False) != preflight_target:
                     raise MentoringError('settings_changed', 'Calendar settings changed. Refresh before saving.', 409)
-            current = {'location_type': profile.location_type}
+            current = {'location_type': profile.location_type, 'session_minutes': profile.session_minutes}
             clean = validate_profile_update(payload, current)
             windows = validate_availability(payload['availability']) if 'availability' in payload else None
             for field, value in clean.items():
@@ -857,7 +864,8 @@ class MentoringService:
         return {
             'state': 'ready',
             'expires_at': invite.expires_at.isoformat(),
-            'default_price_roo': DEFAULT_PRICE_ROO,
+            'default_price_roo': NEW_MENTOR_PRICE_ROO,
+            'default_session_minutes': NEW_MENTOR_SESSION_MINUTES,
         }
 
     @classmethod
@@ -875,7 +883,8 @@ class MentoringService:
             if profile is not None and profile.is_active:
                 raise MentoringError('already_a_mentor', 'You are already an active mentor.', 409)
             fields = {k: v for k, v in payload.items() if k not in ('token', 'away_dates', 'is_active', 'accepting_bookings', 'booking_revision')}
-            fields.setdefault('price_roo', DEFAULT_PRICE_ROO)
+            fields.setdefault('price_roo', NEW_MENTOR_PRICE_ROO)
+            fields.setdefault('session_minutes', NEW_MENTOR_SESSION_MINUTES)
             clean = validate_profile_update(fields, {})
             windows = validate_availability(fields.get('availability'))
             for name in ('headline', 'bio', 'topics', 'session_minutes', 'location_type'):

@@ -706,8 +706,17 @@ def mark_delivery_retry(*, delivery_id: int, error_text: str, permanent: bool = 
     delivery.save(update_fields=["status", "available_at", "locked_at", "lease_token", "lease_expires_at", "last_error", "updated_at"])
 
 
-def defer_delivery(*, delivery_id: int, retry_after: int) -> None:
-    """Quota waits do not consume a provider failure or lose a queued message."""
+def defer_delivery(*, delivery_id: int, retry_after: int, reason: str = "provider_budget_deferred") -> None:
+    """Quota waits do not consume a provider failure or lose a queued message.
+
+    `reason` is the closed hold code (for example a missing bot reader or a
+    legacy hold); only a real provider budget wait keeps the default. The
+    allowlist is shared with the send log so stored and logged codes match.
+    """
+    from .observability import HOLD_REASONS
+
+    if reason not in HOLD_REASONS:
+        reason = "provider_budget_deferred"
     with transaction.atomic():
         from integrations.services.message_sync.delivery import refund_current_delivery_turn
         refund_current_delivery_turn()
@@ -719,7 +728,7 @@ def defer_delivery(*, delivery_id: int, retry_after: int) -> None:
         row.attempts = max(0, row.attempts - 1)
         row.available_at = timezone.now() + timedelta(seconds=max(1, retry_after))
         row.locked_at = None
-        row.last_error = "provider_budget_deferred"
+        row.last_error = reason
         row.lease_token = None
         row.lease_expires_at = None
         row.save(update_fields=["lease_token", "lease_expires_at", "status", "attempts", "available_at", "locked_at", "last_error", "updated_at"])

@@ -904,6 +904,44 @@ def _setup_owner_action(child, setup, connection):
     return None
 
 
+def _reconcile_setup_approval_receipt(op, child, *, now):
+    """Resolve a lost approval response only from its original approved setup PR."""
+    if (op.receipt.get("reason_code") != "setup_approval_unavailable"
+            or op.generation != op.connection.generation or op.connection.state != "connected"
+            or child.run_id != op.receipt.get("child_run_id")
+            or child.workflow != "article_system_setup"
+            or child.status not in {"completed", "pr_opened"}
+            or getattr(child, "approval_state", None) != "approved"
+            or child.organization_id != op.connection.organization_id):
+        return
+    from .website_connections import scoped_run_contract
+    from .vibe_marketing_views import _pull_request_number_from_run
+    saved = scoped_run_contract(child)
+    try:
+        binding = connection_contract(saved)
+    except WebsiteAuthorityError:
+        return
+    current = contract_for(op.connection)
+    if (any(binding.get(key) != current[key] for key in
+            ("website_connection_id", "connection_generation", "repository_id"))
+            or any(saved.get(key) != current[key] for key in ("github_repo", "branch", "app_root"))):
+        return
+    number = _pull_request_number_from_run(child)
+    if not number:
+        return
+    op.receipt["resolved_setup_approval"] = {"version": 1, "run_id": child.run_id,
+        "pr_number": number, "resolved_at": now.isoformat(), "reason_code": "setup_approval_unavailable",
+        "failure_occurrence_id": op.receipt.get("failure_occurrence_id"),
+        "failure_fingerprint": op.receipt.get("failure_fingerprint")}
+    # Preserve failure counters and the original retry window. Only the active
+    # error projection is superseded; the normal review/merge policy still runs.
+    for key in ("failure", "failure_fingerprint", "failure_occurrence_id", "failure_taxonomy_observation",
+                "failure_taxonomy_policy_applied", "error_code", "last_error"):
+        op.receipt.pop(key, None)
+    op.receipt.update(reason_code="", current_step="merge", blocked_step=None, failure_class="", retryable=False,
+        status="working", message="The articles setup pull request is open.", user_action=None)
+
+
 def advance_prepare(identifier, *, now=None, handlers=None):
     """Advance a single leased operation by its next unmet readiness requirement."""
     now = now or timezone.now()
@@ -971,6 +1009,8 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 # The owner closed this setup's pull request on GitHub; a new setup replaces it below.
                 _begin_replacement_setup_attempt(op, child)
                 child = None
+            if child:
+                _reconcile_setup_approval_receipt(op, child, now=now)
             owner_action = _setup_owner_action(child, setup, op.connection) if child and child.workflow == "article_system_setup" else None
             if owner_action:
                 if owns_goal(op) and not any(item["name"] == "previewed" and item["state"] == "passed"

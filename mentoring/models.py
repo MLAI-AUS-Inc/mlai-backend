@@ -14,9 +14,14 @@ from django.db import models
 from django.db.models import F, Q
 from django.utils import timezone
 
+# Stored model defaults (price 40, session length 15). They stay as they are on purpose:
+# changing a field default needs a migration. New mentors get the values below instead,
+# applied in the application flow and the admin add form.
 DEFAULT_PRICE_ROO = 40
-MIN_SESSION_MINUTES = 15
-MAX_SESSION_MINUTES = 120
+NEW_MENTOR_PRICE_ROO = 30
+NEW_MENTOR_SESSION_MINUTES = 30
+MIN_SESSION_MINUTES = 30
+MAX_SESSION_MINUTES = 60
 
 LOCATION_MLAI_SPACE = 'mlai_space'
 LOCATION_VIDEO = 'video'

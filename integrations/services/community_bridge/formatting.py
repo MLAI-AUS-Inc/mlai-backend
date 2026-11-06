@@ -5,6 +5,7 @@ from typing import Callable, Iterable, Optional
 from urllib.parse import urlsplit
 
 from integrations.models import CommunityBridgePlatform
+from integrations.services.message_sync.scheduler import BudgetDeferred
 from .slack_content import slack_message_markdown, slack_mrkdwn
 from ..slack_emoji import emoji_to_slack_reaction, slack_reaction_to_emoji  # noqa: F401
 
@@ -343,6 +344,10 @@ def _resolved_slack_label(
         return ""
     try:
         label = str(resolver(entity_id) or "").strip()
+    except BudgetDeferred:
+        # A paced provider call is not a failed lookup: let the delivery
+        # defer and retry rather than permanently rendering "@user".
+        raise
     except Exception:
         return ""
     if not label or label == entity_id:

@@ -18,7 +18,7 @@ HTTP layer is `community_chat/mentoring_views.py`.
   `is_active` through Mentoring admin or Django admin ("Vibe Mentoring"). Mentors cannot activate
   themselves. An admin can also change a mentor's price.
 - Mentors set their own weekly availability (windows per weekday in their own
-  timezone), their own session length (15 to 120 minutes, multiples of 5), their
+  timezone), their own session length (30 to 60 minutes, multiples of 5; an existing mentor can keep a saved length), their
   price, bio, topics and location.
 - Each mentor sets one location, "MLAI space" or "Video"; the founder does not
   choose. For video there is no mentor-supplied link: when the mentor accepts, MLAI
@@ -30,8 +30,9 @@ HTTP layer is `community_chat/mentoring_views.py`.
   cancelled automatically; the mentor cancels them.
 - Availability windows are wall-clock times in the mentor's timezone; slots advance
   in real time, so daylight saving gaps are skipped and a repeated hour is offered twice.
-- Price defaults to 40 Roo Points and is stored per mentor. The price is
-  snapshotted on each session.
+- New mentors default to 30 Roo Points for 30 minutes. Existing mentors keep their
+  saved price and session length. The price is stored per mentor and snapshotted on
+  each session.
 - Each request carries a brief: stage, biggest struggle, outcome wanted, and an
   optional link.
 - A request charges nothing. Points are taken when the mentor accepts.
@@ -124,7 +125,9 @@ All movements use `PointsService`, ledger source `MANUAL`, reference type
    a request that was never accepted moves no points.
 5. Completion (mentor marks done after the session ends, or automatically 24 hours
    after the end): the price is awarded to the mentor as plain Roo points through
-   `award()`, key `mentor_payout:{session id}`.
+   `award()`, key `mentor_payout:{session id}`. The ledger row carries the fixed label
+   `MENTORING` in `created_by_slack_id`, not the mentor's Slack id, so a payout never
+   counts against a points-admin weekly allowance (rows paid earlier keep the old value).
 
 Known side effect: `PointsService.award` raises the mentor's lifetime earned
 total, which also gates the Conference Room and committee eligibility. Maintainers
