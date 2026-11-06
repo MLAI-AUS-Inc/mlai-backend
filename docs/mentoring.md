@@ -30,8 +30,9 @@ HTTP layer is `community_chat/mentoring_views.py`.
   cancelled automatically; the mentor cancels them.
 - Availability windows are wall-clock times in the mentor's timezone; slots advance
   in real time, so daylight saving gaps are skipped and a repeated hour is offered twice.
-- Price defaults to 40 Roo Points and is stored per mentor. The price is
-  snapshotted on each session.
+- New mentors default to 30 Roo Points for 30 minutes. Existing mentors keep their
+  saved price and session length. The price is stored per mentor and snapshotted on
+  each session.
 - Each request carries a brief: stage, biggest struggle, outcome wanted, and an
   optional link.
 - A request charges nothing. Points are taken when the mentor accepts.
