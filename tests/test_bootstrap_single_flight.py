@@ -109,3 +109,15 @@ class BootstrapSingleFlightTests(SimpleTestCase):
 
         result = self._run(self._patches(compute), scenario)
         self.assertEqual(result["marker"], "cached")
+
+    def test_lock_is_released_when_the_run_lookup_fails(self):
+        def compute(*_args, **_kwargs):
+            raise AssertionError("compute must not run after a failed lookup")
+
+        def scenario():
+            with patch.object(views, "_latest_runs_for_org", side_effect=RuntimeError("db down")):
+                with self.assertRaises(RuntimeError):
+                    views._serialize_bootstrap(self.context)
+
+        self._run(self._patches(compute), scenario)
+        self.assertIsNone(cache.get("vibe_bootstrap:test-key:computing"))
