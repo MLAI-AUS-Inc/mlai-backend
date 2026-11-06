@@ -359,6 +359,7 @@ class ContentIslandGraphNodeSerializer(serializers.ModelSerializer):
     aiSearchVolume = serializers.IntegerField(source='ai_search_volume', read_only=True)
     articlesWritten = serializers.IntegerField(source='articles_written', read_only=True)
     ideaCount = serializers.SerializerMethodField()
+    regionSlug = serializers.SerializerMethodField()
 
     class Meta:
         model = ContentIsland
@@ -366,12 +367,16 @@ class ContentIslandGraphNodeSerializer(serializers.ModelSerializer):
             'id', 'slug', 'name', 'description', 'pillarKeyword',
             'iconKey', 'colorKey', 'status', 'isNew', 'researchPending',
             'keywordCount', 'totalVolume', 'avgDifficulty',
-            'opportunityScore', 'aiSearchVolume', 'ideaCount', 'articlesWritten',
+            'opportunityScore', 'aiSearchVolume', 'ideaCount', 'articlesWritten', 'regionSlug',
         ]
         read_only_fields = fields
 
     def get_id(self, obj):
         return f"island:{obj.slug}"
+
+    def get_regionSlug(self, obj):
+        region = obj.region if obj.region_id else None
+        return region.slug if region and region.organization_id == obj.organization_id else None
 
     def get_researchPending(self, obj):
         return obj.origin == "manual" and obj.last_refreshed_at is None
@@ -400,6 +405,7 @@ class ContentIslandGraphSerializer(serializers.Serializer):
     emergingCount = serializers.SerializerMethodField()
     nodes = serializers.SerializerMethodField()
     edges = serializers.SerializerMethodField()
+    regions = serializers.SerializerMethodField()
 
     def get_updatedAt(self, obj):
         updated_at = obj.get('updated_at')
@@ -414,6 +420,20 @@ class ContentIslandGraphSerializer(serializers.Serializer):
             many=True,
             context=self.context,
         ).data
+
+    def get_regions(self, obj):
+        grouped = {}
+        # The bootstrap joins region in its node query: no per-island reads.
+        islands = sorted(obj.get('islands') or [], key=lambda island: (-island.opportunity_score, island.slug))
+        for island in islands:
+            if island.region_id is None:
+                continue
+            region = island.region
+            if region.organization_id != island.organization_id:
+                continue
+            grouped.setdefault(region.slug, {'slug': region.slug, 'name': region.name,
+                'colorKey': region.color_key, 'islandSlugs': []})['islandSlugs'].append(island.slug)
+        return [grouped[slug] for slug in sorted(grouped)]
 
     def get_edges(self, obj):
         return [

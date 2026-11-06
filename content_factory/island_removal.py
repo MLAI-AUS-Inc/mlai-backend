@@ -16,7 +16,7 @@ REMOVED_ISLAND_SIMILARITY = 0.90
 def remove_island(organization, slug, *, now=None):
     """Archive one island for the founder. Returns None when it does not exist."""
     from organizations.models import Organization
-    from .content_islands import rebuild_island_edges
+    from .content_islands import rebuild_island_edges, rebuild_island_regions
     from .models import ContentIsland, ContentIslandStatus
 
     now = now or timezone.now()
@@ -32,6 +32,7 @@ def remove_island(organization, slug, *, now=None):
             island.save(update_fields=["status", "archived_at", "removed_at", "updated_at"])
             release_from_selections(org, island.slug)
             rebuild_island_edges(org)
+            rebuild_island_regions(org)
     return island
 
 

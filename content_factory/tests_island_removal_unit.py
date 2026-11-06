@@ -93,6 +93,7 @@ class RemoveIslandTests(unittest.TestCase):
         organizations = Mock()
         organizations.select_for_update.return_value.get.return_value = self.org
         self.rebuild = Mock()
+        self.rebuild_regions = Mock()
         self.modules = {
             "organizations.models": module("organizations.models",
                 Organization=SimpleNamespace(objects=organizations)),
@@ -100,7 +101,7 @@ class RemoveIslandTests(unittest.TestCase):
                 ContentIsland=SimpleNamespace(objects=self.islands),
                 ContentIslandStatus=SimpleNamespace(ARCHIVED="archived")),
             "content_factory.content_islands": module("content_factory.content_islands",
-                rebuild_island_edges=self.rebuild),
+                rebuild_island_edges=self.rebuild, rebuild_island_regions=self.rebuild_regions),
         }
 
     def remove(self, slug="balcony-gardens"):
@@ -116,6 +117,7 @@ class RemoveIslandTests(unittest.TestCase):
         island.save.assert_called_once_with(update_fields=["status", "archived_at", "removed_at", "updated_at"])
         release.assert_called_once_with(self.org, "balcony-gardens")
         self.rebuild.assert_called_once_with(self.org)
+        self.rebuild_regions.assert_called_once_with(self.org)
         self.islands.filter.assert_called_once_with(organization=self.org, slug="balcony-gardens")
 
     def test_repeating_a_removal_changes_nothing(self):
