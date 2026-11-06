@@ -161,12 +161,13 @@ class SettingsWriterTests(SimpleTestCase):
                  patch("founder_tools.profile_fields.validate_profile_fields", side_effect=lambda data: data), \
                  patch("founder_tools.profile_fields.save_profile_details"), \
                  patch.object(services, "ensure_company_organization", return_value=organization), \
+                 patch.object(services, "organization_owner_user_id", return_value=1), \
                  patch.object(services, "founder_actor_id_for_user", return_value="mlai_user:1"), \
                  patch.object(services, "actor_ids_for_user", return_value={"mlai_user:1"}), \
                  patch("content_factory.models.OrganizationContentConfig.objects.get_or_create", return_value=(cfg, False)), \
                  patch("startup_updates.services.resolve_or_create_profile", return_value=(None, profile)), \
                  patch("startup_updates.services.bind_user_to_startup"):
-                services.apply_shared_startup_details.__wrapped__(user=Obj(), company=Obj(name="Example"),
+                services.apply_shared_startup_details.__wrapped__(user=Obj(id=1), company=Obj(name="Example"),
                                                                   data={"articleDeliveryMode": "content_only"})
                 self.assertEqual(cfg.article_delivery_mode, "review_draft")
                 self.assertEqual(cfg.save.called, saved)

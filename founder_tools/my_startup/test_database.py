@@ -105,6 +105,89 @@ class StartupDatabaseTests(TestCase):
             )
         self.assertEqual(VibeRaisingCompany.objects.count(), 3)
 
+    def test_historical_staff_duplicate_cannot_break_account_or_picker(self):
+        from content_factory.models import OrganizationContentConfig
+        from founder_tools.services import CompanyDomainClaimedError, apply_shared_startup_details
+
+        self.owner.is_staff = True
+        self.owner.save(update_fields=["is_staff"])
+        duplicate = VibeRaisingCompany.objects.create(
+            profile=self.profile, organization=self.foreign.organization,
+            name="Historical duplicate", domain="other.test")
+        self.profile.active_company = duplicate
+        self.profile.save(update_fields=["active_company"])
+        query = {"company_id": str(duplicate.pk)}
+        self.assertEqual(self.client.get(PREFIX + "auth/me/", query).status_code, 200)
+        response = self.client.get(PREFIX + "founder-tools/profile/", query)
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data["activeCompanyId"])
+        self.assertNotIn(str(duplicate.pk), {row["id"] for row in response.data["companies"]})
+        response = self.client.get(PREFIX + "founder-tools/companies/", query)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(str(duplicate.pk), {row["id"] for row in response.data})
+        self.assertEqual(self.client.get(PREFIX + "vibe-marketing/bootstrap/", query).status_code, 404)
+        self.assertEqual(self.client.post(PREFIX + "founder-tools/companies/",
+            {"companyId": str(duplicate.pk), "name": "Changed"}, format="json").status_code, 404)
+        with patch("founder_tools.views.queue_domain_claim_alert"):
+            response = self.client.post(PREFIX + "founder-tools/companies/",
+                {"name": "Historical duplicate", "shortDescription": "Must not overwrite"}, format="json")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "company_domain_claimed")
+        with self.assertRaises(CompanyDomainClaimedError):
+            apply_shared_startup_details(user=self.owner, company=duplicate,
+                                        data={"shortDescription": "Must not overwrite"})
+        self.foreign.refresh_from_db()
+        self.foreign.organization.refresh_from_db()
+        self.assertEqual(self.foreign.name, "Other")
+        self.assertEqual(self.foreign.organization.name, "Other")
+        self.assertFalse(OrganizationContentConfig.objects.filter(organization=self.foreign.organization).exists())
+
+    @override_settings(MY_STARTUP_ONE_FIELD_START_ENABLED=True)
+    def test_staff_and_superusers_cannot_create_against_a_foreign_domain(self):
+        from content_factory.models import OrganizationContentConfig
+        for superuser in (False, True):
+            for first_profile in (False, True):
+                with self.subTest(superuser=superuser, first_profile=first_profile):
+                    self.owner.is_staff, self.owner.is_superuser = True, superuser
+                    self.owner.save(update_fields=["is_staff", "is_superuser"])
+                    before = VibeRaisingCompany.objects.count()
+                    with patch("content_factory.founder_journey_cohort.new_startup_cohort", return_value="new_journey"), \
+                            patch("founder_tools.views.queue_domain_claim_alert"):
+                        response = self.client.post(PREFIX + "founder-tools/companies/",
+                            {"createNew": True, "firstProfile": first_profile,
+                             "name": "Other", "domain": "other.test", "shortDescription": "Must not overwrite"},
+                            format="json", HTTP_IDEMPOTENCY_KEY=f"foreign-claim-{superuser}-{first_profile}")
+                    self.assertEqual(response.status_code, 409, response.data)
+                    self.assertEqual(response.data["code"], "company_domain_claimed")
+                    self.assertEqual(VibeRaisingCompany.objects.count(), before)
+                    self.profile.refresh_from_db()
+                    self.assertEqual(self.profile.active_company_id, self.company.pk)
+                    self.assertFalse(OrganizationContentConfig.objects.filter(organization=self.foreign.organization).exists())
+
+    def test_staff_binding_race_is_rejected_and_rolls_back(self):
+        self.owner.is_staff = True
+        self.owner.save(update_fields=["is_staff"])
+        with patch("founder_tools.views.domain_is_available_to", return_value=True), \
+                patch("founder_tools.views.queue_domain_claim_alert"):
+            response = self.client.post(PREFIX + "founder-tools/companies/",
+                {"createNew": True, "name": "Other", "domain": "other.test"}, format="json")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(VibeRaisingCompany.objects.count(), 3)
+
+    def test_new_staff_startup_is_accessible_and_repeated_domain_is_not_duplicated(self):
+        self.owner.is_staff = True
+        self.owner.save(update_fields=["is_staff"])
+        body = {"createNew": True, "name": "Fresh", "domain": "fresh.test"}
+        response = self.client.post(PREFIX + "founder-tools/companies/", body, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        created = response.data["id"]
+        self.assertEqual(self.client.get(PREFIX + "auth/me/", {"company_id": created}).status_code, 200)
+        self.assertEqual(self.client.get(PREFIX + "founder-tools/profile/", {"company_id": created}).status_code, 200)
+        response = self.client.post(PREFIX + "founder-tools/companies/", body, format="json")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "duplicate_company_domain")
+        self.assertEqual(VibeRaisingCompany.objects.filter(domain="fresh.test").count(), 1)
+
     def test_domainless_bootstrap_honors_explicit_company_without_switching_active(
         self,
     ):
