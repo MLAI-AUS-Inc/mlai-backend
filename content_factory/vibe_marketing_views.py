@@ -16515,8 +16515,12 @@ class VibeMarketingAuthorPhotoPreviewView(APIView):
         uploaded = getattr(request, "FILES", {}).get("photo")
         if uploaded is not None:
             from content_factory.author_photos import upload_photo
+            from content_factory.models import AuthorPhoto
             try:
-                return Response({"photoUrl": upload_photo(uploaded, company_id=company.pk)}, status=200)
+                url = upload_photo(uploaded, company_id=company.pk, organization_id=company.organization_id,
+                                   user=request.user)
+                record = AuthorPhoto.objects.filter(url=url).only("pk").first()
+                return Response({"photoUrl": url, "photoId": str(record.pk) if record else ""}, status=200)
             except AuthorPhotoError as exc:
                 return Response({"detail": str(exc), "code": exc.code}, status=exc.status)
         url = str(request.data.get("url") or "").strip()
@@ -16959,6 +16963,8 @@ class VibeMarketingSettingsView(APIView):
                 normalize_authors(request.data.get("authors", request.data.get("authorsData"))),
                 previous=previous,
                 company_id=company.id,
+                organization_id=company.organization_id,
+                user=request.user,
             )
         except AuthorPhotoError as exc:
             return Response({"detail": str(exc), "code": exc.code, "field": "authors",
