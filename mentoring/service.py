@@ -445,6 +445,7 @@ def _is_stale_pending(session, now=None):
 
 
 def serialize_session(session, viewer):
+    from .calendar_sync import public_status
     is_mentor = session.mentor.user_id == viewer.pk
     after_acceptance = session.status in (
         MentorSession.STATUS_ACCEPTED, MentorSession.STATUS_COMPLETED,
@@ -487,6 +488,7 @@ def serialize_session(session, viewer):
         'brief_answers': session_brief_answers(session),
         'booking_mode': getattr(session, 'booking_mode', 'legacy_request'),
         'capture_enabled': bool(getattr(session, 'meeting_provisioning', {}).get('verified')),
+        'calendar_sync': public_status(session),
         'requested_at': session.requested_at.isoformat(),
         'responded_at': session.responded_at.isoformat() if session.responded_at else None,
     }
@@ -729,6 +731,9 @@ class MentoringService:
             session.save()
             _release_reservations(session)
         elif action == 'complete':
+            from .calendar_sync import settlement_ready
+            if not settlement_ready(session):
+                return session
             _pay_mentor(session)
             session.status = MentorSession.STATUS_COMPLETED
             session.completed_at = now
@@ -1136,6 +1141,14 @@ class MentoringService:
             return session  # a retried call is a success
         if getattr(session, 'meeting_provisioning', {}).get('repair'):
             from .meeting_repair import process
+            process(session.pk)
+            return cls._load_session(session_id, actor)
+        if (getattr(session.mentor, 'booking_mode', 'legacy_request') == 'instant'
+                and not session.calendar_event_id and not session.calendar_snapshot):
+            from .calendars import service as calendars
+            from .meeting_repair import prepare, process
+            target = calendars.calendar_target(session.mentor, verify=True)
+            prepare(session.pk, connection_id=target['connection_id'], calendar_id=target['calendar_id'])
             process(session.pk)
             return cls._load_session(session_id, actor)
         now = timezone.now()

@@ -1,5 +1,6 @@
 """Incident and Meet configuration regressions with no database/network access."""
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -8,6 +9,7 @@ from mentoring import conflicts, meeting_policy
 from mentoring.calendars import google, service
 from mentoring.calendars.errors import CalendarError
 from mentoring.service import MentoringError, MentoringService
+from mentoring import meeting_repair
 
 START = datetime(2026, 11, 8, 22, tzinfo=timezone.utc)  # Mon 09:00 AEDT
 END = START + timedelta(hours=9)
@@ -130,3 +132,83 @@ class MeetCaptureTests(unittest.TestCase):
         with self.assertRaises(CalendarError):
             meeting_policy.required(SimpleNamespace(location_type='video', booking_snapshot={'meeting_artifact_policy': {'bad': True}}))
         self.assertFalse(meeting_policy.required(SimpleNamespace(location_type='video', booking_snapshot={})))
+
+
+class RepairedMeetingCleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.session = SimpleNamespace(pk=uuid.uuid4(), status='cancelled', founder_id=2,
+            mentor=SimpleNamespace(user_id=7), meeting_claimed_at=None,
+            meeting_provisioning={'repair': True, 'unknown_create': True,
+                                 'cleanup_pending': True, 'verified': True},
+            meet_link='https://meet.google.com/abc-defg-hij', notification_status='sent',
+            save=MagicMock(), time_reservations=MagicMock())
+        self.session.calendar_event_id = google.event_id(self.session.pk)
+        self.manager = MagicMock()
+        self.manager.select_related.return_value.get.return_value = self.session
+        self.manager.select_for_update.return_value.select_related.return_value.get.return_value = self.session
+        self.manager.get.return_value = self.session
+        self.manager.filter.return_value.update.return_value = 1
+        for target, attribute, options in (
+            (meeting_repair.MentorSession, 'objects', {'new': self.manager}),
+            (meeting_repair.transaction, 'atomic', {}),
+            (meeting_repair, '_lock_users', {}),
+            (meeting_repair.calendars, 'cancel_booking', {'return_value': {'outcome': 'absent'}}),
+        ):
+            patcher = patch.object(target, attribute, **options)
+            patcher.start(); self.addCleanup(patcher.stop)
+
+    def test_confirmed_repair_deleted_in_google_releases_old_uncertainty(self):
+        meeting_repair.process(self.session.pk)
+        self.manager.filter.return_value.update.assert_called_once()
+        state = self.manager.filter.return_value.update.call_args.kwargs['meeting_provisioning']
+        self.assertFalse(state['cleanup_pending'])
+        self.assertFalse(state['unknown_create'])
+        self.session.time_reservations.update.assert_called_once_with(active=False)
+
+    def test_unconfirmed_unknown_create_still_keeps_quarantine_on_absence(self):
+        self.session.calendar_event_id = ''
+        self.session.meeting_provisioning['verified'] = False
+        meeting_repair.process(self.session.pk)
+        self.manager.filter.return_value.update.assert_not_called()
+        self.session.time_reservations.update.assert_not_called()
+
+    def test_partial_or_mismatched_creation_evidence_keeps_quarantine(self):
+        for field, value in (('calendar_event_id', 'unrelated'), ('meet_link', ''), ('verified', False)):
+            with self.subTest(field=field):
+                self.session.meeting_claimed_at = None
+                self.session.calendar_event_id = google.event_id(self.session.pk)
+                self.session.meet_link = 'https://meet.google.com/abc-defg-hij'
+                self.session.meeting_provisioning['verified'] = True
+                if field == 'verified':
+                    self.session.meeting_provisioning[field] = value
+                else:
+                    setattr(self.session, field, value)
+                meeting_repair.process(self.session.pk)
+                self.manager.filter.return_value.update.assert_not_called()
+                self.session.time_reservations.update.assert_not_called()
+
+    def test_provider_failure_cannot_release_cancelled_reservations(self):
+        with patch.object(meeting_repair.calendars, 'cancel_booking', side_effect=CalendarError('permission')):
+            meeting_repair.process(self.session.pk)
+        self.session.time_reservations.update.assert_not_called()
+        self.assertEqual(self.manager.filter.return_value.update.call_args.kwargs,
+                         {'meeting_status': 'failed', 'meeting_error': 'permission'})
+
+    def test_successful_repair_clears_create_uncertainty(self):
+        self.session.status = 'accepted'
+        self.session.meet_link = ''
+        client = MagicMock()
+        client.configure_capture.return_value = {'verified': True}
+        result = {'status': 'created', 'event_id': google.event_id(self.session.pk),
+                  'meet_link': 'https://meet.google.com/abc-defg-hij'}
+        with patch.object(meeting_repair.calendars, 'lookup_booking', return_value=result), \
+             patch.object(meeting_repair.calendars, '_target', return_value=(
+                 SimpleNamespace(scopes={google.MEET_SETTINGS_SCOPE}), 'synthetic-calendar')), \
+             patch.object(meeting_repair.calendars, '_client', return_value=client), \
+             patch.object(meeting_repair.calendars, '_access_token'), \
+             patch.object(meeting_repair.calendars, 'verify_booking'), \
+             patch.object(meeting_repair.calendars, 'invite_attendees'):
+            meeting_repair.process(self.session.pk)
+        state = self.manager.filter.return_value.update.call_args.kwargs['meeting_provisioning']
+        self.assertTrue(state['verified'])
+        self.assertFalse(state['unknown_create'])

@@ -1,5 +1,6 @@
 """Bounded, durable repair of an existing accepted meeting; never moves Roo."""
 from datetime import timedelta
+from copy import copy
 
 from django.db import transaction
 from django.utils import timezone
@@ -17,12 +18,15 @@ def prepare(session_id, *, connection_id, calendar_id):
     initial = MentorSession.objects.select_related('mentor__user').get(pk=session_id)
     if initial.status != 'accepted' or initial.location_type != 'video' or initial.meet_link or initial.starts_at <= timezone.now():
         raise MentoringError('invalid_state', 'Only a confirmed video session missing its link can be repaired.', 409)
-    target = calendars.calendar_target(initial.mentor, verify=True)
+    candidate = copy(initial.mentor)
+    candidate.meeting_artifact_policy = dict(REQUIRED_POLICY)
+    target = calendars.calendar_target(candidate, verify=True)
     if target['connection_id'] != connection_id or target['calendar_id'] != calendar_id:
         raise CalendarError('settings_changed')
     if initial.calendar_event_id and (initial.calendar_event_id != google.event_id(initial.pk) or not initial.calendar_snapshot):
         raise CalendarError('original_organizer_review_required')
-    if initial.calendar_snapshot and initial.calendar_snapshot != target:
+    if initial.calendar_snapshot and any(initial.calendar_snapshot.get(k) != target[k]
+            for k in ('connection_id', 'calendar_id')):
         raise CalendarError('original_organizer_review_required')
     with transaction.atomic():
         _lock_users(initial.founder_id, initial.mentor.user_id)
@@ -62,9 +66,17 @@ def process(session_id):
             # Cleanup only when cancelled. A completed appointment retains its event.
             if live.status == 'cancelled':
                 deleted = calendars.cancel_booking(live)
-                if deleted.get('outcome') != 'deleted' and live.meeting_provisioning.get('unknown_create'):
+                if deleted.get('outcome') not in ('deleted', 'absent'):
+                    raise CalendarError('invalid_response')
+                # Older successful repairs retained unknown_create. A stored,
+                # verified deterministic event proves that insert completed;
+                # absence is then sufficient cleanup, never cancellation evidence.
+                observed = (live.calendar_event_id == google.event_id(live.pk)
+                    and bool(live.meet_link) and live.meeting_provisioning.get('verified') is True)
+                if (deleted['outcome'] == 'absent' and live.meeting_provisioning.get('unknown_create')
+                        and not observed):
                     return
-            outcome = {**live.meeting_provisioning, 'cleanup_pending': False}
+            outcome = {**live.meeting_provisioning, 'cleanup_pending': False, 'unknown_create': False}
             fields = {'meeting_provisioning': outcome}
         else:
             result = calendars.lookup_booking(live)
@@ -96,7 +108,8 @@ def process(session_id):
             fields = {'calendar_event_id': result['event_id'], 'meet_link': result['meet_link'],
                 'meeting_status': 'created', 'meeting_error': '', 'notification_status': 'sent',
                 'meeting_provisioning': {**live.meeting_provisioning, **capture,
-                    'verified_at': timezone.now().isoformat(), 'cleanup_pending': True}}
+                    'verified_at': timezone.now().isoformat(), 'cleanup_pending': True,
+                    'unknown_create': False}}
         saved = MentorSession.objects.filter(pk=live.pk, status=live.status,
             meeting_claimed_at=now).update(**fields)
         if saved and live.status == 'cancelled' and not fields['meeting_provisioning']['cleanup_pending']:

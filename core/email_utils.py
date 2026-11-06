@@ -1,5 +1,6 @@
 import os
 import logging
+import uuid
 from django.core.signing import TimestampSigner, BadSignature, SignatureExpired
 from customerio import APIClient
 from dotenv import load_dotenv
@@ -91,10 +92,50 @@ def send_magic_link_email_to_address(
         raise
 
 
-def send_magic_link_email(user, magic_link, message_id="2"):
+APP_NAMES = {
+    "hospital": "Med-Hack",
+    "esafety": "the eSafety hackathon",
+    "watt-the-hack": "Watt the Hack",
+    "founder-tools": "MLAI Founder Tools",
+    "content-factory": "Content Factory",
+    "community-chat": "MLAI Chat",
+    "admin": "MLAI operations",
+}
+
+
+def app_display_name(app_context):
+    """Human name of the app a sign-in link opens, for the email copy."""
+    return APP_NAMES.get(str(app_context or ""), "MLAI")
+
+
+def _send_via_system_email(message_key, user, context, idempotency_key):
+    """Send through our own Resend sender (system_email). Raises on failure."""
+    from system_email import api as system_email
+
+    context = {"first_name": user.first_name or "", **context}
+    return system_email.send(
+        message_key,
+        to=user.email,
+        idempotency_key=idempotency_key,
+        context=context,
+        user_id=user.id,
+    )
+
+
+def send_magic_link_email(user, magic_link, message_id="2", app_context=None):
     """
-    Sends the magic link email using Customer.io for an existing user.
+    Sends the magic link email for an existing user: through system_email when
+    ``magic_link`` is switched to Resend, otherwise through Customer.io.
     """
+    from system_email.api import routes_to_resend
+
+    if routes_to_resend("magic_link"):
+        return _send_via_system_email(
+            "magic_link",
+            user,
+            {"magic_link": magic_link, "app_name": app_display_name(app_context), "expires_minutes": 60},
+            idempotency_key=f"magic/{uuid.uuid4()}",
+        )
     return send_magic_link_email_to_address(
         user.email,
         magic_link,
@@ -105,9 +146,22 @@ def send_magic_link_email(user, magic_link, message_id="2"):
     )
 
 
-def send_password_reset_email(user, reset_link):
-    """Send the one-use MLAI password setup/reset link without logging it."""
+def send_password_reset_email(user, reset_link, delivery_id=None):
+    """Send the one-use MLAI password setup/reset link without logging it.
 
+    ``delivery_id`` (the outbox row) keeps Resend retries idempotent.
+    """
+    from django.conf import settings
+    from system_email.api import routes_to_resend
+
+    if routes_to_resend("password_reset"):
+        ttl_minutes = max(1, int(getattr(settings, "PASSWORD_RESET_TTL_SECONDS", 3600)) // 60)
+        return _send_via_system_email(
+            "password_reset",
+            user,
+            {"reset_link": reset_link, "expires_minutes": ttl_minutes},
+            idempotency_key=f"pwreset/{delivery_id}" if delivery_id else f"pwreset/{uuid.uuid4()}",
+        )
     message_id = os.getenv('CUSTOMERIO_PASSWORD_RESET_MESSAGE_ID', '2')
     return send_magic_link_email_to_address(
         user.email,

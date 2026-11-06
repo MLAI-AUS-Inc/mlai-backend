@@ -71,3 +71,17 @@ The original profile/settings verification passed 198 isolated tests without mig
 The 8 October logo correction separately passes 49 database/network-blocked tests and the model/migration dry-run. With explicit approval, `scripts/test_company_logo_postgres.py` creates a disposable local PostgreSQL cluster, reproduces the old 200-character failure, applies only `0011_company_avatar_url_length`, and verifies existing URLs, complete long URL persistence, rollback and removal. This narrow database regression does not prove organization locking, Firebase upload, GitHub authorization, worker execution or deployed routing. No production migration or deployment was performed.
 
 Repository replacements use `bind_website` and unlinking disconnects the current `WebsiteConnection` generation. This preserves the existing authority checks and invalidates work for superseded connections. Shared GitHub authorization is retained. Settings responses are serialized after the atomic save commits, preserving worker reconciliation without a database lock.
+# Startup selection recovery (6 November 2026)
+
+Normal founder company creation applies the same domain ownership policy to staff,
+superusers, and other founders. A claimed domain returns `409 company_domain_claimed`
+and rolls back the save, including company binding and active selection. Staff status
+does not grant another founder's organisation access.
+
+The Chat facade's `auth/me`, founder profile, and company-list GET/HEAD requests are
+account-scoped. They ignore a stale company hint while retaining account authentication
+and membership admission. Profile and company lists omit owned company rows whose
+organisation belongs to someone else, and return a null active ID when that selection
+is inaccessible. Company operations and profile/company writes retain explicit scope
+and ownership checks. This makes the picker usable for historical invalid selections
+without granting access to the underlying organisation.

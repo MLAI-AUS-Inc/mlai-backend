@@ -10,7 +10,6 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import TestCase, override_settings
-from rest_framework.response import Response
 from rest_framework.test import APIClient
 
 from community_chat import my_startup_views
@@ -194,25 +193,11 @@ class FounderJourneyProfileTests(_Client, TestCase):
             data = self.client_for(built.owner).get(PROFILE_URL).data
         self.assertEqual(data["founderJourney"]["companies"], {})
 
-    def test_the_facade_inherits_the_profile_and_bootstrap_reads(self):
+    @override_settings(**ALL_P1_FLAGS_ON)
+    def test_the_facade_preserves_owned_profile_and_bootstrap_reads(self):
         self.assertTrue(issubclass(my_startup_views.ProfileView, founder_views.FounderToolsProfileView))
-        # The facade adds a team capability only while its flag is on. Its
-        # flag-off contract is unchanged delegation, not method identity.
-        view, request = my_startup_views.ProfileView(), object()
-        legacy = Response({"companies": [{"id": "owned"}], "role": "founder"},
-                          headers={"ETag": '"legacy-profile"'})
-        original = deepcopy(legacy.data)
-        with override_settings(MY_STARTUP_TEAM_ENABLED=False), patch.object(
-                founder_views.FounderToolsProfileView, "get", autospec=True, return_value=legacy) as base:
-            response = view.get(request)
-        base.assert_called_once_with(view, request)
-        self.assertIs(response, legacy)
-        self.assertEqual(response.data, original)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response["ETag"], '"legacy-profile"')
-
-        # Exercise the persisted owner profile through both HTTP compositions;
-        # turning the team flag off must not add another owner's company.
+        # Account reads use the facade's ownership-filtered serializer. Verify
+        # the persisted HTTP contract rather than delegation to the base getter.
         built = make_new_journey_org("facade-owner.studio")
         foreign = make_new_journey_org("facade-foreign.studio")
         client = self.client_for(built.owner)
@@ -226,6 +211,22 @@ class FounderJourneyProfileTests(_Client, TestCase):
         self.assertEqual({row["id"] for row in facade_response.data["companies"]}, {str(built.company.pk)})
         self.assertNotIn(str(foreign.company.pk), {row["id"] for row in facade_response.data["companies"]})
         self.assertNotIn("teamAvailable", facade_response.data)
+        self.assertEqual(facade_response["Cache-Control"], "private, no-store")
         members.assert_not_called()
+
+        duplicate = VibeRaisingCompany.objects.create(
+            profile=built.company.profile, organization=foreign.organization,
+            name="Historical duplicate", domain=foreign.organization.domain)
+        profile = built.company.profile
+        profile.active_company = duplicate
+        profile.save(update_fields=["active_company"])
+        with override_settings(MY_STARTUP_TEAM_ENABLED=False):
+            recovered = client.get("/api/v1/my-startup/founder-tools/profile/",
+                                   {"company_id": str(duplicate.pk)})
+        self.assertEqual(recovered.status_code, 200)
+        self.assertEqual({row["id"] for row in recovered.data["companies"]}, {str(built.company.pk)})
+        self.assertIsNone(recovered.data["activeCompanyId"])
+        self.assertEqual(recovered.data["founderJourney"]["companies"][str(built.company.pk)],
+                         facade_response.data["founderJourney"]["companies"][str(built.company.pk)])
         self.assertIs(my_startup_views.BootstrapView.get,
                       my_startup_views.marketing.VibeMarketingBootstrapView.get)
