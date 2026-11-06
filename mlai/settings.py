@@ -1213,11 +1213,13 @@ CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS = int(
     os.getenv('CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS', str(48 * 60 * 60))
 )
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
-RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Roo <notifications@mlai.au>')
+MLAI_SYSTEM_FROM_EMAIL = os.getenv('MLAI_SYSTEM_FROM_EMAIL', '').strip() or os.getenv('RESEND_FROM_EMAIL', '').strip() or 'MLAI <notifications@notify.mlai.au>'
+# Backwards-compatible alias; new system-mail payloads use the canonical setting.
+RESEND_FROM_EMAIL = MLAI_SYSTEM_FROM_EMAIL
 # Customer.io App API key (already used for magic-link emails). When set, it is
 # the preferred transport for notification-channel emails; Resend is fallback.
 CUSTOMERIO_API_KEY = os.getenv('CUSTOMERIO_API_KEY', '')
-CUSTOMERIO_FROM_EMAIL = os.getenv('CUSTOMERIO_FROM_EMAIL', '')
+CUSTOMERIO_FROM_EMAIL = os.getenv('CUSTOMERIO_FROM_EMAIL', '').strip() or MLAI_SYSTEM_FROM_EMAIL
 # Transactional message id of the Victor:AI completed-registration receipt.
 CUSTOMERIO_VICTOR_REGISTRATION_TEMPLATE_ID = os.getenv(
     'CUSTOMERIO_VICTOR_REGISTRATION_TEMPLATE_ID', '4'

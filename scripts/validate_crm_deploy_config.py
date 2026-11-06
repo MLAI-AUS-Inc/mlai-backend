@@ -32,6 +32,8 @@ FLAG_KEYS = (
     "CRM_PREFLIGHT_ENABLED",
     "CRM_MONITORS_ENABLED",
     "CRM_LIFECYCLE_ENABLED",
+    "CRM_TRANSACTIONAL_MONITOR_ENABLED",
+    "CRM_CUSTOMERIO_NOTIFY_DKIM_VERIFIED",
     "CRM_SEED_HEARTBEAT_ENABLED",
     "CRM_DELIVERABILITY_EMAIL_ALERTS_ENABLED",
 )
@@ -40,7 +42,7 @@ LISTMONK_API_USER = "LISTMONK_API_USER"
 MESSAGING_SERVICE = "TWILIO_MESSAGING_SERVICE_SID"
 KEYS = (*FLAG_KEYS, LISTMONK_BASE_URL, LISTMONK_API_USER, MESSAGING_SERVICE,
         "CRM_RESEND_MONITORED_SENDERS", "CRM_WARMUP_RUN_ID", "CRM_ENGAGEMENT_REFRESH_HOUR",
-        "CRM_SENDING_DOMAINS", *(key for key in DELIVERY_DEFAULTS if key not in FLAG_KEYS))
+        "CRM_SENDING_DOMAINS", "MLAI_SYSTEM_FROM_EMAIL", "CUSTOMERIO_FROM_EMAIL", *(key for key in DELIVERY_DEFAULTS if key not in FLAG_KEYS))
 
 
 def validate_single(key: str, value: str, *, optional: bool = False) -> None:
@@ -95,6 +97,11 @@ def validate_single(key: str, value: str, *, optional: bool = False) -> None:
                         raise ValueError
         except (ValueError, TypeError, OverflowError):
             raise ValueError(f"{key} is not a valid delivery policy value") from None
+    elif key in ("MLAI_SYSTEM_FROM_EMAIL", "CUSTOMERIO_FROM_EMAIL"):
+        from email.utils import parseaddr
+        address = parseaddr(value)[1]
+        if not re.fullmatch(r"[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", address):
+            raise ValueError(f"{key} must contain a valid system sender")
     elif key == "CRM_SENDING_DOMAINS":
         if not all(re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}:(resend|google_relay)", item) for item in value.split(",")):
             raise ValueError(f"{key} must be comma-separated domain:route pairs")

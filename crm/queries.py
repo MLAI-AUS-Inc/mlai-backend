@@ -649,6 +649,7 @@ def recent_activity(limit: int = OVERVIEW_ACTIVITY_LIMIT) -> tuple[list, dict]:
 
     people = list(
         CrmAuditEvent.objects.exclude(action=CrmAuditEvent.Action.SYNC)
+        .exclude(target_type="transactional_mail")
         .exclude(
             action=CrmAuditEvent.Action.EDIT,
             target_type="blast",

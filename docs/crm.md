@@ -935,3 +935,56 @@ over old pause/stream metadata. Stop records the acting staff name in audit
 and blast metadata. Draft saves take the stream/blast locks and recheck the
 current status, so a late editor cannot restore a queued campaign to draft.
 No new schema is required.
+
+## System email and sign-in monitoring (Phase 7)
+
+`MLAI_SYSTEM_FROM_EMAIL` is the canonical sender for newly prepared system
+messages (default `MLAI <notifications@notify.mlai.au>`). `RESEND_FROM_EMAIL`
+is a compatibility alias and an environment fallback only if the canonical
+setting is absent. Review approvals, founder draft notices, website goal
+notifications and notification adapters use the same setting. Existing
+frozen outbox payloads and idempotency keys remain unchanged. The
+notify-restricted `CRM_NOTIFY_API_KEY` is preferred, with the existing
+`RESEND_API_KEY` retained as a rollout fallback. Verify the dedicated key
+and drain or explicitly review old frozen messages before a sender cutover.
+
+Customer.io remains the sign-in provider. `CUSTOMERIO_FROM_EMAIL` defaults
+to the canonical sender and is explicitly included in the code request.
+Customer.io requests set `tracked=false`; Resend tracking must be disabled
+on the notify domain in the provider. Optional notification preferences and
+unsubscribe links remain in their existing routing and message bodies.
+
+`CRM_TRANSACTIONAL_MONITOR_ENABLED=false` independently gates payload-free
+transport observations and a minute scheduler. It does not require marketing
+sending, guardian or external-monitor switches. Each actual configured
+provider attempt produces append-only start/result metadata; no address,
+subject, body, code, credential or upstream exception is retained. Telemetry
+writes use a savepoint and cannot fail the underlying transport.
+
+Completed attempts are grouped by provider and sign-in/notification purpose
+over 15 minutes. More than 5% failures raises a red, alert-only incident.
+Notify Resend callbacks measure deduplicated hard bounces and sent-to-delivered
+p95. More than 120 seconds continuously observed for 15 minutes alerts;
+missing, truncated or unobserved data never becomes healthy. Limits and
+thresholds are configurable. Customer.io API acceptance supports failure
+monitoring but does not prove delivery, bounce rates or latency: those stay
+unknown because this application has no authenticated Customer.io delivery
+callback. Health and the digest explicitly retain that distinction.
+
+`CRM_CUSTOMERIO_NOTIFY_DKIM_VERIFIED` is a default-false operator attestation,
+not a DNS lookup or permission to send. Verify the exact Customer.io From
+domain and provider-issued DKIM records before setting it. Resend notify DNS,
+webhook coverage and domain tracking remain covered by the external monitor.
+No incident or acknowledgement pauses, throttles, caps, reroutes or demotes
+transactional mail. Red incidents require owner review.
+
+Release gates: configure and verify the exact notify domain at both providers,
+its restricted key, tracking settings, callback route, sender alignment and a
+separately authorized staging message before cutover. DMARC remains a people
+operation: only after aggregate reports show every legitimate source aligned,
+review `p=quarantine; pct=25`, then 100, then `p=reject`, setting `sp=`
+explicitly each time and checking reports between changes. Do not publish a
+stronger record from this implementation or treat a missing report as clean.
+
+Provider contracts: [Customer.io From overrides and tracking](https://docs.customer.io/integrations/api/app/tag/send-messages/sendemail/),
+[Resend domain tracking](https://github.com/resend/resend-skills/blob/main/skills/resend/references/sending/overview.md).

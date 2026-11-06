@@ -4,6 +4,7 @@ import logging
 from functools import partial
 
 from django.conf import settings
+from integrations import system_mail
 from django.contrib import admin, messages
 from django.contrib.admin.models import CHANGE, LogEntry
 from django.contrib.auth import get_user_model
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 REVIEW_CLEARED_SUBJECT = "You're in"
 REVIEW_CLEARED_BODY = "Your MLAI membership is approved. You can now post in the community."
-REVIEW_CLEARED_FROM = "MLAI <notifications@mlai.au>"
+REVIEW_CLEARED_FROM = system_mail.DEFAULT_FROM
 # Remember a sent "You're in" for a year; the provider key dedupes retries too.
 REVIEW_CLEARED_GUARD_SECONDS = 365 * 24 * 3600
 
@@ -47,22 +48,30 @@ def send_review_cleared_email(member_id, user_id):
     if not cache.add(guard, "sent", REVIEW_CLEARED_GUARD_SECONDS):
         return False
     user = get_user_model().objects.filter(pk=user_id, is_active=True).only("email").first()
-    api_key = str(getattr(settings, "RESEND_API_KEY", "") or "").strip()
+    api_key = system_mail.resend_key()
     if user is None or not user.email or not api_key:
         cache.delete(guard)
         logger.warning("community_chat_review_cleared_email_skipped member=%s configured=%s",
                        member_id, bool(api_key))
         return False
     try:
-        response = http_client.post(
-            "https://api.resend.com/emails",
-            json={"from": REVIEW_CLEARED_FROM, "to": [user.email],
-                  "subject": REVIEW_CLEARED_SUBJECT, "text": REVIEW_CLEARED_BODY},
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
-                     "Idempotency-Key": key},
-            timeout=(3, 8),
-        )
-        sent = response.status_code < 300
+        with system_mail.observe("resend") as attempt:
+            response = http_client.post(
+                "https://api.resend.com/emails",
+                json={"from": system_mail.sender(), "to": [user.email],
+                      "subject": REVIEW_CLEARED_SUBJECT, "text": REVIEW_CLEARED_BODY},
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+                         "Idempotency-Key": key},
+                timeout=(3, 8),
+            )
+            sent = response.status_code < 300
+            if sent:
+                try:
+                    receipt = response.json()
+                except Exception:
+                    # Receipt telemetry must not turn an accepted send into a retry.
+                    receipt = None
+                attempt.accepted(receipt)
     except Exception as exc:  # The approval stands; log the failure, ids only.
         sent = False
         logger.warning("community_chat_review_cleared_email_failed member=%s error_type=%s",

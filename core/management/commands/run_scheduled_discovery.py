@@ -31,6 +31,7 @@ from crm.deliverability.alerts import run_daily_digest
 from crm.deliverability.preflight.seeds import run_seed_checks
 from crm.engagement_refresh import run_engagement_refresh_scheduler
 from crm.deliverability.lifecycle import run_lifecycle_refresh
+from crm.deliverability.transactional import run_transactional_monitor
 from crm.deliverability.import_hygiene import run_domain_hygiene
 from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
@@ -177,6 +178,7 @@ class Command(BaseCommand):
             # cache-throttled to CRM_BLAST_DISPATCH_INTERVAL_SECONDS.
             ("crm_warmup", run_warmup_scheduler),
             ("crm_deliverability_monitors", run_deliverability_monitors),
+            ("transactional_mail_health", run_transactional_monitor),
             ("crm_deliverability_guard", run_deliverability_guard),
             ("crm_deliverability_digest", run_daily_digest),
             ("crm_seed_checks", run_seed_checks),
