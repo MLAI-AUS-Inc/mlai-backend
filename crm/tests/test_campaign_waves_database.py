@@ -487,6 +487,12 @@ class CampaignWaveTests(CrmApiMixin, TestCase):
 
     def test_real_dispatcher_sends_5000_once_over_six_healthy_sending_days(self):
         blast = self.queue(5000)
+        # TestCase fixtures are invisible to autovacuum. Give this volume fixture
+        # realistic statistics so PostgreSQL does not choose a 5000x5000 nested
+        # loop based on its empty-table estimate of one recipient.
+        from django.db import connection
+        with connection.cursor() as cursor:
+            cursor.execute('ANALYZE crm_contact, crm_blastdelivery')
         daily = Counter()
         for day in range(9):
             morning = datetime(2026, 11, 9, 9, tzinfo=volume.MELBOURNE) + timedelta(days=day)

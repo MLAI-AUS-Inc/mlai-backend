@@ -97,22 +97,27 @@ def _seed_subscriber(mailbox):
 
 def submit(probe_id, *, now):
     """Commit the attempt before the non-idempotent test API; uncertain attempts aren't repeated."""
-    if not policy.value('CRM_PREFLIGHT_ENABLED'):
+    if not (policy.value('CRM_PREFLIGHT_ENABLED') or policy.value('CRM_SEED_HEARTBEAT_ENABLED')):
         return
     with transaction.atomic():
         probe = SeedTest.objects.select_for_update(of=('self',)).select_related('blast__event', 'blast__mailbox', 'stream__mailbox').get(pk=probe_id)
         submission = (probe.results or {}).get('submission') or {}
         if probe.status != 'sending' or submission.get('attempted_at'):
             return
-        if not probe.blast_id or not sending_domains.is_verified(probe.stream.domain):
+        heartbeat = not probe.blast_id and (probe.results or {}).get('heartbeat') is True
+        if not policy.value('CRM_SEED_HEARTBEAT_ENABLED' if heartbeat else 'CRM_PREFLIGHT_ENABLED'):
+            return
+        if (not probe.blast_id and not heartbeat) or probe.stream.transactional or not sending_domains.is_verified(probe.stream.domain):
             return
         snapshot = probe.results.get('message') or {}
         identity = snapshot.get('identity') or {}
-        if (not probe.blast.mailbox_id or identity.get('email') != probe.blast.mailbox.email
+        source = probe.blast if probe.blast_id else Blast(pk=probe.token, stream=probe.stream,
+            mailbox=probe.stream.mailbox, purpose='marketing', channels=['email'])
+        if (not source.mailbox_id or identity.get('email') != source.mailbox.email
                 or identity.get('domain') != probe.stream.domain):
             probe.status = 'error'; probe.save(update_fields=['status', 'updated_at'])
             return
-        blast = copy.copy(probe.blast)
+        blast = copy.copy(source)
         for key in ('subject', 'body_markdown', 'preview_text', 'sign_off_name'):
             setattr(blast, key, snapshot.get(key, ''))
         event = snapshot.get('event') or {}
@@ -161,7 +166,7 @@ def submit(probe_id, *, now):
 
 def probe_result(probe):
     results = list(((probe.results or {}).get('mailboxes') or {}).values())
-    status, reason = seed_inbox.grade(results, timed_out=probe.status in ('timeout', 'error'))
+    status, reason = seed_inbox.grade(results, timed_out=probe.status in ('timeout', 'error'), marketing=not probe.stream.transactional)
     return {'id': str(probe.pk), 'status': probe.status, 'results': results,
         'grade': status, 'reason': reason, 'timed_out': probe.status in ('timeout', 'error')}
 
@@ -212,7 +217,7 @@ def poll(probe_id, *, now):
 
 def run_seed_checks(*, now=None):
     """Never raises into the minute scheduler and performs no mailbox mutations."""
-    if not policy.value('CRM_PREFLIGHT_ENABLED'):
+    if not (policy.value('CRM_PREFLIGHT_ENABLED') or policy.value('CRM_SEED_HEARTBEAT_ENABLED')):
         return {'status': 'disabled'}
     now = now or timezone.now()
     try:
@@ -224,6 +229,9 @@ def run_seed_checks(*, now=None):
             if current.blast_id:
                 from .service import refresh_seed_result
                 refresh_seed_result(current, now=now)
+            if (current.results or {}).get('heartbeat'):
+                from ..monitors.heartbeat import assess
+                assess(current, now=now)
             checked += 1
         return {'status': 'completed', 'checked': checked}
     except Exception as exc:

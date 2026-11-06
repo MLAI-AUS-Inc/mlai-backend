@@ -22,7 +22,8 @@ def time_critical(blast, now):
 
 
 def priority(blast, now):
-    return (0 if time_critical(blast, now) else 1 if blast.purpose == 'event_update' else 2,
+    from .reconfirmation import is_reconfirmation
+    return (0 if time_critical(blast, now) else 1 if blast.purpose == 'event_update' else 3 if is_reconfirmation(blast) else 2,
             blast.queued_at or blast.created_at, str(blast.pk))
 
 
@@ -107,7 +108,15 @@ def allowance_for(blast, now):
         return 0, 0
     used_today, used_hour = usage(stream, now, slot_start=current['slot'])
     first = not blast.waves.filter(started_at__isnull=False).exists()
-    return slot_allowance(budget(stream), used_today, used_hour, current['slots'], current['left'], canary=first)
+    allowance, cap = slot_allowance(budget(stream), used_today, used_hour, current['slots'], current['left'], canary=first)
+    if not first and stream.incidents.filter(state='open', action='half_slot').exists():
+        allowance //= 2
+    if blast.incidents.filter(state='open', action='slow_blast').exists():
+        allowance = max(1, allowance // 2) if allowance else 0
+    from . import reconfirmation
+    if reconfirmation.is_reconfirmation(blast):
+        allowance = reconfirmation.allowance(blast, now, allowance)
+    return allowance, cap
 
 
 def provider_caps(allowance, shares, states=None):
@@ -163,14 +172,22 @@ def promote_stage(stage, sent, day_budget, healthy):
     return stage
 
 
+def preview_stream(stream, now):
+    """Project the next send's idle adjustment once, without persisting a change."""
+    candidate = copy.copy(stream)
+    if (stream.last_send_day and stream.state not in ('held', 'stopped')
+            and (stream.state_detail or {}).get('idle_decay_for') != stream.last_send_day.isoformat()):
+        candidate.ramp_stage = decay_stage(stream.ramp_stage, (now.astimezone(MELBOURNE).date() - stream.last_send_day).days)
+        if candidate.ramp_stage != stream.ramp_stage and candidate.state == 'active':
+            candidate.state = 'warming'
+    return candidate
+
+
 def estimate(stream, people, now, *, used_today=0, used_hour=0, canary_started_at=None, critical=False, canary_factor=1):
     """Simulate the same allocation rules, assuming healthy feedback and promotions."""
-    simulated = copy.copy(stream)
+    simulated = preview_stream(stream, now)
     if not 0 < canary_factor <= 1:
         raise ValueError('Invalid initial batch factor')
-    simulated.ramp_stage = decay_stage(stream.ramp_stage, (now.astimezone(MELBOURNE).date() - stream.last_send_day).days) if stream.last_send_day else stream.ramp_stage
-    if simulated.ramp_stage != stream.ramp_stage and simulated.state == 'active':
-        simulated.state = 'warming'
     remaining = people
     schedule, hours = [], []
     clock = now.replace(second=0, microsecond=0)

@@ -767,7 +767,7 @@ checks; code and synthetic tests do not prove those checks passed.
   incident; new negative evidence can. Every choice is audited.
 - `CRM_DELIVERABILITY_SLACK_CHANNEL` enables aggregate-only alerts and
   four-hour red reminders. No recipient addresses appear in these alerts.
-  Transactional email alerts, full monitors and the health UI follow in
+  Transactional email alerts, full monitors and the health UI are described in
   Phase 5. Phase 2 implements the volume effect of slowed/recovery state;
   the Phase 1 flag must remain off until its release gates are approved.
 - Numeric guard defaults live only in `crm/deliverability/policy.py` and are
@@ -777,6 +777,87 @@ checks; code and synthetic tests do not prove those checks passed.
 Database-free acceptance: `scripts/test_without_database.py crm.tests.test_deliverability_unit`.
 Synthetic database acceptance (specific migration approval first):
 `manage.py test crm.tests.test_deliverability_database`.
+
+## Monitoring and owner health (Phase 5)
+
+All external checks default off (`CRM_MONITORS_ENABLED`); inbox probes and
+owner email alerts have separate switches (`CRM_SEED_HEARTBEAT_ENABLED` and
+`CRM_DELIVERABILITY_EMAIL_ALERTS_ENABLED`). The scheduler runs at most one
+due external check per pass, with a 35-second request budget. The command
+`crm_deliverability_monitors` uses the same runner. Missing configuration,
+provider errors and sparse Postmaster data remain unknown, never healthy.
+Observations are redacted, append-only CRM audits with a bounded cache.
+
+Owner endpoints, behind the verified-installation admin gate:
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET deliverability/` | Streams, 30 observed days, seven sending-day capacity estimates, seed history, checks and open incidents |
+| `PATCH deliverability/streams/{key}/` | Audited daily budget and bounded threshold/window overrides; rejects identity, flag and secret changes |
+| `POST deliverability/self-check/` | `{stream, kind}` for DNS, config, reputation or Postmaster; never sends a seed |
+| `POST deliverability/seed-test/` | Explicit enrolled-seed heartbeat; reuses the stream's daily probe |
+
+The owner-only Health tab in Chat consumes this contract. Staff do not request
+these endpoints. Recipient addresses and credentials are excluded from health
+responses, graphs, incident alerts and digest bodies. Forecast capacity assumes
+healthy feedback and sufficient demand; it is not promised campaign volume.
+
+Guard scopes include campaign/wave totals, stream 24-hour complaints, provider
+one-hour deferrals and policy codes, global service rate limits, and unresolved
+handoffs without feedback. Provider throttles leave other providers running.
+Only amber automation heals. A completed cohort's unchanged amber evidence may
+cool after 24 hours without a new failure; unresolved deliveries prevent this.
+Red incidents always require an owner decision. Acknowledgement accepts exactly
+the recorded negative message identities; new evidence reopens protection.
+Manual/staff pauses survive automatic recovery. Resumed capacity is never
+accumulated into a catch-up burst. Postmaster red demotes once per incident;
+its amber recovery prevents promotion for 48 hours.
+
+DNS requires two spaced failures and two spaced passing checks. Suppressions
+are reconciled in bounded pages; a bounce adds a suppression without inventing
+a withdrawal, a complaint records withdrawal, and a manual provider block adds
+a review hold. No reconciliation removes a suppression. The notify stream's
+incidents are alert-only and cannot stop transactional sends.
+
+Red incidents alert Slack and owner email, with four-hour reminders; amber
+alerts Slack and appears in the daily 08:30 Melbourne digest. Owner email uses
+the dedicated notify credential and durable, per-owner idempotency receipts;
+uncertain attempts expire before Resend's 24-hour deduplication window. No
+marketing credential fallback is allowed. See `ops/listmonk/README.md` for
+credential setup and the remaining operational release gates.
+
+`manage.py crm_simulate_send --scenario healthy --recipients 5000 --days 8`
+qualifies the real campaign path with fake providers and a fixed clock. It
+requires an empty PostgreSQL `test_*` database, `APP_ENV=test`, and an exact
+`CRM_SIMULATION_DATABASE` name opt-in. It applies no migrations, blocks outbound
+network and rolls back all rows. The database tests execute all twelve plan
+scenarios and verify the 150/300/600/1,000/1,500/1,450 healthy ramp, protections,
+recovery, priority, idle decay and capacity ceilings. Prepare the disposable
+schema only within the specifically approved migration scope.
+
+## Dormant contacts and import hygiene (Phase 6)
+
+`CRM_LIFECYCLE_ENABLED=false` is the default. When enabled, the daily activity
+roll-up uses only observed logins, registrations, attendance, clicks and replies,
+including dated Substack exports. Opens and undated counts never reactivate a
+contact. Consent and channel preferences are not rewritten by the job.
+
+Owners prepare a reconfirmation draft from Sending → Health. The fixed audience
+contains dormant contacts with affirmative permission from the last 36 calendar
+months and no hard-bounce history. The stream must be active; the dispatcher
+shares its budget and limits preference checks to 10% per day. A normal review
+and explicit Send are still required. Unanswered requests add a dormant flag
+after 30 days. Nothing is deleted. Signed confirmation uses a read-only GET and
+an explicit CSRF-protected POST; opt-outs, bans and delivery/review holds remain
+authoritative. Reconfirmation does not invent a new original consent date.
+
+Import reports add independent `no_mx`, `disposable`, `likely_typo` and
+`domain_unverified` counts. Pending DNS work is bounded and completed by the
+background domain pass; unknown never means clean. The contact drawer offers
+known-domain suggestions and a separate manual confirmation. Corrections retain
+the original address internally for future imports, feedback and ban checks;
+they never clear opt-outs or delivery holds, and duplicate destinations require
+manual review. System lifecycle/import/alias attributes are not editable fields.
 
 ## Campaign preflight (Phase 3)
 
@@ -830,3 +911,80 @@ all later stream capacity limits remain in force. Synthetic tests cover every
 check, binding/config changes, fixes, seed recovery, authenticated header
 proofs, timeout pacing and migration 0004 reversal/reapplication. Real inbox
 access and real seed/campaign sends are excluded from the local test approval.
+
+## Staff composer contract (Phase 4)
+
+Drafts accept `audience_preset: "opted_in"` or `"city"` with a reviewed
+`city_id`. The server infers community-news purpose and snapshots the rules;
+saved audiences and event guest choices retain their existing paths. Clearing
+a preset clears its definition, so it cannot silently become all contacts.
+The opted-in preset checks the member's current approval, verified matching
+email, active account, latest consent evidence and CRM suppressions. A source
+withdrawal is rechecked just before listmonk handoff even if a CRM sync has not
+run. Choosing a preset never changes consent or a contact record.
+
+`access/` returns fail-closed `campaign_features: {waves, preflight}` alongside
+the owner capability. Blast list responses include the same `pause` and
+plain `status_message` as detail. Preset metadata is returned in
+`audience_preset: {kind, city_id?}`. Plan responses add a bounded, masked
+`people_preview` for the staff list; it is never stored in `Blast.plan`.
+Staff copy covers inbox waits, scheduled batches, sending hours, slowing,
+provider delays, dependency holds, staff/system pauses, frequency waits and
+terminal outcomes without raw provider diagnostics. Terminal status wins
+over old pause/stream metadata. Stop records the acting staff name in audit
+and blast metadata. Draft saves take the stream/blast locks and recheck the
+current status, so a late editor cannot restore a queued campaign to draft.
+No new schema is required.
+
+## System email and sign-in monitoring (Phase 7)
+
+`MLAI_SYSTEM_FROM_EMAIL` is the canonical sender for newly prepared system
+messages (default `MLAI <notifications@notify.mlai.au>`). `RESEND_FROM_EMAIL`
+is a compatibility alias and an environment fallback only if the canonical
+setting is absent. Review approvals, founder draft notices, website goal
+notifications and notification adapters use the same setting. Existing
+frozen outbox payloads and idempotency keys remain unchanged. The
+notify-restricted `CRM_NOTIFY_API_KEY` is preferred, with the existing
+`RESEND_API_KEY` retained as a rollout fallback. Verify the dedicated key
+and drain or explicitly review old frozen messages before a sender cutover.
+
+Customer.io remains the sign-in provider. `CUSTOMERIO_FROM_EMAIL` defaults
+to the canonical sender and is explicitly included in the code request.
+Customer.io requests set `tracked=false`; Resend tracking must be disabled
+on the notify domain in the provider. Optional notification preferences and
+unsubscribe links remain in their existing routing and message bodies.
+
+`CRM_TRANSACTIONAL_MONITOR_ENABLED=false` independently gates payload-free
+transport observations and a minute scheduler. It does not require marketing
+sending, guardian or external-monitor switches. Each actual configured
+provider attempt produces append-only start/result metadata; no address,
+subject, body, code, credential or upstream exception is retained. Telemetry
+writes use a savepoint and cannot fail the underlying transport.
+
+Completed attempts are grouped by provider and sign-in/notification purpose
+over 15 minutes. More than 5% failures raises a red, alert-only incident.
+Notify Resend callbacks measure deduplicated hard bounces and sent-to-delivered
+p95. More than 120 seconds continuously observed for 15 minutes alerts;
+missing, truncated or unobserved data never becomes healthy. Limits and
+thresholds are configurable. Customer.io API acceptance supports failure
+monitoring but does not prove delivery, bounce rates or latency: those stay
+unknown because this application has no authenticated Customer.io delivery
+callback. Health and the digest explicitly retain that distinction.
+
+`CRM_CUSTOMERIO_NOTIFY_DKIM_VERIFIED` is a default-false operator attestation,
+not a DNS lookup or permission to send. Verify the exact Customer.io From
+domain and provider-issued DKIM records before setting it. Resend notify DNS,
+webhook coverage and domain tracking remain covered by the external monitor.
+No incident or acknowledgement pauses, throttles, caps, reroutes or demotes
+transactional mail. Red incidents require owner review.
+
+Release gates: configure and verify the exact notify domain at both providers,
+its restricted key, tracking settings, callback route, sender alignment and a
+separately authorized staging message before cutover. DMARC remains a people
+operation: only after aggregate reports show every legitimate source aligned,
+review `p=quarantine; pct=25`, then 100, then `p=reject`, setting `sp=`
+explicitly each time and checking reports between changes. Do not publish a
+stronger record from this implementation or treat a missing report as clean.
+
+Provider contracts: [Customer.io From overrides and tracking](https://docs.customer.io/integrations/api/app/tag/send-messages/sendemail/),
+[Resend domain tracking](https://github.com/resend/resend-skills/blob/main/skills/resend/references/sending/overview.md).

@@ -7,6 +7,7 @@ from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Max
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from crm.models import BlastDelivery, CrmAuditEvent, EmailEvent, SendingStream, StreamDay
 
@@ -49,7 +50,8 @@ def close_day(row_id, *, now):
         if closed:
             return False
         before = stream.ramp_stage
-        if stream.state not in ('held', 'stopped'):
+        no_promotion_until = parse_datetime(str((stream.state_detail or {}).get('postmaster_no_promotion_until', '')))
+        if stream.state not in ('held', 'stopped') and (not no_promotion_until or now >= no_promotion_until):
             stream.ramp_stage = volume.promote_stage(stream.ramp_stage, row.sent, row.budget, row.healthy is True)
             amber = True
             for offset in range(policy.value('CRM_RAMP_AMBER_DAYS')):

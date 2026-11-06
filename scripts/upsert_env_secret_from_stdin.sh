@@ -21,6 +21,7 @@ case "$key" in
   INTERNAL_API_KEY|\
   LINEAR_API_KEY|\
   CRM_RESEND_WEBHOOK_SECRET|\
+  POSTMASTER_OAUTH_CLIENT_ID|POSTMASTER_OAUTH_CLIENT_SECRET|POSTMASTER_OAUTH_REFRESH_TOKEN|SPAMHAUS_DQS_KEY|SAFE_BROWSING_API_KEY|WEB_RISK_API_KEY|RESEND_READ_API_KEY|CRM_NOTIFY_API_KEY|\
   LISTMONK_API_TOKEN) ;;
   *)
     echo "Unsupported production secret key" >&2
@@ -32,7 +33,15 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 umask 077
 secret="$(cat)"
-if [[ ${#secret} -lt 32 ]]; then
+minimum_length=32
+if [[ "$key" == "SPAMHAUS_DQS_KEY" ]]; then
+  minimum_length=26
+  if ! [[ "$secret" =~ ^[a-zA-Z0-9]{26}$ ]]; then
+    echo "Invalid secret payload for ${key}" >&2
+    exit 1
+  fi
+fi
+if [[ ${#secret} -lt "$minimum_length" ]]; then
   echo "Invalid secret payload for ${key}" >&2
   exit 1
 fi

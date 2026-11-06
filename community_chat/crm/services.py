@@ -120,6 +120,10 @@ def create_contact(data: dict, *, actor, now: datetime) -> Contact:
 
     require_mlai_admin(actor)
     email = data["email"]
+    from crm.email_aliases import canonical_emails
+    corrected = canonical_emails([email]).get(email)
+    if corrected:
+        raise _existing(corrected)
     if Contact.objects.filter(email=email).exists():
         raise _existing(email)
     if _is_banned(email):
@@ -302,6 +306,25 @@ def _found(model, pk, code: str, **filters):
 
 
 def _set_audience(blast: Blast, data: dict) -> None:
+    preset = data.get('audience_preset')
+    if preset:
+        from crm.audience_taxonomy import CITY_OPTIONS
+        if preset not in ('opted_in', 'city'):
+            raise CrmError('invalid_audience_preset')
+        if preset == 'city' and data.get('city_id') not in CITY_OPTIONS:
+            raise CrmError('city_required')
+        blast.event, blast.segment, blast.quick_segment, blast.purpose = None, None, '', 'marketing'
+        definition = ({'version': 2, 'include': {'kind': 'rule', 'rule': {'type': 'location_affinity',
+            'op': 'has_any', 'city_ids': [data['city_id']]}}, 'exclude': None} if preset == 'city' else
+            {'match': 'all', 'rules': [], 'exclude': []})
+        blast.segment_definition = validate_definition(definition)
+        blast.stats = {**(blast.stats or {}), 'audience_preset': {'kind': preset,
+            **({'city_id': data['city_id']} if preset == 'city' else {})}}
+        return
+    if 'audience_preset' in data and (blast.stats or {}).get('audience_preset'):
+        blast.segment_definition = {}
+    if 'audience_preset' in data or data.get('quick_segment') or data.get('segment_id'):
+        blast.stats = {key: value for key, value in (blast.stats or {}).items() if key != 'audience_preset'}
     if data.get("quick_segment"):
         blast.quick_segment = data["quick_segment"]
         blast.segment = None
@@ -323,19 +346,32 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
 
     require_mlai_admin(actor)
     creating = blast is None
+    original_stream_id = blast.stream_id if blast is not None else None
     if creating:
         if "purpose" not in data:
             raise CrmError("invalid_request", fields={"purpose": ["required"]})
         blast = Blast(created_by=actor)
     elif blast.status != Blast.Status.DRAFT:
         raise CrmError("blast_not_draft", 409, blast_status=blast.status)
+    from crm.deliverability.reconfirmation import is_reconfirmation
+    preference_check = is_reconfirmation(blast)
+    if preference_check:
+        if not is_owner(actor):
+            raise CrmError('owner_required', 403)
+        if (data.get('purpose', 'marketing') != 'marketing' or data.get('channels', ['email']) != ['email']
+                or any(data.get(key) for key in ('event_id', 'segment_id', 'quick_segment', 'audience_preset'))):
+            raise CrmError('reconfirmation_audience_fixed')
     if "purpose" in data:
         blast.purpose = data["purpose"]
     if "event_id" in data:
         blast.event = (
             None if data["event_id"] is None else _found(CrmEvent, data["event_id"], "event_not_found")
         )
-    _set_audience(blast, data)
+    if preference_check:
+        blast.event, blast.segment, blast.quick_segment = None, None, ''
+        blast.segment_definition = {'match': 'all', 'rules': [], 'exclude': []}
+    else:
+        _set_audience(blast, data)
     if "channels" in data:
         blast.channels = data["channels"]
     if "sms_only_without_whatsapp" in data:
@@ -370,6 +406,15 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
     check_channel_rules(blast)
     assign_stream(blast, actor=actor, mailbox=blast.mailbox if is_owner(actor) else None)
     with transaction.atomic():
+        from crm.models import SendingStream
+        stream_ids = {original_stream_id, blast.stream_id}
+        list(SendingStream.objects.select_for_update().filter(pk__in=stream_ids - {None}).order_by('pk'))
+        if not creating:
+            current = Blast.objects.select_for_update().only('status', 'stream_id').get(pk=blast.pk)
+            if current.status != Blast.Status.DRAFT:
+                raise CrmError('blast_not_draft', 409, blast_status=current.status)
+            if current.stream_id not in stream_ids:
+                raise CrmError('draft_changed', 409)
         blast.save()
         audit(
             actor,
