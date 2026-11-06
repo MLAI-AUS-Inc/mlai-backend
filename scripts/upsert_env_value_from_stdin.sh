@@ -12,6 +12,7 @@ case "$key" in
   LINEAR_MEETING_REQUIRED_TEAM_KEYS|LINEAR_CHANNEL_ISSUE_BINDINGS_JSON|LINEAR_CHANNEL_ISSUE_MAX_COMMENTS|LINEAR_CHANNEL_ISSUE_WRITES_ENABLED|\
   MLAI_MCP_ENABLED|MLAI_MCP_COMMUNITY_ENABLED|MLAI_MCP_COMMUNITY_RELAY_URL|MLAI_MCP_COMMUNITY_SECRET|MLAI_MCP_CLIENT_INSTALL_URLS|VALLEY_MCP_ENABLED|VALLEY_MCP_PUBLIC_BASE_URL|VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN|COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED|\
   WEBSITE_CONNECTION_WRITE_MODE|WEBSITE_CONNECTION_CANARY_DOMAINS|APPROVED_MIGRATION_PLAN_SHA256|\
+  SYSTEM_EMAIL_RESEND_MESSAGES|MLAI_SYSTEM_FROM_EMAIL|SYSTEM_EMAIL_REPLY_TO|SYSTEM_EMAIL_UNSUBSCRIBE_MAILTO|SYSTEM_EMAIL_TEST_RECIPIENTS|SYSTEM_EMAIL_ALERT_SLACK_CHANNEL_ID|\
   COMMUNITY_CHAT_CRM_ENABLED|CRM_LUMA_SYNC_ENABLED|CRM_SENDING_ENABLED|CRM_SMS_ENABLED|CRM_WHATSAPP_ENABLED|\
   CRM_WARMUP_ENABLED|CRM_WARMUP_RUN_ID|CRM_RESEND_MONITORED_SENDERS|CRM_ENGAGEMENT_REFRESH_ENABLED|CRM_ENGAGEMENT_REFRESH_HOUR|CRM_SUBSTACK_ACTIVITY_ENABLED|LISTMONK_BASE_URL|LISTMONK_API_USER|TWILIO_MESSAGING_SERVICE_SID|\
   ARTICLES_FREE_SETUP_RESEARCH_ENABLED|ARTICLES_FREE_FIRST_ARTICLE_ENABLED|ARTICLES_FIRST_ARTICLE_GOAL_ENABLED|ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED|\
@@ -150,6 +151,29 @@ case "$key" in
       exit 1
     }
     ;;
+  SYSTEM_EMAIL_RESEND_MESSAGES)
+    # Empty keeps every message on its legacy provider; otherwise "all" or registered keys.
+    system_email_keys=" all chat_sign_in_code magic_link password_reset notification_channel_verify article_review_ready article_content_ready article_report_ready monthly_update_7d monthly_update_1d "
+    IFS=',' read -r -a system_email_values <<< "$value"
+    for system_email_value in "${system_email_values[@]}"; do
+      [[ "$system_email_keys" == *" ${system_email_value} "* ]] || {
+        echo "SYSTEM_EMAIL_RESEND_MESSAGES must list registered message keys or all" >&2
+        exit 1
+      }
+    done
+    ;;
+  MLAI_SYSTEM_FROM_EMAIL|SYSTEM_EMAIL_REPLY_TO|SYSTEM_EMAIL_UNSUBSCRIBE_MAILTO|SYSTEM_EMAIL_TEST_RECIPIENTS)
+    [[ "$value" == *@* ]] || {
+      echo "${key} must contain an email address" >&2
+      exit 1
+    }
+    ;;
+  SYSTEM_EMAIL_ALERT_SLACK_CHANNEL_ID)
+    [[ "$value" =~ ^[CG][A-Z0-9]+$ ]] || {
+      echo "${key} must be a Slack channel ID" >&2
+      exit 1
+    }
+    ;;
   LINEAR_CHANNEL_ISSUE_WRITES_ENABLED)
     [[ "$value" == "true" || "$value" == "false" ]] || {
       echo "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED must be true or false" >&2
@@ -158,7 +182,7 @@ case "$key" in
     ;;
 esac
 
-if [[ -z "$value" && "$key" != "WEBSITE_CONNECTION_CANARY_DOMAINS" && "$key" != "APPROVED_MIGRATION_PLAN_SHA256" && "$key" != "SLACK_MEMBER_CHANNEL_ALLOWED_IDS" ]]; then
+if [[ -z "$value" && "$key" != "WEBSITE_CONNECTION_CANARY_DOMAINS" && "$key" != "APPROVED_MIGRATION_PLAN_SHA256" && "$key" != "SYSTEM_EMAIL_RESEND_MESSAGES" && "$key" != "SLACK_MEMBER_CHANNEL_ALLOWED_IDS" ]]; then
   echo "Invalid empty payload for ${key}" >&2
   exit 1
 fi
