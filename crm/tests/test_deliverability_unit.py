@@ -101,10 +101,18 @@ class IdentityTests(SimpleTestCase):
 
     @override_settings(CRM_RESEND_MONITORED_SENDERS=())
     def test_stream_and_system_senders_do_not_need_the_old_allowlist(self):
-        for sender in ("events@news.mlai.au", "notifications@notify.mlai.au", "notifications@mlai.au"):
+        for sender in ("events@news.mlai.au", "notifications@mlai.au"):
             self.assertTrue(monitored_sender(sender))
         for sender in ("a@evilnews.mlai.au", "a@mlai.au.example.net", "a@unconfigured.net"):
             self.assertFalse(monitored_sender(sender))
+
+    @override_settings(CRM_RESEND_MONITORED_SENDERS=("notifications@notify.mlai.au",),
+                       MLAI_SYSTEM_FROM_EMAIL="MLAI <notifications@notify.mlai.au>")
+    def test_system_email_domain_feedback_is_never_crm_feedback(self):
+        # system_email owns notify.mlai.au feedback, even when CRM lists the sender.
+        self.assertFalse(monitored_sender("notifications@notify.mlai.au"))
+        self.assertFalse(monitored_sender("other@notify.mlai.au"))
+        self.assertTrue(monitored_sender("events@news.mlai.au"))
 
     def test_service_refuses_root_mailbox_before_any_provider_or_database_call(self):
         with patch("community_chat.crm.services.require_mlai_admin"):

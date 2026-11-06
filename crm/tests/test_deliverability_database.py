@@ -127,9 +127,10 @@ class DeliverabilityDatabaseTests(CrmApiMixin, TestCase):
         for index, sender in enumerate(("events@news.mlai.au", "notifications@notify.mlai.au", "notifications@mlai.au")):
             event = {"type": "email.sent", "sender": sender, "recipient": "person@example.net", "email_id": str(uuid.uuid4()), "subject": "System mail", "test": False}
             record_event(event, f"unlisted-{index}", now=self.now)
-        self.assertEqual(EmailEvent.objects.count(), 3)
+        # notify.mlai.au is the system_email domain, whose feedback CRM never records.
+        self.assertEqual(EmailEvent.objects.count(), 2)
         self.assertEqual(EmailEvent.objects.filter(stream=self.news).count(), 1)
-        self.assertEqual(EmailEvent.objects.filter(stream=self.notify).count(), 1)
+        self.assertEqual(EmailEvent.objects.filter(stream=self.notify).count(), 0)
         self.assertEqual(EmailEvent.objects.filter(stream=None).count(), 1)
 
     def test_soft_bounce_is_once_per_blast_and_delivery_resets_streak(self):

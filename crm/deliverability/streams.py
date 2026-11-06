@@ -46,12 +46,26 @@ def stream_definitions(raw=None):
     return definitions
 
 
+def system_email_domain():
+    """The system_email app owns feedback for its sender domain (notify.mlai.au)."""
+    from email.utils import parseaddr
+    address = parseaddr(str(getattr(settings, "MLAI_SYSTEM_FROM_EMAIL", "") or ""))[1]
+    return address.rpartition("@")[2].strip().lower()
+
+
 def monitored_sender(sender):
-    """Observe system mail on the root, every configured stream, and legacy senders."""
+    """Observe the root, configured streams and legacy senders, never system_email's domain.
+
+    System mail feedback belongs to the system_email app, so a notify bounce can
+    never pause or throttle a CRM stream.
+    """
     sender = str(sender).lower()
     if "@" not in sender:
         return False
     domain = sender.rsplit("@", 1)[-1]
+    # A legacy root-domain system sender stays covered by the root boundary.
+    if domain == system_email_domain() and not protected_domain(domain):
+        return False
     return (protected_domain(domain)
             or domain in {item["domain"] for item in stream_definitions()}
             or sender in getattr(settings, "CRM_RESEND_MONITORED_SENDERS", ()))
