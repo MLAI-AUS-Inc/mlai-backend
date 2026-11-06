@@ -10,6 +10,7 @@ returned as a ``data:`` URL and never stored.
 """
 
 import base64
+import hashlib
 import http.client
 import logging
 import socket
@@ -19,7 +20,7 @@ import time
 import warnings
 from io import BytesIO
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 from uuid import uuid4
 
 from agent_runtime.webhook_transport import CallbackEndpointError, resolve_callback
@@ -205,13 +206,14 @@ def preview_photo(url: str) -> str:
     return f"data:{content_type};base64,{base64.b64encode(data).decode('ascii')}"
 
 
-def copy_photo(url: str, *, company_id: Any) -> str:
+def copy_photo(url: str, *, company_id: Any, organization_id: Any = None, user: Any = None) -> str:
     """Store a re-encoded copy of the photo under the company's prefix and return its URL."""
     data, content_type = encode_photo(fetch_photo(url), STORED_PHOTO_SIZE)
-    return _store_photo(data, content_type, company_id=company_id)
+    return _store_photo(data, content_type, company_id=company_id, organization_id=organization_id,
+                        user=user, source="copied_link")
 
 
-def upload_photo(uploaded, *, company_id: Any) -> str:
+def upload_photo(uploaded, *, company_id: Any, organization_id: Any = None, user: Any = None) -> str:
     """Store a bounded, decoded still photo under its authorized company prefix."""
     if getattr(uploaded, "size", 0) > MAX_PHOTO_BYTES:
         raise AuthorPhotoError("author_photo_too_large", "Choose a photo no larger than 10 MB.")
@@ -219,10 +221,12 @@ def upload_photo(uploaded, *, company_id: Any) -> str:
     if len(raw) > MAX_PHOTO_BYTES:
         raise AuthorPhotoError("author_photo_too_large", "Choose a photo no larger than 10 MB.")
     data, content_type = encode_photo(raw, STORED_PHOTO_SIZE)
-    return _store_photo(data, content_type, company_id=company_id)
+    return _store_photo(data, content_type, company_id=company_id, organization_id=organization_id,
+                        user=user, source="upload")
 
 
-def _store_photo(data: bytes, content_type: str, *, company_id: Any) -> str:
+def _store_photo(data: bytes, content_type: str, *, company_id: Any, organization_id: Any = None,
+                 user: Any = None, source: str = "upload") -> str:
     from core.firebase_utils import upload_file_to_storage
     extension = "png" if content_type == "image/png" else "jpg"
     destination = f"{STORAGE_PREFIX}/{company_id}/{uuid4().hex}.{extension}"
@@ -233,7 +237,54 @@ def _store_photo(data: bytes, content_type: str, *, company_id: Any) -> str:
     if not stored:
         logger.error("author_photo_storage_failed company_id=%s", company_id)
         raise AuthorPhotoError("author_photo_storage_failed", "The photo couldn't be saved. Please try again.", status=502)
+    if organization_id:
+        record_photo(data, url=stored, content_type=content_type, organization_id=organization_id,
+                     company_id=company_id, source=source, user=user, storage_path=destination)
     return stored
+
+
+def storage_path_for(url: Any) -> str:
+    """The object path of a photo in MLAI's own bucket, or "" for any other URL."""
+    value = str(url or "").strip()
+    if not value.startswith(_storage_url_prefix()):
+        return ""
+    return unquote(urlsplit(value).path.split("/o/", 1)[1])
+
+
+def record_photo(data: bytes, *, url: str, organization_id: Any, company_id: Any = "", source: str,
+                 content_type: str = "", user: Any = None, storage_path: str = ""):
+    """Save the exact stored bytes' SHA-256 so article review can prove which photo it shows."""
+    from content_factory.models import AuthorPhoto
+    width = height = None
+    try:
+        from PIL import Image
+        with Image.open(BytesIO(data)) as image:
+            width, height = image.size
+    except Exception:
+        pass
+    record, _created = AuthorPhoto.objects.get_or_create(url=url, defaults={
+        "organization_id": organization_id, "company_id": str(company_id or ""),
+        "storage_path": storage_path or storage_path_for(url), "sha256": hashlib.sha256(data).hexdigest(),
+        "content_type": content_type, "width": width, "height": height, "byte_size": len(data),
+        "source": source, "uploaded_by": user if getattr(user, "pk", None) else None})
+    return record
+
+
+def attach_photo_records(authors: Iterable[Dict[str, Any]], *, organization_id: Any) -> List[Dict[str, Any]]:
+    """Set each author's photo ID and hash from this organization's records, never from the client."""
+    from content_factory.models import AuthorPhoto
+    authors = [dict(author) for author in authors]
+    urls = {author.get("avatarUrl") for author in authors if author.get("avatarUrl")}
+    records = {record.url: record for record in AuthorPhoto.objects.filter(organization_id=organization_id, url__in=urls)} \
+        if organization_id and urls else {}
+    for author in authors:
+        author.pop("avatarPhotoId", None)
+        author.pop("avatarSha256", None)
+        record = records.get(author.get("avatarUrl"))
+        if record is not None:
+            author["avatarPhotoId"] = str(record.pk)
+            author["avatarSha256"] = record.sha256
+    return authors
 
 
 def store_author_photos(
@@ -242,6 +293,8 @@ def store_author_photos(
     previous: Iterable[Dict[str, Any]],
     company_id: Any,
     skipped: Optional[List[AuthorPhotoError]] = None,
+    organization_id: Any = None,
+    user: Any = None,
 ) -> List[Dict[str, Any]]:
     """Replace each external photo link with an MLAI-stored copy before the profiles are saved.
 
@@ -260,7 +313,7 @@ def store_author_photos(
             result.append(author)
             continue
         try:
-            stored = copies.get(url) or copy_photo(url, company_id=company_id)
+            stored = copies.get(url) or copy_photo(url, company_id=company_id, organization_id=organization_id, user=user)
         except AuthorPhotoError as exc:
             if earlier.get(author.get("id")) == url:
                 logger.info("author_photo_copy_skipped company_id=%s author_id=%s code=%s",
@@ -278,4 +331,4 @@ def store_author_photos(
             ) from None
         copies[url] = stored
         result.append({**author, "avatarUrl": stored})
-    return result
+    return attach_photo_records(result, organization_id=organization_id) if organization_id else result

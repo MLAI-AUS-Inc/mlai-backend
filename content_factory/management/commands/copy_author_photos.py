@@ -50,7 +50,8 @@ class Command(BaseCommand):
                 # previous=authors marks every link as already saved, so a link that
                 # can't be copied is kept and logged instead of raising.
                 stored = store_author_photos(authors, previous=authors,
-                                             company_id=f"org-{config.organization_id}", skipped=skipped)
+                                             company_id=f"org-{config.organization_id}", skipped=skipped,
+                                             organization_id=config.organization_id)
             except Exception:
                 logger.exception("author_photo_backfill_failed organization_id=%s", config.organization_id)
                 failed += 1
