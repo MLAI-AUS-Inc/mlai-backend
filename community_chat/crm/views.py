@@ -163,7 +163,7 @@ def blast_summaries(blasts):
     return [wire.blast_summary(blast, stats.get(blast.pk)) for blast in blasts]
 
 
-BLAST_RELATIONS = ("event", "segment", "created_by", "whatsapp_template", "mailbox", "stream")
+BLAST_RELATIONS = ("event", "segment", "created_by", "whatsapp_template", "mailbox", "stream", 'paused_by')
 
 
 def blast_detail(blast_id):
@@ -622,6 +622,7 @@ class BlastSendView(CrmView):
             actor=request.user,
             definition_hash_confirm=data.get("definition_hash"),
             recipient_fingerprint_confirm=data.get("recipient_fingerprint"),
+            preflight_hash=data.get('preflight_hash'),
         )
         return Response(blast_detail(blast.pk), status=202)
 

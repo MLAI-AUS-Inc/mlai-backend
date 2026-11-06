@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import Iterable, Optional
 
 from django.conf import settings
+from django.db import connection
 from django.db.models import (
     BooleanField,
     Case,
@@ -20,7 +21,9 @@ from django.db.models import (
     Count,
     Exists,
     F,
+    Func,
     IntegerField,
+    JSONField,
     Max,
     OuterRef,
     Q,
@@ -30,6 +33,7 @@ from django.db.models import (
     When,
 )
 from django.db.models.functions import Coalesce, Lower, NullIf
+from django.db.models.fields.json import KeyTransform
 
 from core.models import AccountBan
 
@@ -109,13 +113,16 @@ EMAIL_CAP_Q = (
 
 
 def banned(prefix: str = "") -> Exists:
-    """True when the contact's email has an active ``AccountBan``."""
-
-    return Exists(
-        AccountBan.objects.filter(revoked_at__isnull=True)
-        .annotate(email_key=Lower("email"))
-        .filter(email_key=OuterRef(f"{prefix}email"))
-    )
+    """Active denial follows the current address, linked user and corrected aliases."""
+    rows = AccountBan.objects.filter(revoked_at__isnull=True).annotate(email_key=Lower('email'))
+    denied = Q(email_key=OuterRef(f'{prefix}email')) | Q(user_id=OuterRef(f'{prefix}user_id'))
+    if connection.vendor == 'postgresql':
+        match = Func(KeyTransform('email_aliases', OuterRef(f'{prefix}attributes')),
+            Func(Lower('email'), function='to_jsonb', output_field=JSONField()),
+            template='(%(expressions)s)', arg_joiner=' @> ', output_field=BooleanField())
+        rows = rows.annotate(alias_denied=match)
+        denied |= Q(alias_denied=True)
+    return Exists(rows.filter(denied))
 
 
 def marketing_consent_q(now: datetime, prefix: str = "") -> Q:
@@ -642,6 +649,7 @@ def recent_activity(limit: int = OVERVIEW_ACTIVITY_LIMIT) -> tuple[list, dict]:
 
     people = list(
         CrmAuditEvent.objects.exclude(action=CrmAuditEvent.Action.SYNC)
+        .exclude(target_type="transactional_mail")
         .exclude(
             action=CrmAuditEvent.Action.EDIT,
             target_type="blast",

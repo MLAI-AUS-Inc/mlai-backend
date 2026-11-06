@@ -13,6 +13,7 @@ Email deliveries move ``queued`` → ``submitting`` (on the listmonk list) →
 from __future__ import annotations
 
 import logging
+import html
 import re
 from collections import Counter
 from datetime import datetime, timezone as dt_timezone
@@ -142,6 +143,14 @@ def subscriber_name(contact) -> str:
 
 def campaign_body(blast) -> str:
     body = listmonk_text(blast.body_markdown, blast.event, markdown=True)
+    from .deliverability import reconfirmation
+    if reconfirmation.is_reconfirmation(blast):
+        body += reconfirmation.BUTTON
+    if getattr(blast, 'sign_off_name', ''):
+        body += '\n\n— ' + listmonk_text(html.escape(blast.sign_off_name), blast.event, markdown=True)
+    if getattr(blast, 'preview_text', ''):
+        preview = listmonk_text(html.escape(blast.preview_text), blast.event, markdown=True)
+        body = '<div style="display:none;max-height:0;overflow:hidden;mso-hide:all" aria-hidden="true">' + preview + '</div>\n\n' + body
     return body if (getattr(blast, "stats", None) or {}).get("warmup") else track_links(body)
 
 
@@ -300,6 +309,21 @@ def _drop_reason(blast, contact, is_banned: bool) -> Optional[str]:
         return "consent_withdrawn"
     if blast.purpose == Blast.Purpose.MARKETING and marketing_review_hold(contact.attributes):
         return "marketing_review_hold"
+    if blast.purpose == Blast.Purpose.MARKETING:
+        from .deliverability.lifecycle import dormant_suppressed
+        if dormant_suppressed(contact.attributes):
+            return 'dormant'
+        from .deliverability import reconfirmation
+        if reconfirmation.is_reconfirmation(blast):
+            reason = reconfirmation.handoff_exclusion(contact, timezone.now())
+            if reason:
+                return reason
+    if blast.purpose == Blast.Purpose.MARKETING and (
+            (((blast.stats or {}).get('audience_preset') or {}).get('kind') == 'opted_in')
+            or (getattr(contact, 'marketing_consent_source', '') or '').startswith('community_onboarding:')):
+        from .community_optins import contact_is_opted_in
+        if not contact_is_opted_in(contact):
+            return 'consent_withdrawn'
     return None
 
 
@@ -403,6 +427,9 @@ def _load_batch(blast, list_id: int, deliveries: list, now, *, consent_reasons=F
         if consent_reasons:
             from .deliverability.waves import consent_reason
             attribs["consent_reason"] = consent_reason(delivery)
+        from .deliverability import reconfirmation
+        if reconfirmation.is_reconfirmation(blast):
+            attribs[reconfirmation.ATTRIBUTE] = reconfirmation.url_for(delivery, now=now)
         if record is None:
             try:
                 record = listmonk.create_subscriber(

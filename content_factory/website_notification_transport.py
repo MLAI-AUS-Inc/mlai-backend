@@ -6,6 +6,7 @@ import secrets
 from uuid import UUID
 from urllib.parse import urlsplit
 from django.conf import settings
+from integrations import system_mail
 from django.utils import timezone
 from agent_runtime import native_crypto
 from agent_runtime.webhook_transport import post_webhook, CallbackEndpointError
@@ -74,22 +75,26 @@ def message_event(channel,pubkeys,notice,created_at):
 
 def email_payload(channel,notice):
     """Freeze the entire provider request so a later config change cannot alter retries."""
-    sender=str(getattr(settings,"RESEND_FROM_EMAIL","") or "Roo <notifications@mlai.au>")
+    sender=system_mail.sender()
     return {"from":sender,"to":[channel.route_id],"subject":notice["subject"],"text":notice["text"]+"\n\n"+notice["link"]}
 
 
 def post_email(payload,notice_id,*,exact_key=False):
     """Resend alone provides the verified deduplication contract needed by this outbox."""
-    api_key=str(getattr(settings,"RESEND_API_KEY","") or "")
+    api_key=system_mail.resend_key()
     if not api_key:raise NotificationTransportError("email_unconfigured",retryable=False)
     require_unlocked_remote_call()
-    try:
-        response=post_webhook("https://api.resend.com/emails",native_crypto.canonical_json(payload).encode(),
-            {"Authorization":"Bearer "+api_key,"Idempotency-Key":notice_id if exact_key else "articles-goal/"+notice_id},timeout=10,max_response_bytes=16384)
-        value=json.loads(response.body)
-    except (CallbackEndpointError,ValueError) as exc:raise NotificationTransportError("email_response_unavailable") from exc
-    if response.status in {408,429} or response.status>=500 or response.status==409 and isinstance(value,dict) and value.get("name")=="concurrent_idempotent_requests":
-        raise NotificationTransportError("email_temporarily_unavailable")
-    if response.status not in {200,201} or not isinstance(value,dict):raise NotificationTransportError("email_rejected",retryable=False)
-    try:return str(UUID(value["id"]))
-    except (ValueError,TypeError,KeyError) as exc:raise NotificationTransportError("email_response_unavailable") from exc
+    with system_mail.observe("resend") as attempt:
+        try:
+            response=post_webhook("https://api.resend.com/emails",native_crypto.canonical_json(payload).encode(),
+                {"Authorization":"Bearer "+api_key,"Idempotency-Key":notice_id if exact_key else "articles-goal/"+notice_id},timeout=10,max_response_bytes=16384)
+            value=json.loads(response.body)
+        except (CallbackEndpointError,ValueError) as exc:raise NotificationTransportError("email_response_unavailable") from exc
+        if response.status in {408,429} or response.status>=500 or response.status==409 and isinstance(value,dict) and value.get("name")=="concurrent_idempotent_requests":
+            raise NotificationTransportError("email_temporarily_unavailable")
+        if response.status not in {200,201} or not isinstance(value,dict):raise NotificationTransportError("email_rejected",retryable=False)
+        try:
+            identifier = str(UUID(value["id"]))
+            attempt.accepted({"id": identifier})
+            return identifier
+        except (ValueError,TypeError,KeyError) as exc:raise NotificationTransportError("email_response_unavailable") from exc

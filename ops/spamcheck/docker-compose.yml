@@ -1,0 +1,34 @@
+name: mlai-spamcheck
+
+services:
+  rspamd:
+    # Supply a reviewed, immutable rspamd/rspamd tag@sha256 reference.
+    image: ${RSPAMD_IMAGE:?Set RSPAMD_IMAGE to a tested rspamd/rspamd tag@sha256 digest}
+    volumes:
+      - ./local.d:/etc/rspamd/local.d:ro
+    tmpfs:
+      - /var/lib/rspamd:uid=11333,gid=11333,mode=0750
+      - /var/log/rspamd:uid=11333,gid=11333,mode=0750
+      - /run/rspamd:uid=11333,gid=11333,mode=0750
+      - /tmp
+    # No host port, ingress route, UI, SMTP transport or persistent message store.
+    expose:
+      - "11333"
+    restart: unless-stopped
+    stop_grace_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:11333/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      mlai-shared:
+        aliases:
+          - rspamd
+
+networks:
+  mlai-shared:
+    name: ${MLAI_SHARED_NETWORK:-mlai-shared}
+    external: true

@@ -58,7 +58,13 @@ def plain_body(blast):
     text = re.sub(r'\[([^\]]+)\]\((https?://[^\s)]+)\)', r'\1 (\2)', blast.body_markdown)
     text = re.sub(r'(?m)^\s{0,3}#{1,6}\s+', '', text)
     text = re.sub(r'(?m)^\s*[-*]\s+', '• ', text)
-    return blast_email.listmonk_text(text.replace('**', '').replace('__', ''), blast.event, markdown=False)
+    if getattr(blast, 'sign_off_name', ''):
+        text += '\n\n— ' + blast.sign_off_name
+    text = blast_email.listmonk_text(text.replace('**', '').replace('__', ''), blast.event, markdown=False)
+    from . import reconfirmation
+    if reconfirmation.is_reconfirmation(blast):
+        text += '\n\nYes, keep me subscribed: ' + reconfirmation.GO_URL
+    return text
 
 
 def campaign_payload(wave, blast):
@@ -87,24 +93,17 @@ def canary_block(blast, now):
     wait = policy.value('CRM_EVENT_CANARY_WAIT_MINUTES' if volume.time_critical(blast, now) else 'CRM_CANARY_WAIT_MINUTES')
     if now < first.started_at + timedelta(minutes=wait):
         return 'checking_first_batch'
-    from .guardian import Metrics, evaluate, policy_block
-    rows = first.deliveries.all()
-    n = rows.exclude(status__in=('queued', 'cancelled', 'failed')).count()
-    hard = rows.filter(bounce_kind='hard').count()
-    complaints = rows.filter(error_code='resend_complained').count()
-    delivered = rows.filter(delivered_at__isnull=False).count()
-    events = first.email_events.all()
-    blocks = sum(policy_block(event) for event in events.filter(event_type__in=('email.bounced', 'email.failed')))
-    delayed = events.filter(event_type='email.delivery_delayed').values('recipient').distinct().count()
-    if n and delayed / n >= policy.value('CRM_CANARY_MAX_DEFERRAL_RATE'):
-        return 'first_batch_deferrals'
-    if blocks >= policy.value('CRM_GUARD_POLICY_BLOCK_MIN_COUNT'):
-        return 'first_batch_policy'
-    if n >= policy.value('CRM_CANARY_MIN_SAMPLE') and (
-            hard >= policy.value('CRM_CANARY_HARD_BOUNCE_COUNT') or hard / n >= policy.value('CRM_GUARD_HARD_BOUNCE_AMBER')):
-        return 'first_batch_bounces'
-    if evaluate(Metrics(n, delivered, hard, complaints, blocks)):
-        return 'first_batch_feedback'
+    from .guardian import evaluate, signal_pending
+    from .scopes import blast_metrics, extra_signals, scoped
+    metrics = blast_metrics(blast, now=now, wave=first)
+    minimum = (first.stats or {}).get('canary_min_sample', policy.value('CRM_CANARY_MIN_SAMPLE'))
+    signals = evaluate(metrics, canary=True, min_sample=minimum, stream=blast.stream)
+    signals += extra_signals(metrics, canary=True, stream=blast.stream)
+    for signal in scoped(signals, scope='', metrics=metrics):
+        if signal_pending(blast.stream, blast, signal, wave=first, now=now):
+            return {'deferral_rate': 'first_batch_deferrals', 'policy_block': 'first_batch_policy',
+                'hard_bounce_rate': 'first_batch_bounces'}.get(signal.key, 'first_batch_feedback')
+
     return None
 
 
@@ -115,11 +114,21 @@ def admission(blast, now, *, continuing=False):
     block = blast_email.email_block(blast)
     if block:
         return block
+    from . import reconfirmation
+    if reconfirmation.is_reconfirmation(blast):
+        block = reconfirmation.admission(blast)
+        if block:
+            return block
     if not settings.CRM_RESEND_WEBHOOK_SECRET:
         return 'feedback_not_configured'
     if continuing:
         # This audience already consumed capacity. The gate applies to later waves.
         return None
+    if policy.value('CRM_PREFLIGHT_ENABLED'):
+        from .preflight.service import admission as preflight_admission
+        block = preflight_admission(blast)
+        if block:
+            return block
     if not volume.window(blast.stream, now, critical=volume.time_critical(blast, now)):
         return 'outside_sending_hours'
     block = canary_block(blast, now)
@@ -187,6 +196,10 @@ def reserve(blast_id, *, now):
         rows = _candidates(blast, now)
         shares = {row['provider']: row['n'] for row in rows.values('provider').annotate(n=Count('pk')).order_by()}
         allowance, cap = volume.allowance_for(blast, now)
+        first = not blast.waves.filter(started_at__isnull=False).exists()
+        reduced_canary = first and bool((blast.preflight or {}).get('seed_test', {}).get('timed_out'))
+        if reduced_canary:
+            allowance = math.ceil(allowance * policy.value('CRM_SEED_CANARY_FACTOR'))
         if blast.incidents.filter(state='open', action='slow_blast').exists():
             allowance = math.floor(allowance * policy.value('CRM_STREAM_SLOW_FACTOR'))
         caps = volume.provider_caps(allowance, shares, provider_states(blast))
@@ -197,12 +210,14 @@ def reserve(blast_id, *, now):
                 counts[row['provider']] += 1
                 if len(picked) >= allowance:
                     break
-        if not picked or (len(picked) < policy.value('CRM_MIN_WAVE') and len(picked) < sum(shares.values())):
+        minimum_wave = min(policy.value('CRM_MIN_WAVE'), allowance) if reduced_canary else policy.value('CRM_MIN_WAVE')
+        if not picked or (len(picked) < minimum_wave and len(picked) < sum(shares.values())):
             return None, 'waiting_for_capacity'
         index = (blast.waves.aggregate(n=Max('index'))['n'] or 0) + 1 if blast.waves.exists() else 0
         wave = BlastWave.objects.create(blast=blast, index=index, size=len(picked), reserved_at=now,
-            kind='canary' if not blast.waves.filter(started_at__isnull=False).exists() else 'regular',
-            stats={'hour_cap': cap, 'day_budget': volume.budget(blast.stream), 'by_provider_reserved': dict(counts)})
+            kind='canary' if first else 'regular',
+            stats={'hour_cap': cap, 'day_budget': volume.budget(blast.stream), 'by_provider_reserved': dict(counts),
+                'canary_min_sample': math.ceil(policy.value('CRM_CANARY_MIN_SAMPLE') * (policy.value('CRM_SEED_CANARY_FACTOR') if reduced_canary else 1))})
         rows.filter(pk__in=picked).update(wave=wave, updated_at=now)
         CrmAuditEvent.objects.create(action='send', target_type='blast', target_id=str(blast.pk),
             detail={'operation': 'wave_reserved', 'wave': index, 'people': wave.size, 'hour_cap': cap})
@@ -407,6 +422,9 @@ def advance(wave_id, *, now):
 def _record_handoff(wave, blast):
     if not wave.started_at or not blast.stream_id:
         return
+    from . import reconfirmation
+    if reconfirmation.is_reconfirmation(blast):
+        reconfirmation.handed_off(wave, now=wave.started_at)
     day = wave.started_at.astimezone(volume.MELBOURNE).date()
     stream = blast.stream
     if not stream.last_send_day or day > stream.last_send_day:

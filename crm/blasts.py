@@ -312,6 +312,11 @@ def resolve_audience(blast, *, now) -> Audience:
     querysets[Channel.EMAIL], excluded[Channel.EMAIL] = evaluate(
         definition, blast.purpose, blast.event, now=now
     )
+    if ((blast.stats or {}).get('audience_preset') or {}).get('kind') == 'opted_in':
+        from .community_optins import opted_in_q
+        before = querysets[Channel.EMAIL]
+        querysets[Channel.EMAIL] = before.filter(opted_in_q())
+        excluded[Channel.EMAIL]['no_consent'] += before.count() - querysets[Channel.EMAIL].count()
     if not twilio_allowed(blast):
         return Audience(querysets, excluded, definition)
 
@@ -513,6 +518,7 @@ def queue_blast(
     blast_id, *, confirm: dict, idempotency_key: str, actor, now=None,
     definition_hash_confirm=None,
     recipient_fingerprint_confirm=None,
+    preflight_hash=None,
 ) -> Blast:
     """Check, recount and snapshot a draft, then queue it. The same key returns the same blast.
 
@@ -533,7 +539,25 @@ def queue_blast(
     # DNS is bounded and cached before entering the queue transaction. Recount
     # from current contact data under the lock; never save an old preview.
     preview = Blast.objects.select_related('stream', 'mailbox', 'event', 'segment').get(pk=blast_id)
+    from .deliverability import reconfirmation
+    if reconfirmation.is_reconfirmation(preview) and not reconfirmation.is_owner(actor):
+        raise BlastError('owner_required', 403)
+    if reconfirmation.is_reconfirmation(preview):
+        block = reconfirmation.admission(preview)
+        if block:
+            raise BlastError(block, 409)
     from .deliverability import policy
+    preflight_template = None
+    if (policy.value('CRM_PREFLIGHT_ENABLED') and Channel.EMAIL in (preview.channels or [])
+            and not (preview.stats or {}).get('warmup')):
+        from .deliverability.streams import assign_stream, protected_domain
+        from .deliverability.preflight import service as preflight
+        if preview.mailbox_id and protected_domain(preview.mailbox.domain):
+            raise BlastError('protected_domain', 409)
+        assign_stream(preview, actor=actor, mailbox=preview.mailbox)
+        check_channels_available(preview.channels or [], status=403)
+        check_ready(preview)
+        preflight_template = preflight.queue_context(preview, now=now)
     if (policy.value('CRM_WAVES_ENABLED') and Channel.EMAIL in (preview.channels or [])
             and not (preview.stats or {}).get('warmup')):
         from .deliverability.streams import assign_stream
@@ -558,6 +582,8 @@ def queue_blast(
                     assign_stream(blast, actor=actor, mailbox=blast.mailbox)
             check_channels_available(blast.channels or [], status=403)
             check_ready(blast)
+            if preflight_template is not None:
+                preflight.require(blast, preflight_hash, now=now, template=preflight_template)
             audience, prepared = planned_audience(blast, now, cached_only=True)
             resolved_hash = definition_hash(audience.definition) if audience.definition is not None else None
             if (
@@ -739,6 +765,12 @@ def dispatch_blast(blast_id, *, now=None, twilio_budget: Optional[int] = None) -
             # listmonk answered again, so an earlier outage note no longer applies.
             Blast.objects.filter(pk=blast.pk, last_error__in=_LISTMONK_OUTAGES).update(last_error="")
         except ListmonkError as exc:
+            if blast.stream_id:
+                from crm.deliverability import policy as delivery_policy
+                if delivery_policy.value('CRM_MONITORS_ENABLED') and exc.status_code == 429:
+                    CrmAuditEvent.objects.create(action='sync', target_type='deliverability_dependency',
+                        target_id=str(blast.stream_id), detail={'operation': 'rate_limit', 'status': 429,
+                            'blast_id': str(blast.pk), 'epoch': now.timestamp()})
             if exc.credentials_rejected:
                 raise
             if exc.transient:
@@ -878,6 +910,7 @@ def cancel_blast(blast_id, *, actor, now=None) -> Blast:
                 blast.last_error = "listmonk_cancel_pending"
         # Twilio sends stop between two messages: each claim skips a cancelled blast.
         blast.status = Blast.Status.CANCELLED
+        blast.stats = {**(blast.stats or {}), 'stopped_by': actor.full_name or 'staff', 'stopped_at': now.isoformat()}
         blast.save(update_fields=["status", "stats", "last_error", "updated_at"])
         CrmAuditEvent.objects.create(
             actor=actor,

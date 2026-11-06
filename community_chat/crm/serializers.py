@@ -225,6 +225,8 @@ def _channel_list(**kwargs):
 class BlastEmailInput(StrictSerializer):
     mailbox_id = serializers.UUIDField(allow_null=True, required=False)
     subject = serializers.CharField(max_length=300, allow_blank=True, required=False)
+    preview_text = serializers.CharField(max_length=200, allow_blank=True, required=False)
+    sign_off_name = serializers.CharField(max_length=120, allow_blank=True, required=False)
     body_markdown = serializers.CharField(
         max_length=MAX_BLAST_BODY, allow_blank=True, required=False, trim_whitespace=False
     )
@@ -295,6 +297,8 @@ class BlastInput(StrictSerializer):
         choices=BLAST_QUICK_SEGMENTS, allow_null=True, allow_blank=True, required=False
     )
     segment_id = serializers.UUIDField(allow_null=True, required=False)
+    audience_preset = serializers.ChoiceField(choices=('opted_in', 'city'), allow_null=True, required=False)
+    city_id = serializers.CharField(max_length=40, allow_blank=True, required=False)
     channels = _channel_list(required=False)
     sms_only_without_whatsapp = serializers.BooleanField(required=False)
     email = BlastEmailInput(required=False)
@@ -305,6 +309,12 @@ class BlastInput(StrictSerializer):
         return list(dict.fromkeys(value))
 
     def validate(self, attrs):
+        if attrs.get('audience_preset'):
+            from crm.audience_taxonomy import CITY_OPTIONS
+            if attrs.get('quick_segment') or attrs.get('segment_id'):
+                raise serializers.ValidationError({'audience_preset': ['Choose one audience.']})
+            if attrs['audience_preset'] == 'city' and attrs.get('city_id') not in CITY_OPTIONS:
+                raise serializers.ValidationError({'city_id': ['Choose a listed city.']})
         if attrs.get("quick_segment") and attrs.get("segment_id"):
             raise serializers.ValidationError(
                 {"segment_id": [ErrorDetail("Choose a quick segment or a saved segment.", code="audience_conflict")]}
@@ -317,6 +327,7 @@ class BlastSendInput(StrictSerializer):
     idempotency_key = serializers.CharField(max_length=64)
     definition_hash = serializers.RegexField(r"^[0-9a-f]{64}$", required=False)
     recipient_fingerprint = serializers.RegexField(r"^[0-9a-f]{64}$", required=False)
+    preflight_hash = serializers.RegexField(r"^[0-9a-f]{64}$", required=False)
 
     def validate_confirm(self, value):
         if any(key not in Channel.values for key in value):
@@ -459,6 +470,8 @@ def contact_row(contact: Contact) -> dict:
 
 
 def contact_detail(contact: Contact, *, now, registrations, deliveries, replies, history) -> dict:
+    from crm.deliverability.typos import suggestion
+    from crm.deliverability import policy
     inferred_until = None
     if (
         contact.marketing_consent == Contact.MarketingConsent.UNKNOWN
@@ -469,6 +482,7 @@ def contact_detail(contact: Contact, *, now, registrations, deliveries, replies,
         inferred_until = lapses_at if lapses_at > now else None
     return {
         **contact_row(contact),
+        'email_typo_suggestion': suggestion(contact.email) if policy.value('CRM_LIFECYCLE_ENABLED') else None,
         "phone": contact.phone,
         "city": contact.city,
         "linkedin_url": contact.linkedin_url,
@@ -684,6 +698,12 @@ def quick_segments(event, counts: dict, definition_for) -> list:
 
 
 def _audience(blast) -> Optional[dict]:
+    preset = (blast.stats or {}).get('audience_preset') or {}
+    if preset.get('kind') == 'opted_in':
+        return {'kind': 'preset', 'key': 'opted_in', 'label': "Everyone who's opted in to MLAI emails"}
+    if preset.get('kind') == 'city':
+        from crm.audience_taxonomy import CITY_OPTIONS
+        return {'kind': 'preset', 'key': 'city', 'label': 'People connected to ' + CITY_OPTIONS.get(preset.get('city_id'), 'a city')}
     if blast.quick_segment:
         label = QUICK_SEGMENTS.get(blast.quick_segment, blast.quick_segment)
         if blast.event_id and blast.event:
@@ -715,6 +735,7 @@ def _channel_stats(channel: str, row: Optional[dict]) -> dict:
 def blast_summary(blast, stats: Optional[dict] = None) -> dict:
     stats = stats or {"channels": {}, "replies": 0}
     channels = [channel for channel in blast.channels or [] if channel in Channel.values]
+    from crm.deliverability.copy import status_message
     return {
         "id": str(blast.pk),
         "title": blast_title(blast),
@@ -733,6 +754,8 @@ def blast_summary(blast, stats: Optional[dict] = None) -> dict:
         ),
         "queued_at": iso(blast.queued_at),
         "sent_at": iso(blast.sent_at),
+        'pause': {'state': blast.pause_state, 'reason': blast.pause_reason, 'at': iso(blast.paused_at)},
+        'status_message': status_message(blast),
     }
 
 
@@ -763,8 +786,10 @@ class BlastPauseInput(serializers.Serializer):
 
 
 def blast_detail(blast, stats: Optional[dict] = None) -> dict:
+    from crm.deliverability.reconfirmation import is_reconfirmation
     stats = stats or {"channels": {}, "replies": 0}
     from crm.deliverability.copy import status_message
+    from crm.deliverability.preflight.presentation import result_dto
     stream = blast.stream if getattr(blast, "stream_id", None) else None
     return {
         **blast_summary(blast, stats),
@@ -773,6 +798,8 @@ def blast_detail(blast, stats: Optional[dict] = None) -> dict:
             "mailbox_id": str(blast.mailbox_id) if blast.mailbox_id else None,
             "subject": blast.subject,
             "body_markdown": blast.body_markdown,
+            "preview_text": blast.preview_text,
+            "sign_off_name": blast.sign_off_name,
         },
         "sms": {"body": blast.sms_body},
         "whatsapp": {
@@ -782,6 +809,8 @@ def blast_detail(blast, stats: Optional[dict] = None) -> dict:
         "quick_segment": blast.quick_segment or None,
         "segment_id": str(blast.segment_id) if blast.segment_id else None,
         "segment_definition": blast.segment_definition or None,
+        'audience_preset': (blast.stats or {}).get('audience_preset') or None,
+        'lifecycle_kind': 'reconfirmation' if is_reconfirmation(blast) else None,
         "progress": blast_progress(blast, stats["channels"]),
         "last_error": blast.last_error or None,
         "created_at": iso(blast.created_at),
@@ -793,6 +822,7 @@ def blast_detail(blast, stats: Optional[dict] = None) -> dict:
                   "at": iso(getattr(blast, "paused_at", None))},
         "status_message": status_message(blast),
         "plan": blast.plan or {},
+        "preflight": result_dto(blast.preflight),
         "waves": [{"index": wave.index, "kind": wave.kind, "status": wave.status, "size": wave.size,
                    "started_at": iso(wave.started_at), "finished_at": iso(wave.finished_at), "stats": wave.stats}
                   for wave in blast.waves.all()] if not blast._state.adding else [],
