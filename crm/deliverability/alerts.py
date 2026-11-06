@@ -14,12 +14,18 @@ from .copy import REASONS
 def alert_text(incident):
     """A bounded explanation with evidence and a link to the owner-only record."""
     reason = REASONS.get(incident.signal, "the email system needs attention")
-    value = f"{incident.value:.2%}" if incident.signal.endswith("_rate") else str(int(incident.value))
+    value = (f'{incident.value:g} seconds' if incident.signal == 'transactional_delivery_latency' else
+        f"{incident.value:.2%}" if incident.signal.endswith("_rate") or incident.signal in ('click_anomaly', 'cohort_quarantine') else str(int(incident.value)))
     action = "Recorded for staging review" if policy.value("CRM_GUARDIAN_DRY_RUN") else {
         "stop_stream": "Campaign sending stopped; an owner must decide when it resumes",
         "pause_blast": "This campaign is paused; new campaign starts are on hold",
         "slow_stream": "Future campaign sending will slow down",
+        'throttle_provider': 'Sending to the affected inbox provider has slowed',
     }.get(incident.action, "The email team should review this")
+    if incident.signal == 'cohort_quarantine':
+        action = 'Untouched contacts in that group need review before receiving community email'
+    elif incident.signal.startswith('transactional_'):
+        action = 'Review system email delivery; sign-in and notifications continue without campaign pauses or caps'
     link = f"{settings.DEFAULT_BACKEND_URL.rstrip('/')}/api/v1/community-chat/crm/deliverability/incidents/{incident.pk}/"
     health = settings.COMMUNITY_CHAT_FRONTEND_URL.rstrip("/") + f"/admin/sending?incident={incident.pk}"
     return f"MLAI email: {reason}.\nObserved {value} across {incident.sample} messages.\n{action}.\n{health}\n{link}"
@@ -71,10 +77,27 @@ def digest_text(stream, *, now):
         lines += [f'Sent {day.sent:,}; delivered {day.delivered:,}.',
             f'Hard bounces {day.bounced_hard / day.sent:.2%}; unsubscribes {day.unsubscribed / day.sent:.2%}.' if day.sent else 'No campaign handoffs recorded.',
             f'Complaints {day.complained / day.delivered:.2%}.' if day.delivered else 'No delivery denominator available.']
+        for provider in ('google', 'microsoft', 'yahoo', 'apple', 'other'):
+            values = (day.by_provider or {}).get(provider)
+            if isinstance(values, dict):
+                sent, delivered = values.get('sent'), values.get('delivered')
+                lines.append(f'{provider}: sent {sent:,}; delivered {delivered:,}.' if type(sent) is int and type(delivered) is int else f'{provider}: incomplete observations.')
+        from crm.models import CrmAuditEvent
+        change = CrmAuditEvent.objects.filter(target_type='stream_day', target_id=str(day.pk), detail__operation='day_closed').order_by('-pk').first()
+        if change:
+            lines.append(f'Ramp stage at day close: {change.detail.get("from_stage", "unknown")} → {change.detail.get("stage", "unknown")}.')
     else:
         lines.append('No sending-day observations available for yesterday.')
     if not stream.transactional:
         lines.append(f'Today’s campaign capacity: {volume.budget(stream):,}. Ramp stage: {stream.ramp_stage}.')
+    else:
+        observed = observations.latest(stream, 'transactional')
+        lines.append(f'System-mail observations: {observed.get("status", "not_checked")}.')
+        for row in observed.get('outcomes', []):
+            lines.append(f'{row["provider"]} {row["kind"]}: {row["failed"]} failed of {row["attempted"]} attempts.')
+        p95 = observed.get('resend_delivery_p95_seconds')
+        lines.append(f'Resend delivery p95: {p95:g} seconds.' if type(p95) in (int, float) else 'Resend delivery latency: unknown.')
+        lines.append('Customer.io delivery and DKIM need separate provider evidence; API acceptance is not inbox delivery.')
     lines.append(f'Open incidents: {stream.incidents.filter(state="open").count()}.')
     for kind in ('postmaster', 'dns', 'reputation', 'config', 'heartbeat'):
         result = observations.latest(stream, kind)

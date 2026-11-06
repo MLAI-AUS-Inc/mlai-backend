@@ -89,7 +89,10 @@ def run_scopes(*, now):
                 clear = check.get('compliance', {}).get('status') == 'compliant'
             if incident and not clear:
                 firing.add(incident.fingerprint)
-    return detected, firing
+    from . import lifecycle_guard
+    lifecycle = lifecycle_guard.evaluate(now=now)
+    firing.update(incident.fingerprint for incident in lifecycle)
+    return detected + len(lifecycle), firing
 
 
 def _clean_since(incident, *, now, firing):

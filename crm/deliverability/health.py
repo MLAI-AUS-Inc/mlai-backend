@@ -1,6 +1,5 @@
 """Bounded owner health summaries and audited policy overrides, without recipient identities."""
 
-import copy
 from datetime import datetime, time, timedelta
 
 from django.db import transaction
@@ -23,7 +22,7 @@ def forecast(stream, now):
     """Capacity on the next seven sending days, assuming healthy utilisation; not promised volume."""
     if stream.transactional:
         return []
-    candidate = copy.copy(stream)
+    candidate = volume.preview_stream(stream, now)
     first = now.astimezone(volume.MELBOURNE).date()
     result = []
     for offset in range(30):
@@ -41,6 +40,7 @@ def forecast(stream, now):
 
 def stream_dto(stream, *, now):
     from .preflight.seeds import probe_result
+    from . import reconfirmation
     used, _ = volume.usage(stream, now) if not stream.transactional else (0, 0)
     history = []
     for day in stream.days.order_by('-day')[:30]:
@@ -58,11 +58,13 @@ def stream_dto(stream, *, now):
         'from': stream.mailbox.email, 'reply_to': stream.mailbox.reply_to, 'state': stream.state,
         'state_reason': stream.state_reason, 'state_changed_at': stream.state_changed_at.isoformat() if stream.state_changed_at else None,
         'ramp_stage': stream.ramp_stage, 'transactional': stream.transactional, 'enabled': stream.mailbox.enabled,
+        'reconfirmation_can_start': not stream.transactional and policy.value('CRM_LIFECYCLE_ENABLED') and reconfirmation.stream_block(stream) is None,
+        'reconfirmation_capacity': int(volume.budget(stream) * policy.value('CRM_RECONFIRMATION_DAILY_FRACTION')) if not stream.transactional else None,
         'today': {'day': now.astimezone(volume.MELBOURNE).date().isoformat(), 'budget': volume.budget(stream) if not stream.transactional else None,
             'reserved': used}, 'daily_budget_override': stream.daily_budget_override, 'policy_overrides': stream.policy_overrides,
         'capacity_forecast': forecast(stream, now), 'forecast_assumption': 'Healthy feedback and sufficient demand; sending windows and competing campaigns apply.',
         'days': history, 'seeds': seeds, 'checks': {kind: observations.latest(stream, kind)
-            for kind in ('dns', 'config', 'reputation', 'postmaster', 'root_postmaster', 'heartbeat', 'suppressions')}}
+            for kind in ('dns', 'config', 'reputation', 'postmaster', 'root_postmaster', 'heartbeat', 'suppressions', 'transactional')}}
 
 
 def update_stream(key, values, *, actor, now):

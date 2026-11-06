@@ -60,7 +60,11 @@ def plain_body(blast):
     text = re.sub(r'(?m)^\s*[-*]\s+', '• ', text)
     if getattr(blast, 'sign_off_name', ''):
         text += '\n\n— ' + blast.sign_off_name
-    return blast_email.listmonk_text(text.replace('**', '').replace('__', ''), blast.event, markdown=False)
+    text = blast_email.listmonk_text(text.replace('**', '').replace('__', ''), blast.event, markdown=False)
+    from . import reconfirmation
+    if reconfirmation.is_reconfirmation(blast):
+        text += '\n\nYes, keep me subscribed: ' + reconfirmation.GO_URL
+    return text
 
 
 def campaign_payload(wave, blast):
@@ -110,6 +114,11 @@ def admission(blast, now, *, continuing=False):
     block = blast_email.email_block(blast)
     if block:
         return block
+    from . import reconfirmation
+    if reconfirmation.is_reconfirmation(blast):
+        block = reconfirmation.admission(blast)
+        if block:
+            return block
     if not settings.CRM_RESEND_WEBHOOK_SECRET:
         return 'feedback_not_configured'
     if continuing:
@@ -413,6 +422,9 @@ def advance(wave_id, *, now):
 def _record_handoff(wave, blast):
     if not wave.started_at or not blast.stream_id:
         return
+    from . import reconfirmation
+    if reconfirmation.is_reconfirmation(blast):
+        reconfirmation.handed_off(wave, now=wave.started_at)
     day = wave.started_at.astimezone(volume.MELBOURNE).date()
     stream = blast.stream
     if not stream.last_send_day or day > stream.last_send_day:

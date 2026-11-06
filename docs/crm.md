@@ -826,6 +826,39 @@ uncertain attempts expire before Resend's 24-hour deduplication window. No
 marketing credential fallback is allowed. See `ops/listmonk/README.md` for
 credential setup and the remaining operational release gates.
 
+`manage.py crm_simulate_send --scenario healthy --recipients 5000 --days 8`
+qualifies the real campaign path with fake providers and a fixed clock. It
+requires an empty PostgreSQL `test_*` database, `APP_ENV=test`, and an exact
+`CRM_SIMULATION_DATABASE` name opt-in. It applies no migrations, blocks outbound
+network and rolls back all rows. The database tests execute all twelve plan
+scenarios and verify the 150/300/600/1,000/1,500/1,450 healthy ramp, protections,
+recovery, priority, idle decay and capacity ceilings. Prepare the disposable
+schema only within the specifically approved migration scope.
+
+## Dormant contacts and import hygiene (Phase 6)
+
+`CRM_LIFECYCLE_ENABLED=false` is the default. When enabled, the daily activity
+roll-up uses only observed logins, registrations, attendance, clicks and replies,
+including dated Substack exports. Opens and undated counts never reactivate a
+contact. Consent and channel preferences are not rewritten by the job.
+
+Owners prepare a reconfirmation draft from Sending → Health. The fixed audience
+contains dormant contacts with affirmative permission from the last 36 calendar
+months and no hard-bounce history. The stream must be active; the dispatcher
+shares its budget and limits preference checks to 10% per day. A normal review
+and explicit Send are still required. Unanswered requests add a dormant flag
+after 30 days. Nothing is deleted. Signed confirmation uses a read-only GET and
+an explicit CSRF-protected POST; opt-outs, bans and delivery/review holds remain
+authoritative. Reconfirmation does not invent a new original consent date.
+
+Import reports add independent `no_mx`, `disposable`, `likely_typo` and
+`domain_unverified` counts. Pending DNS work is bounded and completed by the
+background domain pass; unknown never means clean. The contact drawer offers
+known-domain suggestions and a separate manual confirmation. Corrections retain
+the original address internally for future imports, feedback and ban checks;
+they never clear opt-outs or delivery holds, and duplicate destinations require
+manual review. System lifecycle/import/alias attributes are not editable fields.
+
 ## Campaign preflight (Phase 3)
 
 `CRM_PREFLIGHT_ENABLED` is false by default. With it enabled, email draft
@@ -902,3 +935,56 @@ over old pause/stream metadata. Stop records the acting staff name in audit
 and blast metadata. Draft saves take the stream/blast locks and recheck the
 current status, so a late editor cannot restore a queued campaign to draft.
 No new schema is required.
+
+## System email and sign-in monitoring (Phase 7)
+
+`MLAI_SYSTEM_FROM_EMAIL` is the canonical sender for newly prepared system
+messages (default `MLAI <notifications@notify.mlai.au>`). `RESEND_FROM_EMAIL`
+is a compatibility alias and an environment fallback only if the canonical
+setting is absent. Review approvals, founder draft notices, website goal
+notifications and notification adapters use the same setting. Existing
+frozen outbox payloads and idempotency keys remain unchanged. The
+notify-restricted `CRM_NOTIFY_API_KEY` is preferred, with the existing
+`RESEND_API_KEY` retained as a rollout fallback. Verify the dedicated key
+and drain or explicitly review old frozen messages before a sender cutover.
+
+Customer.io remains the sign-in provider. `CUSTOMERIO_FROM_EMAIL` defaults
+to the canonical sender and is explicitly included in the code request.
+Customer.io requests set `tracked=false`; Resend tracking must be disabled
+on the notify domain in the provider. Optional notification preferences and
+unsubscribe links remain in their existing routing and message bodies.
+
+`CRM_TRANSACTIONAL_MONITOR_ENABLED=false` independently gates payload-free
+transport observations and a minute scheduler. It does not require marketing
+sending, guardian or external-monitor switches. Each actual configured
+provider attempt produces append-only start/result metadata; no address,
+subject, body, code, credential or upstream exception is retained. Telemetry
+writes use a savepoint and cannot fail the underlying transport.
+
+Completed attempts are grouped by provider and sign-in/notification purpose
+over 15 minutes. More than 5% failures raises a red, alert-only incident.
+Notify Resend callbacks measure deduplicated hard bounces and sent-to-delivered
+p95. More than 120 seconds continuously observed for 15 minutes alerts;
+missing, truncated or unobserved data never becomes healthy. Limits and
+thresholds are configurable. Customer.io API acceptance supports failure
+monitoring but does not prove delivery, bounce rates or latency: those stay
+unknown because this application has no authenticated Customer.io delivery
+callback. Health and the digest explicitly retain that distinction.
+
+`CRM_CUSTOMERIO_NOTIFY_DKIM_VERIFIED` is a default-false operator attestation,
+not a DNS lookup or permission to send. Verify the exact Customer.io From
+domain and provider-issued DKIM records before setting it. Resend notify DNS,
+webhook coverage and domain tracking remain covered by the external monitor.
+No incident or acknowledgement pauses, throttles, caps, reroutes or demotes
+transactional mail. Red incidents require owner review.
+
+Release gates: configure and verify the exact notify domain at both providers,
+its restricted key, tracking settings, callback route, sender alignment and a
+separately authorized staging message before cutover. DMARC remains a people
+operation: only after aggregate reports show every legitimate source aligned,
+review `p=quarantine; pct=25`, then 100, then `p=reject`, setting `sp=`
+explicitly each time and checking reports between changes. Do not publish a
+stronger record from this implementation or treat a missing report as clean.
+
+Provider contracts: [Customer.io From overrides and tracking](https://docs.customer.io/integrations/api/app/tag/send-messages/sendemail/),
+[Resend domain tracking](https://github.com/resend/resend-skills/blob/main/skills/resend/references/sending/overview.md).
