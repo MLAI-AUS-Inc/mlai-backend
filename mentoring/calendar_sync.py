@@ -22,12 +22,15 @@ from .service import MentoringService, _lock_users
 
 def event_change(session, event):
     """Validate a single linked timed event without changing booking/payment state."""
-    if event.get('id') != google.event_id(session.pk) or not event.get('etag'):
+    if event.get('id') != google.event_id(session.pk):
         raise CalendarError('event_identity_mismatch')
     if event.get('status') == 'cancelled':
-        return {'cancelled': True, 'etag': event['etag']}
+        return {'cancelled': True, 'etag': event.get('etag', '')}
+    if not event.get('etag'):
+        raise CalendarError('event_identity_mismatch')
     if (event.get('extendedProperties', {}).get('private', {}).get('mlai_booking_id') != str(session.pk)
-            or event.get('recurrence') or event.get('recurringEventId')):
+            or event.get('recurrence') or event.get('recurringEventId')
+            or not event.get('start', {}).get('dateTime') or not event.get('end', {}).get('dateTime')):
         raise CalendarError('unsupported_calendar_change')
     start = google.instant(event.get('start', {}).get('dateTime'))
     end = google.instant(event.get('end', {}).get('dateTime'))
@@ -95,7 +98,9 @@ def sync_session(session_id):
                     required(initial) or initial.meeting_provisioning.get('repair')):
                 capture = client.configure_capture(change['link'])
         # Fence provider edits made during our conflict/capture checks.
-        if client.read_booking_change(calendar_id, initial.pk).get('etag') != change['etag']:
+        latest = client.read_booking_change(calendar_id, initial.pk)
+        if (latest.get('etag', '') != change['etag']
+                or (latest.get('status') == 'cancelled') != change['cancelled']):
             raise CalendarError('calendar_changed_during_sync')
         with transaction.atomic():
             _lock_users(initial.founder_id, initial.mentor.user_id)

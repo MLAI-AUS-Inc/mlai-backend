@@ -54,7 +54,7 @@ class CalendarSyncDatabaseTests(TransactionTestCase):
         self.assertEqual(self.balance(self.founder),60)
 
     def test_google_cancellation_refunds_exactly_once(self):
-        self.client.read_booking_change.return_value={'id':google.event_id(self.session.pk),'etag':'v3','status':'cancelled'}
+        self.client.read_booking_change.return_value={'id':google.event_id(self.session.pk),'status':'cancelled'}
         sync.sync_session(self.session.pk);sync.sync_session(self.session.pk)
         self.session.refresh_from_db()
         self.assertEqual(self.session.status,'cancelled')

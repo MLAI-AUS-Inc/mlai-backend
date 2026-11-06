@@ -39,6 +39,10 @@ class CalendarSyncUnitTests(TestCase):
         with patch.object(client,'api',side_effect=CalendarError('not_found')),self.assertRaises(CalendarError):
             client.read_booking_change('calendar',self.session.pk)
 
+    def test_minimal_deletion_tombstone_does_not_require_removed_metadata(self):
+        row={'id':google.event_id(self.session.pk),'status':'cancelled'}
+        self.assertTrue(sync.event_change(self.session,row)['cancelled'])
+
     def test_all_day_recurrence_and_duration_changes_need_attention(self):
         for changes in ({'start':{'date':'2030-01-01'}},{'recurrence':['RRULE:FREQ=DAILY']},
                         {'end':{'dateTime':google.iso(self.session.ends_at+timedelta(hours=2))}}):
