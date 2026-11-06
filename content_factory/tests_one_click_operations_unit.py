@@ -399,7 +399,8 @@ class DisconnectTests(SimpleTestCase):
 
     def test_no_cleanup_files_is_explicit_in_composite_receipt(self):
         from . import website_disconnect as disconnect
-        operation = SimpleNamespace(receipt={"completed_steps": ["refunds", "repository_refs"]}, payload={"remove_setup": True})
+        operation = SimpleNamespace(generation=1, connection=SimpleNamespace(generation=1, state="disconnected"),
+            receipt={"completed_steps": ["refunds", "repository_refs"]}, payload={"remove_setup": True})
         with patch.object(disconnect, "_fence_disconnect"), patch.object(disconnect, "_open_cleanup",
                 return_value=SimpleNamespace(pk=uuid4(), receipt={"status": "no_unchanged_owned_files"})):
             disconnect.advance_disconnect_steps(operation)
@@ -417,7 +418,8 @@ class DisconnectTests(SimpleTestCase):
         self.assertEqual(error.exception.code, "operation_key_conflict")
     def test_resumed_disconnect_runs_only_missing_steps(self):
         from . import website_disconnect as disconnect
-        op = SimpleNamespace(receipt={"completed_steps": ["authority_revoked", "refunds", "repository_refs"]},
+        op = SimpleNamespace(generation=1, connection=SimpleNamespace(generation=1, state="disconnected"),
+            receipt={"completed_steps": ["authority_revoked", "refunds", "repository_refs"]},
             payload={"remove_setup": False})
         with patch.object(disconnect, "_fence_disconnect"), patch.object(disconnect, "refund_cancelled_runs") as refund, \
                 patch.object(disconnect, "close_owned_repository_refs") as close:
