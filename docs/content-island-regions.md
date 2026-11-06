@@ -1,7 +1,7 @@
 # Content island map regions
 
 `ContentIslandRegion` stores an organisation's stable audience groups. Migration
-`content_factory.0051_content_island_regions` creates the region table and the
+`content_factory.0053_content_island_regions` creates the region table and the
 nullable `ContentIsland.region` relation. It has no data backfill: the frontend
 uses deterministic client regions until the next normal island refresh writes
 server groups. Applying this migration requires separate approval for the target

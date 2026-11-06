@@ -7,7 +7,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('content_factory', '0050_retire_hosted_article_sites'),
+        ('content_factory', '0052_author_photo'),
         ('organizations', '0001_split_content_factory_apps'),
     ]
     operations = [
