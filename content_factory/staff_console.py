@@ -22,7 +22,7 @@ from . import registry_policy
 from .models import OrganizationContentConfig
 from .staff_alert_rules import mapping, failure_code, open_alert, overdue, global_alerts
 
-ACTIONS = {"retry_now", "switch_to_draft", "release_or_refund", "resolve_and_notify"}
+ACTIONS = {"retry_now", "switch_to_draft", "release_or_refund", "resolve_and_notify", "verify_safety_claims"}
 RECEIPT_KEYS = ("self_heal_v1", "points_v1", "channel_v1", "re_pin_v1", "model_spend", "snapshot_drift_v1", "event_progress")
 
 
@@ -277,9 +277,92 @@ def _start_copy_ready(run, organization, *, key, carry):
     return {"status": "done", "detail": "Your draft is queued.", "receipt": {"runId": child.run_id, "channel": "copy_ready", "charged": False}}
 
 
-def _perform(action, run, org, user, *, now, command_key=None):
+def held_article_quality(run) -> bool:
+    """An article whose hosted quality check stopped and is waiting on staff."""
+    quality = mapping(mapping(run.result).get("article_preview_quality"))
+    return bool(quality.get("status") == "blocking_findings" and quality.get("self_heal_exhausted"))
+
+
+RECHECK_PENDING_STATUSES = frozenset({"queued", "running"})
+# Content Factory's article preview quality approval blockers. A recheck only
+# replaces one of these; any other blocker (publish authority, setup, a new
+# approval rejection) is left for its own owner.
+QUALITY_BLOCKER_CODES = frozenset({
+    "article_preview_browser_check_failed", "article_preview_component_style_mismatch",
+    "article_preview_content_incomplete", "article_preview_editorial_review_blocked",
+    "article_preview_editorial_score_unavailable", "article_preview_quality_blocked",
+    "article_preview_quality_rechecking", "article_preview_quality_running",
+    "article_preview_safety_review_required",
+})
+
+
+def quality_blocker(blocker):
+    """True when ``blocker`` is absent or is Content Factory's article quality blocker."""
+    if blocker is None:
+        return True
+    return isinstance(blocker, dict) and blocker.get("code") in QUALITY_BLOCKER_CODES
+
+
+def recheck_acknowledged(remote, held_quality):
+    """Accept only a positive, current receipt that a fresh quality check is queued.
+
+    Fails closed: a missing, malformed, refused or still-held response never
+    counts, and neither does a check for a different preview or an older
+    generation than the one that was held.
+    """
+    if not isinstance(remote, dict) or remote.get("error") or remote.get("status") != "quality_review_queued":
+        return False
+    quality = remote.get("article_preview_quality")
+    if not isinstance(quality, dict) or quality.get("status") not in RECHECK_PENDING_STATUSES:
+        return False
+    held = mapping(held_quality)
+    held_url = held.get("preview_url") or held.get("previewUrl")
+    new_url = quality.get("preview_url") or quality.get("previewUrl")
+    if held_url and new_url != held_url:
+        return False
+    held_generation = held.get("resume_generation")
+    new_generation = quality.get("resume_generation")
+    if isinstance(held_generation, int) and not (isinstance(new_generation, int) and new_generation >= held_generation):
+        return False
+    return True
+
+
+def _recheck_article_quality(run):
+    """Run the article's hosted quality check again; a pass unlocks approval for the founder.
+
+    This never waives a finding. It asks Content Factory for a fresh review of
+    the current preview. The held state and its approval blocker are replaced
+    only on a positive receipt, and only if no newer check has landed since.
+    """
+    from .vibe_marketing_views import _call_content_factory_run_action
+    held = mapping(mapping(run.result).get("article_preview_quality"))
+    held_blocker = mapping(run.result).get("approval_blocker")
+    remote = _call_content_factory_run_action(run_id=run.run_id, action="retry-preview-quality",
+                                              payload={}, workflow=run.workflow)
+    if not recheck_acknowledged(remote, held):
+        detail = remote.get("error") if isinstance(remote, dict) else None
+        return {"status": "refused", "detail": str(detail or "The quality check was not queued.")[:300]}
+    with transaction.atomic():
+        current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        result = dict(mapping(current.result))
+        if mapping(result.get("article_preview_quality")) != held or result.get("approval_blocker") != held_blocker:
+            # A newer revision, check or blocker landed since the hold was read; keep it.
+            return {"status": "observe", "detail": "A newer quality state is already recorded."}
+        result["article_preview_quality"] = remote["article_preview_quality"]
+        if quality_blocker(held_blocker):
+            result.pop("approval_blocker", None)
+        ContentFactoryRun.objects.filter(pk=current.pk).update(result=result)
+    return {"status": "queued", "action": "recheck_article_quality"}
+
+
+def _perform(action, run, org, user, *, now, command_key=None, data=None):
     unavailable = {"status": "refused", "detail": "Not available yet.", "receipt": None}
-    if action == "retry_now":
+    if action == "verify_safety_claims":
+        from .staff_safety_verification import verify_safety_claims
+        receipt = verify_safety_claims(run, org, user, data or {}, now=now, command_key=command_key)
+    elif action == "retry_now" and held_article_quality(run):
+        receipt = _recheck_article_quality(run)
+    elif action == "retry_now":
         decide, apply = provider("failure_policy_engine", "decide"), provider("failure_policy_engine", "apply")
         if not decide or not apply:
             return unavailable
@@ -371,14 +454,19 @@ def perform_action(organization_id, data, *, by_user):
             idem.abandon(scope, key, digest)
             return 409, {"status": "refused", "detail": idem.CONFLICT_DETAIL, "reason": idem.CONFLICT_REASON}, False
         try:
-            response = _perform(action, run, org, by_user, now=now, command_key=key)
+            response = _perform(action, run, org, by_user, now=now, command_key=key, data=data)
             with transaction.atomic():
                 current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk, organization_id=org.pk)
                 result = mapping(current.result)
                 history = result.get("staff_actions_v1", [])
                 history = history if isinstance(history, list) else []
-                history = history[-19:] + [{"action": action, "at": now.isoformat(), "by_user_id": by_user.pk,
-                    "note": str(data.get("note") or "")[:500], "outcome": response["status"]}]
+                entry = {"action": action, "at": now.isoformat(), "by_user_id": by_user.pk,
+                         "note": str(data.get("note") or "")[:500], "outcome": response["status"]}
+                audit = mapping(mapping(response.get("receipt")).get("audit"))
+                if audit:
+                    # Sentence hashes, sources and staff notes only; never article prose.
+                    entry.update(request_key=audit.get("request_key"), claims=audit.get("claims"))
+                history = history[-19:] + [entry]
                 ContentFactoryRun.objects.filter(pk=current.pk).update(result={**result, "staff_actions_v1": history})
             idem.finish(scope, key, digest, status=200, body=response)
         finally:

@@ -141,7 +141,7 @@ class StoreAuthorPhotosTests(SimpleTestCase):
                    self.author("c", STORED), self.author("d", "/team/d.jpg"), self.author("e", "")]
         with patch.object(photos, "copy_photo", return_value=STORED) as copy:
             stored = photos.store_author_photos(authors, previous=[], company_id="company")
-        copy.assert_called_once_with(LINKEDIN_PHOTO, company_id="company")
+        copy.assert_called_once_with(LINKEDIN_PHOTO, company_id="company", organization_id=None, user=None)
         self.assertEqual([author["avatarUrl"] for author in stored],
                          [STORED, STORED, STORED, "/team/d.jpg", ""])
         self.assertEqual(authors[0]["avatarUrl"], LINKEDIN_PHOTO)
@@ -265,10 +265,12 @@ class UploadedPhotoTests(SimpleTestCase):
         from django.core.files.uploadedfile import SimpleUploadedFile
         uploaded = SimpleUploadedFile("photo.png", image_bytes("PNG"), content_type="image/png")
         request = Obj(data={"companyId": "company"}, query_params={}, FILES={"photo": uploaded}, user=Obj(id=7))
-        with patch.object(views, "_resolve_profile_company_or_response", return_value=(Obj(), Obj(pk="company"), None)), patch.object(photos, "upload_photo", return_value=STORED) as store:
+        with patch.object(views, "_resolve_profile_company_or_response", return_value=(Obj(), Obj(pk="company", organization_id=11), None)), patch.object(photos, "upload_photo", return_value=STORED) as store, \
+                patch("content_factory.models.AuthorPhoto.objects.filter") as records:
+            records.return_value.only.return_value.first.return_value = Obj(pk="photo-1")
             result = views.VibeMarketingAuthorPhotoPreviewView().post(request)
-        self.assertEqual(result.data, {"photoUrl": STORED})
-        store.assert_called_once_with(uploaded, company_id="company")
+        self.assertEqual(result.data, {"photoUrl": STORED, "photoId": "photo-1"})
+        store.assert_called_once_with(uploaded, company_id="company", organization_id=11, user=request.user)
         refusal = Response({"detail": "Not found."}, status=404)
         with patch.object(views, "_resolve_profile_company_or_response", return_value=(None, None, refusal)), patch.object(photos, "upload_photo") as store:
             self.assertIs(views.VibeMarketingAuthorPhotoPreviewView().post(request), refusal)

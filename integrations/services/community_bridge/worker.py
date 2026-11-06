@@ -379,7 +379,8 @@ class CommunityBridgeDiscordClient(discord.Client):
                     return
                 await self._process_delivery(delivery)
             except BudgetDeferred as exc:
-                await asyncio.to_thread(defer_delivery, delivery_id=delivery["id"], retry_after=exc.retry_after)
+                await asyncio.to_thread(defer_delivery, delivery_id=delivery["id"], retry_after=exc.retry_after,
+                                        reason=getattr(exc, "reason", "provider_budget_deferred"))
             except ParentMappingPending as exc:
                 await asyncio.to_thread(
                     mark_delivery_waiting_for_parent,

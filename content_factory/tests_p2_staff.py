@@ -16,7 +16,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from core.models import User
 from community_chat.admin_access import admin_sections
 from community_chat.models import CommunityChatDevice
-from community_chat.staff_console_views import StartupListView, StartupDetailView, StartupActionView, AlertListView, AlertAckView
+from community_chat.staff_console_views import StartupListView, StartupDetailView, StartupActionView, AlertListView, AlertAckView, StartupSafetyStateView
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun
 from .models import OrganizationContentConfig
@@ -56,7 +56,8 @@ class StaffTests(TestCase):
 
     def test_all_routes_refuse_founder_member_signedout_staff_without_verified_admin(self):
         views = [(StartupListView, {}), (StartupDetailView, {"organization_id": self.org.pk}),
-                 (StartupActionView, {"organization_id": self.org.pk}), (AlertListView, {}), (AlertAckView, {"alert_id": "unknown"})]
+                 (StartupActionView, {"organization_id": self.org.pk}), (AlertListView, {}), (AlertAckView, {"alert_id": "unknown"}),
+                 (StartupSafetyStateView, {"organization_id": self.org.pk, "run_id": "run-1"})]
         for view, args in views:
             for user, verified in ((False, False), (self.built.owner, True), (self.staff, False)):
                 with self.subTest(view=view, user=user):
@@ -248,6 +249,20 @@ class StaffTests(TestCase):
         self.assertEqual(result["organizations"], 500)
         self.assertLess(monotonic()-start, 2)
         self.assertLessEqual(len(queries), 4)
+
+    def test_retry_now_rechecks_a_held_article_quality_check(self):
+        run = self.new_run(result={"article_preview_quality": {
+            "status": "blocking_findings", "self_heal_exhausted": True, "escalation": "safety_review"},
+            "approval_blocker": {"code": "article_preview_safety_review_required"}})
+        remote = {"article_preview_quality": {"status": "queued"}, "status": "quality_review_queued"}
+        with patch("content_factory.vibe_marketing_views._call_content_factory_run_action",
+                   return_value=remote) as call:
+            status, body, _ = self.action(run, "retry_now")
+        self.assertEqual((status, body["status"]), (200, "done"))
+        self.assertEqual(call.call_args.kwargs["action"], "retry-preview-quality")
+        run.refresh_from_db()
+        self.assertEqual(run.result["article_preview_quality"]["status"], "queued")
+        self.assertNotIn("approval_blocker", run.result)
 
     def test_missing_provider_refuses_each_action_and_audits_without_touching_stall_clock(self):
         run = self.new_run()

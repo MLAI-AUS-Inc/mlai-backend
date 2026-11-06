@@ -15,6 +15,10 @@ from integrations import http_client as http_requests
 class GitHubAppTokenError(Exception):
     """Raised when an installation token cannot be minted."""
 
+    def __init__(self, *args, status_code=None):
+        super().__init__(*args)
+        self.status_code = status_code
+
 
 class GitHubWorkflowPermissionRequired(GitHubAppTokenError):
     """The App or installation has not approved editing workflow files."""
@@ -338,7 +342,8 @@ def create_installation_access_token(
         )
         raise GitHubAppTokenError(
             f"Could not mint GitHub App installation token for {normalized_repository}: "
-            f"GitHub returned {response.status_code}.{github_detail}{permission_hint}"
+            f"GitHub returned {response.status_code}.{github_detail}{permission_hint}",
+            status_code=response.status_code,
         )
     try:
         payload = response.json()

@@ -24,12 +24,12 @@ def config(pk, organization_id, *avatar_urls):
     return Obj(pk=pk, organization_id=organization_id, authors=authors)
 
 
-def copy_all(authors, *, previous, company_id, skipped):
+def copy_all(authors, *, previous, company_id, skipped, organization_id=None):
     return [{**author, "avatarUrl": stored_url(author["id"])} if photos.needs_copy(author["avatarUrl"]) else author
             for author in authors]
 
 
-def keep_all(authors, *, previous, company_id, skipped):
+def keep_all(authors, *, previous, company_id, skipped, organization_id=None):
     for author in authors:
         if photos.needs_copy(author["avatarUrl"]):
             skipped.append(photos.AuthorPhotoError("author_photo_unavailable", "expired", author_id=author["id"]))
@@ -93,6 +93,7 @@ class CopyAuthorPhotosCommandTests(SimpleTestCase):
         authors = store_photos.call_args.args[0]
         self.assertEqual(store_photos.call_args.kwargs["previous"], authors)
         self.assertEqual(store_photos.call_args.kwargs["company_id"], "org-11")
+        self.assertEqual(store_photos.call_args.kwargs["organization_id"], 11)
         (lookup, values), = rows.writes
         self.assertEqual(lookup, {"pk": 1, "authors": original})
         self.assertEqual([author["avatarUrl"] for author in values["authors"]],
@@ -131,7 +132,7 @@ class CopyAuthorPhotosCommandTests(SimpleTestCase):
         self.assertIn(("filter", {"organization_id": 11}), rows.lookups)
 
     def test_an_unexpected_failure_leaves_that_org_unchanged_and_continues(self):
-        def flaky(authors, *, previous, company_id, skipped):
+        def flaky(authors, *, previous, company_id, skipped, organization_id=None):
             if company_id == "org-11":
                 raise RuntimeError("storage client misconfigured")
             return copy_all(authors, previous=previous, company_id=company_id, skipped=skipped)

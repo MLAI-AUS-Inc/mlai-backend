@@ -674,7 +674,7 @@
       "identity": "content_factory/island_research.py:adopt_researched_island:ac96393ad34d56730e1274363a09f2ff28837259241d37339e31568d57718d5b:1",
       "path": "content_factory/island_research.py",
       "function": "adopt_researched_island",
-      "line": 143,
+      "line": 145,
       "kind": "inferred_run_save",
       "fields": [],
       "statement_sha256": "ac96393ad34d56730e1274363a09f2ff28837259241d37339e31568d57718d5b",
@@ -684,18 +684,21 @@
         "island"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "db50e583ad253adf89c0b282394fc3f9688ad9481f9bd3120899c9449df43b2f",
+      "function_sha256": "ec1c4ddd36f7c81450549f48147696171d660b52bcf76e3b8fe683c94d4f509b",
       "classification": "non_cf_model",
-      "test_refs": [],
-      "reason": "Saved island receiver is ContentIsland, not the input Run; metric/keyword adoption is a separate backend domain.",
-      "guard": "Explicit ContentIsland query/constructor and island row saves.",
+      "test_refs": [
+        "content_factory/tests_island_research_unit.py",
+        "tests/test_content_islands.py"
+      ],
+      "reason": "Saved island receiver is ContentIsland, not the input Run; metric/keyword adoption and region refresh write separate island-domain models only.",
+      "guard": "Explicit ContentIsland query/constructor and island row saves; region rebuild writes ContentIslandRegion/ContentIsland under the organization lock without Run writes.",
       "pending_owner": null
     },
     {
       "identity": "content_factory/island_research.py:adopt_researched_island:ac96393ad34d56730e1274363a09f2ff28837259241d37339e31568d57718d5b:2",
       "path": "content_factory/island_research.py",
       "function": "adopt_researched_island",
-      "line": 169,
+      "line": 171,
       "kind": "inferred_run_save",
       "fields": [],
       "statement_sha256": "ac96393ad34d56730e1274363a09f2ff28837259241d37339e31568d57718d5b",
@@ -705,11 +708,14 @@
         "island"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "db50e583ad253adf89c0b282394fc3f9688ad9481f9bd3120899c9449df43b2f",
+      "function_sha256": "ec1c4ddd36f7c81450549f48147696171d660b52bcf76e3b8fe683c94d4f509b",
       "classification": "non_cf_model",
-      "test_refs": [],
-      "reason": "Saved island receiver is ContentIsland, not the input Run; metric/keyword adoption is a separate backend domain.",
-      "guard": "Explicit ContentIsland query/constructor and island row saves.",
+      "test_refs": [
+        "content_factory/tests_island_research_unit.py",
+        "tests/test_content_islands.py"
+      ],
+      "reason": "Saved island receiver is ContentIsland, not the input Run; metric/keyword adoption and region refresh write separate island-domain models only.",
+      "guard": "Explicit ContentIsland query/constructor and island row saves; region rebuild writes ContentIslandRegion/ContentIsland under the organization lock without Run writes.",
       "pending_owner": null
     },
     {
@@ -2964,7 +2970,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:a1a285a9d42b926c2996cce6d69065829e73c1dc4a8de28e218ec2483e708f5e:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 21098,
+      "line": 21252,
       "kind": "inferred_run_save",
       "fields": [
         "approval_state",
@@ -2981,7 +2987,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
+      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -2991,7 +2997,7 @@
         "content_factory/tests_founder_run_commands.py",
         "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3102,7 +3108,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 20718,
+      "line": 20868,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3114,7 +3120,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
+      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3124,7 +3130,7 @@
         "content_factory/tests_founder_run_commands.py",
         "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3132,7 +3138,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:2",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 20764,
+      "line": 20918,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3144,7 +3150,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
+      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3154,7 +3160,7 @@
         "content_factory/tests_founder_run_commands.py",
         "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3162,7 +3168,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:3418387b1f3686713bd20e8926e5824cf845c9fb6b6b0eff05d165df49eadd92:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 20803,
+      "line": 20957,
       "kind": "inferred_run_save",
       "fields": [
         "status",
@@ -3176,7 +3182,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
+      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3186,7 +3192,7 @@
         "content_factory/tests_founder_run_commands.py",
         "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3433,7 +3439,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:f4ff89e68ed66f9063658270eb03abec69d12cda8deea5e3abe011406ddb0f95:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 21051,
+      "line": 21205,
       "kind": "model_create",
       "fields": [
         "status",
@@ -3447,7 +3453,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
+      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3457,7 +3463,7 @@
         "content_factory/tests_founder_run_commands.py",
         "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -4154,7 +4160,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:59a558ca649a0f901fe6ee3928fed748c5bfa5405967c2b3e6a15d82f619b69a:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 914,
+      "line": 952,
       "kind": "model_update",
       "fields": [
         "status"
@@ -4166,13 +4172,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
+      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4180,7 +4186,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:4758533f8b3da0df3160a618e903ebdf6827677f3217dbf1b86c5831d943d64f:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 926,
+      "line": 964,
       "kind": "model_update",
       "fields": [
         "status",
@@ -4193,13 +4199,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
+      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4207,7 +4213,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:e0f6dc9a8b4e36827f0f0b6dd598f821f3c7219a519e129bd5d062ff6a2c438a:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1055,
+      "line": 1095,
       "kind": "model_update",
       "fields": [
         "current_step",
@@ -4220,13 +4226,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
+      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4234,7 +4240,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:a8cabcadb8e0fa3cb68cc74238cfdb2c6b9b1e84dcd32c57caa5e8bc9ac13304:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 968,
+      "line": 1008,
       "kind": "model_update",
       "fields": [
         "status"
@@ -4246,13 +4252,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
+      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4260,7 +4266,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:d422bdb8d43e50d6cf617d30aaa5bdd656e9c8ecd495c20a6cf44abd04f4d81e:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1043,
+      "line": 1083,
       "kind": "model_update",
       "fields": [
         "current_step"
@@ -4272,13 +4278,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
+      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4286,7 +4292,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:4758533f8b3da0df3160a618e903ebdf6827677f3217dbf1b86c5831d943d64f:2",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1082,
+      "line": 1122,
       "kind": "model_update",
       "fields": [
         "status",
@@ -4299,13 +4305,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
+      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4313,7 +4319,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:7df6aacf491799a4394ea8be30fd75d393e852241163057d8b859237c1d3aabe:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 994,
+      "line": 1034,
       "kind": "model_update",
       "fields": [
         "status"
@@ -4325,13 +4331,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
+      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4339,7 +4345,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:ef4dffd46122ec23aeb6f61b7685382377b67a830b501d53bae43c712ab415d0:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1013,
+      "line": 1053,
       "kind": "model_update",
       "fields": [
         "status",
@@ -4352,13 +4358,13 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5d4a4707368ee7221e412aca90ba336dcf133f459d21c56ce76d6ad7cd6ffcf3",
+      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -6127,11 +6133,12 @@
     {
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_call_content_factory_run_action",
-      "function_sha256": "3ed430c5275aa9ef34170eaf21084251367404a551a0ab872cf256528fdb0f23",
-      "reason": "Exact original control receipt, current active principal and outgoing admission/ticket are rechecked under SQL lock immediately before marking the external POST permanently uncertain; no transport occurs under that lock. Group operations retain the original member set and use the same before-transport identity gate; unknown effects remain held.",
+      "function_sha256": "1509d94dddfb17e6e5b8324c4455624203c3648caaaa6920c7bc41ff28ab58ae",
+      "reason": "Exact original control receipt, current active principal and outgoing admission/ticket are rechecked under SQL lock immediately before marking the external POST permanently uncertain; no transport occurs under that lock. Group operations retain the original member set and use the same before-transport identity gate; unknown effects remain held. The staff-only actions (record-staff-safety-verification, staff-safety-state) are refused with a 404 before any lock or transport unless the process-local staff console capability is passed; this only narrows the forwarded action set.",
       "test_refs": [
         "content_factory/tests_founder_library_commands.py",
-        "content_factory/tests_founder_run_commands.py"
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_staff_safety_verification_unit.py"
       ]
     },
     {
@@ -6865,6 +6872,15 @@
       "test_refs": [
         "content_factory/tests_p2_notify.py",
         "content_factory/tests_founder_journey_alerts.py"
+      ]
+    },
+    {
+      "path": "content_factory/website_prepare.py",
+      "function": "_reconcile_setup_approval_receipt",
+      "function_sha256": "c4de11df58b802f38515fd1e6fda2302ad8686ef2ab918c85c9fd2f3b9d2614f",
+      "reason": "Bounded reconciliation of a lost setup approval response: exact approved child, current parent generation, original immutable repository/branch/root and existing PR required. Only active error projection is superseded; no independent database writer, repeated consent, dispatch or merge authority; prior counters and retry window are retained.",
+      "test_refs": [
+        "content_factory/tests_prepare_journey_unit.py"
       ]
     }
   ],

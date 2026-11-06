@@ -44,11 +44,16 @@ ENQUEUE = "_community_enqueue_v1"
 IDENTITY = "_community_identity_v1"
 MEMBER_STAMP = "_community_delivery_v1"  # internal attempt implementation contract
 MemberDeliveryUnavailable = member.MemberDeliveryUnavailable
+# Closed hold codes recorded as a held row's `last_error` and in send logs.
+BOT_READER_HOLD = "community_bot_reader_unavailable"
+NOT_ADMITTED_HOLD = "community_channel_not_admitted"
 _identity = member._identity
 
 
 class CommunityLegacyHold(member.MemberDeliveryDeferred):
     """Retain unproven legacy work without terminal rejection or a resend."""
+
+    reason = "legacy_community_send_unproven"
 
     def __init__(self):
         super().__init__(300)
@@ -116,7 +121,7 @@ def _suffix(delivery_id, identity=None):
     if (row.status != "processing" or row.channel_id != channel.pk
             or state is not None and state.status in {"paused", "revoked"}
             or identity is not None and _identity(channel) != identity):
-        raise member.MemberDeliveryDeferred(5)
+        raise member.MemberDeliveryDeferred(5, reason="community_mapping_pending")
     if (not channel.enabled or channel.audience != "community"
             or channel.destination_platform != "buzz" or channel.slack_visibility == "private"
             or channel.slack_archived or channel.slack_deleted or channel.hold_reason
@@ -170,7 +175,8 @@ def _choose(delivery, channel, saved):
     key = str((delivery.get("payload") or {}).get("source_author_id") or "")
     account = community_account_for_key(slack_workspace_id=channel.slack_workspace_id, buzz_pubkey=key)
     if account is None:
-        raise PublicBridgeConsentRequired("Community sharing requires a current verified account device")
+        raise PublicBridgeConsentRequired("Community sharing requires a current verified account device",
+                                          reason="device_unverified")
     bound = saved.get("actor")
     if bound is None and delivery["delivery_type"] in {"edit", "delete", "reaction_remove"}:
         link = member._poster_link(delivery)
@@ -224,7 +230,7 @@ def _bot_reader(channel):
     """Capture a current joined reader before acquiring lower-order locks."""
     grant = access.reader_for_channel(channel.slack_workspace_id, channel.slack_channel_id)
     if grant is None:
-        raise member.MemberDeliveryDeferred(60)
+        raise member.MemberDeliveryDeferred(60, reason=BOT_READER_HOLD)
     return dm._capture_slack_grant_api_authority(grant)
 
 
@@ -242,30 +248,31 @@ def _fence(delivery, original, authority, actor, *, reader_authority=None, read_
         reader_connection = None
         if actor.get("kind") == "bot":
             if reader_authority is None or not access.enabled():
-                raise member.MemberDeliveryDeferred(60)
+                raise member.MemberDeliveryDeferred(60, reason=BOT_READER_HOLD)
             reader = next((g for g in grants if g.pk == reader_authority.grant_id), None)
             reader_user = next((u for u in users if u.pk == reader_authority.user_id), None)
             reader_connection = next((c for c in connections if c.pk == reader_authority.connection_id), None)
             if reader is None or reader_user is None or reader_connection is None:
-                raise member.MemberDeliveryDeferred(60)
+                raise member.MemberDeliveryDeferred(60, reason=BOT_READER_HOLD)
             reader.user, reader.connection = reader_user, reader_connection
             if (reader.slack_workspace_id != original.slack_workspace_id
                     or not access.public_reader_enabled(reader, authority=reader_authority)
                     or access._membership_state(reader, next((m for m in memberships if m.grant_id == reader.pk), None)) != "joined"):
-                raise member.MemberDeliveryDeferred(60)
+                raise member.MemberDeliveryDeferred(60, reason=BOT_READER_HOLD)
         links = list(CommunityBridgeIdentityLink.objects.select_for_update().filter(user_id=owner).order_by("pk"))
         user = next((u for u in users if u.pk == owner), None)
         if user is None or not user.is_active or not member_device_key_allowed(owner, actor.get("public_key")):
-            raise PublicBridgeConsentRequired("Community sender device is no longer current")
+            raise PublicBridgeConsentRequired("Community sender device is no longer current",
+                                              reason="device_unverified")
         if delivery["delivery_type"] in member.CONTENT and not read_reconcile and not has_ai_consent(owner):
             raise PublicBridgeConsentRequired("Current AI sharing permission is required")
         if delivery["delivery_type"] in member.CONTENT and not read_reconcile and not admitted(original):
-            raise member.MemberDeliveryDeferred(60)
+            raise member.MemberDeliveryDeferred(60, reason=NOT_ADMITTED_HOLD)
         grant = None
         connection = None
         if actor.get("kind") == "member":
             if not access.enabled():
-                raise member.MemberDeliveryDeferred(60)
+                raise member.MemberDeliveryDeferred(60, reason="community_member_access_disabled")
             grant = next((g for g in grants if g.pk == authority.grant_id), None)
             connection = next((c for c in connections if c.pk == authority.connection_id), None)
             scopes = {"channels:read", "reactions:write" if delivery["delivery_type"].startswith("reaction") else "chat:write"}
@@ -356,7 +363,7 @@ class _BotClient(member._Client):
         if method in self.READ_SCOPES:
             if (self.authority is None or self.connection is None
                     or self.READ_SCOPES[method] not in self.authority.scopes):
-                raise member.MemberDeliveryDeferred(60)
+                raise member.MemberDeliveryDeferred(60, reason="community_bot_reader_scope_unavailable")
             if method != "users_info" and kwargs.get("channel") != self.channel.slack_channel_id:
                 raise MemberDeliveryUnavailable("community_source_changed")
             if method == "users_info" and not re.fullmatch(r"[UW][A-Z0-9]{1,99}", str(kwargs.get("user") or "")):
@@ -495,10 +502,19 @@ def execute(delivery):
     prior_attempt = (delivery.get("payload") or {}).get(attempts.ATTEMPT_KEY)
     real_attempt = (isinstance(prior_attempt, dict) and prior_attempt.get("status") in {"armed", "uncertain", "acknowledged"}
                     and saved and prior_attempt.get("command_hash") == attempts.command_hash(saved))
-    if delivery["delivery_type"] in member.CONTENT and not admitted(original) and not real_attempt:
-        raise member.MemberDeliveryDeferred(60)
-    authority, actor = _choose(delivery, original, saved)
-    reader_authority = _bot_reader(original) if actor["kind"] == "bot" else None
+    actor = None
+    try:
+        if delivery["delivery_type"] in member.CONTENT and not admitted(original) and not real_attempt:
+            raise member.MemberDeliveryDeferred(60, reason=NOT_ADMITTED_HOLD)
+        authority, actor = _choose(delivery, original, saved)
+        reader_authority = _bot_reader(original) if actor["kind"] == "bot" else None
+    except Exception as error:
+        # Selection runs before the command/attempt block below; record its
+        # drop or hold with the same closed send observation, then re-raise
+        # unchanged so row status semantics stay with the worker.
+        from .observability import send_failure
+        send_failure(original, actor, delivery["id"], error)
+        raise
     command = saved or None
     attempt = None
     client = None
@@ -554,7 +570,7 @@ def execute(delivery):
             else:
                 receipt = attempts.receipt(response, channel, actor, wire, row.delivery_type, outcome=outcome)
             if receipt is None or receipt["actor_verified"] is not True:
-                raise member.MemberDeliveryDeferred(60)
+                raise member.MemberDeliveryDeferred(60, reason="community_receipt_unverified")
             guard_delivery(row)
             row.payload = {**row.payload, attempts.ATTEMPT_KEY: {**attempt, "status": "acknowledged", "receipt": receipt}}
             row.save(update_fields=("payload", "updated_at"))
@@ -568,7 +584,7 @@ def execute(delivery):
         if error.observed_at is not None:
             mark_source_reduction(original.slack_workspace_id, original.slack_channel_id,
                                   reason=error.reason, event_observed_at=error.observed_at)
-        raise member.MemberDeliveryDeferred(60) from None
+        raise member.MemberDeliveryDeferred(60, reason="community_source_closed") from None
     except dm.SlackApiError as error:
         provider_error = error
         failed_authority = reader_authority if client is not None and getattr(client, "reader_failed", False) else authority

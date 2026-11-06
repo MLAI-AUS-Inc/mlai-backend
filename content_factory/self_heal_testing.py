@@ -311,6 +311,17 @@ def staff_actions_receipt(*, actions=(("retry_now", "done"),), by_user_id=1, not
             for action, outcome in actions][-20:]
 
 
+def staff_safety_verification_receipt(*, request_key="staff-safety:k", by_user_id=1, organization_id=1,
+                                      preview_url="https://example.test/preview", resume_generation=1,
+                                      task_id="recheck-task", review_token="recheck-task", claims=1,
+                                      at=None, notified_at=None) -> dict:
+    """``run.result["staff_safety_verification_v1"]`` (plan step 8): armed until the acknowledged recheck passes."""
+    return {"request_key": request_key, "by_user_id": by_user_id, "organization_id": organization_id,
+            "preview_url": preview_url, "resume_generation": resume_generation,
+            "recheck_task_id": task_id, "recheck_review_token": review_token,
+            "recorded_at": _iso(at), "claims": claims, "notified_at": notified_at}
+
+
 def publish_offer_receipt(*, dismissed_at=None) -> dict:
     """``run.result["publish_offer_v1"]`` (IF-P2-21)."""
     return {"dismissed_at": _iso(dismissed_at) if dismissed_at else None}
@@ -348,6 +359,7 @@ RECEIPT_BUILDERS = {
     "merge_v1": merge_receipt,
     "deploy_v1": deploy_receipt,
     "staff_actions_v1": staff_actions_receipt,
+    "staff_safety_verification_v1": staff_safety_verification_receipt,
     "publish_offer_v1": publish_offer_receipt,
     "publish_reviewed_v1": publish_reviewed_receipt,
     "publish_dispatch_v1": publish_dispatch_receipt,

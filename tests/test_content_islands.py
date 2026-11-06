@@ -1053,3 +1053,69 @@ class SelectedIslandExpansionCursorTests(ContentIslandAPITestCase):
         self.sync([], captured_on='2026-09-15', expanded=[island.slug])
         island.refresh_from_db()
         self.assertEqual(island.last_expanded_on, date(2026, 9, 16))
+
+
+@override_settings(CONTENT_ISLANDS_ENABLED=True)
+class ContentIslandRegionPersistenceTests(TestCase):
+    def setUp(self):
+        self.org = Organization.objects.create(name='Regions', domain='regions.example.test')
+        self.islands = [ContentIsland.objects.create(organization=self.org,
+            slug=f'theme-{group}-{index}', name=f'Theme {group} topic {index}',
+            pillar_keyword=f'theme {group} topic {index}', status='visible',
+            opportunity_score=100 - index, total_volume=500,
+            centroid_embedding=[int(dimension == group) for dimension in range(3)])
+            for group in range(3) for index in range(10)]
+
+    def test_refresh_keeps_identity_founder_names_and_unique_colors(self):
+        from content_factory.content_islands import rebuild_island_edges, rebuild_island_regions
+        from content_factory.models import ContentIslandRegion
+        rebuild_island_edges(self.org)
+        rebuild_island_regions(self.org)
+        regions = ContentIslandRegion.objects.filter(organization=self.org)
+        self.assertEqual(regions.count(), 3)
+        region = regions.first()
+        region.name, region.name_source = 'Our chosen audience', 'founder'
+        region.save(update_fields=['name', 'name_source'])
+        before = list(regions.values_list('pk', 'slug', 'name', 'color_key'))
+        ContentIsland.objects.filter(pk=self.islands[2].pk).update(opportunity_score=9000)
+        rebuild_island_regions(self.org)
+        self.assertEqual(list(regions.values_list('pk', 'slug', 'name', 'color_key')), before)
+        self.assertEqual(len(set(row[3] for row in before)), len(before))
+        self.assertFalse(ContentIsland.objects.filter(organization=self.org, region__isnull=True).exists())
+
+    def test_bootstrap_joins_regions_without_per_island_queries_and_filters_archived_members(self):
+        from content_factory.content_islands import rebuild_island_regions
+        from content_factory.vibe_marketing_views import _island_graph_for_bootstrap
+        rebuild_island_regions(self.org)
+        ContentIsland.objects.filter(pk=self.islands[0].pk).update(status='archived')
+        with self.assertNumQueries(3):
+            graph = _island_graph_for_bootstrap(self.org, [])
+        self.assertEqual(len(graph['nodes']), 29)
+        members = [slug for region in graph['regions'] for slug in region['islandSlugs']]
+        self.assertEqual(sorted(members), sorted(row['slug'] for row in graph['nodes']))
+        self.assertNotIn(self.islands[0].slug, members)
+        self.assertTrue(all(node['regionSlug'] for node in graph['nodes']))
+        self.assertNotIn('centroid_embedding', str(graph))
+
+    def test_region_display_updates_invalidate_bootstrap_without_touching_islands(self):
+        from content_factory.content_islands import rebuild_island_regions
+        from content_factory.models import ContentIslandRegion
+        from content_factory.vibe_marketing_views import _bootstrap_state_fingerprint
+        rebuild_island_regions(self.org)
+        before = _bootstrap_state_fingerprint(self.org, None, None)
+        region = ContentIslandRegion.objects.filter(organization=self.org).first()
+        region.name, region.name_source = 'Our audience', 'founder'
+        region.save(update_fields=['name', 'name_source', 'updated_at'])
+        self.assertNotEqual(_bootstrap_state_fingerprint(self.org, None, None), before)
+
+    def test_empty_regions_are_deleted_without_cross_organization_changes(self):
+        from content_factory.content_islands import rebuild_island_regions
+        from content_factory.models import ContentIslandRegion
+        other = Organization.objects.create(name='Other', domain='other-regions.example.test')
+        retained = ContentIslandRegion.objects.create(organization=other, slug='untouched', name='Untouched', color_key='blue')
+        rebuild_island_regions(self.org)
+        ContentIsland.objects.filter(organization=self.org).update(status='archived')
+        rebuild_island_regions(self.org)
+        self.assertFalse(ContentIslandRegion.objects.filter(organization=self.org).exists())
+        self.assertTrue(ContentIslandRegion.objects.filter(pk=retained.pk).exists())
+        self.assertFalse(ContentIsland.objects.filter(organization=self.org, region__isnull=False).exists())

@@ -319,3 +319,58 @@ class PostgreSQLLockTests(unittest.TestCase):
                     sql, _ = queries[0].get_compiler(connection=connection).as_sql()
                 self.assertIn('LEFT OUTER JOIN', sql)
                 self.assertTrue(sql.endswith(f'FOR UPDATE OF "{model._meta.db_table}"'), sql)
+
+class ProfileAdminFormTests(unittest.TestCase):
+    """Django admin applies the same length and price rules as the mentor API."""
+
+    def form(self, **cleaned):
+        from mentoring.admin import MentorProfileAdminForm
+        form = MentorProfileAdminForm.__new__(MentorProfileAdminForm)
+        form.cleaned_data = cleaned
+        form.instance = SimpleNamespace(pk=None, session_minutes=None)
+        return form
+
+    def test_session_minutes_must_be_30_to_60_in_steps_of_5(self):
+        from django import forms
+        for bad in (0, 5, 15, 25, 33, 65, 120):
+            with self.subTest(minutes=bad), self.assertRaises(forms.ValidationError):
+                self.form(session_minutes=bad).clean_session_minutes()
+        for good in (30, 45, 60):
+            self.assertEqual(self.form(session_minutes=good).clean_session_minutes(), good)
+
+    def test_existing_mentor_can_keep_a_length_outside_the_limits(self):
+        from django import forms
+        form = self.form(session_minutes=15)
+        form.instance = SimpleNamespace(pk=1, session_minutes=15)
+        self.assertEqual(form.clean_session_minutes(), 15)
+        form = self.form(session_minutes=20)
+        form.instance = SimpleNamespace(pk=1, session_minutes=15)
+        with self.assertRaises(forms.ValidationError):
+            form.clean_session_minutes()
+
+    def test_price_must_be_1_to_1000(self):
+        from django import forms
+        for bad in (0, 1001, 5000):
+            with self.subTest(price=bad), self.assertRaises(forms.ValidationError):
+                self.form(price_roo=bad).clean_price_roo()
+        for good in (1, 40, 1000):
+            self.assertEqual(self.form(price_roo=good).clean_price_roo(), good)
+
+    def test_admin_and_its_list_page_use_the_validating_form(self):
+        from django.contrib import admin
+        from mentoring.admin import MentorProfileAdminForm
+        from mentoring.models import MentorProfile
+        model_admin = admin.site._registry[MentorProfile]
+        self.assertIs(model_admin.form, MentorProfileAdminForm)
+        list_form = model_admin.get_changelist_form(MagicMock())
+        self.assertTrue(issubclass(list_form, MentorProfileAdminForm))
+
+
+    def test_add_form_starts_at_30_roo_for_30_minutes(self):
+        from django.contrib import admin as dj_admin
+        from django.test import RequestFactory
+        from mentoring.admin import MentorProfileAdmin
+        from mentoring.models import MentorProfile
+        ma = MentorProfileAdmin(MentorProfile, dj_admin.site)
+        initial = ma.get_changeform_initial_data(RequestFactory().get('/'))
+        self.assertEqual((initial['price_roo'], initial['session_minutes']), (30, 30))

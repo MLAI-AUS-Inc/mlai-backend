@@ -11,6 +11,7 @@ from integrations.services.community_bridge.store import _normalize_slack_event
 from integrations.services.slack_dm_mirror import _slack_message_text
 from integrations.services.community_bridge.slack import SlackBridgeClient
 from integrations.services.community_bridge.slack_actions import action_digest
+from integrations.services.message_sync.scheduler import BudgetDeferred
 
 
 @override_settings(
@@ -227,6 +228,20 @@ class SlackDisplayContentTests(SimpleTestCase):
             )
         self.assertIn("Ask @Alice, keep `<@UONE>` and \\<@UONE\\> literal.", resolved)
         self.assertIn("**1. AI Assist**", resolved)
+
+    def test_budget_deferred_mention_lookup_defers_delivery_instead_of_at_user(self):
+        """A paced users.info call must retry the delivery, never bake in "@user"."""
+        deferred = BudgetDeferred(5)
+        for resolve in (
+            SlackBridgeClient.resolve_markdown_entities,
+            SlackBridgeClient.resolve_message_text,
+        ):
+            with self.subTest(resolve=resolve.__name__), patch.object(
+                SlackBridgeClient, "get_user_display_name", side_effect=deferred
+            ), patch.object(SlackBridgeClient, "get_channel_display_name"):
+                with self.assertRaises(BudgetDeferred) as raised:
+                    resolve("give 20 points to <@USUSAN>")
+                self.assertIs(raised.exception, deferred)
 
     def test_fallback_and_unsafe_links(self):
         self.assertEqual(

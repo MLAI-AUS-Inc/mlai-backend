@@ -745,6 +745,15 @@ checks; code and synthetic tests do not prove those checks passed.
   `CRM_PROTECTED_DOMAINS`; that setting may protect additional exact domains.
   Mailbox writes return 400 `mailbox_domain_protected`, direct root campaign
   queueing returns 409 `protected_domain`, and dispatch refuses root starts.
+- `CRM_LEGACY_MAILBOX_PATH_ENABLED` (default true) keeps main's pre-stream
+  email path while `CRM_WAVES_ENABLED` and `CRM_PREFLIGHT_ENABLED` are off.
+  Existing mailboxes outside every stream domain (today's staff mailboxes and
+  the warm-up senders) stay selectable by staff, editable by admins, and queue,
+  start, resume and dispatch without a stream, exactly as before. Warm-up
+  admission (including a paused run), consent, frequency and daily caps are
+  unchanged. The path never applies to a stream-assigned blast, a stream-domain
+  mailbox, a new mailbox, or any blast under waves or preflight; those keep the
+  strict root refusal above. Setting it false is the explicit root cutover.
 - `crm_streams sync` creates the configured stream records and disabled
   mailboxes idempotently. It never enables mailboxes, resets incidents or
   ramp state, or overwrites an existing identity that differs. Run it only
@@ -938,18 +947,18 @@ No new schema is required.
 
 ## System email and sign-in monitoring (Phase 7)
 
-`MLAI_SYSTEM_FROM_EMAIL` is the canonical sender for newly prepared system
-messages (default `MLAI <notifications@notify.mlai.au>`). `RESEND_FROM_EMAIL`
-is a compatibility alias and an environment fallback only if the canonical
-setting is absent. Review approvals, founder draft notices, website goal
-notifications and notification adapters use the same setting. Existing
-frozen outbox payloads and idempotency keys remain unchanged. The
-notify-restricted `CRM_NOTIFY_API_KEY` is preferred, with the existing
-`RESEND_API_KEY` retained as a rollout fallback. Verify the dedicated key
-and drain or explicitly review old frozen messages before a sender cutover.
+Existing system mail keeps main's sender and credential. Review approvals,
+founder draft notices, website goal notifications and notification adapters
+send from `RESEND_FROM_EMAIL` (empty keeps main's verified
+`Roo <notifications@mlai.au>`; review approvals keep `MLAI <notifications@mlai.au>`)
+with `RESEND_API_KEY`. They never inherit `MLAI_SYSTEM_FROM_EMAIL`, which is the
+system_email app's own sender (default `MLAI <notifications@notify.mlai.au>`).
+Moving existing mail to notify.mlai.au is a separate, explicit cutover after
+that domain and its restricted key are verified. Both senders pass through the
+normal deploy configuration; an empty repository variable keeps the host value.
 
-Customer.io remains the sign-in provider. `CUSTOMERIO_FROM_EMAIL` defaults
-to the canonical sender and is explicitly included in the code request.
+Customer.io remains the sign-in provider. `CUSTOMERIO_FROM_EMAIL` is sent
+only when configured; otherwise the template keeps its own sender, as on main.
 Customer.io requests set `tracked=false`; Resend tracking must be disabled
 on the notify domain in the provider. Optional notification preferences and
 unsubscribe links remain in their existing routing and message bodies.

@@ -897,6 +897,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
         from .website_connections import require_unlocked_remote_call
         require_unlocked_remote_call()
         before_cleanup = evidence_digest({"payload": op.payload, "completed_steps": op.receipt.get("completed_steps", []),
+            "repository_cleanup": op.receipt.get("repository_cleanup"),
             "refunded_run_ids": op.receipt.get("refunded_run_ids", []), "closed_mutation_ids": op.receipt.get("closed_mutation_ids", []),
             "tokens": op.receipt.get("tokens", {})})
         try:
@@ -1043,15 +1044,19 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                     op.receipt["status"] = "completed"
         except preview_budget.PreviewCleanupBudgetReached:
             pass
-        except Exception:
+        except Exception as exc:
             # No transport messages can accidentally include credentials or source bodies.
-            op.receipt = {**op.receipt, "last_error": "remote_reconciliation_unavailable"}
+            from .website_cleanup_failures import record_failure
+            record_failure(op, exc, step="remote_reconciliation")
+        from .website_cleanup_failures import settle_failure_state
+        settle_failure_state(op)
         cancel_work.finish(op, now=now)
         preview_budget.completed(op, now=now)
         op.next_attempt_at = None if op.state == "needs_attention" else now + timedelta(seconds=min(3600, 15 * 2 ** min(op.attempts, 8)))
         if op.action == "disconnect" and "remove_setup" in op.payload:
             from .website_disconnect import disconnect_retry_policy
             after_cleanup = evidence_digest({"payload": op.payload, "completed_steps": op.receipt.get("completed_steps", []),
+                "repository_cleanup": op.receipt.get("repository_cleanup"),
                 "refunded_run_ids": op.receipt.get("refunded_run_ids", []), "closed_mutation_ids": op.receipt.get("closed_mutation_ids", []),
                 "tokens": op.receipt.get("tokens", {})})
             disconnect_retry_policy(op, now=now, progressed=before_cleanup != after_cleanup)

@@ -163,5 +163,89 @@ class ArticlesDeployConfigTests(unittest.TestCase):
                       '        install_remote_env_value "$articles_setting" "${!articles_setting}"', install)
 
 
+
+class StaffConsoleFlagReleaseTests(unittest.TestCase):
+    """MY_STARTUP_STAFF_CONSOLE_ENABLED ships only as an explicit operator value.
+
+    It gates the whole existing staff console (every staff_console action and
+    route) and the acknowledgement due times of existing founder journey alerts.
+    An absent or empty repository variable must leave the host value alone, and
+    an explicit true or false must install and be reversible by the next release.
+    """
+
+    KEY = "MY_STARTUP_STAFF_CONSOLE_ENABLED"
+
+    def release(self, host_value, variable):
+        """Run deploy.sh's own settings loop against a sandbox host .env."""
+        deploy = (ROOT / "deploy.sh").read_text()
+        settings_line = next(line for line in deploy.splitlines() if line.startswith("ARTICLES_DEPLOY_SETTINGS="))
+        def loop_from(text):
+            start = text.index("for articles_setting in $ARTICLES_DEPLOY_SETTINGS; do")
+            return text[start:text.index("done\n", start) + len("done\n")]
+        # The early normalization (absent becomes empty), then the install loop.
+        normalize = loop_from(deploy[deploy.index(settings_line):])
+        loop = loop_from(deploy[deploy.index("rsync -avz"):])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            for name in ("upsert_env_value_from_stdin.sh", "validate_articles_deploy_config.py"):
+                shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+            env_file = root / ".env"
+            env_file.write_text("REDIS_URL=redis://synthetic\n"
+                                + (f"{self.KEY}={host_value}\n" if host_value is not None else ""))
+            script = "\n".join([
+                "set -euo pipefail",
+                settings_line,
+                normalize,
+                'install_remote_env_value() { printf "%s" "$2" | bash scripts/upsert_env_value_from_stdin.sh "$1"; }',
+                loop,
+            ])
+            environment = {"PATH": os.defpath}
+            if variable is not None:
+                environment[self.KEY] = variable
+            result = subprocess.run(["bash", "-c", script], cwd=root, env=environment,
+                                    capture_output=True, text=True, check=False)
+            return result, env_file.read_text()
+
+    def test_it_is_wired_like_every_other_operator_switch(self):
+        self.assertIn(self.KEY, FLAG_KEYS)
+        workflow = (ROOT / ".github/workflows/deploy.yml").read_text()
+        self.assertIn(f"{self.KEY}: ${{{{ vars.{self.KEY} || '' }}}}", workflow)
+        self.assertNotIn(f"secrets.{self.KEY}", workflow)
+        self.assertEqual((ROOT / "scripts/upsert_env_value_from_stdin.sh").read_text().count(f"|{self.KEY}|"), 2)
+
+    def test_an_absent_or_empty_variable_keeps_the_host_value(self):
+        for host in ("false", "true", None):
+            for variable in (None, ""):
+                with self.subTest(host=host, variable=variable):
+                    result, text = self.release(host, variable)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if host is None:
+                        self.assertNotIn(self.KEY, text, "nothing is activated by inheritance")
+                    else:
+                        self.assertEqual(text.count(f"{self.KEY}="), 1)
+                        self.assertIn(f"{self.KEY}={host}\n", text)
+
+    def test_an_explicit_value_installs_and_false_rolls_it_back(self):
+        result, text = self.release("false", "true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"{self.KEY}=true\n", text)
+        result, text = self.release("true", "false")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"{self.KEY}=false\n", text)
+        self.assertEqual(text.count(f"{self.KEY}="), 1)
+        self.assertIn("REDIS_URL=redis://synthetic\n", text)
+
+    def test_anything_but_true_or_false_is_refused_and_the_host_is_untouched(self):
+        for variable in ("1", "yes", "TRUE", "on", "true\nINJECTED=1"):
+            with self.subTest(variable=variable):
+                result, text = self.release("false", variable)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"{self.KEY}=false\n", text)
+                self.assertNotIn("INJECTED", text)
+        with self.assertRaises(ValueError):
+            validate_single(self.KEY, "1")
+
+
 if __name__ == "__main__":
     unittest.main()

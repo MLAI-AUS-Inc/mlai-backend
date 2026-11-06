@@ -96,6 +96,42 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                     self.assertTrue(_article_publish_retry_authorized(run))
                     accept_feedback.assert_called_once()
 
+    def test_a_quality_rejection_replies_with_founder_copy_and_keeps_staff_diagnostics(self):
+        run = _review_run()
+        run.pk = 1
+        run.workflow = "article_generation"
+        run.save = MagicMock()
+        run.refresh_from_db = MagicMock()
+        blocker = {"code": "article_preview_editorial_review_blocked", "message": "content:visible_editorial:claim_7 unsupported",
+                   "founder_message": "Some statements or links still need an evidence check.", "findings": ["claim_7"]}
+        request = SimpleNamespace(data={}, headers={}, user=SimpleNamespace(pk=1))
+        with (
+            patch("content_factory.article_review_views.check_approval_comments", return_value=None),
+            patch("content_factory.article_review_views.record_review_approval"),
+            patch("content_factory.vibe_marketing_views._resolve_context_or_response", return_value=(SimpleNamespace(organization=object()), None)),
+            patch("content_factory.vibe_marketing_views._get_config", return_value=object()),
+            patch("content_factory.vibe_marketing_views._setup_blocked_response_for_generation", return_value=None),
+            patch("content_factory.incident_guards.publish_child_binding", return_value={}),
+            patch("content_factory.vibe_marketing_views.get_object_or_404", return_value=run),
+            patch("content_factory.vibe_marketing_views._run_belongs_to_context", return_value=True),
+            patch("content_factory.vibe_marketing_views._latest_review_ready_component_revision", return_value=None),
+            patch("content_factory.vibe_marketing_views.founder_actor_id_for_user", return_value="founder-1"),
+            patch("content_factory.vibe_marketing_views.transaction.atomic", return_value=nullcontext()),
+            patch("content_factory.vibe_marketing_views.ContentFactoryRun.objects.select_for_update") as lock,
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_action", return_value={
+                "content_factory_status_code": 409, "error": blocker["message"], "approval_blocker": blocker}),
+        ):
+            lock.return_value.get.return_value = run
+            response = VibeMarketingRunControlView.post.__wrapped__(
+                VibeMarketingRunControlView(), request, run.run_id, "approve",
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["detail"], blocker["founder_message"])
+        self.assertEqual(response.data["error"], blocker["founder_message"])
+        self.assertNotIn("claim_7", str(response.data))
+        self.assertEqual(run.result["approval_blocker"]["message"], blocker["message"], "staff diagnostics are stored")
+        self.assertEqual(run.result["latest_control_response"]["error"], blocker["message"])
+
     def test_passing_preview_does_not_authorize_direct_promotion(self):
         run = _review_run()
         self.assertFalse(_article_publish_retry_authorized(run))
@@ -361,12 +397,85 @@ class HostedQualityPublishStateTests(SimpleTestCase):
         self.assertEqual(public_hosted_quality_issues(quality, preview, manifest), [])
 
     def test_specific_terminal_message_precedes_the_legacy_neutral_fallback(self):
-        from content_factory.hosted_quality_state import FALLBACK_MESSAGE, preview_quality_publish_notice
+        from django.test import override_settings
+        from content_factory.hosted_quality_state import (
+            FALLBACK_MESSAGE, UNALERTED_FALLBACK_MESSAGE, preview_quality_publish_notice)
         quality = {"status": "blocking_findings", "self_heal_exhausted": True,
                    "founder_message": "The preview is missing part of the article."}
         self.assertEqual(preview_quality_publish_notice(quality), ("blocked", quality["founder_message"]))
         quality.pop("founder_message")
-        self.assertEqual(preview_quality_publish_notice(quality), ("blocked", FALLBACK_MESSAGE))
+        # "Our team has been notified" is only true while staff alerts are on.
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=True):
+            self.assertEqual(preview_quality_publish_notice(quality), ("blocked", FALLBACK_MESSAGE))
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=False):
+            self.assertEqual(preview_quality_publish_notice(quality), ("blocked", UNALERTED_FALLBACK_MESSAGE))
+        self.assertNotIn("notified", UNALERTED_FALLBACK_MESSAGE)
+
+    def test_a_check_that_failed_to_run_blocks_publishing(self):
+        from content_factory.hosted_quality_state import FAILED_TO_RUN_MESSAGE, preview_quality_publish_notice
+        for status in ("review_error", "queue_failed"):
+            with self.subTest(status=status):
+                self.assertEqual(preview_quality_publish_notice({"status": status}), ("blocked", FAILED_TO_RUN_MESSAGE))
+        self.assertIsNone(preview_quality_publish_notice({"status": "passed"}))
+
+
+class FounderQualityProjectionTests(SimpleTestCase):
+    BLOCKER = {"code": "article_preview_editorial_review_blocked", "message": "content:visible_editorial:claim_7 unsupported",
+               "founder_message": "A few details need checking before publishing.", "findings": ["content:visible_editorial:claim_7"],
+               "repair_instructions": ["Rebind claim_7"], "retryable": True, "retry_action": "/api/runs/r/retry-preview-quality",
+               "detail": "raw", "content_factory_status_code": 409}
+    QUALITY = {"status": "blocking_findings", "escalation": "quality_review", "self_heal_exhausted": True,
+               "founder_message": "A few details need checking before publishing.", "preview_url": "https://p.test/a",
+               "resume_generation": 3, "findings": ["editorial:score_missing", "safety_unverified: Call 000 now"],
+               "safety_findings": ["safety_unverified: Call 000 now"], "repair_instructions": ["Rebind claim_7"],
+               "self_heal_history": [{"result": "x"}], "visible_content_acceptance": {"review": {"errors": ["raw"]}}}
+
+    def test_blocker_keeps_only_code_and_founder_copy(self):
+        from content_factory.hosted_quality_state import founder_blocker
+        view = founder_blocker(self.BLOCKER)
+        self.assertEqual(set(view), {"code", "founder_message", "retryable", "retry_action"})
+        self.assertNotIn("message", view)
+
+    def test_blocker_without_founder_copy_never_shows_the_staff_message(self):
+        from content_factory.hosted_quality_state import UNALERTED_FALLBACK_MESSAGE, founder_blocker
+        blocker = {"code": "article_preview_quality_running", "message": "Hosted article quality verification is running."}
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=False):
+            self.assertEqual(founder_blocker(blocker)["founder_message"], UNALERTED_FALLBACK_MESSAGE)
+
+    def test_notified_copy_follows_whether_staff_alerts_are_on(self):
+        from content_factory.hosted_quality_state import (
+            FALLBACK_MESSAGE, UNALERTED_FALLBACK_MESSAGE, founder_blocker, founder_quality)
+        blocker = {"code": "article_preview_quality_blocked", "founder_message": FALLBACK_MESSAGE}
+        quality = {"status": "blocking_findings", "founder_message": FALLBACK_MESSAGE}
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=False):
+            self.assertEqual(founder_blocker(blocker)["founder_message"], UNALERTED_FALLBACK_MESSAGE)
+            self.assertEqual(founder_quality(quality)["founder_message"], UNALERTED_FALLBACK_MESSAGE)
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=True):
+            self.assertEqual(founder_blocker(blocker)["founder_message"], FALLBACK_MESSAGE)
+            self.assertEqual(founder_quality(quality)["founder_message"], FALLBACK_MESSAGE)
+
+    def test_quality_drops_staff_diagnostics_and_keeps_founder_fields(self):
+        from content_factory.hosted_quality_state import founder_quality
+        view = founder_quality(self.QUALITY)
+        self.assertEqual(view["findings"], ["editorial:score_missing"])
+        for key in ("safety_findings", "repair_instructions", "self_heal_history", "visible_content_acceptance"):
+            self.assertNotIn(key, view)
+        for key in ("status", "escalation", "self_heal_exhausted", "founder_message", "preview_url", "resume_generation"):
+            self.assertEqual(view[key], self.QUALITY[key])
+
+    def test_result_projection_reaches_nested_copies_and_leaves_other_keys(self):
+        from content_factory.hosted_quality_state import founder_result
+        result = {"approval_blocker": self.BLOCKER, "article_preview_quality": self.QUALITY, "title": "T",
+                  "latest_control_response": {"approval_blocker": self.BLOCKER},
+                  "result": {"articlePreviewQuality": self.QUALITY}}
+        view = founder_result(result)
+        import json
+        text = json.dumps(view)
+        for raw in ("claim_7", "Call 000 now", "Rebind", "\"raw\""):
+            self.assertNotIn(raw, text)
+        self.assertEqual(view["title"], "T")
+        self.assertEqual(result["approval_blocker"]["message"], self.BLOCKER["message"], "input is not mutated")
+        self.assertIsNone(founder_result(None))
 
     def test_staff_rules_detect_exhausted_quality_on_an_awaiting_approval_run(self):
         from django.utils import timezone
@@ -553,3 +662,185 @@ class HostedQualitySyncHookTests(SimpleTestCase):
             self.assertIs(_sync_local_run_from_remote(run, {"status": "approval_required"}), run)
             self.assertEqual(order, ["lock", "unlock"])
             queue.assert_not_called()
+
+
+class FounderRunResponseProjectionTests(SimpleTestCase):
+    def _serialize(self, result):
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from content_factory import vibe_marketing_views as views
+        now = datetime.now(timezone.utc)
+        run = SimpleNamespace(run_id="held-article", workflow="article_generation", domain="example.test",
+            github_repo="fixture/repo", status="awaiting_approval", current_step="await_review",
+            approval_state="approval_required", resume_available=False, created_at=now, updated_at=now,
+            step_order=[], steps=SimpleNamespace(order_by=lambda *args: [], all=lambda: []),
+            result=result, run_request={}, acceptance_summary={}, verification_summary={}, error="")
+        with (
+            patch.object(views, "_run_source_run_id", return_value=""),
+            patch.object(views, "_article_restart_available", return_value=False),
+            patch.object(views, "_article_setup_state", return_value={}),
+            patch.object(views, "_workflow_progress", return_value={}),
+            patch.object(views, "_content_package_from_run", return_value=None),
+            patch.object(views, "_component_feedback_from_run", return_value={}),
+            patch.object(views, "_component_manifest_from_run", return_value=None),
+            patch.object(views, "_run_content_island_payload", return_value=None),
+        ):
+            return {mode: views._serialize_run(run, mode=mode)["result"] for mode in ("summary", "status", "full")}
+
+    def test_every_run_response_mode_carries_only_founder_quality_copy(self):
+        import json
+        blocker, quality = FounderQualityProjectionTests.BLOCKER, FounderQualityProjectionTests.QUALITY
+        for mode, result in self._serialize({"approval_blocker": blocker, "article_preview_quality": quality,
+                                             "latest_control_response": {"approval_blocker": blocker}}).items():
+            with self.subTest(mode=mode):
+                text = json.dumps(result, default=str)
+                for raw in ("claim_7", "Call 000 now", "Rebind"):
+                    self.assertNotIn(raw, text)
+
+    def test_malformed_findings_are_omitted_instead_of_failing_the_response(self):
+        quality = {"status": "blocking_findings", "founder_message": "Checking.",
+                   "findings": ["editorial:score_missing", {"code": "x"}, ["nested"], None, 7, "content:raw"]}
+        for mode, result in self._serialize({"article_preview_quality": quality}).items():
+            with self.subTest(mode=mode):
+                if mode == "full" or "article_preview_quality" in result:
+                    self.assertEqual(result["article_preview_quality"]["findings"], ["editorial:score_missing"])
+
+    def test_rejected_approval_control_response_carries_founder_copy_only(self):
+        import json
+        blocker = FounderQualityProjectionTests.BLOCKER
+        control = {"error": blocker["message"], "errors": [blocker["message"]], "approval_blocker": blocker,
+                   "content_factory_status_code": 409, "content_factory_response": {"detail": blocker}}
+        for mode, result in self._serialize({"approval_blocker": {**blocker, "detail": blocker["message"]},
+                                             "latest_control_response": control}).items():
+            with self.subTest(mode=mode):
+                text = json.dumps(result, default=str)
+                self.assertNotIn("claim_7", text)
+                if mode != "full" and "latest_control_response" not in result:
+                    continue
+                view = result["latest_control_response"]
+                self.assertEqual(view["error"], blocker["founder_message"])
+                self.assertEqual(view["errors"], [blocker["founder_message"]])
+                self.assertEqual(view["content_factory_response"]["detail"]["founder_message"], blocker["founder_message"])
+                self.assertEqual(view["content_factory_status_code"], 409)
+
+    def test_non_quality_blockers_and_control_errors_pass_through(self):
+        blocker = {"code": "publish_auto_merge_blocked", "message": "Repository rules block auto-merge.", "retryable": False}
+        control = {"error": "Repository rules block auto-merge.", "content_factory_response": {"detail": "x"}}
+        for mode, result in self._serialize({"approval_blocker": blocker, "latest_control_response": control}).items():
+            with self.subTest(mode=mode):
+                if mode != "full":
+                    continue
+                self.assertEqual(result["approval_blocker"], blocker)
+                self.assertEqual(result["latest_control_response"], control)
+
+
+class FounderAutomaticRetryProjectionTests(SimpleTestCase):
+    """Step 7: a failed enqueue with retry budget left reads as checking, never as a failure."""
+    URL = "https://preview.example/articles/one"
+
+    def _quality(self, *, count=1, until_seconds=40, status="queue_failed", url=None, generation=2):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        quality = {"status": status, "preview_url": url or self.URL, "resume_generation": generation,
+                   "queue_failed_count": count, "queue_failed_at": now.isoformat(), "error": "redis: connection refused"}
+        if until_seconds is not None:
+            quality["automatic_retry_until"] = (now + timedelta(seconds=until_seconds)).isoformat()
+        return quality
+
+    def _result(self, quality):
+        return {"article_preview_quality": quality,
+                "live_preview": {"previewUrl": self.URL, "resumeGeneration": 2, "available": True, "exactRender": True}}
+
+    def _views(self, quality):
+        projection = FounderRunResponseProjectionTests()
+        return projection._serialize(self._result(quality))["full"]["article_preview_quality"]
+
+    def test_initial_failure_and_each_backoff_read_as_checking_with_publishing_locked(self):
+        from content_factory.hosted_quality_state import preview_quality_publish_notice, current_preview_target
+        for count, until in ((1, 70), (1, 5), (2, 90)):
+            with self.subTest(count=count, until=until):
+                quality = self._quality(count=count, until_seconds=until)
+                view = self._views(quality)
+                self.assertEqual(view["status"], "queued")
+                self.assertNotIn("error", view)
+                self.assertNotIn("redis", str(view))
+                notice = preview_quality_publish_notice(quality, target=current_preview_target(self._result(quality)))
+                self.assertEqual(notice[0], "locked")
+                self.assertEqual(quality["status"], "queue_failed", "stored state keeps the real failure")
+
+    def test_exhausted_or_stalled_retry_shows_the_real_failure(self):
+        from content_factory.hosted_quality_state import FAILED_TO_RUN_MESSAGE, preview_quality_publish_notice
+        for label, quality in (("exhausted", self._quality(count=3, until_seconds=None)),
+                               ("stalled past its retry time", self._quality(count=1, until_seconds=-1)),
+                               ("malformed stamp", {**self._quality(), "automatic_retry_until": "soon"}),
+                               ("naive stamp", {**self._quality(), "automatic_retry_until": "2999-01-01T00:00:00"})):
+            with self.subTest(label):
+                self.assertEqual(self._views(quality)["status"], "queue_failed")
+                self.assertEqual(preview_quality_publish_notice(quality), ("blocked", FAILED_TO_RUN_MESSAGE))
+
+    def test_a_retry_for_an_older_preview_or_generation_does_not_read_as_checking(self):
+        for quality in (self._quality(url="https://preview.example/articles/old"), self._quality(generation=1)):
+            with self.subTest(quality=(quality["preview_url"], quality["resume_generation"])):
+                self.assertEqual(self._views(quality)["status"], "queue_failed")
+
+    def test_a_recovered_check_passes_through(self):
+        quality = {"status": "passed", "preview_url": self.URL, "resume_generation": 2, "queue_failed_count": 1}
+        self.assertEqual(self._views(quality)["status"], "passed")
+
+
+class FounderAutomaticRetryTargetBindingTests(SimpleTestCase):
+    """The quiet mapping needs a proven current preview, inherited by nested copies."""
+    URL_A, URL_B = "https://preview.example/articles/a", "https://preview.example/articles/b"
+
+    def _stamped(self, url, generation, seconds=40):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        return {"status": "queue_failed", "preview_url": url, "resume_generation": generation, "queue_failed_count": 1,
+                "automatic_retry_until": (now + timedelta(seconds=seconds)).isoformat(), "error": "redis down"}
+
+    def _full(self, result):
+        return FounderRunResponseProjectionTests()._serialize(result)["full"]
+
+    def test_a_nested_old_preview_stays_a_failure_while_the_current_one_reads_as_checking(self):
+        current = {"previewUrl": self.URL_B, "resumeGeneration": 2}
+        result = {"live_preview": current, "article_preview_quality": self._stamped(self.URL_B, 2),
+                  "latest_control_response": {"article_preview_quality": self._stamped(self.URL_A, 1)},
+                  "result": {"article_preview_quality": self._stamped(self.URL_A, 1)}}
+        view = self._full(result)
+        self.assertEqual(view["article_preview_quality"]["status"], "queued")
+        self.assertEqual(view["latest_control_response"]["article_preview_quality"]["status"], "queue_failed")
+        self.assertEqual(view["result"]["article_preview_quality"]["status"], "queue_failed")
+
+    def test_a_nested_preview_target_is_not_trusted_on_its_own(self):
+        result = {"latest_control_response": {"live_preview": {"previewUrl": self.URL_A, "resumeGeneration": 1},
+                                              "article_preview_quality": self._stamped(self.URL_A, 1)}}
+        self.assertEqual(self._full(result)["latest_control_response"]["article_preview_quality"]["status"], "queue_failed")
+
+    def test_a_missing_or_malformed_current_target_never_reads_as_checking(self):
+        from content_factory.hosted_quality_state import FAILED_TO_RUN_MESSAGE, preview_quality_publish_notice
+        for live in (None, {}, {"previewUrl": self.URL_A}, {"previewUrl": self.URL_A, "resumeGeneration": "1"},
+                     {"previewUrl": self.URL_A, "resumeGeneration": True}, {"previewUrl": self.URL_A, "resumeGeneration": -1},
+                     {"previewUrl": "/relative", "resumeGeneration": 1}, {"resumeGeneration": 1}):
+            with self.subTest(live=live):
+                result = {"article_preview_quality": self._stamped(self.URL_A, 1)}
+                if live is not None:
+                    result["live_preview"] = live
+                self.assertEqual(self._full(result)["article_preview_quality"]["status"], "queue_failed")
+                self.assertEqual(preview_quality_publish_notice(result["article_preview_quality"]),
+                                 ("blocked", FAILED_TO_RUN_MESSAGE))
+
+    def test_an_implausibly_far_future_stamp_is_not_trusted(self):
+        current = {"previewUrl": self.URL_A, "resumeGeneration": 1}
+        for seconds, expected in ((90, "queued"), (119, "queued"), (600, "queue_failed"), (86400 * 365, "queue_failed")):
+            with self.subTest(seconds=seconds):
+                result = {"live_preview": current, "article_preview_quality": self._stamped(self.URL_A, 1, seconds)}
+                self.assertEqual(self._full(result)["article_preview_quality"]["status"], expected)
+
+    def test_an_unrelated_approval_blocker_is_never_hidden(self):
+        current = {"previewUrl": self.URL_A, "resumeGeneration": 1}
+        blocker = {"code": "publish_auto_merge_blocked", "message": "Repository rules block auto-merge."}
+        view = self._full({"live_preview": current, "article_preview_quality": self._stamped(self.URL_A, 1),
+                           "approval_blocker": blocker})
+        self.assertEqual(view["article_preview_quality"]["status"], "queued")
+        self.assertEqual(view["approval_blocker"], blocker)

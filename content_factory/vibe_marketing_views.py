@@ -2662,7 +2662,7 @@ def _island_graph_for_bootstrap(organization, topic_pillars):
     islands = list(
         ContentIsland.objects.filter(
             organization=organization, status=ContentIslandStatus.VISIBLE
-        ).order_by("-opportunity_score", "slug")
+        ).select_related("region").order_by("-opportunity_score", "slug")
     )
     if not islands:
         return None
@@ -11078,8 +11078,8 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     article_result = _run_mapping(article_run.result) if article_run else {}
     preview_quality = _run_mapping(article_result.get("article_preview_quality"))
     preview_quality_status = str(preview_quality.get("status") or "").strip().lower()
-    from .hosted_quality_state import preview_quality_publish_notice
-    quality_publish_notice = preview_quality_publish_notice(preview_quality)
+    from .hosted_quality_state import current_preview_target, preview_quality_publish_notice
+    quality_publish_notice = preview_quality_publish_notice(preview_quality, target=current_preview_target(article_result))
     publish_handoff_pending = bool(article_result.get("publish_handoff_pending"))
     publish_handoff_stale = _publish_handoff_stale_for_run(article_run)
     publish_child_recoverable = _publish_child_run_recoverable(publish_child_run) or bool(article_result.get("publish_child_recoverable"))
@@ -12077,6 +12077,7 @@ def _serialize_run(
     topic_candidates=None, precomputed_article_setup_state=None, config=None, include_workflow_progress=True,
 ):
     from .run_ownership import public_run_value
+    from .hosted_quality_state import founder_result
     from .setup_status_projection import terminal_setup_projection
     run = terminal_setup_projection(_setup_pr_creation_failure_view(run))
     compact = mode in {"summary", "status"}
@@ -12207,7 +12208,7 @@ def _serialize_run(
             "workflowProgress": _workflow_progress(
                 context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
             ) if include_workflow_progress else None,
-            "result": public_run_value(_strip_missing_setup_run_refs(_compact_result_for_run(run))),
+            "result": founder_result(public_run_value(_strip_missing_setup_run_refs(_compact_result_for_run(run)))),
             **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                        current_step=run.current_step, resume_available=resume_available,
                                        approval_state=approval_state),
@@ -12290,7 +12291,7 @@ def _serialize_run(
         "workflowProgress": _workflow_progress(
             context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
         ) if include_workflow_progress else None,
-        "result": public_run_value(_strip_missing_setup_run_refs(response_result)),
+        "result": founder_result(public_run_value(_strip_missing_setup_run_refs(response_result))),
         **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                    current_step=run.current_step, resume_available=resume_available,
                                    approval_state=approval_state),
@@ -12548,7 +12549,9 @@ def _bootstrap_state_fingerprint(organization, company, config) -> str:
     islands = ContentIsland.objects.filter(organization=organization, origin="manual").aggregate(c=Count("id"), m=Max("updated_at"))
     island_members = {"c": None, "m": None}
     if _content_islands_enabled():
-        islands = ContentIsland.objects.filter(organization=organization).aggregate(c=Count("id"), m=Max("updated_at"))
+        islands = ContentIsland.objects.filter(organization=organization).aggregate(
+            c=Count("id"), m=Max("updated_at"), r=Max("region__updated_at")
+        )
         island_members = ContentIslandKeyword.objects.filter(island__organization=organization).aggregate(
             c=Count("id"), m=Max("created_at")
         )
@@ -12559,7 +12562,7 @@ def _bootstrap_state_fingerprint(organization, company, config) -> str:
         feedback["c"], feedback["m"],
         articles["c"], articles["m"],
         channels["c"], channels["m"],
-        islands["c"], islands["m"],
+        islands["c"], islands["m"], islands.get("r"),
         island_members["c"], island_members["m"],
         baseline_updated,
         # Already-loaded identity fields (no extra query) so company/profile edits —
@@ -14552,9 +14555,11 @@ def _sync_steps_from_remote(run, remote_data):
 def _sync_local_run_from_remote(run, remote_data):
     from .run_owned_observations import refresh_owned_run
     from .hosted_quality_alerts import queue_hosted_quality_review_alert
+    from .staff_safety_verification import notify_after_staff_safety_verification
     owned = refresh_owned_run(run)
     if owned is not None:
         queue_hosted_quality_review_alert(owned)
+        notify_after_staff_safety_verification(owned)
         return owned
     from content_factory.run_state import stale_execution_event
     from .portable_drafts import portable_run_update_allowed
@@ -14577,6 +14582,7 @@ def _sync_local_run_from_remote(run, remote_data):
     from .first_article_entitlement import settle_entitlement_for_run
     settle_entitlement_for_run(run)
     queue_hosted_quality_review_alert(run)
+    notify_after_staff_safety_verification(run)
     return run
 
 
@@ -15536,6 +15542,13 @@ def _autofill_start_response(run, *, reused_active_run=False, research_company_i
     return Response(payload, status=status.HTTP_202_ACCEPTED)
 
 
+# Content Factory actions that only the audited staff console may send. The
+# capability is a process-local object, so no founder or service route that
+# forwards an action name from a URL can supply it.
+STAFF_ONLY_REMOTE_ACTIONS = frozenset({"record-staff-safety-verification", "staff-safety-state"})
+STAFF_ACTION_CAPABILITY = object()
+
+
 def _call_content_factory_run_action(
     *,
     run_id,
@@ -15548,7 +15561,11 @@ def _call_content_factory_run_action(
     control_user=None,
     control_command_key=None,
     expected_run_binding=None,
+    staff_capability=None,
 ):
+    if action in STAFF_ONLY_REMOTE_ACTIONS and staff_capability is not STAFF_ACTION_CAPABILITY:
+        return {"error": "Unsupported run action.", "errors": ["Unsupported run action."],
+                "content_factory_status_code": 404, "retryable": False}
     require_unlocked_remote_call()
     admitted_child = None
     if action in {"cancel", "deny", "approve"}:
@@ -16515,8 +16532,12 @@ class VibeMarketingAuthorPhotoPreviewView(APIView):
         uploaded = getattr(request, "FILES", {}).get("photo")
         if uploaded is not None:
             from content_factory.author_photos import upload_photo
+            from content_factory.models import AuthorPhoto
             try:
-                return Response({"photoUrl": upload_photo(uploaded, company_id=company.pk)}, status=200)
+                url = upload_photo(uploaded, company_id=company.pk, organization_id=company.organization_id,
+                                   user=request.user)
+                record = AuthorPhoto.objects.filter(url=url).only("pk").first()
+                return Response({"photoUrl": url, "photoId": str(record.pk) if record else ""}, status=200)
             except AuthorPhotoError as exc:
                 return Response({"detail": str(exc), "code": exc.code}, status=exc.status)
         url = str(request.data.get("url") or "").strip()
@@ -16959,6 +16980,8 @@ class VibeMarketingSettingsView(APIView):
                 normalize_authors(request.data.get("authors", request.data.get("authorsData"))),
                 previous=previous,
                 company_id=company.id,
+                organization_id=company.organization_id,
+                user=request.user,
             )
         except AuthorPhotoError as exc:
             return Response({"detail": str(exc), "code": exc.code, "field": "authors",
@@ -20851,6 +20874,10 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             }
             run.result = result
             run.save(update_fields=["result", "updated_at"])
+            from .hosted_quality_state import founder_blocker, quality_blocker_code
+            if quality_blocker_code(remote_blocker):
+                # The stored blocker keeps the staff diagnostics; the founder sees its copy.
+                detail = founder_blocker(remote_blocker)["founder_message"]
             return Response(
                 {
                     "detail": detail,
