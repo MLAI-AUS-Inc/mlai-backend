@@ -1646,6 +1646,30 @@ class ContentIslandOrigin(models.TextChoices):
     MANUAL = "manual", "Manual"
 
 
+class ContentIslandRegion(models.Model):
+    """Stable audience group; display identity survives topic refreshes."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='content_island_regions', db_index=True
+    )
+    slug = models.SlugField(max_length=80)
+    name = models.CharField(max_length=80)
+    name_source = models.CharField(max_length=16, default='fallback',
+        choices=[('fallback', 'Fallback'), ('llm', 'Generated'), ('founder', 'Founder')])
+    color_key = models.CharField(max_length=32)
+    centroid_embedding = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'seo_content_island_region'
+        unique_together = ['organization', 'slug']
+        ordering = ['slug']
+
+    def __str__(self):
+        return self.name
+
+
 class ContentIsland(models.Model):
     """
     A durable topic island for an organization.
@@ -1662,6 +1686,9 @@ class ContentIsland(models.Model):
         related_name='content_islands',
         db_index=True
     )
+
+    region = models.ForeignKey(ContentIslandRegion, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='islands')
 
     # Stable identity - the slug is never re-slugged once assigned.
     slug = models.SlugField(max_length=80)
@@ -1878,3 +1905,32 @@ from .website_models import (  # noqa: E402,F401
     WebsiteTemplateRevision,
 )
 from .dispatch_models import ContentFactoryDispatchOutbox  # noqa: E402,F401
+
+
+class AuthorPhoto(models.Model):
+    """One stored author photo and the SHA-256 of its exact bytes.
+
+    Author profiles keep the photo's URL; this record lets article review prove
+    the image on the page is the photo the founder saved (6 Nov 2026).
+    """
+
+    SOURCE_CHOICES = [("upload", "Uploaded"), ("copied_link", "Copied from a link"), ("legacy", "Saved before records")]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(Organization, on_delete=models.CASCADE, related_name="author_photos")
+    company_id = models.CharField(max_length=64, blank=True, default="")
+    url = models.URLField(max_length=2048, unique=True)
+    storage_path = models.CharField(max_length=1024)
+    sha256 = models.CharField(max_length=64)
+    content_type = models.CharField(max_length=64, blank=True, default="")
+    width = models.PositiveIntegerField(null=True, blank=True)
+    height = models.PositiveIntegerField(null=True, blank=True)
+    byte_size = models.PositiveIntegerField(null=True, blank=True)
+    source = models.CharField(max_length=16, choices=SOURCE_CHOICES)
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+                                    related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "content_factory_author_photo"
+        indexes = [models.Index(fields=["organization", "created_at"])]

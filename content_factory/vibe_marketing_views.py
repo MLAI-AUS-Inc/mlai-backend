@@ -2662,7 +2662,7 @@ def _island_graph_for_bootstrap(organization, topic_pillars):
     islands = list(
         ContentIsland.objects.filter(
             organization=organization, status=ContentIslandStatus.VISIBLE
-        ).order_by("-opportunity_score", "slug")
+        ).select_related("region").order_by("-opportunity_score", "slug")
     )
     if not islands:
         return None
@@ -12548,7 +12548,9 @@ def _bootstrap_state_fingerprint(organization, company, config) -> str:
     islands = ContentIsland.objects.filter(organization=organization, origin="manual").aggregate(c=Count("id"), m=Max("updated_at"))
     island_members = {"c": None, "m": None}
     if _content_islands_enabled():
-        islands = ContentIsland.objects.filter(organization=organization).aggregate(c=Count("id"), m=Max("updated_at"))
+        islands = ContentIsland.objects.filter(organization=organization).aggregate(
+            c=Count("id"), m=Max("updated_at"), r=Max("region__updated_at")
+        )
         island_members = ContentIslandKeyword.objects.filter(island__organization=organization).aggregate(
             c=Count("id"), m=Max("created_at")
         )
@@ -12559,7 +12561,7 @@ def _bootstrap_state_fingerprint(organization, company, config) -> str:
         feedback["c"], feedback["m"],
         articles["c"], articles["m"],
         channels["c"], channels["m"],
-        islands["c"], islands["m"],
+        islands["c"], islands["m"], islands.get("r"),
         island_members["c"], island_members["m"],
         baseline_updated,
         # Already-loaded identity fields (no extra query) so company/profile edits —
@@ -16515,8 +16517,12 @@ class VibeMarketingAuthorPhotoPreviewView(APIView):
         uploaded = getattr(request, "FILES", {}).get("photo")
         if uploaded is not None:
             from content_factory.author_photos import upload_photo
+            from content_factory.models import AuthorPhoto
             try:
-                return Response({"photoUrl": upload_photo(uploaded, company_id=company.pk)}, status=200)
+                url = upload_photo(uploaded, company_id=company.pk, organization_id=company.organization_id,
+                                   user=request.user)
+                record = AuthorPhoto.objects.filter(url=url).only("pk").first()
+                return Response({"photoUrl": url, "photoId": str(record.pk) if record else ""}, status=200)
             except AuthorPhotoError as exc:
                 return Response({"detail": str(exc), "code": exc.code}, status=exc.status)
         url = str(request.data.get("url") or "").strip()
@@ -16959,6 +16965,8 @@ class VibeMarketingSettingsView(APIView):
                 normalize_authors(request.data.get("authors", request.data.get("authorsData"))),
                 previous=previous,
                 company_id=company.id,
+                organization_id=company.organization_id,
+                user=request.user,
             )
         except AuthorPhotoError as exc:
             return Response({"detail": str(exc), "code": exc.code, "field": "authors",

@@ -63,6 +63,10 @@ def normalize_author(raw: Any) -> Optional[Dict[str, Any]]:
         "url": _clean(raw.get("url") or raw.get("website")),
         "sameAs": _normalize_same_as(raw.get("sameAs") or raw.get("same_as")),
     }
+    # Set from AuthorPhoto records on save (author_photos.attach_photo_records), never trusted from a client.
+    photo_id, photo_sha = _clean(raw.get("avatarPhotoId")), _clean(raw.get("avatarSha256"))
+    if author["avatarUrl"] and photo_id and re.fullmatch(r"[0-9a-f]{64}", photo_sha):
+        author["avatarPhotoId"], author["avatarSha256"] = photo_id, photo_sha
     if not author["avatarAlt"] and author["avatarUrl"]:
         author["avatarAlt"] = f"{name} profile photo"
     return author
@@ -114,6 +118,8 @@ def author_profile_for_renderer(author: Optional[Dict[str, Any]]) -> Dict[str, A
         "bio": author.get("bio", ""),
         "avatarUrl": author.get("avatarUrl", ""),
         "avatarAlt": author.get("avatarAlt", ""),
+        "avatarPhotoId": author.get("avatarPhotoId", ""),
+        "avatarSha256": author.get("avatarSha256", ""),
         "url": author.get("url", ""),
         "sameAs": author.get("sameAs", []),
     }
