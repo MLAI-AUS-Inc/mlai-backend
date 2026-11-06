@@ -43,6 +43,15 @@ tracking off, a sending-only API key for that domain
 `SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET`). `validate_prod_urls` refuses to start
 production with keys routed but these unset, or with the CRM key reused.
 
+Production values come from GitHub: secrets `SYSTEM_EMAIL_RESEND_API_KEY` and
+`SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET`, and repository variables
+`SYSTEM_EMAIL_RESEND_MESSAGES`, `MLAI_SYSTEM_FROM_EMAIL`, `SYSTEM_EMAIL_REPLY_TO`,
+`SYSTEM_EMAIL_UNSUBSCRIBE_MAILTO`, `SYSTEM_EMAIL_TEST_RECIPIENTS` and
+`SYSTEM_EMAIL_ALERT_SLACK_CHANNEL_ID`. `deploy.sh` copies them to the host on
+each deploy. `SYSTEM_EMAIL_RESEND_MESSAGES` is always copied, so clearing the
+variable and redeploying rolls every message back; the others keep the host's
+value when empty.
+
 Check a template end to end with
 `python manage.py send_system_email_test --message <key> --to <address>`;
 the address must be in `SYSTEM_EMAIL_TEST_RECIPIENTS`.
