@@ -203,6 +203,39 @@ class FounderJourneyAlertTests(FounderJourneyFixture):
         self.assertEqual(waiting.updated_at, stale)
         self.assertEqual(len(calls), 3)
 
+    def test_unpicked_research_automation_topics_are_not_your_turn_but_failures_still_alert(self):
+        stale = self.now - timedelta(hours=73)
+        automated = {"client_request_id": "automation-research:" + "a" * 64}
+        batch = self.make_run(workflow="auto_discovery", status="awaiting_approval", age=timedelta(hours=80),
+                              touched=stale, run_request=automated)
+        failed = self.make_run(workflow="auto_discovery", status="failed", run_request=automated, age=timedelta(hours=90))
+        manual = self.make_run(workflow="auto_discovery", status="awaiting_approval", age=timedelta(hours=79),
+                               touched=stale, run_request={"client_request_id": "discovery-manual-1"})
+
+        _, calls = self.sweep()
+
+        self.assertEqual(self.receipts(batch), {})
+        self.assertEqual(set(self.receipts(failed)), {"run_terminal"})
+        self.assertEqual(set(self.receipts(manual)), {"your_turn_72h"})
+        self.assertEqual(alerts.run_alert_reasons(batch, now=self.now), [])
+        self.assertEqual(len(calls), 2)
+
+    def test_only_the_newest_waiting_run_of_a_workflow_is_the_founders_turn(self):
+        stale = self.now - timedelta(hours=73)
+        first = self.make_run(workflow="auto_discovery", status="awaiting_confirmation", age=timedelta(hours=80), touched=stale)
+        second = self.make_run(workflow="auto_discovery", status="awaiting_confirmation", age=timedelta(hours=79), touched=stale)
+        newest = self.make_run(workflow="auto_discovery", status="awaiting_confirmation", age=timedelta(hours=78), touched=stale)
+        other = self.make_run(workflow="confirmed_topic", status="awaiting_approval", age=timedelta(hours=90), touched=stale)
+
+        _, calls = self.sweep()
+
+        self.assertEqual(self.receipts(first), {})
+        self.assertEqual(self.receipts(second), {})
+        self.assertEqual(set(self.receipts(newest)), {"your_turn_72h"})
+        self.assertEqual(set(self.receipts(other)), {"your_turn_72h"})
+        self.assertTrue(alerts.is_superseded(first))
+        self.assertEqual(len(calls), 2)
+
     def test_company_with_a_delivered_draft_or_younger_than_a_day_gets_no_draft_alert(self):
         self.age_company(hours=5)
         self.sweep()
