@@ -277,9 +277,39 @@ def _start_copy_ready(run, organization, *, key, carry):
     return {"status": "done", "detail": "Your draft is queued.", "receipt": {"runId": child.run_id, "channel": "copy_ready", "charged": False}}
 
 
+def held_article_quality(run) -> bool:
+    """An article whose hosted quality check stopped and is waiting on staff."""
+    quality = mapping(mapping(run.result).get("article_preview_quality"))
+    return bool(quality.get("status") == "blocking_findings" and quality.get("self_heal_exhausted"))
+
+
+def _recheck_article_quality(run):
+    """Run the article's hosted quality check again; a pass unlocks approval for the founder.
+
+    This never waives a finding. It asks Content Factory for a fresh review of
+    the current preview, which also clears a hold that a since-fixed rule set.
+    """
+    from .vibe_marketing_views import _call_content_factory_run_action
+    remote = _call_content_factory_run_action(run_id=run.run_id, action="retry-preview-quality",
+                                              payload={}, workflow=run.workflow)
+    remote = remote if isinstance(remote, dict) else {}
+    if remote.get("error"):
+        return {"status": "refused", "detail": str(remote.get("error"))[:300]}
+    with transaction.atomic():
+        current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        result = dict(mapping(current.result))
+        if isinstance(remote.get("article_preview_quality"), dict):
+            result["article_preview_quality"] = remote["article_preview_quality"]
+        result.pop("approval_blocker", None)
+        ContentFactoryRun.objects.filter(pk=current.pk).update(result=result)
+    return {"status": "queued", "action": "recheck_article_quality"}
+
+
 def _perform(action, run, org, user, *, now, command_key=None):
     unavailable = {"status": "refused", "detail": "Not available yet.", "receipt": None}
-    if action == "retry_now":
+    if action == "retry_now" and held_article_quality(run):
+        receipt = _recheck_article_quality(run)
+    elif action == "retry_now":
         decide, apply = provider("failure_policy_engine", "decide"), provider("failure_policy_engine", "apply")
         if not decide or not apply:
             return unavailable
