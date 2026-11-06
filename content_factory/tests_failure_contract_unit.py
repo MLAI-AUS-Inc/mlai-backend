@@ -558,11 +558,13 @@ class FailureDeliveryChainTests(SimpleTestCase):
         companies.select_related.return_value = companies
         companies.get.return_value = company
         profile = SimpleNamespace(user=runtime.user, companies=companies, role=VibeRaisingProfile.ROLE_FOUNDER)
+        company.profile = profile
         real_config = views._get_config
         with runtime.boundaries(), \
                 patch.object(Atomic, "__enter__", return_value=None), \
                 patch.object(Atomic, "__exit__", return_value=False), \
                 patch.object(views, "get_founder_company_context", founder_services.get_founder_company_context), \
+                patch.object(founder_services, "user_may_use_organization", return_value=True), \
                 patch.object(views, "_get_config", real_config), \
                 patch.object(VibeRaisingProfile.objects, "get_or_create", return_value=(profile, False)), \
                 patch.object(OrganizationContentConfig.objects, "get_or_create", return_value=(runtime.config, False)), \
