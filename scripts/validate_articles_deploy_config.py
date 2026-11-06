@@ -49,6 +49,12 @@ FLAG_KEYS = (
     "ARTICLES_DRAFT_TOOLS_ENABLED",
     "ARTICLES_LIVE_URL_VERIFICATION_ENABLED",
     "MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED",
+    # The WHOLE existing staff console (every staff_console action, including
+    # retry_now, release_or_refund, resolve_and_notify and verify_safety_claims,
+    # and the staff console routes), plus the acknowledgement due times of
+    # existing founder journey alerts (founder_journey_alerts._ack_due_applies).
+    # Empty keeps the host value; only an explicit operator true/false installs.
+    "MY_STARTUP_STAFF_CONSOLE_ENABLED",
 )
 # 0 means "no cap", "off" or, for the queue slots, "no ETA".
 COUNT_KEYS = (
