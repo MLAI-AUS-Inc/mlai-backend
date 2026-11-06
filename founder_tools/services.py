@@ -715,6 +715,10 @@ def _normalize_organization_kind(value) -> str:
 @transaction.atomic
 def ensure_company_organization(company: VibeRaisingCompany) -> Organization | None:
     if company.organization_id:
+        # Historical staff-created duplicates must not bypass the same policy
+        # through an implicit name-based save or another legacy caller.
+        if not user_may_use_organization(company.profile.user, company.organization):
+            raise CompanyDomainClaimedError(company.organization)
         return company.organization
     normalized_domain = normalize_company_domain(company.domain)
     if not normalized_domain:

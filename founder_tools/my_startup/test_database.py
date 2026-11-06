@@ -125,6 +125,11 @@ class StartupDatabaseTests(TestCase):
         self.assertEqual(self.client.get(PREFIX + "vibe-marketing/bootstrap/", query).status_code, 404)
         self.assertEqual(self.client.post(PREFIX + "founder-tools/companies/",
             {"companyId": str(duplicate.pk), "name": "Changed"}, format="json").status_code, 404)
+        with patch("founder_tools.views.queue_domain_claim_alert"):
+            response = self.client.post(PREFIX + "founder-tools/companies/",
+                {"name": "Historical duplicate", "shortDescription": "Must not overwrite"}, format="json")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "company_domain_claimed")
         self.foreign.refresh_from_db()
         self.assertEqual(self.foreign.name, "Other")
 
