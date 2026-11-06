@@ -163,7 +163,7 @@ def blast_summaries(blasts):
     return [wire.blast_summary(blast, stats.get(blast.pk)) for blast in blasts]
 
 
-BLAST_RELATIONS = ("event", "segment", "created_by", "whatsapp_template", "mailbox", "stream")
+BLAST_RELATIONS = ("event", "segment", "created_by", "whatsapp_template", "mailbox", "stream", 'paused_by')
 
 
 def blast_detail(blast_id):
@@ -582,6 +582,30 @@ class BlastAudienceView(CrmView):
         return Response(blast_audience(blast))
 
 
+class BlastPlanView(CrmView):
+    def post(self, request, blast_id):
+        from crm.deliverability.planner import plan_preview
+        from crm.deliverability.streams import assign_stream
+        blast = get_object_or_404(Blast.objects.select_related(*BLAST_RELATIONS), pk=blast_id)
+        assign_stream(blast, actor=request.user, mailbox=blast.mailbox)
+        return Response(plan_preview(blast, timezone.now()))
+
+
+class BlastPauseView(CrmView):
+    resume = False
+
+    def post(self, request, blast_id):
+        from crm.deliverability.waves import pause_blast
+        get_object_or_404(Blast, pk=blast_id)
+        data = validated(wire.BlastPauseInput, request)
+        pause_blast(blast_id, actor=request.user, now=timezone.now(), resume=self.resume, reason=data.get('reason', ''))
+        return Response(blast_detail(blast_id))
+
+
+class BlastResumeView(BlastPauseView):
+    resume = True
+
+
 class BlastTestView(CrmView):
     def post(self, request, blast_id):
         data = validated(wire.BlastTestInput, request)
@@ -598,6 +622,7 @@ class BlastSendView(CrmView):
             actor=request.user,
             definition_hash_confirm=data.get("definition_hash"),
             recipient_fingerprint_confirm=data.get("recipient_fingerprint"),
+            preflight_hash=data.get('preflight_hash'),
         )
         return Response(blast_detail(blast.pk), status=202)
 

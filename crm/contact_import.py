@@ -20,6 +20,7 @@ import csv
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Iterable, Iterator, Optional
 
@@ -326,7 +327,7 @@ def apply_import(
     try:
         for chunk in _chunks(parsed.rows, CHUNK_SIZE):
             with transaction.atomic():
-                counts.update(_apply_chunk(chunk, consent, default_source, extra_tags, now))
+                counts.update(_apply_chunk(chunk, consent, default_source, extra_tags, now, source_import=record.pk))
     except Exception:
         record.status = ContactImport.Status.FAILED
         record.counts = dict(counts)
@@ -422,10 +423,10 @@ def apply_upload_chunk(
         parsed = parse_rows(rows, record.column_plan, first_row_number=start_row + FIRST_DATA_ROW)
         if record.dry_run:
             with transaction.atomic():
-                applied = _apply_chunk(parsed.rows, record.consent, record.consent_source, record.tags, now)
+                applied = _apply_chunk(parsed.rows, record.consent, record.consent_source, record.tags, now, source_import=record.pk)
                 transaction.set_rollback(True)
         else:
-            applied = _apply_chunk(parsed.rows, record.consent, record.consent_source, record.tags, now)
+            applied = _apply_chunk(parsed.rows, record.consent, record.consent_source, record.tags, now, source_import=record.pk)
         counts = Counter(record.counts)
         counts.update(parsed.counts)
         counts.update(applied)
@@ -516,9 +517,17 @@ def _import_options(file_name: str, consent: str, consent_source: str, tags: Ite
     return default_source, extra_tags
 
 
-def _apply_chunk(rows: list, consent: str, default_source: str, extra_tags: list, now: datetime) -> Counter:
+def _apply_chunk(rows: list, consent: str, default_source: str, extra_tags: list, now: datetime, *, source_import=None) -> Counter:
     counts: Counter = Counter()
+    from .email_aliases import canonical_emails
+    aliases = canonical_emails(row.email for row in rows)
+    rows = [replace(row, email=aliases.get(row.email, row.email)) for row in rows]
     emails = [row.email for row in rows]
+    from .deliverability import policy
+    lifecycle = policy.value('CRM_LIFECYCLE_ENABLED')
+    if lifecycle:
+        from .deliverability.import_hygiene import report
+        counts.update(report(emails, now=now))
     existed = set(Contact.objects.filter(email__in=emails).values_list("email", flat=True))
     banned = set(
         AccountBan.objects.annotate(email_key=Lower("email"))
@@ -558,6 +567,9 @@ def _apply_chunk(rows: list, consent: str, default_source: str, extra_tags: list
             counts["suppressed"] += 1
             continue
         dirty = False
+        if lifecycle and is_new and source_import and isinstance(contact.attributes, dict):
+            contact.attributes['source_import'] = str(source_import)
+            dirty = True
         for name, value in row.profile.items():
             if name != "phone" and value and not getattr(contact, name):
                 setattr(contact, name, value)

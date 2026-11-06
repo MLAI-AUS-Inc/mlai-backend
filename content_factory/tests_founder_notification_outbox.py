@@ -28,7 +28,8 @@ from .website_models import WebsiteConnection
 KEY = "01" * 32  # Synthetic local signing fixture, never a deployed key.
 DEVICE = native_crypto.public_key(native_crypto.signing_key("02" * 32))
 DELIVERY = {"ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY": KEY, "COMMUNITY_CHAT_RELAY_URL": "wss://chat.mlai.au",
-            "RESEND_API_KEY": "synthetic", "RESEND_FROM_EMAIL": "Roo <notifications@example.test>",
+            "RESEND_API_KEY": "synthetic", "RESEND_FROM_EMAIL": "Roo <legacy@example.test>",
+            "MLAI_SYSTEM_FROM_EMAIL": "MLAI <notifications@example.test>",
             "COMMUNITY_CHAT_FRONTEND_URL": "https://chat.staging.example/"}
 FLAGS = {**ALL_P1_FLAGS_ON, **DELIVERY}
 FLAG_OFF = {**FLAGS, "ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED": False}

@@ -1,11 +1,61 @@
 # listmonk email delivery
 
+## External monitoring setup (Phase 5, disabled by default)
+
+Source configuration is prepared; no account, DNS, host environment, deployment
+or real inbox has been changed by implementation. Review the staging results
+before enabling `CRM_MONITORS_ENABLED`, then separately authorize enrolled-seed
+delivery and owner emails. These are independent flags, all false by default.
+
+- Postmaster Tools v2 uses user OAuth with
+  `https://www.googleapis.com/auth/postmaster.traffic.readonly`, not a service
+  account. Store the client ID, secret and refresh token in the dedicated
+  `POSTMASTER_OAUTH_*` secrets. Verify ownership of the exact news/notify domain
+  and mlai.au. Sparse daily data stays unknown. Root-domain spam can alert but
+  never proves compliance for a sending subdomain.
+- `RESEND_READ_API_KEY` is a separate credential used only by GET requests for
+  domain, webhook and suppression inspection. Resend documents full-access and
+  sending-only keys; it does not document a read-only key permission. Review its
+  actual scope with an owner. The client never falls back to the sending key.
+  `CRM_NOTIFY_API_KEY` is a separate, domain-restricted notify sending key.
+- `SPAMHAUS_DQS_KEY` is a 26-character DQS subscription key. Daily positive and
+  negative resolver probes must both work before NXDOMAIN means clean. SURBL
+  and URIBL are opt-in and require suitable usage terms; URIBL also requires an
+  explicit permitted recursive resolver. Refused/error answers remain unknown.
+- Prefer `WEB_RISK_API_KEY` for commercial URL checks. Safe Browsing v4 requires
+  explicit `CRM_SAFE_BROWSING_NONCOMMERCIAL=true`; its noncommercial restriction
+  is not inferred from MLAI's organisation type. URL checks use full URLs, retain
+  only hashes and bounded outcomes, and never cache a partial result as clean.
+- Enrol the seven personal seed mailboxes and configure IMAP app credentials
+  before enabling the heartbeat. News and notify each send their own probe:
+  seven enrolled seeds across two streams means up to fourteen test messages
+  per day. Only the fixed seed snapshot is eligible. The daily request is
+  idempotent; an uncertain submission is not blindly resent. IMAP checks are
+  read-only. Notify checks authentication without marketing unsubscribe rules.
+- Set `CRM_DELIVERABILITY_OWNERS` and the Slack channel, verify notify DNS and
+  the dedicated key, then enable email alerts separately. A red alert uses the
+  same frozen body/key for retries for less than 24 hours. Credential rotation
+  or an expired uncertainty window requires owner review instead of a new send.
+
+Validate DNS, listmonk v6.2 SMTP/template settings, tracking disabled, the seven
+webhook event types, seed authentication and an actual staging message before
+production rollout. The owner Health tab and aggregate-only digest show check
+coverage; unknown observations are not release evidence. The existing migration
+approval covers only disposable synthetic databases, not these environments.
+
+Provider references: [Postmaster v2](https://developers.google.com/workspace/gmail/postmaster/reference/rest/v2/domains.domainStats/query),
+[Resend key permissions](https://resend.com/changelog/new-api-key-permissions),
+[Resend idempotency](https://resend.com/docs/dashboard/emails/idempotency-keys),
+[Spamhaus DQS](https://docs.spamhaus.com/datasets/docs/source/70-access-methods/data-query-service/040-dqs-queries.html),
+[Safe Browsing](https://developers.google.com/safe-browsing),
+[Web Risk](https://docs.cloud.google.com/web-risk/docs/reference/rest/v1/uris/search).
+
 This Compose project runs [listmonk](https://listmonk.app) v6.2 and its own
 PostgreSQL database, separate from `mlai-backend`. It is Phase 0 of the
 contacts and blasts plan (`mlai-chat/docs/mlai/CONTACTS_EVENTS_EMAIL_PLAN_2026-10-23.md`).
 
 listmonk only **delivers email blasts**:
-- `mlai-backend` (the `crm` app) is the source of truth for contacts, consent and blasts. It creates one listmonk list and campaign per email blast, and reads opens, clicks, unsubscribes and bounces back every few minutes.
+- `mlai-backend` (the `crm` app) is the source of truth for contacts, consent and blasts. Wave-enabled sending creates one list/campaign per reserved batch; legacy sending keeps one per blast. It reads opens, clicks, unsubscribes and bounces back every few minutes.
 - SMS and WhatsApp blasts don't touch listmonk. `mlai-backend` sends them through Twilio (see [Twilio](#twilio-sms-and-whatsapp)).
 
 Don't add, edit or delete subscribers, lists or campaigns in the listmonk UI. `mlai-backend` manages them, and unsubscribes made in listmonk are copied back to the contact in MLAI.
@@ -236,8 +286,8 @@ Before any production enablement, verify the source plan's Phase 0 checklist:
 3. Check the public root URL, unsubscribe headers and signed one-click
    headers using real seed headers. Enable `settings:get` on the backend role
    for the later config monitor. The template must identify MLAI, give a
-   contact address, include `{{ UnsubscribeURL }}`, and eventually print the
-   per-recipient consent reason.
+   contact address, include `{{ UnsubscribeURL }}`, and print the per-recipient
+   `{{ .Subscriber.Attribs.consent_reason }}` written by wave loading.
 4. Subscribe the signed callback to all seven documented delivery events for
    stream and system domains. Verify real signed simulator feedback. Storing
    an event is not proof that a message reached the inbox.
@@ -254,3 +304,75 @@ guardian pauses campaign blasts only on sample-qualified rates or repeated
 policy rejections; marketing incidents never act on the notify stream.
 Owner acknowledgement is required for red recovery. Provider pause failures
 remain durably blocked and retry on the next guardian pass.
+
+## Campaign waves: Phase 2 rollout gate
+
+`CRM_WAVES_ENABLED` stays false until schema and acceptance gates are reviewed.
+The backend owns `crm-blast-<uuid>-w<index>` resources and separate
+`crm-blast-<uuid>-test` resources. Never edit their lists or restart a completed
+campaign manually. Unknown starts are reconciled by exact name and retained ID.
+When staff cancel a paused wave, it remains paused in listmonk and is locally
+cancelled. listmonk only allows a running campaign to transition to cancelled;
+the backend never resumes a paused campaign just to satisfy that restriction.
+
+Migration 0003 adopts live campaign IDs into wave zero without calling this
+service or changing consent, status or recipients. Existing running campaigns
+can finish through their original resources. This is not permission to restart
+listmonk, migrate production, extend the finite pilot, or enable a sender.
+
+The backend's stream/day/hour allowances are the primary pacing control.
+Keep listmonk's account rate and sliding window as provider-aligned backstops;
+do not raise them from a theoretical ramp maximum without verifying the
+account's current rate and quota. The generated campaign supplies fixed MLAI
+From identity, Reply-To, readable `altbody`, X-MLAI-Blast, X-MLAI-Wave and
+Feedback-ID. Actual DKIM coverage of those headers and one-click unsubscribe
+still needs real seed-header acceptance before production rollout.
+
+## Preflight resources and Phase 3 gate
+
+Preflight owns empty `crm-blast-<uuid>-preflight-<content-hash>` resources and
+seed checks own `crm-seed-<uuid>` resources. They are separate from campaign
+waves and manual tests. Never start a preflight or seed campaign through the
+UI: only listmonk's test endpoint delivers the dedicated seed snapshot. The
+backend commits a submission marker before the test call, then polls after an
+uncertain response rather than risking a second submission.
+
+Enable `settings:get` for the backend role. Read-only checks require the exact
+news SMTP `from_addresses` route, verified STARTTLS/TLS, unsubscribe headers,
+the public lists URL, bounded account message rate and permanent-bounce/
+complaint blocklisting. Temporary bounces are managed by the backend streak
+policy and must not be globally blocklisted after a single occurrence. The
+template must include MLAI, its contact address, `{{ UnsubscribeURL }}` and
+the consent-reason attribute. Provider settings responses and masked SMTP
+credentials are never retained in preflight results.
+
+The [internal content checker](../spamcheck/README.md) is prepared separately.
+Keep `CRM_PREFLIGHT_ENABLED=false` until the selected scanner image has passed
+configuration/scoring fixtures and an authorized staging send proves actual
+Gmail/Outlook/Yahoo placement and signed one-click headers. Neither these files
+nor the disposable test approval authorize starting this stack, changing live
+listmonk settings, real inbox access or sending a seed message.
+
+The staff composer now receives only the stream-selected identity, plan and
+plain delivery status. There is no per-campaign From picker or speed control.
+The owner Sending view retains configuration and diagnostics. A staff pause
+may be resumed only by its actor; a system pause still requires an owner's
+incident acknowledgement. The API's current-consent preset also checks the
+source permission before handing off to listmonk, without changing subscriber
+status or consent itself.
+
+## Transactional cutover gate (Phase 7)
+
+The system sender, notify-key preference and independent alert-only monitor
+are implemented in source; no provider, DNS or environment was changed.
+Follow [the system-email runbook](../../docs/crm.md#system-email-and-sign-in-monitoring-phase-7)
+before deployment. Explicitly set `MLAI_SYSTEM_FROM_EMAIL` and
+`CUSTOMERIO_FROM_EMAIL` only after both providers verify notify DKIM. Disable
+Resend domain tracking; Customer.io API calls disable tracking per message.
+Do not rotate a frozen pending outbox payload to a new From address.
+`CRM_TRANSACTIONAL_MONITOR_ENABLED` is independent of campaign switches,
+while `CRM_CUSTOMERIO_NOTIFY_DKIM_VERIFIED` remains false until an operator
+has current provider evidence. Customer.io inbox delivery remains unknown
+without an authenticated feedback integration. DMARC enforcement is held
+until aggregate reports identify all legitimate senders and a separately
+authorized staged DNS change has been reviewed.

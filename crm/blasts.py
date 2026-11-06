@@ -30,7 +30,7 @@ from typing import Any, Iterable, Optional
 from django.conf import settings
 from django.core.cache import cache
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Exists, OuterRef, Q
+from django.db.models import Case, Count, Exists, IntegerField, OuterRef, Q, Value, When
 from django.utils import timezone
 
 from community_chat.admin_access import require_mlai_admin
@@ -139,7 +139,9 @@ def audience_body(*, people: int, reachable: dict, excluded: dict, sms: dict, wh
 
     def excluded_for(channel):
         counts = excluded.get(channel) or {}
-        return {reason: int(counts.get(reason) or 0) for reason in EXCLUDED[channel]}
+        extra = ('no_mx', 'domain_unverified', 'disposable', 'likely_typo', 'role_address', 'repeated_soft_bounce', 'dormant')
+        reasons = (*EXCLUDED[channel], *(key for key in extra if channel == Channel.EMAIL and key in counts))
+        return {reason: int(counts.get(reason) or 0) for reason in reasons}
 
     return {
         "people": people,
@@ -310,6 +312,11 @@ def resolve_audience(blast, *, now) -> Audience:
     querysets[Channel.EMAIL], excluded[Channel.EMAIL] = evaluate(
         definition, blast.purpose, blast.event, now=now
     )
+    if ((blast.stats or {}).get('audience_preset') or {}).get('kind') == 'opted_in':
+        from .community_optins import opted_in_q
+        before = querysets[Channel.EMAIL]
+        querysets[Channel.EMAIL] = before.filter(opted_in_q())
+        excluded[Channel.EMAIL]['no_consent'] += before.count() - querysets[Channel.EMAIL].count()
     if not twilio_allowed(blast):
         return Audience(querysets, excluded, definition)
 
@@ -398,6 +405,10 @@ def channel_limits(blast, counts: dict, *, now) -> list:
     limits = []
     for channel in blast.channels or []:
         if channel == Channel.EMAIL:
+            from .deliverability import policy
+            if policy.value('CRM_WAVES_ENABLED') and blast.stream_id and not (blast.stats or {}).get('warmup'):
+                # A campaign may span days. Stream reservations enforce the daily cap.
+                continue
             if blast.mailbox_id is None:
                 continue
             remaining = mailbox_remaining_today(blast.mailbox, now)
@@ -446,7 +457,25 @@ def blast_audience(blast, *, now=None) -> dict:
 
     now = now or timezone.now()
     check_channel_rules(blast)
-    return audience_summary(blast, resolve_audience(blast, now=now), now=now)
+    audience, prepared = planned_audience(blast, now)
+    summary = audience_summary(blast, audience, now=now)
+    if prepared:
+        summary['plan'] = prepared.summary
+    return summary
+
+
+def planned_audience(blast, now, *, cached_only=False):
+    """Apply hygiene to the existing resolver while retaining all other channels."""
+    from .deliverability import planner, policy
+    audience = resolve_audience(blast, now=now)
+    if not (policy.value('CRM_WAVES_ENABLED') and blast.stream_id
+            and Channel.EMAIL in (blast.channels or []) and not (blast.stats or {}).get('warmup')):
+        return audience, None
+    prepared = planner.prepare(blast, now, audience=audience, cached_only=cached_only)
+    audience.querysets[Channel.EMAIL] = audience.querysets[Channel.EMAIL].filter(
+        pk__in=[row.contact.pk for row in prepared.recipients])
+    audience.excluded[Channel.EMAIL] = prepared.excluded
+    return audience, prepared
 
 
 # Queueing
@@ -489,6 +518,7 @@ def queue_blast(
     blast_id, *, confirm: dict, idempotency_key: str, actor, now=None,
     definition_hash_confirm=None,
     recipient_fingerprint_confirm=None,
+    preflight_hash=None,
 ) -> Blast:
     """Check, recount and snapshot a draft, then queue it. The same key returns the same blast.
 
@@ -506,6 +536,33 @@ def queue_blast(
         if str(replay.pk) != str(blast_id):
             raise BlastError("idempotency_key_reused", 409)
         return Blast.objects.get(pk=replay.pk)
+    # DNS is bounded and cached before entering the queue transaction. Recount
+    # from current contact data under the lock; never save an old preview.
+    preview = Blast.objects.select_related('stream', 'mailbox', 'event', 'segment').get(pk=blast_id)
+    from .deliverability import reconfirmation
+    if reconfirmation.is_reconfirmation(preview) and not reconfirmation.is_owner(actor):
+        raise BlastError('owner_required', 403)
+    if reconfirmation.is_reconfirmation(preview):
+        block = reconfirmation.admission(preview)
+        if block:
+            raise BlastError(block, 409)
+    from .deliverability import policy
+    preflight_template = None
+    if (policy.value('CRM_PREFLIGHT_ENABLED') and Channel.EMAIL in (preview.channels or [])
+            and not (preview.stats or {}).get('warmup')):
+        from .deliverability.streams import assign_stream, protected_domain
+        from .deliverability.preflight import service as preflight
+        if preview.mailbox_id and protected_domain(preview.mailbox.domain):
+            raise BlastError('protected_domain', 409)
+        assign_stream(preview, actor=actor, mailbox=preview.mailbox)
+        check_channels_available(preview.channels or [], status=403)
+        check_ready(preview)
+        preflight_template = preflight.queue_context(preview, now=now)
+    if (policy.value('CRM_WAVES_ENABLED') and Channel.EMAIL in (preview.channels or [])
+            and not (preview.stats or {}).get('warmup')):
+        from .deliverability.streams import assign_stream
+        assign_stream(preview, actor=actor, mailbox=preview.mailbox)
+        planned_audience(preview, now)
     try:
         with transaction.atomic():
             blast = (
@@ -525,7 +582,9 @@ def queue_blast(
                     assign_stream(blast, actor=actor, mailbox=blast.mailbox)
             check_channels_available(blast.channels or [], status=403)
             check_ready(blast)
-            audience = resolve_audience(blast, now=now)
+            if preflight_template is not None:
+                preflight.require(blast, preflight_hash, now=now, template=preflight_template)
+            audience, prepared = planned_audience(blast, now, cached_only=True)
             resolved_hash = definition_hash(audience.definition) if audience.definition is not None else None
             if (
                 (audience.definition or {}).get("version") == 2
@@ -542,6 +601,8 @@ def queue_blast(
                 for channel in blast.channels
             }
             counts = {channel: len(rows) for channel, rows in recipients.items()}
+            if counts.get(Channel.EMAIL, 0) > policy.value('CRM_MAX_BLAST_RECIPIENTS'):
+                raise BlastError('audience_too_large', 409, maximum=policy.value('CRM_MAX_BLAST_RECIPIENTS'))
             membership_hash = recipient_fingerprint({
                 channel: sorted(row[0] for row in rows) for channel, rows in recipients.items()
             })
@@ -558,7 +619,12 @@ def queue_blast(
             limits = channel_limits(blast, counts, now=now)
             if limits:
                 raise BlastError("daily_limit", 409, limits=limits)
-            BlastDelivery.objects.bulk_create(_snapshot(blast, recipients), batch_size=1000)
+            if prepared:
+                from .deliverability.planner import plan_snapshot
+                plan_snapshot(blast, now, prepared=prepared)
+            BlastDelivery.objects.bulk_create(_snapshot(blast, {
+                channel: rows for channel, rows in recipients.items() if channel != Channel.EMAIL or not prepared
+            }), batch_size=1000)
             blast.segment_definition = audience.definition or {}
             blast.status = Blast.Status.QUEUED
             blast.queued_at = now
@@ -575,6 +641,7 @@ def queue_blast(
                     "recipient_count",
                     "idempotency_key",
                     "last_error",
+                    "plan",
                     "updated_at",
                 ]
             )
@@ -612,6 +679,12 @@ def refresh_status(blast_id, *, now=None) -> str:
     states = {}
     for channel in blast.channels or []:
         if channel == Channel.EMAIL:
+            from .deliverability.waves import ACTIVE, managed
+            if managed(blast):
+                active = blast.waves.filter(status__in=ACTIVE).exists()
+                cancelled = blast.waves.filter(status='cancelled', started_at__isnull=False).exists()
+                states[channel] = IN_FLIGHT if active or counts[channel].get(BlastDelivery.Status.QUEUED, 0) else channel_state(counts[channel], provider_failed=cancelled)
+                continue
             started = blast_email.email_started(blast)
             blocked = not started and bool(blast_email.email_block(blast))
             provider_failed = (
@@ -647,12 +720,17 @@ def fail_unauthorised(blast_id, *, now) -> str:
     """
 
     with transaction.atomic():
+        from .models import SendingStream
+        stream_id = Blast.objects.values_list('stream_id', flat=True).get(pk=blast_id)
+        if stream_id:
+            SendingStream.objects.select_for_update().get(pk=stream_id)
         blast = Blast.objects.select_for_update().get(pk=blast_id)
         if blast.status not in LIVE or is_mlai_admin_user(blast.created_by):
             return blast.status
         previous = blast.status
         if Channel.EMAIL in (blast.channels or []):
-            values = blast_email.cancel_campaign(blast, now=now)
+            from .deliverability.waves import cancel_locked, managed
+            values = cancel_locked(blast, now) if managed(blast) else blast_email.cancel_campaign(blast, now=now)
             if values:
                 blast.stats = blast_email.with_email_stats(blast.stats, **values)
         BlastDelivery.objects.filter(blast=blast, status=BlastDelivery.Status.QUEUED).update(
@@ -687,6 +765,12 @@ def dispatch_blast(blast_id, *, now=None, twilio_budget: Optional[int] = None) -
             # listmonk answered again, so an earlier outage note no longer applies.
             Blast.objects.filter(pk=blast.pk, last_error__in=_LISTMONK_OUTAGES).update(last_error="")
         except ListmonkError as exc:
+            if blast.stream_id:
+                from crm.deliverability import policy as delivery_policy
+                if delivery_policy.value('CRM_MONITORS_ENABLED') and exc.status_code == 429:
+                    CrmAuditEvent.objects.create(action='sync', target_type='deliverability_dependency',
+                        target_id=str(blast.stream_id), detail={'operation': 'rate_limit', 'status': 429,
+                            'blast_id': str(blast.pk), 'epoch': now.timestamp()})
             if exc.credentials_rejected:
                 raise
             if exc.transient:
@@ -722,10 +806,19 @@ def claim_blasts(*, now, limit: int = MAX_BLASTS_PER_TICK) -> list:
     """Live blasts, oldest first, skipping any another dispatcher holds; queued ones become sending."""
 
     with transaction.atomic():
+        from datetime import timedelta
+        from .deliverability import policy
+        query = Blast.objects.filter(status__in=LIVE)
+        ordering = ('queued_at', 'pk')
+        if policy.value('CRM_WAVES_ENABLED'):
+            query = query.annotate(sending_priority=Case(
+                When(purpose='event_update', event__start_at__gte=now,
+                    event__start_at__lte=now + timedelta(hours=policy.value('CRM_TIME_CRITICAL_HOURS')), then=Value(0)),
+                When(purpose='event_update', then=Value(1)), default=Value(2), output_field=IntegerField()))
+            ordering = ('pause_state', 'sending_priority', 'queued_at', 'pk')
         rows = list(
-            Blast.objects.select_for_update(skip_locked=True)
-            .filter(status__in=LIVE)
-            .order_by("queued_at", "pk")
+            query.select_for_update(skip_locked=True, of=('self',))
+            .order_by(*ordering)
             .values_list("pk", "status")[:limit]
         )
         queued = [pk for pk, status in rows if status == Blast.Status.QUEUED]
@@ -798,6 +891,10 @@ def cancel_blast(blast_id, *, actor, now=None) -> Blast:
     require_mlai_admin(actor)
     now = now or timezone.now()
     with transaction.atomic():
+        from .models import SendingStream
+        stream_id = Blast.objects.values_list('stream_id', flat=True).get(pk=blast_id)
+        if stream_id:
+            SendingStream.objects.select_for_update().get(pk=stream_id)
         blast = Blast.objects.select_for_update().get(pk=blast_id)
         if blast.status == Blast.Status.CANCELLED:
             return blast
@@ -805,13 +902,15 @@ def cancel_blast(blast_id, *, actor, now=None) -> Blast:
             raise BlastError("blast_not_cancellable", 409, blast_status=blast.status)
         previous = blast.status
         if previous in LIVE and Channel.EMAIL in (blast.channels or []):
-            values = blast_email.cancel_campaign(blast, now=now)
+            from .deliverability.waves import cancel_locked, managed
+            values = cancel_locked(blast, now) if managed(blast) else blast_email.cancel_campaign(blast, now=now)
             if values:
                 blast.stats = blast_email.with_email_stats(blast.stats, **values)
             if values.get("cancel_pending"):
                 blast.last_error = "listmonk_cancel_pending"
         # Twilio sends stop between two messages: each claim skips a cancelled blast.
         blast.status = Blast.Status.CANCELLED
+        blast.stats = {**(blast.stats or {}), 'stopped_by': actor.full_name or 'staff', 'stopped_at': now.isoformat()}
         blast.save(update_fields=["status", "stats", "last_error", "updated_at"])
         CrmAuditEvent.objects.create(
             actor=actor,

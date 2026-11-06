@@ -1,0 +1,19 @@
+# Exact public shortening domains; redirects are always revalidated and pinned.
+bit.ly
+bitly.com
+tinyurl.com
+t.co
+goo.gl
+ow.ly
+buff.ly
+rebrand.ly
+cutt.ly
+is.gd
+tiny.cc
+shorturl.at
+rb.gy
+lnkd.in
+short.io
+bl.ink
+s.id
+v.gd

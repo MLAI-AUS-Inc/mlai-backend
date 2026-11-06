@@ -283,6 +283,7 @@ class RecoveryTests(SimpleTestCase):
         stream = SimpleNamespace(pk="stream", domain="news.mlai.au", transactional=False, mailbox=mailbox,
                                  ramp_stage=5, incidents=Mock(), save=Mock())
         stream.incidents.filter.return_value.exists.return_value = False
+        stream.incidents.filter.return_value.exclude.return_value.exists.return_value = False
         incident = SimpleNamespace(pk="incident", state="open", resolution="", save=Mock())
         targets = [SimpleNamespace(pk=str(index), listmonk_campaign_id=index, mailbox_id=mailbox.pk,
             mailbox=mailbox, stats={}, pause_state="system", save=Mock()) for index in (42, 43)]
