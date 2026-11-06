@@ -1,6 +1,5 @@
-"""Plan step 8: staff verify exact current safety sentences; founders hear only after a real pass."""
+"""Plan step 8: staff verify exact current safety sentences; founders hear only after the acknowledged recheck passes."""
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -10,25 +9,34 @@ from . import staff_safety_verification as verification
 
 URL, GEN, FP = "https://preview.test/a", 3, "fp-1"
 SAFETY_HASH = "a" * 64
+LIVE = {"previewUrl": URL, "resumeGeneration": GEN}
+BLOCKER = {"code": "article_preview_safety_review_required"}
 HELD = {"status": "blocking_findings", "self_heal_exhausted": True, "escalation": "safety_review",
-        "preview_url": URL, "resume_generation": GEN, "self_heal_fingerprint": FP}
+        "preview_url": URL, "resume_generation": GEN, "self_heal_fingerprint": FP, "task_id": "task-old",
+        "review_token": "task-old"}
 CLAIMS = [{"sentence_sha256": "b" * 64, "source_url": "https://www.healthdirect.gov.au/x",
            "note": "Healthdirect lists 000 for immediate danger."}]
 REQUEST = {"held": {"preview_url": URL, "resume_generation": GEN, "self_heal_fingerprint": FP, "safety_hash": SAFETY_HASH},
            "claims": CLAIMS, "actor": {"user_id": "999", "organization_id": "1"}}
-RECHECK = {"status": "quality_review_queued",
-           "article_preview_quality": {"status": "queued", "preview_url": URL, "resume_generation": GEN}}
-NOW = datetime(2026, 11, 6, 13, 0, tzinfo=timezone.utc)
+QUEUED = {"status": "queued", "preview_url": URL, "resume_generation": GEN, "task_id": "task-new", "review_token": "task-new"}
+RECHECK = {"status": "quality_review_queued", "idempotent": False, "article_preview_quality": QUEUED}
 STAFF = SimpleNamespace(pk=17, email="Staff@MLAI.au", is_active=True, is_staff=True)
 ORG = SimpleNamespace(pk=30)
+NOW = __import__("datetime").datetime(2026, 11, 6, 13, 0, tzinfo=__import__("datetime").timezone.utc)
+
+
+def stored(quality=HELD, *, live=LIVE, blocker=BLOCKER, org=30, **extra):
+    result = {"article_preview_quality": quality, "live_preview": live, **extra}
+    if blocker is not None:
+        result["approval_blocker"] = blocker
+    return SimpleNamespace(pk=7, run_id="run-1", workflow="article_generation", organization_id=org,
+                           status="awaiting_approval", result=result)
 
 
 class VerifyRequestTests(SimpleTestCase):
-    def verify(self, data=REQUEST, *, quality=HELD, remote=None, current_quality=None, key="key-1"):
-        run = SimpleNamespace(pk=7, run_id="run-1", workflow="article_generation",
-                              result={"article_preview_quality": quality, "approval_blocker": {"code": "article_preview_safety_review_required"}})
-        current = SimpleNamespace(pk=7, result={"article_preview_quality": current_quality or quality,
-                                                "approval_blocker": {"code": "article_preview_safety_review_required"}})
+    def verify(self, data=REQUEST, *, run=None, current=None, remote=None, key="key-1"):
+        run = run or stored()
+        current = current or stored(run.result["article_preview_quality"])
         manager = Mock()
         manager.select_for_update.return_value.get.return_value = current
         remote = {"status": "recorded", "recheck": RECHECK} if remote is None else remote
@@ -38,18 +46,21 @@ class VerifyRequestTests(SimpleTestCase):
             outcome = verification.verify_safety_claims(run, ORG, STAFF, data, now=NOW, command_key=key)
         return outcome, call, manager
 
-    def test_a_matching_request_records_and_queues_the_normal_recheck(self):
+    def written(self, manager):
+        return manager.filter.return_value.update.call_args.kwargs["result"]
+
+    def test_a_matching_request_arms_the_notice_for_the_acknowledged_recheck(self):
         outcome, call, manager = self.verify()
-        self.assertEqual(outcome["status"], "verified")
-        self.assertTrue(outcome["recheck_queued"])
-        sent = call.call_args.kwargs
-        self.assertEqual(sent["action"], "record-staff-safety-verification")
-        self.assertIs(sent["staff_capability"], verification_capability())
-        written = manager.filter.return_value.update.call_args.kwargs["result"]
+        self.assertEqual((outcome["status"], outcome["recheck_queued"], outcome["notice_armed"]), ("verified", True, True))
+        from .vibe_marketing_views import STAFF_ACTION_CAPABILITY
+        self.assertIs(call.call_args.kwargs["staff_capability"], STAFF_ACTION_CAPABILITY)
+        self.assertEqual(call.call_args.kwargs["action"], "record-staff-safety-verification")
+        written = self.written(manager)
         receipt = written[verification.RECEIPT_KEY]
+        self.assertEqual((receipt["recheck_task_id"], receipt["recheck_review_token"]), ("task-new", "task-new"))
         self.assertEqual((receipt["preview_url"], receipt["resume_generation"], receipt["by_user_id"]), (URL, GEN, 17))
         self.assertIsNone(receipt["notified_at"])
-        self.assertEqual(written["article_preview_quality"]["status"], "queued")
+        self.assertEqual(written["article_preview_quality"], QUEUED)
         self.assertNotIn("approval_blocker", written)
         self.assertEqual(outcome["audit"]["claims"], CLAIMS)
 
@@ -64,7 +75,7 @@ class VerifyRequestTests(SimpleTestCase):
         for quality in ({**HELD, "escalation": "quality_review"}, {**HELD, "self_heal_exhausted": False},
                         {**HELD, "status": "passed"}, {}):
             with self.subTest(quality=quality):
-                outcome, call, _ = self.verify(quality=quality)
+                outcome, call, _ = self.verify(run=stored(quality))
                 self.assertEqual(outcome["status"], "refused")
                 call.assert_not_called()
 
@@ -99,18 +110,39 @@ class VerifyRequestTests(SimpleTestCase):
                 self.assertIn(outcome["refusal"], verification.CF_REFUSALS | {"unknown"})
                 manager.filter.return_value.update.assert_not_called()
 
-    def test_a_newer_quality_state_is_kept_while_the_verification_is_still_recorded(self):
-        newer = {**HELD, "status": "passed", "resume_generation": 4}
-        outcome, _, manager = self.verify(current_quality=newer)
-        written = manager.filter.return_value.update.call_args.kwargs["result"]
-        self.assertEqual(written["article_preview_quality"], newer)
-        self.assertIn(verification.RECEIPT_KEY, written)
-        self.assertFalse(outcome["recheck_queued"])
+    def test_a_state_that_changed_during_the_call_is_observe_and_arms_nothing(self):
+        changes = {
+            "newer quality": stored({**HELD, "status": "passed", "resume_generation": 4}),
+            "same quality, new blocker": stored(HELD, blocker={"code": "article_publish_policy_hold"}),
+            "preview moved on": stored(HELD, live={"previewUrl": "https://preview.test/b", "resumeGeneration": GEN}),
+            "newer generation": stored(HELD, live={"previewUrl": URL, "resumeGeneration": GEN + 1}),
+            "other organization": stored(HELD, org=31),
+        }
+        for label, current in changes.items():
+            with self.subTest(label):
+                before = dict(current.result)
+                outcome, call, manager = self.verify(current=current)
+                call.assert_called_once()
+                self.assertEqual(outcome["status"], "observe")
+                self.assertFalse(outcome["recheck_queued"])
+                # The audit of what Content Factory recorded is still returned for staff history.
+                self.assertEqual(outcome["audit"]["claims"], CLAIMS)
+                manager.filter.return_value.update.assert_not_called()
+                self.assertEqual(current.result, before)
 
-
-def verification_capability():
-    from .vibe_marketing_views import STAFF_ACTION_CAPABILITY
-    return STAFF_ACTION_CAPABILITY
+    def test_no_fresh_recheck_acknowledgement_arms_no_notice(self):
+        for label, recheck in (
+                ("refused", {"status": "refused"}),
+                ("idempotent", {**RECHECK, "idempotent": True}),
+                ("idempotent unknown", {k: v for k, v in RECHECK.items() if k != "idempotent"}),
+                ("already running", {**RECHECK, "article_preview_quality": {**QUEUED, "status": "running"}}),
+                ("no task", {**RECHECK, "article_preview_quality": {**QUEUED, "task_id": ""}}),
+                ("held task", {**RECHECK, "article_preview_quality": {**QUEUED, "task_id": "task-old"}}),
+                ("newer generation", {**RECHECK, "article_preview_quality": {**QUEUED, "resume_generation": GEN + 1}})):
+            with self.subTest(label):
+                outcome, _, manager = self.verify(remote={"status": "recorded", "recheck": recheck})
+                self.assertEqual((outcome["status"], outcome["notice_armed"]), ("verified", False))
+                manager.filter.return_value.update.assert_not_called()
 
 
 class StaffOnlyActionTests(SimpleTestCase):
@@ -130,18 +162,18 @@ class StaffOnlyActionTests(SimpleTestCase):
 
 
 class FounderNotificationTests(SimpleTestCase):
-    RECORDED = NOW.isoformat()
+    PASSED = {"status": "passed", "preview_url": URL, "resume_generation": GEN, "task_id": "task-new", "review_token": "task-new"}
 
     def receipt(self, **extra):
         return {"request_key": "staff-safety:k", "by_user_id": 17, "organization_id": 30, "preview_url": URL,
-                "resume_generation": GEN, "recorded_at": self.RECORDED, "claims": 1, "notified_at": None, **extra}
+                "resume_generation": GEN, "recheck_task_id": "task-new", "recheck_review_token": "task-new",
+                "recorded_at": NOW.isoformat(), "claims": 1, "notified_at": None, **extra}
 
-    def held_run(self, *, quality=None, receipt=None, live=None, status="awaiting_approval"):
-        quality = {"status": "passed", "preview_url": URL, "resume_generation": GEN,
-                   "reviewed_at": (NOW + timedelta(minutes=2)).isoformat()} if quality is None else quality
-        return SimpleNamespace(pk=7, run_id="run-1", organization_id=30, status=status, result={
-            "article_preview_quality": quality, "live_preview": live or {"previewUrl": URL, "resumeGeneration": GEN},
-            verification.RECEIPT_KEY: self.receipt() if receipt is None else receipt})
+    def held_run(self, *, quality=None, receipt=None, live=LIVE, status="awaiting_approval"):
+        run = stored(self.PASSED if quality is None else quality, live=live, blocker=None,
+                     **{verification.RECEIPT_KEY: self.receipt() if receipt is None else receipt})
+        run.status = status
+        return run
 
     def notify(self, run, current=None):
         current = current or run
@@ -158,7 +190,7 @@ class FounderNotificationTests(SimpleTestCase):
             count = verification.notify_after_staff_safety_verification(run)
         return count, send, manager
 
-    def test_the_same_preview_passing_after_the_verification_notifies_once(self):
+    def test_the_acknowledged_recheck_passing_notifies_once(self):
         count, send, manager = self.notify(self.held_run())
         self.assertEqual(count, 2)
         organization, item = send.call_args.args
@@ -171,33 +203,41 @@ class FounderNotificationTests(SimpleTestCase):
         self.assertEqual(count, 0)
         send.assert_not_called()
 
-    def test_no_notice_without_a_current_same_generation_pass(self):
-        later = (NOW + timedelta(minutes=2)).isoformat()
-        cases = {
-            "recheck failed": {"status": "blocking_findings", "preview_url": URL, "resume_generation": GEN, "reviewed_at": later},
-            "still checking": {"status": "queued", "preview_url": URL, "resume_generation": GEN},
-            "stale callback": {"status": "passed", "preview_url": URL, "resume_generation": GEN,
-                               "reviewed_at": (NOW - timedelta(minutes=1)).isoformat()},
-            "no review time": {"status": "passed", "preview_url": URL, "resume_generation": GEN},
-            "other generation": {"status": "passed", "preview_url": URL, "resume_generation": GEN + 1, "reviewed_at": later},
-            "other preview": {"status": "passed", "preview_url": "https://preview.test/b", "resume_generation": GEN, "reviewed_at": later},
-        }
-        for label, quality in cases.items():
+    def test_an_older_overlapping_pass_of_the_same_preview_never_notifies(self):
+        # Same preview and generation, finished after the staff submission, but
+        # it is not the recheck Content Factory acknowledged for the verification.
+        for label, quality in (
+                ("older task, later finish", {**self.PASSED, "task_id": "task-old", "review_token": "task-old",
+                                              "reviewed_at": "2026-11-06T13:05:00+00:00"}),
+                ("same task, other token", {**self.PASSED, "review_token": "task-other"}),
+                ("no task identity", {k: v for k, v in self.PASSED.items() if k not in {"task_id", "review_token"}})):
+            with self.subTest(label):
+                count, send, manager = self.notify(self.held_run(quality=quality))
+                self.assertEqual(count, 0)
+                send.assert_not_called()
+                manager.filter.return_value.update.assert_not_called()
+
+    def test_no_notice_without_the_same_generation_passing(self):
+        for label, quality in (
+                ("recheck failed", {**self.PASSED, "status": "blocking_findings"}),
+                ("still checking", {**self.PASSED, "status": "running"}),
+                ("other generation", {**self.PASSED, "resume_generation": GEN + 1}),
+                ("other preview", {**self.PASSED, "preview_url": "https://preview.test/b"})):
             with self.subTest(label):
                 count, send, _ = self.notify(self.held_run(quality=quality))
                 self.assertEqual(count, 0)
                 send.assert_not_called()
         for label, run in (("preview moved on", self.held_run(live={"previewUrl": "https://preview.test/b", "resumeGeneration": GEN})),
-                           ("cancelled", self.held_run(status="cancelled")), ("no receipt", self.held_run(receipt={}))):
+                           ("cancelled", self.held_run(status="cancelled")), ("no receipt", self.held_run(receipt={})),
+                           ("receipt without recheck identity", self.held_run(receipt=self.receipt(recheck_task_id=None)))):
             with self.subTest(label):
                 count, send, _ = self.notify(run)
                 self.assertEqual(count, 0)
                 send.assert_not_called()
 
     def test_a_concurrent_sync_that_already_notified_does_not_send_again(self):
-        run = self.held_run()
         already = self.held_run(receipt=self.receipt(notified_at=NOW.isoformat()))
-        count, send, manager = self.notify(run, current=already)
+        count, send, manager = self.notify(self.held_run(), current=already)
         self.assertEqual(count, 0)
         send.assert_not_called()
         manager.filter.return_value.update.assert_not_called()

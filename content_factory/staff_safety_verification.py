@@ -8,7 +8,6 @@ and only after the same preview and generation actually pass.
 """
 from __future__ import annotations
 
-from datetime import datetime
 import hashlib
 import re
 
@@ -59,7 +58,7 @@ def _remote_refusal(remote):
 
 def verify_safety_claims(run, org, user, data, *, now, command_key):
     """Ask Content Factory to record a staff verification bound to the held state shown to staff."""
-    from .staff_console import quality_blocker, recheck_acknowledged
+    from .staff_console import quality_blocker
     from .vibe_marketing_views import STAFF_ACTION_CAPABILITY, _call_content_factory_run_action
     result = mapping(run.result)
     quality = mapping(result.get("article_preview_quality"))
@@ -96,34 +95,58 @@ def verify_safety_claims(run, org, user, data, *, now, command_key):
         return {"status": "observe" if refusal == "observe" else "refused", "refusal": refusal,
                 "detail": "Content Factory did not record the verification."}
     audit = {"request_key": request_key, "claims": claims}
+    recheck = remote.get("recheck")
+    task = _fresh_recheck_task(recheck, quality)
+    from .article_publish_approval import article_review_identity
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
         latest = dict(mapping(current.result))
-        existing = mapping(latest.get(RECEIPT_KEY))
-        if existing.get("request_key") != request_key:
+        identity = article_review_identity(current)
+        # Revalidate after the remote call: the organization, the current
+        # preview target and the exact held quality and blocker must be the
+        # ones staff reviewed. Otherwise nothing is installed here; Content
+        # Factory keeps its own audit of what it recorded.
+        if (current.organization_id != org.pk
+                or identity["preview_url"] != quality.get("preview_url")
+                or identity["resume_generation"] != quality.get("resume_generation")
+                or mapping(latest.get("article_preview_quality")) != quality
+                or latest.get("approval_blocker") != result.get("approval_blocker")):
+            return {"status": "observe", "detail": "The article changed while the verification was recorded. "
+                    "Reload and review it again.", "recheck_queued": False, "audit": audit}
+        if task is None:
+            # Recorded, but no fresh recheck was acknowledged, so there is no
+            # exact review to wait for and no founder notice is armed.
+            return {"status": "verified", "action": "verify_safety_claims", "recheck_queued": False,
+                    "notice_armed": False, "audit": audit}
+        if mapping(latest.get(RECEIPT_KEY)).get("request_key") != request_key:
             latest[RECEIPT_KEY] = {
                 "request_key": request_key, "by_user_id": user.pk, "organization_id": org.pk,
                 "preview_url": quality.get("preview_url"), "resume_generation": quality.get("resume_generation"),
+                # The founder hears only when this exact acknowledged review passes.
+                "recheck_task_id": task["task_id"], "recheck_review_token": task["review_token"],
                 "recorded_at": now.isoformat(), "claims": len(claims), "notified_at": None,
             }
-        recheck = remote.get("recheck")
-        unchanged = mapping(latest.get("article_preview_quality")) == quality
-        if unchanged and recheck_acknowledged(recheck, quality):
-            latest["article_preview_quality"] = recheck["article_preview_quality"]
-            if quality_blocker(latest.get("approval_blocker")):
-                latest.pop("approval_blocker", None)
+        latest["article_preview_quality"] = recheck["article_preview_quality"]
+        if quality_blocker(latest.get("approval_blocker")):
+            latest.pop("approval_blocker", None)
         ContentFactoryRun.objects.filter(pk=current.pk).update(result=latest)
-    return {"status": "verified", "action": "verify_safety_claims", "recheck_queued": bool(
-        unchanged and recheck_acknowledged(recheck, quality)), "audit": audit}
+    return {"status": "verified", "action": "verify_safety_claims", "recheck_queued": True,
+            "notice_armed": True, "audit": audit}
 
 
-def _reviewed_at(quality):
-    raw = quality.get("reviewed_at") or quality.get("finished_at") or quality.get("checked_at")
-    try:
-        value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
+def _fresh_recheck_task(recheck, held_quality):
+    """The identity of a newly queued recheck, or None when none was positively acknowledged."""
+    from .staff_console import recheck_acknowledged
+    recheck = mapping(recheck)
+    queued = mapping(recheck.get("article_preview_quality"))
+    task_id, token = queued.get("task_id"), queued.get("review_token")
+    if (not recheck_acknowledged(recheck, held_quality) or recheck.get("idempotent") is not False
+            or queued.get("status") != "queued" or not isinstance(task_id, str) or not task_id
+            or queued.get("preview_url") != held_quality.get("preview_url")
+            or queued.get("resume_generation") != held_quality.get("resume_generation")
+            or not isinstance(token, str) or not token or task_id == held_quality.get("task_id")):
         return None
-    return value if value.tzinfo else None
+    return {"task_id": task_id, "review_token": token}
 
 
 def _ready_to_notify(run, receipt):
@@ -131,19 +154,17 @@ def _ready_to_notify(run, receipt):
     result = mapping(run.result)
     quality = mapping(result.get("article_preview_quality"))
     identity = article_review_identity(run)
-    try:
-        recorded = datetime.fromisoformat(str(receipt.get("recorded_at")))
-    except ValueError:
-        return False
-    reviewed = _reviewed_at(quality)
+    task_id, token = receipt.get("recheck_task_id"), receipt.get("recheck_review_token")
     return bool(
         receipt.get("request_key") and not receipt.get("notified_at")
         and run.status not in {"cancelled", "canceled"}
         and quality.get("status") == "passed"
+        # Only the exact recheck acknowledged after the verification counts. An
+        # older overlapping review of the same preview never does, whenever it lands.
+        and isinstance(task_id, str) and task_id and quality.get("task_id") == task_id
+        and isinstance(token, str) and token and quality.get("review_token") == token
         and quality.get("preview_url") == receipt.get("preview_url") == identity["preview_url"]
         and quality.get("resume_generation") == receipt.get("resume_generation") == identity["resume_generation"]
-        # A stale callback from before the verification never counts as its pass.
-        and reviewed is not None and recorded.tzinfo is not None and reviewed >= recorded
     )
 
 
