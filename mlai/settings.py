@@ -271,6 +271,7 @@ INSTALLED_APPS = [
 
     "integrations",
     "crm",
+    "system_email",
 ]
 
 MIDDLEWARE = [
@@ -587,6 +588,8 @@ COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER
 COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM = os.getenv('COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM', '')
+COMMUNITY_CHAT_VOLUNTEER_BOOST_REWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_BOOST_REWARDS_ENABLED', False)
+COMMUNITY_CHAT_VOLUNTEER_BOOST_ACTIVE_FROM = os.getenv('COMMUNITY_CHAT_VOLUNTEER_BOOST_ACTIVE_FROM', '')
 COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_ATTENDANCE_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ATTENDANCE_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_COMMUNITY = os.getenv('COMMUNITY_CHAT_VOLUNTEER_COMMUNITY', '')
@@ -723,6 +726,8 @@ MEETING_ROOM_BOOKING_ENABLED = _env_is_true(
 )
 # Vibe Mentoring pilot. Off by default; see docs/mentoring.md.
 MENTOR_BOOKING_ENABLED = _env_is_true('MENTOR_BOOKING_ENABLED', False)
+# Independent admission flag: existing request clients never charge implicitly.
+MENTOR_INSTANT_BOOKING_ENABLED = _env_is_true('MENTOR_INSTANT_BOOKING_ENABLED', False)
 MENTOR_REQUEST_TTL_HOURS = int(os.getenv('MENTOR_REQUEST_TTL_HOURS', '48'))
 MENTOR_AUTO_COMPLETE_HOURS = int(os.getenv('MENTOR_AUTO_COMPLETE_HOURS', '24'))
 # Google Meet links and free/busy for mentoring, through one MLAI-owned free
@@ -731,6 +736,15 @@ MENTORING_GOOGLE_ENABLED = _env_is_true('MENTORING_GOOGLE_ENABLED', False)
 MENTORING_GOOGLE_CLIENT_ID = os.getenv('MENTORING_GOOGLE_CLIENT_ID', '')
 MENTORING_GOOGLE_CLIENT_SECRET = os.getenv('MENTORING_GOOGLE_CLIENT_SECRET', '')
 MENTORING_GOOGLE_REFRESH_TOKEN = os.getenv('MENTORING_GOOGLE_REFRESH_TOKEN', '')
+
+# Personal, mentor-owned Google Calendar OAuth. This does not borrow Gmail or
+# the legacy global organiser's refresh token.
+MENTOR_CALENDAR_GOOGLE_ENABLED = _env_is_true('MENTOR_CALENDAR_GOOGLE_ENABLED', False)
+MENTOR_CALENDAR_GOOGLE_CLIENT_ID = os.getenv('MENTOR_CALENDAR_GOOGLE_CLIENT_ID', '')
+MENTOR_CALENDAR_GOOGLE_CLIENT_SECRET = os.getenv('MENTOR_CALENDAR_GOOGLE_CLIENT_SECRET', '')
+MENTOR_CALENDAR_GOOGLE_REDIRECT_URI = os.getenv('MENTOR_CALENDAR_GOOGLE_REDIRECT_URI', '')
+MENTOR_CALENDAR_CHAT_ORIGIN = os.getenv('MENTOR_CALENDAR_CHAT_ORIGIN', 'https://chat.mlai.au')
+
 PASSWORD_RESET_TTL_SECONDS = int(os.getenv('PASSWORD_RESET_TTL_SECONDS', '3600'))
 PASSWORD_RESET_MIN_RESPONSE_SECONDS = float(
     os.getenv('PASSWORD_RESET_MIN_RESPONSE_SECONDS', '0.12')
@@ -1191,15 +1205,6 @@ ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS = tuple(
     identifier.strip() for identifier in os.getenv('ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS', '').split(',')
     if identifier.strip()
 )
-# MLAI-hosted article sites: owners publish repo-free drafts that MLAI serves on their own domain.
-ARTICLES_HOSTED_SITES_ENABLED = os.getenv('ARTICLES_HOSTED_SITES_ENABLED', 'false').lower() == 'true'
-# Hosted publish also requires Content Factory's previewedRevision (a rendered
-# preview of exactly the reviewed revision). Enable only after the portable
-# preview ladder is verified in production, clients bind viewedRevision, and
-# Content Factory's snapshot rungs (CONTENT_FACTORY_SNAPSHOT_PREVIEW) cover every
-# hosted domain: the saved-HTML shell, the last rung while they are off, never
-# counts, so a hosted site whose own build fails could not publish at all.
-HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW = os.getenv('HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW', 'false').lower() == 'true'
 CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE = os.getenv(
     'CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE',
     'review_draft',
@@ -1216,6 +1221,21 @@ RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
 MLAI_SYSTEM_FROM_EMAIL = os.getenv('MLAI_SYSTEM_FROM_EMAIL', '').strip() or os.getenv('RESEND_FROM_EMAIL', '').strip() or 'MLAI <notifications@notify.mlai.au>'
 # Backwards-compatible alias; new system-mail payloads use the canonical setting.
 RESEND_FROM_EMAIL = MLAI_SYSTEM_FROM_EMAIL
+# Transactional email sent by our own code through Resend (system_email app).
+# Separate key, domain and webhook from CRM sending; never uses CRM mailboxes or
+# warm-up caps. Each message key listed in SYSTEM_EMAIL_RESEND_MESSAGES (or
+# "all") is sent this way; unlisted keys stay on their legacy provider.
+SYSTEM_EMAIL_RESEND_API_KEY = os.getenv('SYSTEM_EMAIL_RESEND_API_KEY', '').strip()
+SYSTEM_EMAIL_REPLY_TO = os.getenv('SYSTEM_EMAIL_REPLY_TO', 'team@mlai.au').strip()
+SYSTEM_EMAIL_UNSUBSCRIBE_MAILTO = os.getenv('SYSTEM_EMAIL_UNSUBSCRIBE_MAILTO', '').strip()
+SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET = os.getenv('SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET', '').strip()
+SYSTEM_EMAIL_RESEND_MESSAGES = tuple(
+    value.strip() for value in os.getenv('SYSTEM_EMAIL_RESEND_MESSAGES', '').split(',') if value.strip()
+)
+SYSTEM_EMAIL_TEST_RECIPIENTS = tuple(
+    value.strip().lower() for value in os.getenv('SYSTEM_EMAIL_TEST_RECIPIENTS', '').split(',') if value.strip()
+)
+SYSTEM_EMAIL_ALERT_SLACK_CHANNEL_ID = os.getenv('SYSTEM_EMAIL_ALERT_SLACK_CHANNEL_ID', '').strip()
 # Customer.io App API key (already used for magic-link emails). When set, it is
 # the preferred transport for notification-channel emails; Resend is fallback.
 CUSTOMERIO_API_KEY = os.getenv('CUSTOMERIO_API_KEY', '')
@@ -2413,6 +2433,7 @@ COMMUNITY_CHAT_DELETION_CONTACT = os.getenv("COMMUNITY_CHAT_DELETION_CONTACT", "
 # Public Roo's identity verified in the MLAI Slack workspace. Empty values pause
 # the first-party DM connection; no other bot is enabled by this setting.
 COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
+ROO_LINK_LOVE_SLACK_CHANNEL_ID = os.getenv("ROO_LINK_LOVE_SLACK_CHANNEL_ID", "C09BQAWJ66R")
 COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID", "U090FV0GTT4")
 
 # Optional startup-update editorial covers; all generation runs server-side.
@@ -2656,9 +2677,6 @@ ARTICLES_GITHUB_INSTALLATION_WAKES_ENABLED = _env_is_true("ARTICLES_GITHUB_INSTA
 ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED", False)
 MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
 MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)
-ARTICLES_HOSTED_AUTO_REGISTER_ENABLED = _env_is_true("ARTICLES_HOSTED_AUTO_REGISTER_ENABLED", False)
-# Comma-separated organisation ids, or * for every P2-cohort organisation.
-ARTICLES_HOSTED_RUNG_ORGANIZATIONS = os.getenv("ARTICLES_HOSTED_RUNG_ORGANIZATIONS", "").strip()
 ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED = _env_is_true("ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED", False)
 # Startup team (held until its security sign-off; declared here so the block is complete).
 MY_STARTUP_TEAM_ENABLED = _env_is_true("MY_STARTUP_TEAM_ENABLED", False)

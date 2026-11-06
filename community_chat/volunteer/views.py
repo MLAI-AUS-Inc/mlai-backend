@@ -809,6 +809,10 @@ class ReceiptView(APIView):
                 return Response(
                     dict(status="ignored", outcome="member_unavailable"), status=202
                 )
+            if exc.code == "source_unavailable" and exc.status == 403:
+                # A revoked/private source is terminal, not a poison item that
+                # prevents every later public reward from being collected.
+                return Response(dict(status="ignored", outcome="source_unavailable"), status=202)
             return Response({"error": exc.code}, status=exc.status)
         return Response(
             dict(

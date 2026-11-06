@@ -9,6 +9,8 @@ feature flag is off.
 from datetime import date
 
 from django.conf import settings
+from django.db import transaction
+from django.utils.decorators import method_decorator
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -51,6 +53,9 @@ class MentoringBaseView(APIView):
         return response
 
     def handle_exception(self, exc):
+        from mentoring.calendars.errors import CalendarError
+        if isinstance(exc, CalendarError):
+            return Response({'code': exc.code, 'detail': 'We could not verify the calendar. Reconnect Google or try again.'}, status=503)
         if isinstance(exc, MentoringDisabled):
             return Response({'code': 'mentor_booking_disabled', 'detail': 'Mentor booking is not available.'}, status=404)
         if isinstance(exc, MentoringError):
@@ -82,6 +87,7 @@ class MentorListView(MentoringBaseView):
         return Response({'mentors': MentoringService.list_mentors(request.user)})
 
 
+@method_decorator(transaction.non_atomic_requests, name='dispatch')
 class MentorAvailabilityView(MentoringBaseView):
     def get(self, request, mentor_id):
         first = _parse_day(request.query_params.get('from'), 'from')
@@ -89,6 +95,7 @@ class MentorAvailabilityView(MentoringBaseView):
         return Response(MentoringService.availability(mentor_id, first, last))
 
 
+@method_decorator(transaction.non_atomic_requests, name='dispatch')
 class MyMentorProfileView(MentoringBaseView):
     def get(self, request):
         return Response(MentoringService.get_profile(request.user))
@@ -114,8 +121,8 @@ class MentorApplicationView(MentoringBaseView):
 class MentorSessionsView(MentoringBaseView):
     def get(self, request):
         role = request.query_params.get('role', 'founder')
-        if role not in ('founder', 'mentor'):
-            raise MentoringError('invalid_role', 'role must be founder or mentor.', 400)
+        if role not in ('founder', 'mentor', 'all'):
+            raise MentoringError('invalid_role', 'role must be founder, mentor or all.', 400)
         status = request.query_params.get('status') or None
         if status and status not in dict(MentorSession.STATUS_CHOICES):
             raise MentoringError('invalid_status', 'Unknown status.', 400)

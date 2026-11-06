@@ -33,8 +33,9 @@ class ConsentTests(SimpleTestCase):
         for rung in ("adopt","native_collection","deterministic","model_adapter","agent"):
             self.assertEqual(consent.required_grants(ci_mode="hosted",strategy=rung),{"contents":"write","pull_requests":"write"},rung)
             self.assertEqual(consent.required_grants(ci_mode="repository",strategy=rung),{"contents":"write","pull_requests":"write","workflows":"write","checks":"read","statuses":"read"},rung)
-        self.assertEqual(consent.required_grants(ci_mode="repository",strategy="hosted"),{})
-        for channel in ("hosted","wordpress","ghost"):
+        with self.assertRaises(ValueError):consent.required_grants(ci_mode="repository",strategy="hosted")
+        with self.assertRaises(ValueError):consent.required_grants(channel="hosted")
+        for channel in ("wordpress","ghost"):
             self.assertEqual(consent.required_grants(channel=channel),{})
 
     def operation(self):

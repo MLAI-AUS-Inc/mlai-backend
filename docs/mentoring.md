@@ -173,12 +173,13 @@ unavailable on isolated staging (capability `google`, never called).
   existing event instead of inserting a second, and a cancel can always delete it. With Google off or on staging the status is
   `unavailable`.
 - Cancel after a meeting exists: the Calendar event is deleted (best effort; guests are told).
-- Slots: when the mentor has `busy_calendar_email` and Google is enabled, the slot list
-  drops times the mentor is busy, from the Calendar `freeBusy` call made by the MLAI
-  account. Answers are cached per mentor and window for 5 minutes. If the call fails the
-  slots are still shown and `busy_check` is `failed` (`off` when not used). The booking
-  re-check inside the transaction does not call Google, so a mentor who is busy can still
-  decline a request.
+- Slots: both booking modes read the mentor's selected personal conflict calendars.
+  A mentor without personal connection history can use an explicitly verified legacy
+  shared calendar. Missing or unsuccessful verification returns no slots. New legacy
+  requests and acceptance check fresh external conflicts outside database locks, then
+  validate configuration revisions and check age under lock before writing/charging.
+  Saved scheduling policies apply to new sessions; their buffers are frozen. Existing
+  legacy sessions retain their stored zero buffers. See [automatic capture](mentoring-automatic-capture.md).
 - Responses: `meet_link` and `meeting_status` appear only for video sessions that are
   accepted or completed, and sessions are only ever returned to their two participants.
   `busy_calendar_email` is returned only on the mentor's own profile.
@@ -231,7 +232,7 @@ Open questions that need a live test before the pilot relies on them:
    and how to recompute it), then merge and deploy (the flag is off, so nothing
    changes for users).
 4. In Django admin create a `MentorProfile` per mentor and tick active; mentors
-   fill in availability through the API or the chat client (and, if they want busy times hidden, share free/busy with the MLAI account and set `busy_calendar_email`).
+   fill in availability and connect their personal Google conflict calendars. A mentor without personal connection history may instead configure a verifiable shared calendar; unverified calendars cannot accept new requests.
 5. Set `MENTOR_BOOKING_ENABLED=true` in the host env and restart.
 6. Release the chat clients that read `feature_flags.mentor_booking`.
 

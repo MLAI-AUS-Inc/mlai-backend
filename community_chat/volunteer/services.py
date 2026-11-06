@@ -114,6 +114,8 @@ def contribution_total(user, state=None):
     known_ledger = VolunteerRecognition.objects.filter(
         community=community_id(), user=user, ledger__isnull=False
     ).values("ledger_id")
+    from roo.system_rewards import legacy_boost_ledgers
+    legacy_boost = legacy_boost_ledgers(user).filter(pk__gt=state.historical_ledger_cutoff).exclude(pk__in=known_ledger)
     # A second startup can receive its monthly payment after this member uses
     # the single ranking slot. The durable cap receipt classifies that ledger
     # without turning it into a second contribution.
@@ -135,6 +137,7 @@ def contribution_total(user, state=None):
         .exclude(source="purchased_topup")
         .exclude(reference_type__in=("VOLUNTEER_LEVEL_BONUS", "VOLUNTEER_CORRECTION"))
         .exclude(pk__in=known_ledger)
+        .exclude(pk__in=legacy_boost.values("pk"))
         .exclude(pk__in=capped_monthly_ledger_ids, source="STARTUP_UPDATE", kind="EARN")
         .filter(Q(kind="EARN") | Q(kind__isnull=True, delta__gt=0))
     )
@@ -161,7 +164,8 @@ def contribution_total(user, state=None):
         ).aggregate(value=Sum("reward_microroo"))["value"]
         or 0
     )
-    return max(0, state.historical_microroo + total - reversed_opening)
+    legacy_total = legacy_boost.aggregate(value=Sum("delta_microroo"))["value"] or 0
+    return max(0, state.historical_microroo + total + legacy_total - reversed_opening)
 
 
 def legacy_intro_completed(user):
@@ -806,6 +810,11 @@ def decision(record, actor, payload, *, automatic=False, existing_ledger=None):
                 ):
                     raise VolunteerError("invalid_ledger")
                 record.ledger = existing_ledger
+            elif amount and record.action_key == "boost_startup":
+                from roo.system_rewards import award_native_boost
+                if amount != 2_000_000:
+                    raise VolunteerError("invalid_reward")
+                record.ledger, _ = award_native_boost(user, record.source)
             elif amount:
                 record.ledger, _ = PointsService.credit_volunteer(
                     user,

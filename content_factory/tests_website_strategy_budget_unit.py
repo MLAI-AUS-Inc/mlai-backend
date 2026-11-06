@@ -24,7 +24,7 @@ class StrategyTests(SimpleTestCase):
             self.assertEqual(goal["strategy_pin"]["rung"], rung)
             self.assertEqual(strategy.ensure_pin(goal, {}, source=self.source, now=self.now), goal)
             goal = strategy.advance(goal, source=self.source, now=self.now, reason="strategy_exhausted")
-        self.assertEqual(len(goal["strategy_history"]), 6)
+        self.assertEqual(len(goal["strategy_history"]), len(strategy.RUNGS))
 
     def test_exhaustion_cannot_cross_goal_source_or_pin_revision(self):
         goal = strategy.ensure_pin(self.goal, {}, source=self.source, now=self.now)

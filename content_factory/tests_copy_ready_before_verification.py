@@ -234,7 +234,6 @@ class NewJourneyCopyReadyTests(_StartHarness, TestCase):
                 self.assertEqual(views._reported_article_delivery_mode(self.built.config), "review_draft")
 
 
-@override_settings(ARTICLES_HOSTED_SITES_ENABLED=True)  # PawShare's production shape
 class LegacyDeliveryModeTests(_StartHarness, TestCase):
     """G1: the five named organisations keep today's delivery mode with every P1 flag on."""
 
@@ -259,7 +258,7 @@ class LegacyDeliveryModeTests(_StartHarness, TestCase):
             for marker in (True, False):
                 built = make_named_legacy_org(name, marker=marker, domain=f"{name.replace('_', '-')}-{marker}.example.test")
                 today = self.results(built)
-                self.assertEqual(today, expected["hosted" if name == "pawshare" else "connected"], name)
+                self.assertEqual(today, expected["connected"], name)
                 for label, flags in FLAG_SETS:
                     with self.subTest(name=name, marker=marker, flags=label), override_settings(**flags):
                         self.assertEqual(self.results(built), today)

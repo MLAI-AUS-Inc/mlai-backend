@@ -78,7 +78,7 @@ def _rung(result, request):
              or request.get('strategy_pin'))
     if isinstance(value, dict):
         value = value.get('rung')
-    return value if isinstance(value, str) and value in {'adopt', 'native_collection', 'deterministic', 'model_adapter', 'agent', 'hosted'} else 'native_collection'
+    return value if isinstance(value, str) and value in {'adopt', 'native_collection', 'deterministic', 'model_adapter', 'agent'} else 'native_collection'
 
 
 def _config(organization):
@@ -606,11 +606,7 @@ def _apply_unowned_operation(subject, decision, *, now):
             _save_daily(config, day)
             from .website_strategy import advance
             goal = advance(goal, source=goal.get('current_source_sha'), now=now, reason='strategy_exhausted', organization=operation.connection.organization)
-            if mapping(goal.get('strategy_pin')).get('rung') == 'hosted':
-                from .website_goal_runner import wait_for_channel
-                wait_for_channel(operation, goal)
-            else:
-                retry_goal_action(operation, goal, now=now, occurrence=f'policy:{decision.attempt}', step='setup')
+            retry_goal_action(operation, goal, now=now, occurrence=f'policy:{decision.attempt}', step='setup')
         else:
             retry_goal_action(operation, goal, now=now, occurrence=f'policy:{decision.attempt}', step='scan' if decision.action == 'rescan' else None)
         receipt.update(attempts=decision.attempt, last_action=decision.action, last_action_at=now.isoformat())

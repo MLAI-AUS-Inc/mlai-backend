@@ -54,7 +54,6 @@ P2_FLAG_NAMES = (
     "ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED",
     "MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED",
     "MY_STARTUP_TURN_REMINDERS_ENABLED",
-    "ARTICLES_HOSTED_AUTO_REGISTER_ENABLED",
     "ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED",
     "MY_STARTUP_TEAM_ENABLED",
     "MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED",
@@ -65,7 +64,6 @@ P2_SETTING_DEFAULTS = {
     "ARTICLES_SELF_HEAL_LEGACY_ORGANIZATIONS": "",
     "ARTICLES_SELF_HEAL_SWEEP_LIMIT": 50,
     "ARTICLES_MERGE_WORKER_LIMIT": 20,
-    "ARTICLES_HOSTED_RUNG_ORGANIZATIONS": "",
     "MY_STARTUP_TEAM_DOMAIN_DENYLIST": "",
 }
 ALL_P2_FLAGS_ON = {name: True for name in P2_FLAG_NAMES}
@@ -75,7 +73,6 @@ P2_SEAM_PROVIDER_MODULES = (
     "content_factory.failure_policy_engine",
     "content_factory.no_delivery_refunds",
     "content_factory.publish_merge_worker",
-    "content_factory.hosted_auto_register",
     "content_factory.founder_transitions",
     "content_factory.staff_alert_rules",
     "content_factory.channel_switch",
@@ -337,7 +334,7 @@ def publish_reviewed_receipt(*, source_run_id="source-run", approved_body_sha256
 
 
 def publish_dispatch_receipt(*, at=None, hosted=False):
-    """Backend-owned accepted publish dispatch, including the hosted destination kind."""
+    """Historical dispatch fixture; hosted receipts are read-only after retirement."""
     return {"accepted_at": _iso(at), "hosted": bool(hosted)}
 
 

@@ -111,6 +111,10 @@ def _cleanup_retry_journey(op, context, config, journey):
     return journey
 
 
+# Content Factory refuses setup when the repository head moved since the scan.
+SOURCE_CHANGED_CODES = frozenset({"SOURCE_CHANGED", "WEBSITE_SOURCE_CHANGED"})
+
+
 SETUP_PR_RESULT_KEYS = ("pr_url", "pull_request_url", "draft_pr_url", "pr_number", "pull_request_number", "draft_pr_number")
 
 
@@ -242,6 +246,10 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
             cleanup_retry = (op.state == "needs_user" and op.receipt.get("reason_code") == SETUP_EXAMPLE_CLEANUP_CODE
                 and _setup_example_cleanup_action(op.receipt.get("user_action"), current) is not None)
             check_again = _checking_owner_wait(op)
+            # The setup refused a scan of an older repository head. Retrying with
+            # that scan id replays the same refusal, so start again from a scan
+            # of the current head (Pawshare, 6 Nov 2026).
+            source_changed = op.receipt.get("reason_code") in SOURCE_CHANGED_CODES
             if not check_again:
                 _cancel_prepare_child(op, config)
             op.state, op.next_attempt_at = "pending", None
@@ -259,6 +267,10 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
                 op.payload["repair_setup"] = True
             if cleanup_retry:
                 op.payload["manual_setup_example_cleanup_retry"] = True
+            if source_changed and not check_again:
+                op.payload["source_reverify"] = True
+                op.receipt["current_step"] = "scan"
+            if cleanup_retry or (source_changed and not check_again):
                 for key in ("scan_run_id", "setup_run_id", "completed_steps"):
                     op.receipt.pop(key, None)
             op.save(update_fields=["state", "next_attempt_at", "receipt", "payload", "updated_at"])
@@ -539,7 +551,7 @@ def prepare_failure(op, step, error, *, now=None):
             op.receipt.pop("channel_options", None)
         else:
             op.state = "stopped"
-            op.receipt.update(status="stopped", channel_options=["hosted", "portable"],
+            op.receipt.update(status="stopped", channel_options=["portable"],
                 user_action={"id": "choose_article_channel", "label": "Choose an articles channel"})
     else:
         op.state, op.next_attempt_at = "needs_attention", None
@@ -913,17 +925,7 @@ def _advance_claimed_prepare(op, *, now, handlers):
             op.state,op.next_attempt_at="pending",now+timedelta(minutes=1)
             op.receipt.update(status="working",message="Completing the previous article credit.",user_action=None)
             return _finish_prepare(op,now=now)
-        from .hosted_articles import active_site
         from .website_goal_runner import owns_goal
-        hosted_site = active_site(getattr(config, "organization", None))
-        if hosted_site is not None and not owns_goal(op):
-            # MLAI serves this company's articles, so a repository setup can
-            # never pass its route audit. Stop instead of dispatching one.
-            op.state, op.next_attempt_at = "cancelled", None
-            op.receipt.update(status="not_needed", reason_code="", current_step="ready",
-                blocked_step=None, user_action=None,
-                message=f"MLAI hosts your blog at https://{hosted_site.domain}{hosted_site.base_path}, so your website repository needs no articles setup.")
-            return _finish_prepare(op, now=now)
         journey = journey_for_context(context, config)
         journey = _cleanup_retry_journey(op, context, config, journey)
         from .website_goal_runner import owns_goal, goal_journey, ready

@@ -352,6 +352,10 @@ class TeamTests(TransactionTestCase):
                 for method in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']:
                     identity = (view.__module__, view.__name__)
                     allowed = method in views.MEMBER_ACCESS.get(identity, {})
+                    # These reads return the caller's own account/chooser,
+                    # independently of any supplied member workspace hint.
+                    allowed = allowed or (method == 'GET' and view in {
+                        views.AccountView, views.ProfileView, views.CompaniesView})
                     with self.subTest(route=route, method=method), patch.object(view, method.lower(), side_effect=domain, create=True) as handler:
                         kwargs = {'run_id': run.run_id} if '<str:run_id>' in route else {}
                         response = self.call(view, user=self.member, method=method.lower(),

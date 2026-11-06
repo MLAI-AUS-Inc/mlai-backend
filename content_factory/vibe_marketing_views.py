@@ -590,9 +590,6 @@ def _effective_article_delivery_mode(config, *, requested_mode=None, explicit=Fa
     if explicit and requested in ARTICLE_DELIVERY_MODES:
         return requested
 
-    from .hosted_articles import hosted_site_active
-    if hosted_site_active(config):
-        return "content_only"
     stored = _stored_article_delivery_mode(config)
     if _article_repo_is_review_capable(config, github_ready=github_ready, article_ready=article_ready):
         if stored in LEGACY_REVIEW_BLOCKING_DELIVERY_MODES or not stored:
@@ -5220,12 +5217,6 @@ def _portable_preview_revision_stale(run, stored) -> bool:
     return bool(known and shown and known != shown and stored.get("autoStartRevision") != known)
 
 
-def _portable_draft_published_hosted(run) -> bool:
-    """This draft is published, or being published, on its MLAI-hosted blog."""
-    from .hosted_article_models import HostedArticlePublication
-
-    statuses = (HostedArticlePublication.Status.PENDING, *HostedArticlePublication.RENDERED)
-    return HostedArticlePublication.objects.filter(run_id=run.run_id, status__in=statuses).exists()
 
 
 def _backend_live_preview_stand_in(payload) -> bool:
@@ -5357,7 +5348,6 @@ def _portable_article_preview_should_rearm(run):
     return (
         _portable_article_preview_rearm_due(run, stored, now)
         and not _portable_auto_start_throttled(stored, now)
-        and not _portable_draft_published_hosted(run)
     )
 
 
@@ -11279,19 +11269,7 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
         summary_by_id["package"] = f"Article package ready{': ' + title if title else '.'}"
         action_by_id["package"] = _workflow_step_action("Review package", href=_run_url(article_run))
 
-    from .hosted_articles import hosted_publish_step
-    hosted_step = hosted_publish_step(article_run, config) if content_package_ready else None
-    if hosted_step is not None:
-        status_by_id["publish"] = hosted_step["status"]
-        href_by_id["publish"] = hosted_step["href"] or _run_url(article_run)
-        run_by_id["publish"] = article_run.run_id
-        summary_by_id["publish"] = hosted_step["summary"]
-        if hosted_step["label"]:
-            action_by_id["publish"] = _workflow_step_action(hosted_step["label"], href=hosted_step["href"] or _run_url(article_run),
-                                                            intent=hosted_step["intent"] or None)
-        else:
-            action_by_id.pop("publish", None)
-    elif publish_complete:
+    if publish_complete:
         status_by_id["publish"] = "complete"
         href_by_id["publish"] = _run_url(publish_evidence_run)
         run_by_id["publish"] = publish_evidence_run.run_id
@@ -12704,6 +12682,52 @@ def _overlay_live_bootstrap_fields(payload, *, context, request, config=None, la
     return payload
 
 
+_BOOTSTRAP_COMPUTE_LOCK_SECONDS = 30
+_BOOTSTRAP_COMPUTE_WAIT_SECONDS = 15.0
+_BOOTSTRAP_COMPUTE_POLL_SECONDS = 0.1
+
+
+def _acquire_bootstrap_compute_lock(lock_key) -> bool:
+    """True when this request should compute. A cache failure never blocks it."""
+    try:
+        return bool(cache.add(lock_key, 1, _BOOTSTRAP_COMPUTE_LOCK_SECONDS))
+    except Exception:
+        logger.exception("vibe_bootstrap_compute_lock_failed")
+        return True
+
+
+def _release_bootstrap_compute_lock(lock_key) -> None:
+    try:
+        cache.delete(lock_key)
+    except Exception:
+        logger.exception("vibe_bootstrap_compute_unlock_failed")
+
+
+def _wait_for_bootstrap_payload(cache_key):
+    """Wait for the request already computing this payload; None if it never lands.
+
+    The wait is bounded, so a computing request that dies (its lock then expires)
+    only delays the waiter, which then computes for itself.
+    """
+    deadline = time.monotonic() + _BOOTSTRAP_COMPUTE_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(_BOOTSTRAP_COMPUTE_POLL_SECONDS)
+        try:
+            payload = cache.get(cache_key)
+        except Exception:
+            logger.exception("vibe_bootstrap_compute_wait_failed")
+            return None
+        if payload is not None:
+            return payload
+        try:
+            if cache.get(f"{cache_key}:computing") is None:
+                # The computing request finished without caching (or failed).
+                return cache.get(cache_key)
+        except Exception:
+            return None
+    return None
+
+
 def _serialize_bootstrap(context, request=None, *, view="summary"):
     config = _get_config(context.organization)
     ttl = _bootstrap_cache_seconds()
@@ -12720,8 +12744,21 @@ def _serialize_bootstrap(context, request=None, *, view="summary"):
             )
             payload = None
 
-    runs = _latest_runs_for_org(context.organization, config=config, prefetch_feedback=payload is None)
+    # Single flight: when several reads miss together (a page opening fires the
+    # bootstrap from more than one place), one computes and the rest wait for
+    # its cached answer instead of each paying the multi-second compute.
+    lock_key = f"{cache_key}:computing" if cache_key is not None else None
+    holds_lock = False
+    if payload is None and lock_key is not None:
+        holds_lock = _acquire_bootstrap_compute_lock(lock_key)
+        if not holds_lock:
+            payload = _wait_for_bootstrap_payload(cache_key)
+            if payload is None:
+                holds_lock = _acquire_bootstrap_compute_lock(lock_key)
+
+    runs = []
     try:
+        runs = _latest_runs_for_org(context.organization, config=config, prefetch_feedback=payload is None)
         capabilities = None
         if payload is None:
             # The live overlay projects progress once for root + displayed runs,
@@ -12742,6 +12779,8 @@ def _serialize_bootstrap(context, request=None, *, view="summary"):
         return _overlay_live_bootstrap_fields(payload, context=context, request=request, config=config,
             latest_runs=runs, capabilities=capabilities)
     finally:
+        if holds_lock:
+            _release_bootstrap_compute_lock(lock_key)
         from .bootstrap_run_lifetime import release_projection_runs
         release_projection_runs(runs)
 

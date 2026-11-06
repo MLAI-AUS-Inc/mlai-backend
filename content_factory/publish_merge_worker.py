@@ -436,6 +436,8 @@ def merge_run(run, token, *, now):
             merged = {"sha": pull.get("merge_commit_sha"), "merged": True}
             method = "observed"
         else:
+            if _mapping(run.run_request).get("retirement_requires_owner_merge") is True:
+                return _ask(run, token, receipt, "merge_manual_owner_required", now=now)
             if _state(run).get("manual") is True:
                 return _ask(run, token, receipt, "merge_manual_owner_required", now=now)
             if pull.get("state") != "open" or pull.get("mergeable") is False:

@@ -116,8 +116,6 @@ class World:
         self.runs.append(run)
         return run
 
-    def site(self, org, domain, state="active"):
-        self.sites.append(NS(organization=org, domain=domain, state=state))
 
     def connection(self, org, site_url="", state="connected"):
         connection = NS(pk=next(self.ids), organization=org, state=state, site_url=site_url, generation=3)
@@ -137,7 +135,7 @@ class World:
 
     def basis(self, run_id, domain):
         managers = ((claims.ContentFactoryRun, self.runs), (claims.Organization, self.orgs),
-                    (claims.HostedArticleSite, self.sites), (claims.WebsiteConnection, self.connections),
+                    (claims.WebsiteConnection, self.connections),
                     (claims.WebsiteConnectionOperation, self.operations),
                     (claims.CommunityChatEmailCodeChallenge, self.challenges),
                     (claims.VibeRaisingCompany, self.companies))
@@ -273,12 +271,6 @@ class ClaimBasisTests(SimpleTestCase):
         self.world.run("orphan-run", None)
         self.assertEqual(self.basis("pawshare.example.com", run_id="orphan-run"), "none")
 
-    def test_an_active_or_draft_hosted_site_of_the_runs_organisation_is_the_strongest_basis(self):
-        self.world.site(self.org, "brand.example.com", state="draft")
-        self.assertEqual(self.basis("brand.example.com"), "hosted_site")
-        self.assertEqual(self.basis("https://www.brand.example.com/blog/"), "hosted_site")
-        self.world.sites[0].state = "paused"
-        self.assertEqual(self.basis("brand.example.com"), "none")
 
     def test_a_connection_with_no_live_deployment_receipt_proves_nothing(self):
         # BEB-1: a typed site_url plus any bound repository is not evidence of the live site.
@@ -434,17 +426,16 @@ class ClaimBasisTests(SimpleTestCase):
             self.assertEqual(world.basis("provider-run", provider), "none", provider)
             self.assertEqual(world.basis("provider-run", f"mail.{provider}"), "none", provider)
 
-    def test_a_listed_mail_provider_is_refused_even_with_a_hosted_site_or_receipt(self):
+    def test_a_listed_mail_provider_is_refused_even_with_a_live_receipt(self):
         for provider in ("web.de", "comcast.net", "gmail.com", "bigpond.net.au", "mail.gmail.com", "mail.com"):
             world = World()
             org = world.org(provider)
-            world.site(org, provider)
             world.receipt(world.connection(org), f"https://{provider}/articles")
             world.run("provider-run", org)
             self.assertEqual(world.basis("provider-run", provider), "none", provider)
 
     def test_a_mail_brand_word_refuses_only_the_weak_bases(self):
-        # R2-BEB-4: inbox.ai or orange.ai may be a startup; a hosted site or live receipt proves it is.
+        # R2-BEB-4: inbox.ai or orange.ai may be a startup; a live deployment receipt proves it is.
         for domain in ("inbox.ai", "live.ai", "email.app", "mail.app", "orange.ai", "excite.ai", "zoho.com"):
             world = World()
             org = world.org(domain)
@@ -454,8 +445,6 @@ class ClaimBasisTests(SimpleTestCase):
             self.assertEqual(world.basis("brand-run", domain), "none", domain)
             world.receipt(world.connection(org), f"https://{domain}/articles")
             self.assertEqual(world.basis("brand-run", domain), "website_connection", domain)
-            world.site(org, domain)
-            self.assertEqual(world.basis("brand-run", domain), "hosted_site", domain)
 
     def test_the_organisations_saved_website_is_the_weakest_basis(self):
         self.assertEqual(self.basis("pawshare.example.com"), "org_website")
@@ -468,10 +457,7 @@ class ClaimBasisTests(SimpleTestCase):
     def test_bases_are_reported_strongest_first(self):
         domain = self.org.domain
         self.prove_mailbox(f"founder@{domain}")
-        self.world.site(self.org, domain)
         self.world.receipt(self.world.connection(self.org), f"https://{domain}/articles")
-        self.assertEqual(self.basis(domain), "hosted_site")
-        self.world.sites.clear()
         self.assertEqual(self.basis(domain), "website_connection")
         self.world.operations.clear()
         self.assertEqual(self.basis(domain), "email_domain")
@@ -489,15 +475,8 @@ class ClaimBasisTests(SimpleTestCase):
             world.code(attacker_owner, attacker_owner.email)
             world.run("attacker-run", attacker, attacker_owner)
             self.assertEqual(world.basis("attacker-run", "tenant-brand.com"), "none", stored)
-            # A hosted site under any spelling outranks even a live-deployment receipt.
-            world = World()
-            world.site(world.org("rival-brand.example.net"), stored)
-            attacker = world.org("tenant-brand.com")
-            world.receipt(world.connection(attacker), "https://tenant-brand.com/articles")
-            world.run("attacker-run", attacker)
-            self.assertEqual(world.basis("attacker-run", "tenant-brand.com"), "none", stored)
 
-    def test_a_website_another_organisation_only_typed_never_takes_a_hosted_site_or_receipt(self):
+    def test_a_website_another_organisation_only_typed_never_takes_a_live_receipt(self):
         # R2-BEB-2: any free account can save blog.<domain>, or the domain with a trailing dot or port, as its website.
         for squat in ("blog.pawshareclub.com", "x.pawshareclub.com", "www2.pawshareclub.com", "pawshareclub.com.",
                       "pawshareclub.com:443"):
@@ -513,15 +492,10 @@ class ClaimBasisTests(SimpleTestCase):
             # ... the strong ones do not.
             world.receipt(world.connection(org), "https://pawshareclub.com/blog")
             self.assertEqual(world.basis("pawshare-run", "pawshareclub.com"), "website_connection", squat)
-            world.site(org, "pawshareclub.com")
-            self.assertEqual(world.basis("pawshare-run", "pawshareclub.com"), "hosted_site", squat)
-            # An operator-created hosted site of another organisation at a child still outranks both.
-            world.site(world.org("agency.example.net"), "shop.pawshareclub.com", state="archived")
-            self.assertEqual(world.basis("pawshare-run", "pawshareclub.com"), "none", squat)
 
     def test_a_parent_or_child_held_by_another_organisation_blocks_the_claim(self):
         rival = self.world.org("shop.acme-group.com")
-        self.world.site(rival, "blog.other-group.com")
+        self.world.org("blog.other-group.com")
         self.world.company(self.org, self.owner, "acme-group.com")
         self.world.company(self.org, self.owner, "other-group.com")
         self.world.company(self.org, self.owner, "deep.shop.acme-group.com")
@@ -542,9 +516,9 @@ class ClaimBasisTests(SimpleTestCase):
         rival = self.world.org("rival.example.com")
         rival_owner = self.world.founder(rival, "rival@rival.example.com")
         self.world.run("rival-run", rival, rival_owner)
-        self.world.site(rival, "rival-blog.example.com")
+        self.world.company(rival, rival_owner, "rival-blog.example.com")
         self.assertEqual(self.basis("rival.example.com", run_id="rival-run"), "org_website")
-        self.assertEqual(self.basis("rival-blog.example.com", run_id="rival-run"), "hosted_site")
+        self.assertEqual(self.basis("rival-blog.example.com", run_id="rival-run"), "org_website")
         self.assertEqual(self.basis(self.org.domain, run_id="rival-run"), "none")
         self.assertEqual(self.basis(self.org.domain), "org_website")
         for domain in ("rival.example.com", "blog.rival.example.com", "rival-blog.example.com"):

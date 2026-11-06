@@ -175,9 +175,6 @@ def has_connected_website(config):
     """
     if config is None or not getattr(config, "website_connection_id", None):
         return False
-    from .hosted_articles import hosted_site_active
-    if hosted_site_active(config):
-        return False
     connection = getattr(config, "website_connection", None)
     return getattr(connection, "state", None) in WEBSITE_PREVIEW_CONNECTION_STATES
 

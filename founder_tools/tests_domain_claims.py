@@ -216,13 +216,18 @@ class DomainClaimTests(TestCase):
 
     def test_research_marker_on_a_saved_startup_never_moves_or_releases_it(self):
         # A saved startup, then an administrator's "Research my startup" on the
-        # same domain: staff skip the claim check and the per-org marker lands
-        # on the real startup's organisation.
+        # same domain, written by the historical staff bypass. Build that old
+        # state directly; ordinary creation must no longer permit it.
         owned = VibeRaisingCompany.objects.get(pk=self._create(self.owner_client).data["id"])
         organization = owned.organization
         VibeRaisingCompany.objects.filter(pk=owned.pk).update(created_at=timezone.now() - timedelta(days=30))
         admin = User.objects.create_user(email="claim-admin@example.test", role="participant", is_staff=True)
-        self._research_workspace(admin, age=timedelta(hours=2))
+        admin_profile = VibeRaisingProfile.objects.create(user=admin, role="founder")
+        VibeRaisingCompany.objects.create(profile=admin_profile, organization=organization,
+                                        name="Historical duplicate", domain="acme.test")
+        config = OrganizationContentConfig.objects.get(organization=organization)
+        config.pillar_strategy = {**config.pillar_strategy, PROFILE_KEY: {"researchDraft": True}}
+        config.save()
         self.assertEqual(organization_owner_user_id(organization), self.owner.id)
 
         # Days later the marker still does not make the real startup stale.

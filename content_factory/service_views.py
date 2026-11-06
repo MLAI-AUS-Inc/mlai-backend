@@ -8959,6 +8959,8 @@ def _merge_django_owned_run_request(existing_request, incoming_request, *, drift
     publish_approval = saved_result.get("article_approval_v1")
     publish_owned = set()
     if isinstance(publish_approval, dict) and publish_approval.get("source") == "publish_reviewed":
+        # Preserve a retired destination as refusal/history evidence. A worker
+        # omission must not turn an old hosted approval into repository consent.
         publish_owned = {"approved_body", "approved_body_sha256", "body_format", "approval", "new_run_id", "run_id",
             "source_run_id", "source_revision", "hosted_site_id", "original_billing_source_run_id"}
         for field in publish_owned:

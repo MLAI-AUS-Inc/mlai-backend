@@ -1038,7 +1038,6 @@
         "deliveryMode": {
           "enum": [
             "contentOnly",
-            "hosted",
             "website"
           ]
         },
@@ -4954,39 +4953,6 @@
         },
         "integrationVerified": {
           "type": "boolean"
-        },
-        "canPublishHostedArticle": {
-          "type": "boolean"
-        },
-        "hostedSite": {
-          "anyOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "state": {
-                  "type": "string",
-                  "maxLength": 100
-                },
-                "baseUrl": {
-                  "type": "string",
-                  "maxLength": 4096
-                },
-                "proxyVerified": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "state",
-                "baseUrl",
-                "proxyVerified"
-              ],
-              "x-wire-project": true
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "stage": {
           "enum": [

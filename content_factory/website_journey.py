@@ -69,8 +69,6 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         # The open setup pull request is the integration; publishing it comes before any rescan.
         reason_code = "setup_pr_unmerged"
         reason = "Your articles setup pull request is ready. Review the changes, then publish."
-    # MLAI serves a hosted site's articles; its repository is never set up for them.
-    hosted = capabilities.get("canPublishHostedArticle") is True
     running = operation and operation.get("state") in {"pending", "running", "verifying", "applying"}
     op_id = operation.get("id") if operation else None
     adapter = target.get("adapter") or target_contract.get("delivery_adapter") or proof.get("verifiedAdapter")
@@ -132,7 +130,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         allowed.append("github-revoke")
     if website:
         allowed += ["disconnect", "reset", "purge", "reconcile", "github-revoke"]
-        if connected and write_access and write_allowed and not hosted:
+        if connected and write_access and write_allowed:
             allowed.append("prepare")
         if access:
             if not permissions_ready:
@@ -140,8 +138,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
             allowed += ["custom-contract", "ci-attestation"]
         allowed += ["scan", "pause"] if connected else ["reconnect"]
         if write_allowed and write_access:
-            if not hosted:
-                allowed.append("setup")
+            allowed.append("setup")
             if not verification_stale:
                 allowed.append("verify")
         if website.get("hasMutationHistory"):
@@ -214,9 +211,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "capabilities": {"canRead": access, "canScan": bool(access and connected), "canPrepare": "setup" in allowed,"repositoryWriteVerified":capabilities.get("repositoryWriteVerified") is True,
             "canPreview": bool(mapping(website.get("capabilities")).get("previewSupported") and write_allowed),
             "canGeneratePortableDraft": bool(capabilities.get("canGeneratePortableDraft", company_id)), "canGenerateArticle": verified, "canOpenPublicationPr": verified,
-            "canPublishArticle": live_ready, **({"canPublishHostedArticle": capabilities.get("canPublishHostedArticle") is True,
-                "hostedSite": capabilities.get("hostedSite") if capabilities.get("canPublishHostedArticle") is True else None}
-                if "canPublishHostedArticle" in capabilities else {}), "canMerge": bool(write_allowed and proof.get("reviewedMergeReady")), "canDisconnect": bool(website), "canPurge": bool(website), "canCleanup": "cleanup" in allowed},
+            "canPublishArticle": live_ready, "canMerge": bool(write_allowed and proof.get("reviewedMergeReady")), "canDisconnect": bool(website), "canPurge": bool(website), "canCleanup": "cleanup" in allowed},
         "allowedActions": list(dict.fromkeys(allowed)), "actions": actions, "nextAction": next_action,
         "setupPullRequest": setup_pr or None,
         "discovery": discovery, "githubPermissions": grants, "operation": operation, "sourceRuns": source_runs or [], "ciSourceRuns": ci_source_runs or source_runs or [],

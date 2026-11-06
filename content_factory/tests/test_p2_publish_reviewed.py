@@ -191,45 +191,7 @@ class ReviewedPublishingTests(TransactionTestCase):
         self.assertEqual(ContentFactoryRun.objects.count(), 1)
         self.remote.assert_not_called()
 
-    @override_settings(ARTICLES_HOSTED_SITES_ENABLED=True)
-    def test_active_hosted_uses_existing_hosted_pipeline_without_repository_dispatch_and_records_live(self):
-        from content_factory.hosted_article_models import HostedArticleSite, HostedArticlePublication
-        from content_factory.hosted_articles import record_progress
-        from roo.models import Ledger
-        site = HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain, state='active',
-            worker_url='https://mine.owned.workers.dev', proxy_verified_at=timezone.now())
-        count = Ledger.objects.count()
-        run, created = self.start()
-        self.assertTrue(created)
-        self.assertEqual(len(self.posts), 1)
-        self.assertTrue(self.posts[0][0].endswith('/hosted-publish-reviewed'))
-        self.assertEqual(self.posts[0][1]['approved_body'], self.body)
-        self.assertEqual(self.posts[0][1]['hosted_site_id'], str(site.pk))
-        self.assertEqual(self.posts[0][1]['github_repo'], '')
-        self.assertNotIn('website_connection_id', self.posts[0][1])
-        self.assertEqual(Ledger.objects.count(), count)
-        publication = HostedArticlePublication.objects.get(site=site, run_id=run.run_id)
-        record_progress(domain=site.domain, run_id=run.run_id, data={'status': 'rendering', 'revision_digest': 'c'*64,
-            'article': {'slug': 'saved-article', 'title': 'Saved article', 'body_html': '<p>Saved edit</p>', 'published_at': '2026-11-02'}})
-        record_progress(domain=site.domain, run_id=run.run_id, data={'status': 'live', 'verified_digest': 'c'*64})
-        run.refresh_from_db()
-        self.assertEqual(run.status, 'completed')
-        self.assertEqual(run.result['deploy_v1']['url'], 'https://'+site.domain+'/blog/saved-article/')
-        self.assertEqual(run.result['article_approval_v1']['approved_body_sha256'], hashlib.sha256(self.body.encode()).hexdigest())
-        self.assertEqual(Ledger.objects.count(), count)
 
-    @override_settings(ARTICLES_HOSTED_SITES_ENABLED=True, HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW=True)
-    def test_hosted_publish_requires_the_current_rendered_revision_when_gate_on(self):
-        from content_factory.hosted_article_models import HostedArticleSite
-        HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain, state='active')
-        with self.assertRaises(service.PublishReviewedError) as error:
-            self.start()
-        self.assertEqual(error.exception.reason, 'preview_required')
-        self.remote.assert_not_called()
-        self.review['previewPending'] = False
-        self.review['previewedRevision'] = self.review['revision']
-        self.assertTrue(self.start()[1])
-        self.assertTrue(self.posts[0][0].endswith('/hosted-publish-reviewed'))
 
     def test_same_run_switched_channel_with_delivered_evidence_is_offered_without_mutating_bound_request(self):
         self.run.run_request['delivery_mode'] = 'review_draft'
@@ -278,10 +240,3 @@ class ReviewedPublishingTests(TransactionTestCase):
         article.refresh_from_db()
         self.assertEqual(article.source_run_id, self.run.run_id)
         self.assertEqual(article.live_url, run.result["deploy_v1"]["url"])
-
-    @override_settings(ARTICLES_HOSTED_SITES_ENABLED=True)
-    def test_an_already_live_hosted_article_is_not_offered_a_duplicate_publish(self):
-        from content_factory.hosted_article_models import HostedArticleSite, HostedArticlePublication
-        site = HostedArticleSite.objects.create(organization=self.org, domain=self.org.domain, state="active")
-        HostedArticlePublication.objects.create(site=site, run_id=self.run.run_id, status="live", slug="saved-source")
-        self.assertIsNone(service.publish_offer(self.run))

@@ -54,9 +54,10 @@ covers only 0001 and does not cover this full rollout.
 - Pending requests expire after 48 hours or at the start, whichever is sooner.
 - Cancellation/refund is possible only before the session starts. After its end,
   mentors can complete it. Automatic completion becomes due 24 hours after the end
-  and is processed on the next relevant read; there is no background worker.
-- Slack and Google failures do not undo a booking. Google busy checks can fail open
-  with a visible warning; the mentor still decides whether to accept.
+  and is processed on the next relevant read or bounded mentoring worker pass.
+- Calendar checks fail closed for new admissions in both modes. Legacy acceptance
+  rechecks conflicts before charging. Instant provider setup has durable recovery,
+  exact refunds and unknown-outcome cleanup; see [automatic capture](mentoring-automatic-capture.md).
 
 ## Disablement
 

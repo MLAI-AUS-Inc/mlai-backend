@@ -142,7 +142,6 @@ def enrich_journey(payload, *, organization, company, config, user, run, connect
     """
     from . import founder_journey as journey
     from .founder_draft_views import is_delivered_article
-    from .hosted_articles import hosted_capabilities
     from .article_publish_approval import article_review_identity_is_complete
     from .website_failure_contract import load_registry
 
@@ -157,10 +156,8 @@ def enrich_journey(payload, *, organization, company, config, user, run, connect
     ready = bool(run is not None and is_delivered_article(run))
     approved = bool(run is not None and effective_approval_state(run) == "approved")
     copied = bool(run is not None and journey.copied_or_posted(config, run.run_id))
-    hosted = hosted_capabilities(config)
     mode = journey.delivery_mode(run) if run is not None else "content_only"
-    delivery = ("hosted" if mode == "hosted" or hosted.get("canPublishHostedArticle") is True
-        else "contentOnly" if mode in {"", "content_only"} else "website")
+    delivery = "contentOnly" if mode in {"", "content_only", "hosted"} else "website"
     stage, state = payload["stage"], payload["state"]
     button = _mapping(payload.get("action") or payload.get("next")).get("label")
     current_copy = _copy(payload["headline"], payload.get("body"), button)

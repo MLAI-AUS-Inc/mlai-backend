@@ -185,6 +185,35 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
         self.assertTrue(self.op.payload["manual_setup_example_cleanup_retry"])
         self.assertEqual(self.op.generation, 3)
 
+    def test_retry_after_source_changed_rescans_instead_of_reusing_the_old_scan(self):
+        for code in ("SOURCE_CHANGED", "WEBSITE_SOURCE_CHANGED"):
+            self.setUp()
+            self.op.state = "stopped"
+            self.op.receipt.update(reason_code=code, failure_class="unsupported", completed_steps=["verify-access", "scan"],
+                user_action={"id": "choose_article_channel"})
+            with self.subTest(code=code), \
+                    patch.object(prepare, "authority_guard", return_value=nullcontext(self.website)), \
+                    patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)), \
+                    patch.object(ContentFactoryRun.objects, "filter", return_value=self.rows(first=self.child)):
+                prepare.start_prepare(self.config, expected=contract_for(self.website), retry=True)
+            self.assertEqual(self.op.state, "pending")
+            self.assertEqual(self.op.receipt["current_step"], "scan")
+            for key in ("scan_run_id", "setup_run_id", "completed_steps"):
+                self.assertNotIn(key, self.op.receipt)
+            self.assertTrue(self.op.payload["source_reverify"])
+            self.assertEqual(self.op.payload["attempt"], 2)
+            self.assertNotIn("manual_setup_example_cleanup_retry", self.op.payload)
+
+    def test_retry_of_other_stopped_failures_keeps_the_saved_scan(self):
+        self.op.state = "stopped"
+        self.op.receipt.update(reason_code="website_prepare_step_failed")
+        with patch.object(prepare, "authority_guard", return_value=nullcontext(self.website)), \
+                patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)), \
+                patch.object(ContentFactoryRun.objects, "filter", return_value=self.rows(first=self.child)):
+            prepare.start_prepare(self.config, expected=contract_for(self.website), retry=True)
+        self.assertEqual(self.op.receipt["scan_run_id"], "old-scan")
+        self.assertNotIn("source_reverify", self.op.payload)
+
     def test_other_needs_user_children_and_unrequested_cleanup_retry_stay_saved(self):
         for retry, action_id in ((False, "remove_setup_example"), (True, "merge_pr"), (True, "review_setup"),
                 (True, "review_github_permissions"), (True, "authorize_github"), (True, "deploy_site"),

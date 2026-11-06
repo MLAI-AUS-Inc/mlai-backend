@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import ANY, MagicMock, patch
 import uuid
 
-from mentoring import google, service
+from mentoring import conflicts, google, service
 from mentoring.models import MentorSession
 from mentoring.service import MentoringError, MentoringService
 
@@ -26,6 +26,7 @@ def make_session(status='requested', **kw):
         responded_at=None, completed_at=None, cancelled_at=None, cancelled_by=None,
         location_type='video', meet_link='', calendar_event_id='', meeting_status='pending',
         meeting_error='', meeting_path='', meeting_claimed_at=None,
+        buffer_before_minutes=0, buffer_after_minutes=0,
     )
     base.update(kw)
     s = SimpleNamespace(**base)
@@ -64,7 +65,12 @@ class Base(unittest.TestCase):
         for p in (
             patch.object(service, 'PointsService', self.points),
             patch.object(service, 'transaction', self.txn),
+            patch.object(conflicts, 'preflight', return_value={'busy': []}),
+            patch.object(conflicts, 'validate'),
             patch.object(service, '_lock_keys', self.lock_keys),
+            patch.object(service, '_lock_users'),
+            patch.object(service, '_reserve_session'),
+            patch.object(service, '_release_reservations'),
             patch.object(service, 'PointsAccount', self.account_cls),
             patch.object(service.timezone, 'now', side_effect=lambda: self.clock),
         ):
@@ -75,9 +81,10 @@ class Base(unittest.TestCase):
         self.actor_founder = SimpleNamespace(pk=1, slack_id='UFOUNDER')
 
     def load(self, session):
-        p = patch.object(MentoringService, '_load_for_update', return_value=session)
-        p.start()
-        self.addCleanup(p.stop)
+        for name in ('_load_for_update', '_load_session'):
+            p = patch.object(MentoringService, name, return_value=session)
+            p.start()
+            self.addCleanup(p.stop)
 
 
 class TransitionTests(Base):
@@ -348,6 +355,7 @@ class RequestTests(Base):
         self.profile = SimpleNamespace(
             pk=7, user=SimpleNamespace(pk=2, slack_id='UMENTOR'), user_id=2, is_active=True,
             price_roo=40, session_minutes=30, timezone='Australia/Melbourne',
+            booking_mode='legacy_request', buffer_before_minutes=0, buffer_after_minutes=0,
             location_type='video', busy_calendar_email='', space_notes='', brief_questions=[],
         )
         self.slot = START
@@ -362,7 +370,7 @@ class RequestTests(Base):
             patch.object(service, 'PointsAccount', acct_cls),
             patch.object(MentoringService, '_get_active_mentor', return_value=self.profile),
             patch.object(MentoringService, 'sweep'),
-            patch.object(MentoringService, 'free_slots', side_effect=lambda *a, **k: [self.slot]),
+            patch.object(MentoringService, '_free_slots', side_effect=lambda *a, **k: ([self.slot], 'ok')),
             patch.object(MentoringService, 'notify_mentor'),
         ):
             p.start()
@@ -880,13 +888,24 @@ class BusyTests(GoogleBase):
     def setUp(self):
         super().setUp()
         self.mentor = SimpleNamespace(
-            pk=7, timezone='UTC', session_minutes=30, away_dates=[], busy_calendar_email='mia@gmail.com',
+            pk=7, user_id=2, booking_revision=1, timezone='UTC', session_minutes=30, away_dates=[], busy_calendar_email='mia@gmail.com',
+            buffer_before_minutes=0, buffer_after_minutes=0, minimum_notice_minutes=0,
+            booking_horizon_days=30, start_increment_minutes=30,
             availability_rules=MagicMock(all=lambda: [
                 SimpleNamespace(weekday=0, start_time=datetime(2026, 1, 1, 9).time(), end_time=datetime(2026, 1, 1, 11).time()),
             ]),
         )
         self.objs.filter.return_value.values_list.return_value = []
         self.g.busy_times.return_value = []
+        reader = patch.object(conflicts, 'read', side_effect=lambda profile, start, end: self.g.busy_times(profile.busy_calendar_email, start, end) if profile.busy_calendar_email and self.g.is_enabled() else (_ for _ in ()).throw(google.GoogleError('off')))
+        reader.start()
+        self.addCleanup(reader.stop)
+        rows = patch.object(conflicts.MentorCalendarConnection, 'objects')
+        rows.start().filter.return_value.__iter__.return_value = iter([])
+        self.addCleanup(rows.stop)
+        internal = patch('mentoring.instant_booking._internal_busy', return_value=[])
+        internal.start()
+        self.addCleanup(internal.stop)
         self.now = datetime(2026, 11, 2, tzinfo=tz.utc)
 
     def slots(self, **kw):
@@ -903,17 +922,17 @@ class BusyTests(GoogleBase):
         self.assertEqual((self.hours(slots), check), (['09:00', '10:30'], 'ok'))
         self.assertEqual(self.g.busy_times.call_args.args[0], 'mia@gmail.com')
 
-    def test_freebusy_failure_still_shows_slots_and_flags_it(self):
+    def test_freebusy_failure_returns_no_slots(self):
         self.g.busy_times.side_effect = google.GoogleError('calendar_not_shared')
         slots, check = self.slots(with_google=True)
-        self.assertEqual((self.hours(slots), check), (['09:00', '09:30', '10:00', '10:30'], 'failed'))
+        self.assertEqual((self.hours(slots), check), ([], 'failed'))
 
     def test_off_without_email_google_or_flag(self):
         self.mentor.busy_calendar_email = ''
-        self.assertEqual(self.slots(with_google=True)[1], 'off')
+        self.assertEqual(self.slots(with_google=True), ([], 'failed'))
         self.mentor.busy_calendar_email = 'mia@gmail.com'
         self.g.is_enabled.return_value = False
-        self.assertEqual(self.slots(with_google=True)[1], 'off')
+        self.assertEqual(self.slots(with_google=True), ([], 'failed'))
         self.g.is_enabled.return_value = True
         self.assertEqual(self.slots(with_google=False)[1], 'off')
         self.g.busy_times.assert_not_called()

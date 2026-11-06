@@ -110,7 +110,7 @@ jobs:
       run: python scripts/test_without_database.py integrations.tests_studio_report_source
 
     - name: Run isolated refactor checks without database access
-      run: python scripts/test_without_database.py content_factory.tests_run_sync_authority_unit content_factory.tests_snapshot_meaning_unit content_factory.tests_run_events_unit content_factory.tests_run_job_parity_unit content_factory.tests_pulse_sync_unit startup_updates.tests_source_throughput_unit content_factory.tests_current_connection_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
+      run: python scripts/test_without_database.py content_factory.tests_hosting_retirement_unit content_factory.tests_run_sync_authority_unit content_factory.tests_snapshot_meaning_unit content_factory.tests_run_events_unit content_factory.tests_run_job_parity_unit content_factory.tests_pulse_sync_unit startup_updates.tests_source_throughput_unit content_factory.tests_current_connection_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
 
     - name: Check Roo Points GST and Xero capture contracts without database access
       run: python scripts/test_without_database.py roo.tests_purchase_tax_unit roo.tests_startup_update_benefits_unit tests.test_xero_capture_backoff_unit
@@ -130,6 +130,9 @@ jobs:
     - name: Check CRM blasts, sending domains and the listmonk client without database access
       run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit crm.tests.test_deliverability_unit crm.tests.test_deliverability_monitors_unit crm.tests.test_transactional_unit crm.tests.test_deliverability_planner_unit crm.tests.test_preflight_content_unit crm.tests.test_preflight_seed_unit crm.tests.test_campaign_copy_unit
 
+    - name: Check system email rendering, Resend transport, routing and webhook parsing without database access
+      run: python scripts/test_without_database.py system_email.tests.test_system_email_unit startup_updates.tests_reminder_admin_permissions_unit
+
     - name: Verify event discounts against disposable migration state
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency
 
@@ -147,7 +150,7 @@ jobs:
       run: python scripts/test_without_database.py community_chat.tests.test_unified_dm_directory_unit
 
     - name: Check Chat Roo identity and broadcast permissions without database access
-      run: python scripts/test_without_database.py integrations.tests_bridge_roo_actor integrations.tests_private_roo_actor integrations.tests_bridge_native_mentions integrations.test_broadcast_mentions_unit
+      run: python scripts/test_without_database.py integrations.tests_bridge_roo_actor integrations.tests_private_roo_actor integrations.tests_bridge_link_love roo.tests_system_rewards_unit integrations.tests_bridge_native_mentions integrations.test_broadcast_mentions_unit
 
     - name: Check Slack conversation opening without database access
       run: python scripts/test_without_database.py tests.test_slack_catalog_cors community_chat.tests.test_slack_inventory_openable community_chat.tests.test_slack_open_requests community_chat.tests.test_slack_open_recovery integrations.tests_slack_progressive_presentation integrations.tests_slack_unread_prefetch
@@ -250,6 +253,9 @@ jobs:
 
     - name: Check website journey and lifecycle contracts without database access
       run: python scripts/test_without_database.py content_factory.tests_website_goal_unit content_factory.tests_website_goal_chain_unit content_factory.tests_website_status_unit content_factory.tests_one_click_operations_unit content_factory.tests_articles_phase_a_unit content_factory.tests_dispatch_outcomes_unit content_factory.tests_prepare_observability_unit content_factory.tests_prepare_journey_unit content_factory.tests_prepare_permissions_unit content_factory.tests_cancel_receipts_unit content_factory.tests_article_publication_evidence_unit content_factory.tests_article_publication_observation_unit content_factory.tests_setup_revision_status_unit content_factory.tests_reconciliation_unit content_factory.tests_ops_dm_delivery content_factory.tests_website_articles_reliability_unit content_factory.tests_portable_run_controls_unit content_factory.tests_portable_workflow_progress_unit content_factory.tests_incident_guards_unit content_factory.tests_publish_child_review_identity_unit content_factory.tests_website_operation_recovery_unit content_factory.tests_setup_pr_failure_unit content_factory.tests_setup_merge_verification_unit content_factory.tests_source_reverify_target_unit content_factory.tests_verification_refresh_unit content_factory.tests_live_marker_routes_unit content_factory.tests_setup_pr_changes_unit content_factory.tests_setup_merge_policy_unit content_factory.tests_setup_pr_return_unit content_factory.tests_stopped_prepare_source_unit content_factory.tests_superseded_setup_cleanup_unit content_factory.tests_owner_setup_merge_unit content_factory.tests_setup_post_merge_unit content_factory.tests_setup_delivery_unit content_factory.test_reliability_contract content_factory.tests_private_preview_document_unit content_factory.tests_editorial_dispatch_unit content_factory.tests_cancel_preview_stop_unit content_factory.tests_website_cancel_retirement_unit content_factory.tests_prepare_transient_authorization_unit content_factory.tests_site_fingerprint_unit content_factory.tests_website_first_article_unit content_factory.tests_website_first_article_topics_unit content_factory.tests_website_first_article_billing_unit content_factory.tests_website_first_article_settlement_unit content_factory.tests_website_notification_delivery_unit content_factory.tests_website_goal_notifications_unit content_factory.tests_website_deployment_unit content_factory.tests_website_hosted_verification_unit content_factory.tests_website_hosted_build_unit content_factory.tests_website_environment_recovery_unit content_factory.tests_website_setup_consent_unit content_factory.tests_website_doctor_unit content_factory.tests_website_wakeups_unit content_factory.tests_website_strategy_budget_unit content_factory.tests_website_usage_settlement_unit content_factory.tests_website_cost_usage_unit content_factory.tests_website_cost_ledger_unit content_factory.tests_website_cost_recovery_unit content_factory.tests_website_operational_alerts_unit content_factory.tests_website_repair_alerts_unit content_factory.tests_website_stage_stalls_unit content_factory.tests_website_preview_cleanup_budget_unit content_factory.tests_publishing_inputs_unit content_factory.tests_sealed_verification_unit content_factory.tests_sealed_candidate_unit content_factory.tests_sealed_workflow_unit content_factory.tests_sealed_settlement_integration_unit content_factory.tests_sealed_provenance_unit content_factory.tests_draft_pull_request_cleanup_unit content_factory.tests_website_goal_audit_unit content_factory.tests_website_review_action_audit_unit content_factory.tests_website_comment_action_audit_unit content_factory.tests_website_zoo_scope_unit content_factory.tests_website_rollout_inspection_unit content_factory.tests_website_runtime_observation_unit content_factory.tests_native_inventory_summary_unit content_factory.tests_hosted_postmerge_lineage_unit content_factory.tests_source_recheck_journey_unit
+
+    - name: Test instant mentor scheduling and personal Google calendars without a database
+      run: python scripts/test_without_database.py mentoring.tests.test_calendar_sync_unit mentoring.tests.test_calendar_protection_unit mentoring.tests.test_instant_scheduling_unit mentoring.tests.test_instant_booking_unit mentoring.tests.test_personal_google_unit community_chat.tests.test_mentoring_calendar_views_unit community_chat.tests.test_mentoring_booking_views_unit
 
     - name: Test mentoring booking, points, scheduling, and administration without a database
       run: python scripts/test_without_database.py mentoring.tests.test_scheduling_unit mentoring.tests.test_dst_unit mentoring.tests.test_google_unit mentoring.tests.test_service_unit mentoring.tests.test_followup_unit mentoring.tests.test_admin_unit community_chat.tests.test_mentoring_views_unit community_chat.tests.test_mentoring_admin_views_unit
@@ -378,6 +384,7 @@ jobs:
           tests.test_vibe_marketing_bootstrap_performance \
           tests.test_articles_bootstrap_summary \
           tests.test_articles_bootstrap_read_path \
+          tests.test_bootstrap_single_flight \
           tests.test_bootstrap_run_lifetime \
           tests.test_articles_bootstrap_draft_reuse \
           tests.test_articles_bootstrap_progress_cache \
@@ -517,6 +524,7 @@ jobs:
           tests.test_admin_brain_activation_unit \
           tests.test_drive_transcript_inventory \
           tests.test_validate_prod_urls \
+          system_email.tests.test_system_email_database \
           tests.test_deploy_command_wiring \
           tests.test_research_automations \
           tests.test_linear_deployment_wiring \
@@ -604,6 +612,7 @@ jobs:
           community_chat.tests.test_volunteer_presentation \
           community_chat.tests.test_volunteer_events \
           community_chat.tests.test_intro_award_handoff \
+          community_chat.tests.test_native_reward_parity \
           integrations.tests_bridge_roo_actor_database \
           roo.tests.StartupUpdateRewardServiceTests \
           roo.tests_api.FirstChannelPostAwardViewTests \
@@ -758,6 +767,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install --require-hashes -r requirements.lock
 
+    - name: Verify native reward parity and original-device authority on PostgreSQL
+      run: python manage.py test community_chat.tests.test_native_reward_parity community_chat.tests.test_volunteer.VolunteerTests.test_questioners_other_verified_device_can_mark_answer_useful --verbosity 2
+
     - name: Verify event discount row locks and service boundaries on PostgreSQL
       run: python manage.py test roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency --verbosity 2
 
@@ -788,7 +800,6 @@ jobs:
           content_factory.tests.test_p2_authority_events \
           content_factory.tests.test_p2_authority_lineage \
           content_factory.tests.test_p2_authority_repin \
-          content_factory.tests.test_p2_hosted_registration \
           content_factory.tests.test_p2_publish_reviewed \
           content_factory.tests_p2_merge_worker \
           content_factory.tests_p2_policy \
@@ -801,7 +812,6 @@ jobs:
           content_factory.tests_free_baseline_reservations \
           content_factory.tests_p3_website_check_boundaries \
           content_factory.tests_p3_dispatch_identity_boundary \
-          content_factory.tests_hosted_publish_authority \
           content_factory.tests_p3_improvements \
           roo.tests_startup_checkout_return \
           content_factory.tests_p2_runs \
@@ -907,7 +917,7 @@ jobs:
           --verbosity 2
 
     - name: Run mentoring PostgreSQL booking and ledger tests
-      run: python manage.py test mentoring.tests.test_booking_database --verbosity 2
+      run: python manage.py test mentoring.tests.test_booking_database mentoring.tests.test_instant_booking_database mentoring.tests.test_calendar_sync_database --verbosity 2
 
     - name: Run meeting-room PostgreSQL tests
       run: python manage.py test roo.tests_meeting_rooms --verbosity 2
@@ -1061,6 +1071,9 @@ jobs:
     # Exercise the article chain before the expensive graph-rewind regressions,
     # so a controller/billing failure has a short, separately named CI result.
     # This uses the same disposable PostgreSQL schema and never deploys.
+    - name: Verify retired blog archive guard and table removal on PostgreSQL
+      run: python manage.py test content_factory.tests_hosting_retirement_database --noinput --verbosity 2
+
     - name: Run first-article and bootstrap-budget PostgreSQL tests
       run: python manage.py test content_factory.tests_website_first_article_database content_factory.tests_website_sealed_database content_factory.tests_article_publication_observation_database content_factory.tests_dispatch_admission_database content_factory.tests_website_cost_database content_factory.tests_website_cost_recovery_database content_factory.tests_website_operational_alerts_database content_factory.tests_website_repair_alerts_database content_factory.tests_website_stage_stalls_database content_factory.tests_website_preview_cleanup_budget_database tests.test_articles_bootstrap_endpoint_budget --verbosity 2
 
@@ -1515,7 +1528,6 @@ jobs:
         CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE: ${{ vars.CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE || '' }}
         ARTICLES_WORKSHOP_WINDOWS: ${{ vars.ARTICLES_WORKSHOP_WINDOWS || '' }}
         CONTENT_FACTORY_PORTABLE_PREVIEW_REARM: ${{ vars.CONTENT_FACTORY_PORTABLE_PREVIEW_REARM || '' }}
-        HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW: ${{ vars.HOSTED_PUBLISH_REQUIRES_RENDERED_PREVIEW || '' }}
         ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED: ${{ vars.ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED || '' }}
         ARTICLES_RUN_EVENTS_ENABLED: ${{ vars.ARTICLES_RUN_EVENTS_ENABLED || '' }}
         ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED: ${{ vars.ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED || '' }}

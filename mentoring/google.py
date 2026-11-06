@@ -292,7 +292,7 @@ def _parse(value):
     return parsed.astimezone(dt_timezone.utc)
 
 
-def busy_times(calendar_email, start, end):
+def busy_times(calendar_email, start, end, *, fresh=False):
     """Busy intervals [(start, end)] (aware UTC) of a calendar shared with the MLAI account.
 
     Cached per calendar and window for 5 minutes. Raises GoogleError.
@@ -302,22 +302,25 @@ def busy_times(calendar_email, start, end):
         f'{email}|{_utc_iso(start)}|{_utc_iso(end)}'.encode()
     ).hexdigest()[:40]
     cached = cache.get(key)
-    if cached is not None:
+    if cached is not None and not fresh:
         return [(_parse(a), _parse(b)) for a, b in cached]
     data = _api('POST', f'{CALENDAR_BASE}/freeBusy', json={
         'timeMin': _utc_iso(start), 'timeMax': _utc_iso(end),
         'items': [{'id': email}],
     })
     entry = (data.get('calendars') or {}).get(email)
-    if entry is None:
-        # Google keys the answer by the requested id; accept any single entry.
-        calendars = data.get('calendars') or {}
-        entry = next(iter(calendars.values()), None)
-    if entry is None:
+    if not isinstance(entry, dict):
         raise GoogleError('bad_response', 'no calendar in answer')
     if entry.get('errors'):
         raise GoogleError('calendar_not_shared')
-    pairs = [(item['start'], item['end']) for item in entry.get('busy', [])]
-    result = [(_parse(a), _parse(b)) for a, b in pairs]
+    if not isinstance(entry.get('busy'), list):
+        raise GoogleError('bad_response')
+    try:
+        pairs = [(item['start'], item['end']) for item in entry['busy']]
+        result = [(_parse(a), _parse(b)) for a, b in pairs]
+        if any(a >= b for a, b in result):
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        raise GoogleError('bad_response') from None
     cache.set(key, pairs, BUSY_CACHE_SECONDS)
     return result

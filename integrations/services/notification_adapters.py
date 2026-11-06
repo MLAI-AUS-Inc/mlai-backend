@@ -942,6 +942,45 @@ def _send_email_via_resend(
         return True, identifier, response_payload
 
 
+def _send_email_via_system_email(
+    channel: NotificationChannel,
+    *,
+    message_key: str,
+    subject: str,
+    text: str,
+    html_body: Optional[str],
+    idempotency_key: str,
+    unsubscribe_url: str = "",
+) -> tuple[bool, str, dict]:
+    from system_email import api as system_email
+    from system_email.render import RenderedEmail
+    from system_email.transport_resend import SystemEmailError
+
+    try:
+        result = system_email.send(
+            message_key,
+            to=str(channel.route_id or ""),
+            idempotency_key=idempotency_key,
+            prerendered=RenderedEmail(
+                subject=subject,
+                html=html_body or html.escape(text).replace("\n", "<br>"),
+                text=text,
+            ),
+            user_id=channel.user_id,
+            unsubscribe_url=unsubscribe_url,
+        )
+    except SystemEmailError as exc:
+        return False, "", {"error": exc.code, "retryable": exc.retryable}
+    return True, result.provider_message_id, {"id": result.provider_message_id, "provider": "resend"}
+
+
+# Automation event types whose email has a system_email message key.
+SYSTEM_EMAIL_KEY_FOR_EVENT = {
+    "review_ready": "article_review_ready",
+    "content_ready": "article_content_ready",
+}
+
+
 def _send_email(
     channel: NotificationChannel,
     *,
@@ -951,7 +990,28 @@ def _send_email(
     idempotency_key: str,
     message_data: Optional[dict[str, Any]] = None,
     transactional_message_id: str = "",
+    message_key: str = "",
+    unsubscribe_url: str = "",
 ) -> tuple[bool, str, dict]:
+    """Send one notification email.
+
+    A ``message_key`` switched on in ``SYSTEM_EMAIL_RESEND_MESSAGES`` goes
+    through our own Resend sender on the transactional domain. Everything else
+    keeps the legacy order: Customer.io when its key is set, else Resend.
+    """
+    if message_key:
+        from system_email.api import routes_to_resend
+
+        if routes_to_resend(message_key):
+            return _send_email_via_system_email(
+                channel,
+                message_key=message_key,
+                subject=subject,
+                text=text,
+                html_body=html_body,
+                idempotency_key=idempotency_key,
+                unsubscribe_url=unsubscribe_url,
+            )
     if str(getattr(settings, "CUSTOMERIO_API_KEY", "") or "").strip():
         return _send_email_via_customerio(
             channel,
@@ -1096,6 +1156,8 @@ def _send_channel_delivery(
                 idempotency_key=delivery.idempotency_key,
                 message_data=email_message_data,
                 transactional_message_id=email_transactional_message_id,
+                message_key=SYSTEM_EMAIL_KEY_FOR_EVENT.get(event_type, ""),
+                unsubscribe_url=_unsubscribe_url(run, channel),
             )
         elif channel.channel_type == NotificationChannelType.WHATSAPP:
             content_sid = str(channel.provider_metadata.get(f"{event_type}_content_sid") or "").strip()

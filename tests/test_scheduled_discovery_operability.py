@@ -2,9 +2,47 @@ from io import StringIO
 from unittest.mock import Mock, patch
 
 from django.core.management.base import CommandError
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 class ScheduledDiscoveryHeartbeatTests(SimpleTestCase):
+    @override_settings(MENTOR_INSTANT_BOOKING_ENABLED=False)
+    def test_mentor_recovery_runner_has_valid_status_when_admission_is_disabled(self):
+        from core.management.commands import run_scheduled_discovery as scheduler
+        from core.scheduling import run_runners
+
+        def run_mentor(runners):
+            names = [name for name, _ in runners]
+            self.assertEqual(names.count("mentor_booking_operations"), 1)
+            self.assertEqual(
+                names.index("self_heal_sweeps"),
+                names.index("article_dispatch_outbox") + 1,
+            )
+            self.assertGreater(
+                names.index("mentor_booking_operations"), names.index("self_heal_sweeps")
+            )
+            results, failures = run_runners([
+                (name, runner) for name, runner in runners
+                if name == "mentor_booking_operations"
+            ])
+            self.assertEqual(failures, [])
+            self.assertEqual(results["mentor_booking_operations"], {
+                "status": "completed", "processed": 2,
+            })
+            return results, failures
+
+        with (
+            patch.object(scheduler, "run_runners", side_effect=run_mentor),
+            patch.object(scheduler, "process_due_bookings", return_value={"processed": 2}) as process,
+            patch.object(scheduler.ScheduledDiscoveryHeartbeat, "objects") as heartbeats,
+        ):
+            heartbeats.get_or_create.return_value = (Mock(), False)
+            scheduler.Command(stdout=StringIO()).handle()
+
+        process.assert_called_once_with()
+        update = heartbeats.filter.return_value.update.call_args.kwargs
+        self.assertIn("last_succeeded_at", update)
+        self.assertEqual(update["last_error"], "")
+
     def test_shared_runner_failures_preserve_heartbeat_checks(self):
         from core.management.commands import run_scheduled_discovery as scheduler
         from core.scheduling import run_runners

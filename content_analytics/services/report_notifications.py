@@ -246,6 +246,7 @@ def send_report_ready(report: ArticlePerformanceReport) -> list[NotificationDeli
                         _report_email_message_data(report, channel) if template_id else None
                     ),
                     transactional_message_id=template_id,
+                    message_key="article_report_ready",
                 )
             elif channel.channel_type == NotificationChannelType.WHATSAPP:
                 content_sid = str(

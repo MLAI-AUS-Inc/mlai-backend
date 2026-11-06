@@ -2,6 +2,7 @@ import base64
 import hashlib
 import logging
 import math
+import uuid
 from types import SimpleNamespace
 from datetime import timedelta
 
@@ -45,8 +46,34 @@ def decrypt_signup_email(encrypted):
     return _cipher().decrypt(str(encrypted).encode("ascii")).decode("utf-8")
 
 
-def send_community_chat_email_code(user, code):
-    """Send one code through the dedicated Customer.io transaction."""
+def send_community_chat_email_code(user, code, delivery_id=None):
+    """Send one code: through system_email when ``chat_sign_in_code`` is
+    switched to Resend, otherwise through the dedicated Customer.io transaction.
+
+    ``delivery_id`` (the outbox row) makes Resend retries idempotent.
+    """
+    from system_email import api as system_email
+
+    if system_email.routes_to_resend("chat_sign_in_code"):
+        display_name = user.full_name or user.first_name or ""
+        result = system_email.send(
+            "chat_sign_in_code",
+            to=user.email,
+            idempotency_key=(
+                f"chat-code/{delivery_id}" if delivery_id is not None else f"chat-code/{uuid.uuid4()}"
+            ),
+            context={
+                "verification_code": code,
+                "expires_minutes": max(
+                    1, math.ceil(settings.COMMUNITY_CHAT_EMAIL_CODE_TTL_SECONDS / 60)
+                ),
+                "first_name": user.first_name or display_name,
+                "product_name": "MLAI Chat",
+                "support_url": "https://mlai.au/support",
+            },
+            user_id=user.id,
+        )
+        return {"id": result.provider_message_id}
 
     api_key = str(settings.CUSTOMERIO_API_KEY).strip()
     message_id = str(settings.CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID).strip()
@@ -169,7 +196,7 @@ def deliver_email_code(delivery_id):
             )
         else:
             recipient = challenge.user
-        response = send_community_chat_email_code(recipient, code)
+        response = send_community_chat_email_code(recipient, code, delivery_id=delivery.id)
     except InvalidToken:
         logger.error(
             "Chat email-code delivery payload could not be decrypted delivery_id=%s",

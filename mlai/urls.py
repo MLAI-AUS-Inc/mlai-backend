@@ -43,6 +43,7 @@ urlpatterns = [
     path('api/v1/community-chat/', include('community_chat.urls')),
     path('api/v1/crm/webhooks/', include('crm.urls_webhooks')),
     path('api/v1/crm/preferences/', include('crm.urls_preferences')),
+    path('api/v1/system-email/webhooks/', include('system_email.urls')),
     path('api/v1/public-brain/', include('org_memory.public_urls')),
     path('api/v1/jobs/', include('jobs.urls')),
     path('api/v1/medhack/', include('hospital.medhack_urls')),
