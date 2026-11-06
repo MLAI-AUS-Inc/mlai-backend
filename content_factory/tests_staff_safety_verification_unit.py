@@ -324,3 +324,24 @@ class StaffSafetyStateTests(SimpleTestCase):
         text = str(view)
         for leaked in ("task-new", "healthdirect", "sentence_sha256", SAFETY_HASH):
             self.assertNotIn(leaked, text)
+
+
+class StatusMergeContractTests(SimpleTestCase):
+    """The production merges keep both halves the notice needs: Content Factory's
+    passing quality with its task_id/review_token, and the backend's own receipt."""
+
+    def test_both_status_merges_carry_the_recheck_identity_and_keep_the_receipt(self):
+        from .service_views import _merge_django_owned_run_result
+        from .vibe_marketing_views import _merge_django_owned_article_result
+        receipt = FounderNotificationTests().receipt()
+        local = {**stored(QUEUED, blocker=None).result, verification.RECEIPT_KEY: receipt}
+        # Content Factory's snapshot never carries the backend receipt.
+        remote = {"article_preview_quality": FounderNotificationTests.PASSED, "live_preview": LIVE}
+        for merge in (_merge_django_owned_run_result, _merge_django_owned_article_result):
+            with self.subTest(merge.__name__):
+                merged = merge(local, remote)
+                self.assertEqual(merged[verification.RECEIPT_KEY], receipt)
+                quality = merged["article_preview_quality"]
+                self.assertEqual((quality["task_id"], quality["review_token"]), ("task-new", "task-new"))
+                run = SimpleNamespace(pk=7, run_id="run-1", status="awaiting_approval", organization_id=30, result=merged)
+                self.assertTrue(verification._ready_to_notify(run, merged[verification.RECEIPT_KEY]))
