@@ -38,6 +38,7 @@ from jobs.services.job_pipeline import enqueue_daily_jobs as run_daily_jobs_sche
 from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
 from roo.coding import reconcile_coding_reservations
 from mentoring.instant_booking import process_due_bookings
+from mentoring.calendar_sync import sync_due_sessions
 from roo.models import ScheduledDiscoveryHeartbeat
 from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
 
@@ -135,6 +136,7 @@ class Command(BaseCommand):
             ("self_heal_sweeps", scheduled_self_heal_sweeps),
             # Paid booking recovery continues even when new instant admission is off.
             ("mentor_booking_operations", lambda: {"status": "completed", **process_due_bookings()}),
+            ("mentor_calendar_sync", lambda: {"status": "completed", **sync_due_sessions()}),
             # Refreshes the durable Stripe payout ledger once per local day.
             # This never posts to Xero; posting always requires admin approval.
             ("stripe_payout_reconciliation", run_daily_payout_reconciliation),

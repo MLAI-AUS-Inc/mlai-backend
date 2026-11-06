@@ -244,7 +244,8 @@ def public_connection(connection):
     """Owner-only connection representation, with no token or Google subject."""
     return {key:getattr(connection,key) for key in ('id','provider','email','status','conflict_calendar_ids','booking_calendar_id','revision','last_error_code')} | {
         'calendars':connection.calendar_metadata,
-        'checked_at':connection.checked_at.isoformat() if connection.checked_at else None}
+        'checked_at':connection.checked_at.isoformat() if connection.checked_at else None,
+        'capture_ready':google.MEET_SETTINGS_SCOPE in connection.scopes}
 
 
 def refresh_calendars(user, connection_id):

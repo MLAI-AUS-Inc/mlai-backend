@@ -195,6 +195,22 @@ class GoogleCalendarClient:
             raise CalendarError('event_identity_mismatch')
         return result
 
+    def read_booking_change(self, calendar_id, booking_id):
+        """Read a known booking, retaining explicit deletion tombstones for sync.
+
+        A missing/inaccessible event is not proof of cancellation. Google may
+        omit private properties on a deleted event; its previously bound,
+        deterministic ID is required even in that case.
+        """
+        result = self.api('GET', self.events_path(calendar_id) + '/' + event_id(booking_id))
+        if result.get('id') != event_id(booking_id):
+            raise CalendarError('event_identity_mismatch')
+        if result.get('status') != 'cancelled':
+            private = result.get('extendedProperties', {}).get('private', {})
+            if private.get('mlai_booking_id') != str(booking_id):
+                raise CalendarError('event_identity_mismatch')
+        return result
+
     def create_booking(self, calendar_id, session):
         booking_id = str(session.pk)
         existing = self.get_booking(calendar_id,booking_id)
