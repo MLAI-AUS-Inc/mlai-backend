@@ -4203,9 +4203,13 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             "The hosted preview loaded before its required deployment assets were available. "
             "Content Factory is rechecking the current preview automatically; try approval again shortly."
         )
+        # Content Factory sends founder copy beside the technical message
+        # (main.py _founder_blocker_message); founders only ever see the copy.
+        founder_copy = "We're checking the preview again automatically. Publishing unlocks when it's done."
         blocker_detail = {
             "code": "article_preview_quality_rechecking",
             "message": blocker,
+            "founder_message": founder_copy,
             "retryable": False,
         }
 
@@ -4220,7 +4224,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             )
 
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data["detail"], blocker)
+        self.assertEqual(response.data["detail"], founder_copy)
+        self.assertNotIn(blocker, str(response.data), "the staff diagnostic stays out of the founder response")
         self.run.refresh_from_db()
         self.assertEqual(self.run.status, ContentFactoryRunStatus.APPROVAL_REQUIRED)
         self.assertEqual(
