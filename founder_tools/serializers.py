@@ -121,10 +121,25 @@ class FounderProfileSerializer(serializers.ModelSerializer):
         fields = ["role", "organizationName", "activeCompanyId", "companies"]
 
     def get_activeCompanyId(self, obj):
+        if self.context.get("startup_owner_only"):
+            allowed = {company.pk for company in self._startup_companies(obj)}
+            if obj.active_company_id not in allowed:
+                return None
         return str(obj.active_company_id) if obj.active_company_id else None
 
+    def _startup_companies(self, obj):
+        if not hasattr(self, "_startup_company_rows"):
+            from .services import user_may_use_organization
+
+            self._startup_company_rows = [
+                company for company in visible_companies(obj.companies.select_related("organization").all())
+                if not company.organization_id or user_may_use_organization(obj.user, company.organization)
+            ]
+        return self._startup_company_rows
+
     def get_companies(self, obj):
-        companies = visible_companies(obj.companies.select_related("organization").all())
+        companies = (self._startup_companies(obj) if self.context.get("startup_owner_only")
+                     else visible_companies(obj.companies.select_related("organization").all()))
         return FounderCompanySerializer(companies, many=True).data
 
 

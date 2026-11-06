@@ -6,6 +6,7 @@ from django.http import Http404
 from django.shortcuts import get_object_or_404
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 
 from founder_tools.my_startup.api import MyStartupAuthentication, MyStartupViewMixin
 from content_factory.website_metrics import WebsiteMetricsView as ContentWebsiteMetricsView
@@ -45,6 +46,7 @@ class MyStartupAccess(MyStartupViewMixin):
     authentication_classes = (MyStartupAuthentication,)
     permission_classes = (IsAuthenticated,)
     requires_company = True
+    account_scoped_reads = False
 
     def dispatch(self, request, *args, **kwargs):
         self._team_context_token = None
@@ -57,6 +59,12 @@ class MyStartupAccess(MyStartupViewMixin):
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
+        self.company = None
+        # Recovery must remain reachable with a stale/deleted/foreign selection.
+        # Only explicitly account-scoped reads ignore company hints; writes and
+        # every company operation retain the scope and ownership checks below.
+        if self.account_scoped_reads and request.method in {"GET", "HEAD"}:
+            return
         values = [source.get(key) for source in (request.query_params, request.data)
                   for key in ("company_id", "companyId") if source.get(key)]
         if kwargs.get("company_id"):
@@ -128,6 +136,7 @@ class MyStartupAccess(MyStartupViewMixin):
 class AccountView(MyStartupAccess, CurrentUserView):
     startup_read_bucket = "bootstrap"
     requires_company = False
+    account_scoped_reads = True
 
 
 class BalanceView(MyStartupAccess, CurrentUserBalanceView):
@@ -143,9 +152,18 @@ class FounderBootstrapView(MyStartupAccess, founder.FounderToolsBootstrapView):
 class ProfileView(MyStartupAccess, founder.FounderToolsProfileView):
     startup_read_bucket = "bootstrap"
     requires_company = False
+    account_scoped_reads = True
 
     def get(self, request):
-        response = super().get(request)
+        from content_factory.founder_journey_cohort import account_payload
+        from founder_tools.serializers import FounderProfileSerializer
+
+        profile = founder.get_or_create_founder_profile(request.user)
+        payload = FounderProfileSerializer(profile, context={"startup_owner_only": True}).data
+        journey = account_payload(request.user)
+        if journey is not None:
+            payload = {**payload, "founderJourney": journey}
+        response = Response(payload, status=200)
         from founder_tools.startup_team import enabled
         if enabled() and response.status_code == 200 and isinstance(response.data, dict):
             response.data = {**response.data, 'teamAvailable': True}
@@ -154,9 +172,14 @@ class ProfileView(MyStartupAccess, founder.FounderToolsProfileView):
 
 class CompaniesView(MyStartupAccess, founder.FounderToolsCompanyView):
     requires_company = False
+    account_scoped_reads = True
 
     def get(self, request):
-        response = super().get(request)
+        from founder_tools.serializers import FounderProfileSerializer
+
+        profile = founder.get_or_create_founder_profile(request.user)
+        payload = FounderProfileSerializer(profile, context={"startup_owner_only": True}).data
+        response = Response(payload["companies"], status=200)
         from founder_tools.startup_team import member_companies
         if response.status_code == 200:
             members = member_companies(request.user)

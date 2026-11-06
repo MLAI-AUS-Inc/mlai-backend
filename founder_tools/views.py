@@ -250,15 +250,11 @@ class FounderToolsCompanyView(APIView):
                 assert_company_domain_available(
                     profile, plain_fields["domain"], exclude_company_id=company.id
                 )
-                is_admin = bool(
-                    getattr(request.user, "is_staff", False) or getattr(request.user, "is_superuser", False)
-                )
                 # First-claim-wins tenancy: a founder may only take a domain that
                 # is unclaimed or already theirs (parity with the vibe-raising
                 # company endpoint).
                 if (
                     plain_fields["domain"]
-                    and not is_admin
                     and not domain_is_available_to(request.user, plain_fields["domain"])
                 ):
                     raise CompanyDomainClaimedError(claimed_organization(plain_fields["domain"]))

@@ -734,11 +734,9 @@ def ensure_company_organization(company: VibeRaisingCompany) -> Organization | N
     )
     if not created:
         user = company.profile.user
-        is_admin = bool(user.is_staff or user.is_superuser)
-        if not is_admin:
-            if not user_may_claim_organization(user, organization):
-                raise CompanyDomainClaimedError(organization)
-            _settle_organization_claim(user, company, organization)
+        if not user_may_claim_organization(user, organization):
+            raise CompanyDomainClaimedError(organization)
+        _settle_organization_claim(user, company, organization)
     if not created and not organization.name:
         organization.name = company.name
         organization.save(update_fields=["name"])
