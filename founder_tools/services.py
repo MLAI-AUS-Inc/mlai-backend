@@ -734,11 +734,9 @@ def ensure_company_organization(company: VibeRaisingCompany) -> Organization | N
     )
     if not created:
         user = company.profile.user
-        is_admin = bool(user.is_staff or user.is_superuser)
-        if not is_admin:
-            if not user_may_claim_organization(user, organization):
-                raise CompanyDomainClaimedError(organization)
-            _settle_organization_claim(user, company, organization)
+        if not user_may_claim_organization(user, organization):
+            raise CompanyDomainClaimedError(organization)
+        _settle_organization_claim(user, company, organization)
     if not created and not organization.name:
         organization.name = company.name
         organization.save(update_fields=["name"])
@@ -761,6 +759,8 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     organization = ensure_company_organization(company)
     if organization is None:
         return None
+    if not user_may_use_organization(user, organization):
+        raise CompanyDomainClaimedError(organization)
 
     brand_name_provided = _has_any_key(data, "brandName", "brand_name")
     company_context_provided = _has_any_key(data, "companyContext", "company_context")

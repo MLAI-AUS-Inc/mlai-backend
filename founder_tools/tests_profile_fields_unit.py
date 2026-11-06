@@ -148,7 +148,7 @@ class ProfileSaveRegistrationTests(SimpleTestCase):
     def test_sparse_profile_save_preserves_registration_without_abr_call(self):
         from founder_tools import views
         company_id = uuid4()
-        company = Obj(id=company_id, abn="saved-abn", acn="saved-acn", registered=True,
+        company = Obj(id=company_id, organization_id=None, abn="saved-abn", acn="saved-acn", registered=True,
                       save=Mock(), refresh_from_db=Mock())
         profile = Obj(pk=1, role="founder", active_company_id=company_id)
         with patch.object(views, "get_or_create_founder_profile", return_value=profile), \
