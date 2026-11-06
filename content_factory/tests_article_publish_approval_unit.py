@@ -400,6 +400,24 @@ class FounderQualityProjectionTests(SimpleTestCase):
         self.assertEqual(set(view), {"code", "founder_message", "retryable", "retry_action"})
         self.assertNotIn("message", view)
 
+    def test_blocker_without_founder_copy_never_shows_the_staff_message(self):
+        from content_factory.hosted_quality_state import UNALERTED_FALLBACK_MESSAGE, founder_blocker
+        blocker = {"code": "article_preview_quality_running", "message": "Hosted article quality verification is running."}
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=False):
+            self.assertEqual(founder_blocker(blocker)["founder_message"], UNALERTED_FALLBACK_MESSAGE)
+
+    def test_notified_copy_follows_whether_staff_alerts_are_on(self):
+        from content_factory.hosted_quality_state import (
+            FALLBACK_MESSAGE, UNALERTED_FALLBACK_MESSAGE, founder_blocker, founder_quality)
+        blocker = {"code": "article_preview_quality_blocked", "founder_message": FALLBACK_MESSAGE}
+        quality = {"status": "blocking_findings", "founder_message": FALLBACK_MESSAGE}
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=False):
+            self.assertEqual(founder_blocker(blocker)["founder_message"], UNALERTED_FALLBACK_MESSAGE)
+            self.assertEqual(founder_quality(quality)["founder_message"], UNALERTED_FALLBACK_MESSAGE)
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=True):
+            self.assertEqual(founder_blocker(blocker)["founder_message"], FALLBACK_MESSAGE)
+            self.assertEqual(founder_quality(quality)["founder_message"], FALLBACK_MESSAGE)
+
     def test_quality_drops_staff_diagnostics_and_keeps_founder_fields(self):
         from content_factory.hosted_quality_state import founder_quality
         view = founder_quality(self.QUALITY)

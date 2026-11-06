@@ -25,11 +25,21 @@ def fallback_message():
     return FALLBACK_MESSAGE if alerts else UNALERTED_FALLBACK_MESSAGE
 
 
+def _founder_copy(message):
+    """Founder copy, never claiming a staff notification that alerts would not send."""
+    if not isinstance(message, str) or not message.strip() or message == FALLBACK_MESSAGE:
+        return fallback_message()
+    return message
+
+
 def founder_blocker(blocker):
     """Project an approval blocker to its code and founder copy."""
     if not isinstance(blocker, dict):
         return blocker
-    return {key: blocker[key] for key in FOUNDER_BLOCKER_KEYS if key in blocker}
+    view = {key: blocker[key] for key in FOUNDER_BLOCKER_KEYS if key in blocker}
+    # A blocker without founder copy must not fall back to the staff message.
+    view["founder_message"] = _founder_copy(blocker.get("founder_message"))
+    return view
 
 
 def founder_quality(quality):
@@ -37,6 +47,8 @@ def founder_quality(quality):
     if not isinstance(quality, dict):
         return quality
     view = {key: quality[key] for key in FOUNDER_QUALITY_KEYS if key in quality}
+    if view.get("founder_message") is not None:
+        view["founder_message"] = _founder_copy(view["founder_message"])
     findings = quality.get("findings")
     if isinstance(findings, list):
         view["findings"] = [item for item in findings if item in FOUNDER_FINDING_MARKERS]
