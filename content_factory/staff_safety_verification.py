@@ -20,7 +20,8 @@ RECEIPT_KEY = "staff_safety_verification_v1"
 MAX_CLAIMS = 50
 MIN_NOTE_CHARS = 20
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-# Content Factory's refusal reasons, shown to staff only. Anything else is "unknown".
+# Content Factory's STAFF_REFUSALS (harness/staff_safety_verification.py), shown to
+# staff only and never a failure code. Anything else is "unknown".
 CF_REFUSALS = frozenset({
     "actor_required", "run_not_held", "observe", "locale_unsupported", "no_safety_sentences",
     "medication_or_dosing", "claims_required", "claim_invalid", "duplicate_sentence", "stale_sentence",
@@ -52,7 +53,7 @@ def _claims(raw):
 
 def _remote_refusal(remote):
     detail = mapping(mapping(remote.get("content_factory_response")).get("detail"))
-    reason = detail.get("code")
+    reason = detail.get("refusal")
     return reason if reason in CF_REFUSALS else "unknown"
 
 

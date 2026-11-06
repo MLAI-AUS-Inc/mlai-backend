@@ -100,9 +100,11 @@ class VerifyRequestTests(SimpleTestCase):
         call.assert_not_called()
 
     def test_a_content_factory_refusal_writes_nothing(self):
-        for remote, expected in (({"error": "x", "content_factory_response": {"detail": {"code": "observe"}}}, "observe"),
-                                 ({"error": "x", "content_factory_response": {"detail": {"code": "partial_cover"}}}, "refused"),
-                                 ({"error": "x", "content_factory_response": {"detail": {"code": "<script>"}}}, "refused"),
+        for remote, expected in (({"error": "x", "content_factory_response": {"detail": {"refusal": "observe"}}}, "observe"),
+                                 ({"error": "x", "content_factory_response": {"detail": {"refusal": "partial_cover"}}}, "refused"),
+                                 ({"error": "x", "content_factory_response": {"detail": {"refusal": "<script>"}}}, "refused"),
+                                 # A failure-code field is never read as a staff refusal.
+                                 ({"error": "x", "content_factory_response": {"detail": {"code": "observe"}}}, "refused"),
                                  ({}, "refused"), ({"status": "pending"}, "refused")):
             with self.subTest(remote=remote):
                 outcome, _, manager = self.verify(remote=remote)

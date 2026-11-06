@@ -2964,7 +2964,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:a1a285a9d42b926c2996cce6d69065829e73c1dc4a8de28e218ec2483e708f5e:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 21098,
+      "line": 21252,
       "kind": "inferred_run_save",
       "fields": [
         "approval_state",
@@ -2981,7 +2981,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
+      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -2991,7 +2991,7 @@
         "content_factory/tests_founder_run_commands.py",
         "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3102,7 +3102,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 20718,
+      "line": 20868,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3114,7 +3114,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
+      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3124,7 +3124,7 @@
         "content_factory/tests_founder_run_commands.py",
         "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3132,7 +3132,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:2",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 20764,
+      "line": 20918,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3144,7 +3144,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
+      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3154,7 +3154,7 @@
         "content_factory/tests_founder_run_commands.py",
         "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3162,7 +3162,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:3418387b1f3686713bd20e8926e5824cf845c9fb6b6b0eff05d165df49eadd92:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 20803,
+      "line": 20957,
       "kind": "inferred_run_save",
       "fields": [
         "status",
@@ -3176,7 +3176,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
+      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3186,7 +3186,7 @@
         "content_factory/tests_founder_run_commands.py",
         "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3433,7 +3433,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:f4ff89e68ed66f9063658270eb03abec69d12cda8deea5e3abe011406ddb0f95:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 21051,
+      "line": 21205,
       "kind": "model_create",
       "fields": [
         "status",
@@ -3447,7 +3447,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "ea62385148fffef7d02840358477ed7578787cc5b710438ec9e710dd8fba5449",
+      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3457,7 +3457,7 @@
         "content_factory/tests_founder_run_commands.py",
         "content_factory/tests_founder_library_commands.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -6127,11 +6127,12 @@
     {
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_call_content_factory_run_action",
-      "function_sha256": "3ed430c5275aa9ef34170eaf21084251367404a551a0ab872cf256528fdb0f23",
-      "reason": "Exact original control receipt, current active principal and outgoing admission/ticket are rechecked under SQL lock immediately before marking the external POST permanently uncertain; no transport occurs under that lock. Group operations retain the original member set and use the same before-transport identity gate; unknown effects remain held.",
+      "function_sha256": "1509d94dddfb17e6e5b8324c4455624203c3648caaaa6920c7bc41ff28ab58ae",
+      "reason": "Exact original control receipt, current active principal and outgoing admission/ticket are rechecked under SQL lock immediately before marking the external POST permanently uncertain; no transport occurs under that lock. Group operations retain the original member set and use the same before-transport identity gate; unknown effects remain held. The staff-only actions (record-staff-safety-verification, staff-safety-state) are refused with a 404 before any lock or transport unless the process-local staff console capability is passed; this only narrows the forwarded action set.",
       "test_refs": [
         "content_factory/tests_founder_library_commands.py",
-        "content_factory/tests_founder_run_commands.py"
+        "content_factory/tests_founder_run_commands.py",
+        "content_factory/tests_staff_safety_verification_unit.py"
       ]
     },
     {
