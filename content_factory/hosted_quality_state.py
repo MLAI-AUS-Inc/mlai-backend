@@ -19,26 +19,39 @@ FOUNDER_QUALITY_KEYS = (
 FOUNDER_FINDING_MARKERS = frozenset({"editorial:score_missing"})
 
 
+# Content Factory's longest automatic retry delay (30 s) plus its 60 s sync
+# grace, with a little clock-skew allowance. A stamp further out is not trusted.
+MAX_AUTOMATIC_RETRY_WINDOW_SECONDS = 120
+
+
 def current_preview_target(result):
+    """The proven current preview of a run result: an absolute URL and an integer generation, or None."""
+    if not isinstance(result, dict):
+        return None
     preview = result.get("live_preview") if isinstance(result.get("live_preview"), dict) else result.get("livePreview")
     if not isinstance(preview, dict):
         return None
     url = preview.get("previewUrl") or preview.get("preview_url")
     generation = preview.get("resumeGeneration", preview.get("resume_generation"))
-    return (url, generation) if isinstance(url, str) and url else None
+    if (not isinstance(url, str) or not url.startswith(("https://", "http://"))
+            or type(generation) is not int or generation < 0):
+        return None
+    return url, generation
 
 
 def automatic_retry_pending(quality, now=None, *, target=None):
-    """True while Content Factory's bounded automatic retry of a failed enqueue is still due.
+    """True while Content Factory's bounded automatic retry of a failed enqueue is due for the current preview.
 
-    Content Factory stamps ``automatic_retry_until`` only while retry budget
-    remains. Past that time, or with no stamp, the failure is real.
+    It needs a proven current target, a quality record for exactly that
+    preview and generation, and a timezone-aware ``automatic_retry_until``
+    stamp that is still ahead but within the configured retry window.
+    Otherwise the failure is real.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     if not isinstance(quality, dict) or str(quality.get("status") or "").strip().lower() != "queue_failed":
         return False
-    if target is not None and (quality.get("preview_url"), quality.get("resume_generation")) != target:
-        return False  # A retry for an older preview or generation says nothing about this one.
+    if target is None or (quality.get("preview_url"), quality.get("resume_generation")) != target:
+        return False  # Currentness is never inferred from the quality record itself.
     raw = quality.get("automatic_retry_until")
     if not isinstance(raw, str):
         return False
@@ -48,7 +61,8 @@ def automatic_retry_pending(quality, now=None, *, target=None):
         return False
     if until.tzinfo is None:
         return False
-    return (now or datetime.now(timezone.utc)) < until
+    now = now or datetime.now(timezone.utc)
+    return now < until <= now + timedelta(seconds=MAX_AUTOMATIC_RETRY_WINDOW_SECONDS)
 
 
 def fallback_message():
@@ -97,10 +111,19 @@ def founder_quality(quality, *, target=None):
     return view
 
 
-def founder_result(result):
-    """Apply the founder projections wherever a run result carries quality state."""
+_TOP_LEVEL = object()
+
+
+def founder_result(result, *, target=_TOP_LEVEL):
+    """Apply the founder projections wherever a run result carries quality state.
+
+    The current preview target comes from the top-level result only, and
+    nested ``result`` and control-response copies inherit it.
+    """
     if not isinstance(result, dict):
         return result
+    if target is _TOP_LEVEL:
+        target = current_preview_target(result)
     view = dict(result)
     blocker = view.get("approval_blocker")
     if "approval_blocker" in view:
@@ -118,13 +141,12 @@ def founder_result(result):
             if key in view:
                 raw = view[key] if isinstance(view[key], dict) else {}
                 view[key] = {"detail": founder_blocker(raw["detail"])} if quality_blocker_code(raw.get("detail")) else {}
-    target = current_preview_target(view)
     for key in ("article_preview_quality", "articlePreviewQuality"):
         if key in view:
             view[key] = founder_quality(view[key], target=target)
     for key in ("result", "latest_control_response"):
         if isinstance(view.get(key), dict):
-            view[key] = founder_result(view[key])
+            view[key] = founder_result(view[key], target=target)
     return view
 
 

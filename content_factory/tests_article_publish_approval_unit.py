@@ -787,3 +787,60 @@ class FounderAutomaticRetryProjectionTests(SimpleTestCase):
     def test_a_recovered_check_passes_through(self):
         quality = {"status": "passed", "preview_url": self.URL, "resume_generation": 2, "queue_failed_count": 1}
         self.assertEqual(self._views(quality)["status"], "passed")
+
+
+class FounderAutomaticRetryTargetBindingTests(SimpleTestCase):
+    """The quiet mapping needs a proven current preview, inherited by nested copies."""
+    URL_A, URL_B = "https://preview.example/articles/a", "https://preview.example/articles/b"
+
+    def _stamped(self, url, generation, seconds=40):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        return {"status": "queue_failed", "preview_url": url, "resume_generation": generation, "queue_failed_count": 1,
+                "automatic_retry_until": (now + timedelta(seconds=seconds)).isoformat(), "error": "redis down"}
+
+    def _full(self, result):
+        return FounderRunResponseProjectionTests()._serialize(result)["full"]
+
+    def test_a_nested_old_preview_stays_a_failure_while_the_current_one_reads_as_checking(self):
+        current = {"previewUrl": self.URL_B, "resumeGeneration": 2}
+        result = {"live_preview": current, "article_preview_quality": self._stamped(self.URL_B, 2),
+                  "latest_control_response": {"article_preview_quality": self._stamped(self.URL_A, 1)},
+                  "result": {"article_preview_quality": self._stamped(self.URL_A, 1)}}
+        view = self._full(result)
+        self.assertEqual(view["article_preview_quality"]["status"], "queued")
+        self.assertEqual(view["latest_control_response"]["article_preview_quality"]["status"], "queue_failed")
+        self.assertEqual(view["result"]["article_preview_quality"]["status"], "queue_failed")
+
+    def test_a_nested_preview_target_is_not_trusted_on_its_own(self):
+        result = {"latest_control_response": {"live_preview": {"previewUrl": self.URL_A, "resumeGeneration": 1},
+                                              "article_preview_quality": self._stamped(self.URL_A, 1)}}
+        self.assertEqual(self._full(result)["latest_control_response"]["article_preview_quality"]["status"], "queue_failed")
+
+    def test_a_missing_or_malformed_current_target_never_reads_as_checking(self):
+        from content_factory.hosted_quality_state import FAILED_TO_RUN_MESSAGE, preview_quality_publish_notice
+        for live in (None, {}, {"previewUrl": self.URL_A}, {"previewUrl": self.URL_A, "resumeGeneration": "1"},
+                     {"previewUrl": self.URL_A, "resumeGeneration": True}, {"previewUrl": self.URL_A, "resumeGeneration": -1},
+                     {"previewUrl": "/relative", "resumeGeneration": 1}, {"resumeGeneration": 1}):
+            with self.subTest(live=live):
+                result = {"article_preview_quality": self._stamped(self.URL_A, 1)}
+                if live is not None:
+                    result["live_preview"] = live
+                self.assertEqual(self._full(result)["article_preview_quality"]["status"], "queue_failed")
+                self.assertEqual(preview_quality_publish_notice(result["article_preview_quality"]),
+                                 ("blocked", FAILED_TO_RUN_MESSAGE))
+
+    def test_an_implausibly_far_future_stamp_is_not_trusted(self):
+        current = {"previewUrl": self.URL_A, "resumeGeneration": 1}
+        for seconds, expected in ((90, "queued"), (119, "queued"), (600, "queue_failed"), (86400 * 365, "queue_failed")):
+            with self.subTest(seconds=seconds):
+                result = {"live_preview": current, "article_preview_quality": self._stamped(self.URL_A, 1, seconds)}
+                self.assertEqual(self._full(result)["article_preview_quality"]["status"], expected)
+
+    def test_an_unrelated_approval_blocker_is_never_hidden(self):
+        current = {"previewUrl": self.URL_A, "resumeGeneration": 1}
+        blocker = {"code": "publish_auto_merge_blocked", "message": "Repository rules block auto-merge."}
+        view = self._full({"live_preview": current, "article_preview_quality": self._stamped(self.URL_A, 1),
+                           "approval_blocker": blocker})
+        self.assertEqual(view["article_preview_quality"]["status"], "queued")
+        self.assertEqual(view["approval_blocker"], blocker)
