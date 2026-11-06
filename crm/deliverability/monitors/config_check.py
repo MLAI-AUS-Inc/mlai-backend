@@ -57,3 +57,38 @@ def check_listmonk(stream, *, now, template, refresh=False):
     # include masked passwords and unrelated operational configuration.
     cache.set(key, result, timeout=policy.value('CRM_CONFIG_CHECK_SECONDS'))
     return result
+
+
+def check(stream, *, now):
+    """Inspect both providers without persisting their settings, keys or seed addresses."""
+    from crm.models import SeedMailbox
+    from .. import observations, scopes
+    from ..preflight import render, seed_inbox
+    from . import resend
+    from .http import Unavailable
+    critical, warnings = [], []
+    results = {}
+    if not stream.transactional:
+        try:
+            template = render.template_body(refresh=True)
+            results['listmonk'] = check_listmonk(stream, now=now, template=template, refresh=True)
+        except listmonk.ListmonkError:
+            results['listmonk'] = {'status': 'unavailable', 'critical': ['listmonk_unavailable'], 'warnings': []}
+        critical += results['listmonk'].get('critical', [])
+    try:
+        results['resend'] = resend.check(stream)
+    except Unavailable:
+        results['resend'] = {'status': 'unknown', 'critical': [], 'warnings': ['resend_unavailable']}
+    critical += results['resend']['critical']
+    warnings += results['resend']['warnings']
+    seeds = [{'provider': row.provider, 'status': seed_inbox.login_check(row)}
+        for row in SeedMailbox.objects.filter(enabled=True).order_by('pk')]
+    if not seeds or any(row['status'] != 'pass' for row in seeds):
+        warnings.append('seed_access_incomplete')
+    result = {'status': 'fail' if critical else 'unknown' if warnings else 'pass',
+        'critical': sorted(set(critical)), 'warnings': sorted(set(warnings)), 'providers': results, 'seeds': seeds}
+    if critical:
+        from ..guardian import Signal, detect
+        detect(None, Signal('listmonk_down', 'amber', len(set(critical)), 1, len(set(critical)), 'hold_stream',
+            evidence_key=scopes.evidence_key(critical)), stream=stream, now=now)
+    return observations.record(stream, 'config', result, now=now)

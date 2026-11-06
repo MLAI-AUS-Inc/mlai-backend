@@ -13,7 +13,7 @@ NOW = datetime(2026, 11, 9, 9, tzinfo=volume.MELBOURNE)
 
 
 def stream(**fields):
-    return SimpleNamespace(**{'pk': 'news', 'ramp_stage': 0, 'state': 'warming', 'daily_budget_override': None,
+    return SimpleNamespace(**{'pk': 'news', 'transactional': False, 'ramp_stage': 0, 'state': 'warming', 'daily_budget_override': None,
         'peak_healthy_daily_volume': 0, 'last_send_day': None, 'policy_overrides': {}, 'state_detail': {}, 'save': Mock(), **fields})
 
 
@@ -23,6 +23,17 @@ def contact(**fields):
 
 
 class VolumeTests(SimpleTestCase):
+    def test_preview_and_forecast_apply_idle_decay_exactly_once(self):
+        from crm.deliverability.health import forecast
+        anchor = (NOW - timedelta(days=90)).date()
+        original = stream(state='active', ramp_stage=10, last_send_day=anchor)
+        self.assertEqual(volume.preview_stream(original, NOW).ramp_stage, 5)
+        self.assertEqual(forecast(original, NOW)[0]['capacity'], 2500)
+        self.assertEqual(original.ramp_stage, 10)
+        applied = stream(ramp_stage=5, last_send_day=anchor, state_detail={'idle_decay_for': anchor.isoformat()})
+        self.assertEqual(volume.preview_stream(applied, NOW).ramp_stage, 5)
+        self.assertEqual(forecast(applied, NOW)[0]['capacity'], 2500)
+
     def test_five_thousand_people_finish_in_six_sending_days_without_catch_up(self):
         result = volume.estimate(stream(), 5000, NOW)
         self.assertEqual([row['count'] for row in result['schedule']], [150, 300, 600, 1000, 1500, 1450])

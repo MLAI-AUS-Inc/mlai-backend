@@ -26,15 +26,20 @@ VERSION = '2026-11-05.1'
 
 def policy_hash():
     prefixes = ('CRM_SUBJECT_', 'CRM_BODY_', 'CRM_HTML_', 'CRM_LINKS_', 'CRM_SPAM_', 'CRM_FOOTER_',
-        'CRM_ALLOWED_ACRONYMS', 'CRM_SEED_SPAM_', 'CRM_PREFLIGHT_POSTMASTER_', 'CRM_POSTMASTER_MAX_AGE_DAYS')
+        'CRM_ALLOWED_ACRONYMS', 'CRM_SEED_SPAM_', 'CRM_PREFLIGHT_POSTMASTER_', 'CRM_POSTMASTER_MAX_AGE_DAYS', 'CRM_RECONFIRMATION_')
     values = {key: policy.value(key) for key in policy.DEFAULTS if key.startswith(prefixes)}
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
-def _reputation(subjects, now, key, title, group):
+def _reputation(subjects, now, key, title, group, urls=None):
     latest = {}
     for check in ReputationCheck.objects.filter(subject__in=subjects,
             checked_at__gte=now - timedelta(hours=policy.value('CRM_REPUTATION_MAX_AGE_HOURS'))).order_by('-checked_at'):
+        if check.source == 'safe_browsing' and urls is not None:
+            from ..monitors.reputation import urls_digest
+            wanted = [url for url in urls if links.parsed_url(url)[1] == check.subject]
+            if check.detail.get('urls_hash') != urls_digest(wanted):
+                continue
         latest.setdefault((check.subject, check.source), check)
     listed = sorted({check.subject for check in latest.values() if check.listed is True})
     checked = {check.subject for check in latest.values() if check.listed is not None}
@@ -156,7 +161,29 @@ def run_preflight(blast, *, now=None, include_seed=True):
             subjects.add(links.parsed_url(url)[1])
         except ValueError:
             continue
-    items.append(_reputation(subjects, now, 'link_reputation', 'Link safety', 'message'))
+    urls = set()
+    for url, _ in links.link_targets(blast.body_markdown):
+        try:
+            links.parsed_url(url)
+            urls.add(url)
+        except ValueError:
+            pass
+    for observation in observations:
+        try:
+            subjects.add(links.parsed_url(observation.final_url)[1])
+            urls.add(observation.final_url)
+        except ValueError:
+            pass
+    if policy.value('CRM_MONITORS_ENABLED'):
+        from ..monitors.reputation import check_subjects
+        from ..monitors.http import budget
+        try:
+            with budget(policy.value('CRM_MONITOR_PASS_SECONDS')):
+                check_subjects(subjects, urls=urls, now=now)
+        except Exception:
+            # A failed reputation lookup remains unknown, never a false pass.
+            pass
+    items.append(_reputation(subjects, now, 'link_reputation', 'Link safety', 'message', urls=urls))
     items += audience_checks(blast, prepared, digest, now) + system_checks(blast, template, now)
     seed = {'status': 'not_started', 'results': []}
     if not any(row['status'] == 'block' for row in items) and include_seed:

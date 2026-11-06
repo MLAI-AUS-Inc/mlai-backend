@@ -60,7 +60,7 @@ def inspect_domain(domain, now):
     return info
 
 
-def domain_infos(addresses, now, *, cached_only=False):
+def domain_infos(addresses, now, *, cached_only=False, max_new=None):
     """Preview may refresh the external cache; it writes no CRM rows."""
     domains = sorted({address.rpartition('@')[2].lower() for address in addresses})
     if not domains:
@@ -76,6 +76,8 @@ def domain_infos(addresses, now, *, cached_only=False):
         if isinstance(saved, DomainInfo) and cutoff <= saved.checked_at <= now:
             found[domain] = saved
     missing = [domain for domain in domains if domain not in found]
+    if max_new is not None:
+        missing = missing[:min(max_new, policy.value('CRM_DOMAIN_CHECK_WORKERS'))]
     if not cached_only and missing:
         with ThreadPoolExecutor(max_workers=policy.value('CRM_DOMAIN_CHECK_WORKERS')) as pool:
             for info in pool.map(lambda domain: inspect_domain(domain, now), missing):
@@ -86,6 +88,9 @@ def domain_infos(addresses, now, *, cached_only=False):
 def exclusion(contact, info, purpose):
     """First matching reason wins; unanswered MX never becomes a false no-MX result."""
     domain = contact.email.rpartition('@')[2].lower()
+    from .lifecycle import dormant_suppressed
+    if purpose == 'marketing' and dormant_suppressed(contact.attributes):
+        return 'dormant'
     if info is None or info.has_mx is None:
         return 'domain_unverified'
     if not info.has_mx:

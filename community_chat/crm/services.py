@@ -120,6 +120,10 @@ def create_contact(data: dict, *, actor, now: datetime) -> Contact:
 
     require_mlai_admin(actor)
     email = data["email"]
+    from crm.email_aliases import canonical_emails
+    corrected = canonical_emails([email]).get(email)
+    if corrected:
+        raise _existing(corrected)
     if Contact.objects.filter(email=email).exists():
         raise _existing(email)
     if _is_banned(email):
@@ -349,13 +353,25 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
         blast = Blast(created_by=actor)
     elif blast.status != Blast.Status.DRAFT:
         raise CrmError("blast_not_draft", 409, blast_status=blast.status)
+    from crm.deliverability.reconfirmation import is_reconfirmation
+    preference_check = is_reconfirmation(blast)
+    if preference_check:
+        if not is_owner(actor):
+            raise CrmError('owner_required', 403)
+        if (data.get('purpose', 'marketing') != 'marketing' or data.get('channels', ['email']) != ['email']
+                or any(data.get(key) for key in ('event_id', 'segment_id', 'quick_segment', 'audience_preset'))):
+            raise CrmError('reconfirmation_audience_fixed')
     if "purpose" in data:
         blast.purpose = data["purpose"]
     if "event_id" in data:
         blast.event = (
             None if data["event_id"] is None else _found(CrmEvent, data["event_id"], "event_not_found")
         )
-    _set_audience(blast, data)
+    if preference_check:
+        blast.event, blast.segment, blast.quick_segment = None, None, ''
+        blast.segment_definition = {'match': 'all', 'rules': [], 'exclude': []}
+    else:
+        _set_audience(blast, data)
     if "channels" in data:
         blast.channels = data["channels"]
     if "sms_only_without_whatsapp" in data:

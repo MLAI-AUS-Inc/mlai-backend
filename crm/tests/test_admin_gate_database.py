@@ -27,7 +27,7 @@ def crm_routes():
     """(path, view) for every CRM route, with each URL parameter filled by a fresh UUID."""
 
     for pattern in crm_urls.urlpatterns:
-        path = re.sub(r"<uuid:\w+>", lambda _match: str(uuid.uuid4()), str(pattern.pattern))
+        path = re.sub(r"<uuid:\w+>", lambda _match: str(uuid.uuid4()), str(pattern.pattern)).replace("<slug:key>", "news")
         unfilled = re.search(r"<[^>]+>", path)
         assert unfilled is None, f"fill the {unfilled.group()} parameter in {pattern.pattern}"
         yield path, pattern.callback.view_class

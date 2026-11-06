@@ -7,6 +7,7 @@ from email.message import EmailMessage
 from email.utils import format_datetime
 
 from django.core.cache import cache
+from django.conf import settings
 
 from crm import blast_email, listmonk, merge_tags
 from crm.models import BlastWave
@@ -24,6 +25,10 @@ def event_context(blast):
 def content_hash(blast, template_body):
     """Bind event substitutions and template bytes as well as the requested fields."""
     data = {key: getattr(blast, key) for key in ('subject', 'preview_text', 'body_markdown', 'sign_off_name')}
+    from ..reconfirmation import is_reconfirmation
+    data['reconfirmation'] = is_reconfirmation(blast)
+    if data['reconfirmation']:
+        data['preference_origin'] = settings.DEFAULT_BACKEND_URL
     data.update(stream=blast.stream.key, domain=blast.stream.domain, from_address=blast.mailbox.email,
         reply_to=blast.mailbox.reply_to, template_id=listmonk.template_id(),
         template_hash=hashlib.sha256(template_body.encode()).hexdigest(), event=event_context(blast))
@@ -51,6 +56,11 @@ def template_body(*, refresh=False):
 def preview_payload(blast, list_id, name):
     wave = BlastWave(blast=blast, index=0, listmonk_list_id=list_id)
     payload = waves.campaign_payload(wave, blast)
+    from .. import reconfirmation
+    if reconfirmation.is_reconfirmation(blast):
+        preview_url = settings.DEFAULT_BACKEND_URL.rstrip('/') + reconfirmation.PATH + '?preview=1'
+        for key in ('body', 'altbody'):
+            payload[key] = payload[key].replace(reconfirmation.GO_URL, preview_url)
     payload['name'] = name
     return payload
 

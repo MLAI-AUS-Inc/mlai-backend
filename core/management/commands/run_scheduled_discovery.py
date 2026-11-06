@@ -26,8 +26,13 @@ from crm.luma_sync import run_luma_guest_sync_scheduler
 from crm.warmup import run_warmup_scheduler
 from crm.deliverability.guardian import run_deliverability_guard
 from crm.deliverability.day_close import run_stream_day_close
+from crm.deliverability.monitors.runner import run_deliverability_monitors
+from crm.deliverability.alerts import run_daily_digest
 from crm.deliverability.preflight.seeds import run_seed_checks
 from crm.engagement_refresh import run_engagement_refresh_scheduler
+from crm.deliverability.lifecycle import run_lifecycle_refresh
+from crm.deliverability.transactional import run_transactional_monitor
+from crm.deliverability.import_hygiene import run_domain_hygiene
 from integrations.services.daily_discovery import (
     enqueue_scheduled_discovery,
     run_daily_discovery_scheduler,
@@ -172,7 +177,10 @@ class Command(BaseCommand):
             # through Twilio. Off unless a blast channel is enabled, and
             # cache-throttled to CRM_BLAST_DISPATCH_INTERVAL_SECONDS.
             ("crm_warmup", run_warmup_scheduler),
+            ("crm_deliverability_monitors", run_deliverability_monitors),
+            ("transactional_mail_health", run_transactional_monitor),
             ("crm_deliverability_guard", run_deliverability_guard),
+            ("crm_deliverability_digest", run_daily_digest),
             ("crm_seed_checks", run_seed_checks),
             ("crm_stream_day_close", run_stream_day_close),
             ("crm_blast_dispatch", run_blast_dispatch_scheduler),
@@ -182,6 +190,8 @@ class Command(BaseCommand):
             ("crm_listmonk_sync", run_listmonk_sync_scheduler),
             # Activity-only daily ratings. No consent or messaging side effects.
             ("crm_engagement_refresh", run_engagement_refresh_scheduler),
+            ("crm_lifecycle", run_lifecycle_refresh),
+            ("crm_domain_hygiene", run_domain_hygiene),
             # Releases expired, undispatched MLAI Coding reservations and
             # resolves calls whose provider usage could not be confirmed.
             # Authenticated request paths only reconcile their own account;
