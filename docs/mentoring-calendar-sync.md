@@ -21,6 +21,9 @@ on scheduler load and provider availability.
 - Explicit Google cancellation tombstones use the existing cancellation/refund
   transaction before the session starts. Replays cannot charge or refund twice.
   Existing durable cleanup handles the app-to-Google direction.
+  Older repaired sessions with a verified deterministic event also release their
+  reservations once cancelled-event cleanup confirms absence. A genuinely
+  unresolved insert remains quarantined; absence alone never cancels a session.
 - Changed Meet links require capture configuration again when the booking's
   frozen policy (or historical repair policy) requires it.
 - Network/permission failures, 404s and ambiguous responses never imply a refund

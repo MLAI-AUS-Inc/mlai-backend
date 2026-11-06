@@ -8,10 +8,10 @@ import uuid
 from django.db import connection
 from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
-from mentoring import calendar_sync as sync, instant_booking as instant
+from mentoring import calendar_sync as sync, instant_booking as instant, meeting_repair
 from mentoring.calendars import google
 from mentoring.calendars.errors import CalendarError
-from mentoring.models import MentorSession, MentorTimeReservation
+from mentoring.models import MentorBookingAttempt, MentorSession, MentorTimeReservation
 from mentoring.service import MentoringService
 from mentoring.tests import test_instant_booking_database as existing
 
@@ -60,6 +60,37 @@ class CalendarSyncDatabaseTests(TransactionTestCase):
         self.assertEqual(self.session.status,'cancelled')
         self.assertEqual(self.balance(self.founder),100)
         self.assertIsNotNone(self.session.release_ledger_entry_id)
+
+    def test_repaired_legacy_google_cancellation_releases_time_after_absent_cleanup(self):
+        # Model a repair completed by the older worker, which retained its
+        # unknown-create flag even after recording the verified event.
+        MentorBookingAttempt.objects.filter(session=self.session).delete()
+        self.session.booking_mode = 'legacy_request'
+        self.session.location_type = 'video'
+        self.session.meet_link = 'https://meet.google.com/abc-defg-hij'
+        self.session.meeting_provisioning = {'repair': True, 'unknown_create': True,
+                                            'cleanup_pending': True, 'verified': True}
+        self.session.save()
+        charge = self.session.charge_ledger_entry_id
+        self.client.read_booking_change.return_value = {
+            'id': google.event_id(self.session.pk), 'status': 'cancelled'}
+        sync.sync_session(self.session.pk)
+        self.session.refresh_from_db()
+        refund = self.session.release_ledger_entry_id
+        self.assertEqual(self.session.status, 'cancelled')
+        self.assertEqual(self.balance(self.founder), 100)
+        self.assertEqual(self.session.time_reservations.filter(active=True).count(), 2)
+        with patch.object(meeting_repair.calendars, 'cancel_booking', return_value={'outcome': 'absent'}):
+            meeting_repair.process(self.session.pk)
+        sync.sync_session(self.session.pk)
+        self.session.refresh_from_db()
+        self.assertFalse(self.session.meeting_provisioning['cleanup_pending'])
+        self.assertFalse(self.session.meeting_provisioning['unknown_create'])
+        self.assertFalse(self.session.time_reservations.filter(active=True).exists())
+        self.assertEqual(self.session.charge_ledger_entry_id, charge)
+        self.assertIsNotNone(refund)
+        self.assertEqual(self.session.release_ledger_entry_id, refund)
+        self.assertEqual(self.balance(self.founder), 100)
 
     def test_permission_failure_and_404_never_cancel_or_release_time(self):
         for code in ('permission','not_found','provider_unavailable'):

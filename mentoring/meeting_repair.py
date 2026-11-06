@@ -66,9 +66,17 @@ def process(session_id):
             # Cleanup only when cancelled. A completed appointment retains its event.
             if live.status == 'cancelled':
                 deleted = calendars.cancel_booking(live)
-                if deleted.get('outcome') != 'deleted' and live.meeting_provisioning.get('unknown_create'):
+                if deleted.get('outcome') not in ('deleted', 'absent'):
+                    raise CalendarError('invalid_response')
+                # Older successful repairs retained unknown_create. A stored,
+                # verified deterministic event proves that insert completed;
+                # absence is then sufficient cleanup, never cancellation evidence.
+                observed = (live.calendar_event_id == google.event_id(live.pk)
+                    and bool(live.meet_link) and live.meeting_provisioning.get('verified') is True)
+                if (deleted['outcome'] == 'absent' and live.meeting_provisioning.get('unknown_create')
+                        and not observed):
                     return
-            outcome = {**live.meeting_provisioning, 'cleanup_pending': False}
+            outcome = {**live.meeting_provisioning, 'cleanup_pending': False, 'unknown_create': False}
             fields = {'meeting_provisioning': outcome}
         else:
             result = calendars.lookup_booking(live)
@@ -100,7 +108,8 @@ def process(session_id):
             fields = {'calendar_event_id': result['event_id'], 'meet_link': result['meet_link'],
                 'meeting_status': 'created', 'meeting_error': '', 'notification_status': 'sent',
                 'meeting_provisioning': {**live.meeting_provisioning, **capture,
-                    'verified_at': timezone.now().isoformat(), 'cleanup_pending': True}}
+                    'verified_at': timezone.now().isoformat(), 'cleanup_pending': True,
+                    'unknown_create': False}}
         saved = MentorSession.objects.filter(pk=live.pk, status=live.status,
             meeting_claimed_at=now).update(**fields)
         if saved and live.status == 'cancelled' and not fields['meeting_provisioning']['cleanup_pending']:
