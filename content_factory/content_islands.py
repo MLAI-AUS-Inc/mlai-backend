@@ -9,6 +9,8 @@ the crash class this triple validation exists to prevent.
 import logging
 import math
 
+from .island_regions import compute_island_regions
+
 from django.utils.text import slugify
 
 logger = logging.getLogger(__name__)
@@ -204,6 +206,60 @@ def rebuild_island_edges(organization):
         for slug_a, slug_b, similarity in edges
     ])
     return len(edges)
+
+
+def rebuild_island_regions(organization):
+    """Persist stable groups after edges refresh, under the organisation lock.
+
+    Reads use the stored groups without any writes; the first subsequent refresh
+    populates regions for organisations created before this schema was introduced.
+    """
+    from django.db import transaction
+    from organizations.models import Organization
+    from .models import ContentIsland, ContentIslandEdge, ContentIslandRegion, ContentIslandStatus
+
+    with transaction.atomic():
+        org = Organization.objects.select_for_update().get(pk=organization.pk)
+        islands = list(ContentIsland.objects.filter(organization=org).exclude(
+            status=ContentIslandStatus.ARCHIVED).select_related('region'))
+        previous = list(ContentIslandRegion.objects.filter(organization=org).order_by('slug'))
+        members = {}
+        for island in islands:
+            if island.region_id:
+                members.setdefault(island.region_id, []).append(island.slug)
+        snapshots = [dict(slug=region.slug, name=region.name, name_source=region.name_source,
+                          color_key=region.color_key, centroid_embedding=region.centroid_embedding,
+                          island_slugs=members.get(region.pk, [])) for region in previous]
+        edges = list(ContentIslandEdge.objects.filter(organization=org).values_list(
+            'island_a__slug', 'island_b__slug', 'similarity'))
+        computed = compute_island_regions(islands, snapshots, edges=edges)
+        old_by_slug = {region.slug: region for region in previous}
+        regions_by_island = {}
+        retained = []
+        for snapshot in computed:
+            member_slugs = snapshot.pop('island_slugs')
+            slug = snapshot.pop('slug')
+            region = old_by_slug.get(slug)
+            if region is None:
+                region = ContentIslandRegion.objects.create(organization=org, slug=slug, **snapshot)
+            else:
+                # Name/source/colour are stable even when the opportunity ranking changes.
+                region.centroid_embedding = snapshot['centroid_embedding']
+                region.save(update_fields=['centroid_embedding', 'updated_at'])
+            retained.append(region.pk)
+            for member_slug in member_slugs:
+                regions_by_island[member_slug] = region
+        changed = []
+        for island in islands:
+            region = regions_by_island.get(island.slug)
+            if island.region_id != (region.pk if region else None):
+                island.region = region
+                changed.append(island)
+        if changed:
+            ContentIsland.objects.bulk_update(changed, ['region'])
+        ContentIsland.objects.filter(organization=org, status=ContentIslandStatus.ARCHIVED).update(region=None)
+        ContentIslandRegion.objects.filter(organization=org).exclude(pk__in=retained).delete()
+    return len(computed)
 
 
 def seed_islands_from_bootstrap_pillars(organization):

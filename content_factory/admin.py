@@ -8,6 +8,7 @@ from .models import (
     ContentFactoryHealingRecord,
     ContentFactoryJob,
     ContentIsland,
+    ContentIslandRegion,
     ContentIslandEdge,
     ContentIslandKeyword,
     ContentIslandRefreshDispatch,
@@ -499,7 +500,7 @@ class ContentIslandAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ('Identity', {
-            'fields': ('organization', 'slug', 'name', 'description', 'pillar_keyword')
+            'fields': ('organization', 'region', 'slug', 'name', 'description', 'pillar_keyword')
         }),
         ('Visuals', {
             'fields': ('icon_key', 'color_key'),
@@ -643,3 +644,12 @@ class ContentFactoryHealingRecordAdmin(admin.ModelAdmin):
     search_fields = ('domain', 'github_repo', 'failure_family_key', 'summary', 'latest_run_id')
     ordering = ('-updated_at',)
     readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(ContentIslandRegion)
+class ContentIslandRegionAdmin(admin.ModelAdmin):
+    list_display = ('name', 'organization', 'slug', 'name_source', 'color_key')
+    list_filter = ('name_source', 'organization')
+    search_fields = ('name', 'slug', 'organization__domain')
+    list_select_related = ('organization',)
+    readonly_fields = ('created_at', 'updated_at', 'centroid_embedding')
