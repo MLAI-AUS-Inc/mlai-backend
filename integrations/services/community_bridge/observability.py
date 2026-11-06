@@ -12,6 +12,18 @@ from django.db import DEFAULT_DB_ALIAS, connections
 logger = logging.getLogger(__name__)
 _route = ContextVar("public_bridge_log_route", default=None)
 _ID = re.compile(r"[TC][A-Z0-9]{1,23}")
+# Closed hold codes, shared with `store.defer_delivery`: a held row's
+# `last_error` and a deferred send log use the same allowlist. Unknown codes
+# are stored as provider_budget_deferred and logged as the generic hold.
+HOLD_REASONS = frozenset({
+    "provider_budget_deferred", "member_delivery_deferred", "legacy_community_send_unproven",
+    "community_bot_reader_unavailable", "community_bot_reader_scope_unavailable",
+    "community_channel_not_admitted", "community_mapping_pending",
+    "community_member_access_disabled", "community_receipt_unverified",
+    "community_source_closed", "parent_mapping_pending", "member_membership_unproven",
+})
+# Closed codes for permanent drops (row becomes dead without a provider call).
+DROP_REASONS = frozenset({"consent_required", "device_unverified", "permanent_failure"})
 _SCHEMAS = {
     "slack_member_event": {
         "route": {"members", "community"},
@@ -25,8 +37,8 @@ _SCHEMAS = {
     },
     "slack_member_send": {
         "poster": {"member", "bot"},
-        "outcome": {"settled", "deferred", "retry", "unavailable"},
-        "reason": {"recorded_strategy", "reconciled", "authority_or_provider_hold"},
+        "outcome": {"settled", "deferred", "retry", "unavailable", "dropped"},
+        "reason": {"recorded_strategy", "reconciled", "authority_or_provider_hold"} | HOLD_REASONS | DROP_REASONS,
     },
     "slack_public_echo": {"kind": {"create", "edit", "delete", "reaction_add", "reaction_remove"}},
 
@@ -144,22 +156,51 @@ def event(snapshot, result):
         emit("slack_member_event", **fields)
 
 
-def send(row, actor, delivery_id, outcome, *, reconciled=False):
+def send(row, actor, delivery_id, outcome, *, reconciled=False, reason=None):
+    """`actor` is None when selection failed before a poster was chosen."""
     snapshot = room_snapshot(row)
-    if snapshot is not None and isinstance(actor, dict):
-        reason = ("reconciled" if reconciled else "recorded_strategy"
-                  if outcome == "settled" else "authority_or_provider_hold")
-        emit("slack_member_send", **snapshot, delivery_id=delivery_id,
-             poster=actor.get("kind"), outcome=outcome, reason=reason)
+    if snapshot is not None and (actor is None or isinstance(actor, dict)):
+        if reason is None:
+            reason = ("reconciled" if reconciled else "recorded_strategy"
+                      if outcome == "settled" else "authority_or_provider_hold")
+        fields = {**snapshot, "delivery_id": delivery_id, "outcome": outcome, "reason": reason}
+        if actor is not None:
+            fields["poster"] = actor.get("kind")
+        emit("slack_member_send", **fields)
+
+
+def failure_outcome(error):
+    """Map a send exception to a closed (outcome, reason) by type and code only.
+
+    Error messages and provider response data are deliberately never read,
+    including when they contain an unexpected body.
+    """
+    from integrations.services.message_sync.scheduler import BudgetDeferred
+    from .ai_consent import PublicBridgeConsentRequired
+    from .member_delivery import MemberDeliveryUnavailable
+    from .worker import ParentMappingPending
+
+    if isinstance(error, BudgetDeferred):
+        reason = getattr(error, "reason", None)
+        return "deferred", reason if reason in HOLD_REASONS else "authority_or_provider_hold"
+    if isinstance(error, ParentMappingPending):
+        return "deferred", "parent_mapping_pending"
+    if isinstance(error, MemberDeliveryUnavailable):
+        return "unavailable", "authority_or_provider_hold"
+    if isinstance(error, PublicBridgeConsentRequired):
+        reason = getattr(error, "reason", None)
+        return "dropped", reason if reason in DROP_REASONS else "consent_required"
+    if getattr(error, "permanent", False) is True:
+        return "dropped", "permanent_failure"
+    return "retry", "authority_or_provider_hold"
 
 
 def send_failure(row, actor, delivery_id, error):
-    # Inspect exception types only. Error messages/provider response data are
-    # deliberately absent, including when they contain an unexpected body.
-    from .member_delivery import MemberDeliveryDeferred, MemberDeliveryUnavailable
-    outcome = ("deferred" if isinstance(error, MemberDeliveryDeferred)
-               else "unavailable" if isinstance(error, MemberDeliveryUnavailable) else "retry")
-    send(row, actor, delivery_id, outcome)
+    try:
+        outcome, reason = failure_outcome(error)
+    except Exception:
+        return
+    send(row, actor, delivery_id, outcome, reason=reason)
 
 
 def echo(row, receipt_id, kind):

@@ -698,7 +698,7 @@ def _poster_for_author(pubkey, workspace_id, channel_id, *, required_scopes=None
     if state is None:
         state = _probe_membership(current, channel_id, key)
         if state is None and strict_membership:
-            raise BudgetDeferred(60)
+            raise BudgetDeferred(60, reason="member_membership_unproven")
     if state != "joined":
         return None
     # Probes and cached positives remain subject to a final current-device,
