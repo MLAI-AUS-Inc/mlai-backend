@@ -361,12 +361,67 @@ class HostedQualityPublishStateTests(SimpleTestCase):
         self.assertEqual(public_hosted_quality_issues(quality, preview, manifest), [])
 
     def test_specific_terminal_message_precedes_the_legacy_neutral_fallback(self):
-        from content_factory.hosted_quality_state import FALLBACK_MESSAGE, preview_quality_publish_notice
+        from django.test import override_settings
+        from content_factory.hosted_quality_state import (
+            FALLBACK_MESSAGE, UNALERTED_FALLBACK_MESSAGE, preview_quality_publish_notice)
         quality = {"status": "blocking_findings", "self_heal_exhausted": True,
                    "founder_message": "The preview is missing part of the article."}
         self.assertEqual(preview_quality_publish_notice(quality), ("blocked", quality["founder_message"]))
         quality.pop("founder_message")
-        self.assertEqual(preview_quality_publish_notice(quality), ("blocked", FALLBACK_MESSAGE))
+        # "Our team has been notified" is only true while staff alerts are on.
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=True):
+            self.assertEqual(preview_quality_publish_notice(quality), ("blocked", FALLBACK_MESSAGE))
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=False):
+            self.assertEqual(preview_quality_publish_notice(quality), ("blocked", UNALERTED_FALLBACK_MESSAGE))
+        self.assertNotIn("notified", UNALERTED_FALLBACK_MESSAGE)
+
+    def test_a_check_that_failed_to_run_blocks_publishing(self):
+        from content_factory.hosted_quality_state import FAILED_TO_RUN_MESSAGE, preview_quality_publish_notice
+        for status in ("review_error", "queue_failed"):
+            with self.subTest(status=status):
+                self.assertEqual(preview_quality_publish_notice({"status": status}), ("blocked", FAILED_TO_RUN_MESSAGE))
+        self.assertIsNone(preview_quality_publish_notice({"status": "passed"}))
+
+
+class FounderQualityProjectionTests(SimpleTestCase):
+    BLOCKER = {"code": "article_preview_editorial_review_blocked", "message": "content:visible_editorial:claim_7 unsupported",
+               "founder_message": "A few details need checking before publishing.", "findings": ["content:visible_editorial:claim_7"],
+               "repair_instructions": ["Rebind claim_7"], "retryable": True, "retry_action": "/api/runs/r/retry-preview-quality",
+               "detail": "raw", "content_factory_status_code": 409}
+    QUALITY = {"status": "blocking_findings", "escalation": "quality_review", "self_heal_exhausted": True,
+               "founder_message": "A few details need checking before publishing.", "preview_url": "https://p.test/a",
+               "resume_generation": 3, "findings": ["editorial:score_missing", "safety_unverified: Call 000 now"],
+               "safety_findings": ["safety_unverified: Call 000 now"], "repair_instructions": ["Rebind claim_7"],
+               "self_heal_history": [{"result": "x"}], "visible_content_acceptance": {"review": {"errors": ["raw"]}}}
+
+    def test_blocker_keeps_only_code_and_founder_copy(self):
+        from content_factory.hosted_quality_state import founder_blocker
+        view = founder_blocker(self.BLOCKER)
+        self.assertEqual(set(view), {"code", "founder_message", "retryable", "retry_action"})
+        self.assertNotIn("message", view)
+
+    def test_quality_drops_staff_diagnostics_and_keeps_founder_fields(self):
+        from content_factory.hosted_quality_state import founder_quality
+        view = founder_quality(self.QUALITY)
+        self.assertEqual(view["findings"], ["editorial:score_missing"])
+        for key in ("safety_findings", "repair_instructions", "self_heal_history", "visible_content_acceptance"):
+            self.assertNotIn(key, view)
+        for key in ("status", "escalation", "self_heal_exhausted", "founder_message", "preview_url", "resume_generation"):
+            self.assertEqual(view[key], self.QUALITY[key])
+
+    def test_result_projection_reaches_nested_copies_and_leaves_other_keys(self):
+        from content_factory.hosted_quality_state import founder_result
+        result = {"approval_blocker": self.BLOCKER, "article_preview_quality": self.QUALITY, "title": "T",
+                  "latest_control_response": {"approval_blocker": self.BLOCKER},
+                  "result": {"articlePreviewQuality": self.QUALITY}}
+        view = founder_result(result)
+        import json
+        text = json.dumps(view)
+        for raw in ("claim_7", "Call 000 now", "Rebind", "\"raw\""):
+            self.assertNotIn(raw, text)
+        self.assertEqual(view["title"], "T")
+        self.assertEqual(result["approval_blocker"]["message"], self.BLOCKER["message"], "input is not mutated")
+        self.assertIsNone(founder_result(None))
 
     def test_staff_rules_detect_exhausted_quality_on_an_awaiting_approval_run(self):
         from django.utils import timezone
@@ -553,3 +608,36 @@ class HostedQualitySyncHookTests(SimpleTestCase):
             self.assertIs(_sync_local_run_from_remote(run, {"status": "approval_required"}), run)
             self.assertEqual(order, ["lock", "unlock"])
             queue.assert_not_called()
+
+
+class FounderRunResponseProjectionTests(SimpleTestCase):
+    def test_every_run_response_mode_carries_only_founder_quality_copy(self):
+        import json
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from content_factory import vibe_marketing_views as views
+        now = datetime.now(timezone.utc)
+        blocker, quality = FounderQualityProjectionTests.BLOCKER, FounderQualityProjectionTests.QUALITY
+        run = SimpleNamespace(run_id="held-article", workflow="article_generation", domain="example.test",
+            github_repo="fixture/repo", status="awaiting_approval", current_step="await_review",
+            approval_state="approval_required", resume_available=False, created_at=now, updated_at=now,
+            step_order=[], steps=SimpleNamespace(order_by=lambda *args: [], all=lambda: []),
+            result={"approval_blocker": blocker, "article_preview_quality": quality,
+                    "latest_control_response": {"approval_blocker": blocker}},
+            run_request={}, acceptance_summary={}, verification_summary={}, error="")
+        with (
+            patch.object(views, "_run_source_run_id", return_value=""),
+            patch.object(views, "_article_restart_available", return_value=False),
+            patch.object(views, "_article_setup_state", return_value={}),
+            patch.object(views, "_workflow_progress", return_value={}),
+            patch.object(views, "_content_package_from_run", return_value=None),
+            patch.object(views, "_component_feedback_from_run", return_value={}),
+            patch.object(views, "_component_manifest_from_run", return_value=None),
+            patch.object(views, "_run_content_island_payload", return_value=None),
+        ):
+            for mode in ("summary", "status", "full"):
+                with self.subTest(mode=mode):
+                    text = json.dumps(views._serialize_run(run, mode=mode)["result"], default=str)
+                    for raw in ("claim_7", "Call 000 now", "Rebind"):
+                        self.assertNotIn(raw, text)

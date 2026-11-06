@@ -12077,6 +12077,7 @@ def _serialize_run(
     topic_candidates=None, precomputed_article_setup_state=None, config=None, include_workflow_progress=True,
 ):
     from .run_ownership import public_run_value
+    from .hosted_quality_state import founder_result
     from .setup_status_projection import terminal_setup_projection
     run = terminal_setup_projection(_setup_pr_creation_failure_view(run))
     compact = mode in {"summary", "status"}
@@ -12207,7 +12208,7 @@ def _serialize_run(
             "workflowProgress": _workflow_progress(
                 context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
             ) if include_workflow_progress else None,
-            "result": public_run_value(_strip_missing_setup_run_refs(_compact_result_for_run(run))),
+            "result": founder_result(public_run_value(_strip_missing_setup_run_refs(_compact_result_for_run(run)))),
             **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                        current_step=run.current_step, resume_available=resume_available,
                                        approval_state=approval_state),
@@ -12290,7 +12291,7 @@ def _serialize_run(
         "workflowProgress": _workflow_progress(
             context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
         ) if include_workflow_progress else None,
-        "result": public_run_value(_strip_missing_setup_run_refs(response_result)),
+        "result": founder_result(public_run_value(_strip_missing_setup_run_refs(response_result))),
         **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                    current_step=run.current_step, resume_available=resume_available,
                                    approval_state=approval_state),

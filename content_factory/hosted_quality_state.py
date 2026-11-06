@@ -2,6 +2,61 @@
 
 SAFETY_MESSAGE = "Our team is checking the safety guidance in this article before it can be published. You don't need to do anything yet."
 FALLBACK_MESSAGE = "We couldn't finish the final check automatically. Our team has been notified."
+# Used when staff alerts are off: nothing would actually tell the team.
+UNALERTED_FALLBACK_MESSAGE = "We couldn't finish the final check automatically. Check again, or contact us if it keeps happening."
+FAILED_TO_RUN_MESSAGE = "The final check didn't finish. Check again to unlock publishing."
+FAILED_TO_RUN_STATUSES = frozenset({"review_error", "queue_failed"})
+
+# Founders see the blocker's code and founder copy only. The technical
+# ``message``, findings and repair instructions are staff diagnostics.
+FOUNDER_BLOCKER_KEYS = ("code", "founder_message", "retryable", "retry_action", "owner", "run_id")
+FOUNDER_QUALITY_KEYS = (
+    "status", "escalation", "self_heal_exhausted", "self_heal_attempt", "founder_message", "blocker_code",
+    "preview_url", "previewUrl", "resume_generation", "retryable", "advisory", "quality_attempt",
+    "queued_at", "started_at", "finished_at", "checked_at", "reviewed_preview_commit_sha",
+)
+# Finding markers founder copy is chosen from; every other finding stays internal.
+FOUNDER_FINDING_MARKERS = frozenset({"editorial:score_missing"})
+
+
+def fallback_message():
+    from django.conf import settings
+    alerts = bool(getattr(settings, "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED", False))
+    return FALLBACK_MESSAGE if alerts else UNALERTED_FALLBACK_MESSAGE
+
+
+def founder_blocker(blocker):
+    """Project an approval blocker to its code and founder copy."""
+    if not isinstance(blocker, dict):
+        return blocker
+    return {key: blocker[key] for key in FOUNDER_BLOCKER_KEYS if key in blocker}
+
+
+def founder_quality(quality):
+    """Project hosted quality state to the fields founder surfaces read."""
+    if not isinstance(quality, dict):
+        return quality
+    view = {key: quality[key] for key in FOUNDER_QUALITY_KEYS if key in quality}
+    findings = quality.get("findings")
+    if isinstance(findings, list):
+        view["findings"] = [item for item in findings if item in FOUNDER_FINDING_MARKERS]
+    return view
+
+
+def founder_result(result):
+    """Apply the founder projections wherever a run result carries quality state."""
+    if not isinstance(result, dict):
+        return result
+    view = dict(result)
+    if "approval_blocker" in view:
+        view["approval_blocker"] = founder_blocker(view["approval_blocker"])
+    for key in ("article_preview_quality", "articlePreviewQuality"):
+        if key in view:
+            view[key] = founder_quality(view[key])
+    for key in ("result", "latest_control_response"):
+        if isinstance(view.get(key), dict):
+            view[key] = founder_result(view[key])
+    return view
 
 
 def preview_quality_publish_notice(quality):
@@ -15,5 +70,8 @@ def preview_quality_publish_notice(quality):
     if status == "blocking_findings":
         if quality.get("escalation") == "safety_review":
             return "blocked", SAFETY_MESSAGE
-        return "blocked", str(quality.get("founder_message") or FALLBACK_MESSAGE)
+        return "blocked", str(quality.get("founder_message") or fallback_message())
+    if status in FAILED_TO_RUN_STATUSES:
+        # A required check that crashed or never queued has not passed.
+        return "blocked", FAILED_TO_RUN_MESSAGE
     return None
