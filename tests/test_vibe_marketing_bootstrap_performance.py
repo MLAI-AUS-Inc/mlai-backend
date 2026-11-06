@@ -294,3 +294,28 @@ class VibeMarketingBootstrapPerformanceTests(SimpleTestCase):
                 keyword, coverage_memory={"records": []}
             ))
             matcher.assert_called_once()
+
+    def test_island_regions_serialize_from_one_joined_node_query(self):
+        from content_factory.models import ContentIsland, ContentIslandRegion
+        region = ContentIslandRegion(id='00000000-0000-0000-0000-000000000001',
+            organization_id=1, slug='ai-coding', name='AI coding', color_key='blue')
+        islands = [ContentIsland(organization_id=1, region=region, slug=f'coding-{index}',
+            name=f'Coding {index}', pillar_keyword='ai coding', opportunity_score=100 - index,
+            status='visible', updated_at=datetime.now(timezone.utc)) for index in range(40)]
+        rows = Mock()
+        rows.select_related.return_value.order_by.return_value = islands
+        emerging = Mock()
+        emerging.count.return_value = 0
+        edges = Mock()
+        edges.select_related.return_value.order_by.return_value = []
+        with patch.object(views, '_content_islands_enabled', return_value=True), \
+                patch.object(views.ContentIsland.objects, 'filter', side_effect=[rows, emerging]) as node_query, \
+                patch.object(views.ContentIslandEdge.objects, 'filter', return_value=edges):
+            graph = views._island_graph_for_bootstrap(SimpleNamespace(pk=1), [])
+        rows.select_related.assert_called_once_with('region')
+        self.assertEqual(node_query.call_count, 2)
+        self.assertEqual(len(graph['regions']), 1)
+        self.assertEqual(graph['regions'][0]['islandSlugs'], [island.slug for island in islands])
+        self.assertEqual(graph['regions'][0]['name'], 'AI coding')
+        self.assertTrue(all(node['regionSlug'] == 'ai-coding' for node in graph['nodes']))
+        self.assertNotIn('centroid_embedding', str(graph))

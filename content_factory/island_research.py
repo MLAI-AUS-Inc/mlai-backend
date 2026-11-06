@@ -98,7 +98,7 @@ def adopt_researched_island(organization, run, proposal, *, merge_evidence=False
     from django.utils.text import slugify
     from organizations.models import Organization
     from .models import ContentIsland, ContentIslandKeyword, ContentIslandSnapshot, ResearchedKeyword
-    from .content_islands import normalize_color_key, normalize_icon_key, rebuild_island_edges, seed_islands_from_bootstrap_pillars
+    from .content_islands import normalize_color_key, normalize_icon_key, rebuild_island_edges, rebuild_island_regions, seed_islands_from_bootstrap_pillars
     from .custom_islands import custom_island_description
 
     brief = run.run_request["island_research_brief"]
@@ -118,6 +118,8 @@ def adopt_researched_island(organization, run, proposal, *, merge_evidence=False
                 existing.status, existing.promoted_at = "visible", now
                 existing.archived_at = existing.removed_at = None
                 existing.save(update_fields=["status", "promoted_at", "archived_at", "removed_at", "updated_at"])
+                rebuild_island_edges(org)
+                rebuild_island_regions(org)
             return existing, False
         scope = {**brief, "focus": brief.get("focus") or f"{brief['intent'].capitalize()} search intent"}
         defaults = {
@@ -170,4 +172,5 @@ def adopt_researched_island(organization, run, proposal, *, merge_evidence=False
         ContentIslandSnapshot.objects.update_or_create(island=island, captured_on=now.date(),
             defaults={**{key: getattr(island, key) for key in proposal["metrics"]}, "status": island.status})
         rebuild_island_edges(org)
+        rebuild_island_regions(org)
     return island, created

@@ -29,6 +29,8 @@ subsystem-specific contracts and runbooks.
 
 ## Content Factory
 
+- [Content island map regions](content-island-regions.md) — stable groups, bootstrap contract and migration boundary
+
 - [Job to Run cutover](run-job-cutover.md) — parity, copied identity, historical coverage and rollback
 - [Topic discovery reconciliation](discovery-reconciliation.md) — bounded cohort preview, saved scope and activation boundary
 - [Nightly island refresh reconciliation](nightly-refresh-reconciliation.md) — new scheduler contract, bounded preview and separate rollout

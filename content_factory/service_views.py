@@ -7421,6 +7421,7 @@ from content_factory.content_islands import (
     normalize_color_key,
     normalize_icon_key,
     rebuild_island_edges,
+    rebuild_island_regions,
     seed_islands_from_bootstrap_pillars,
     unique_island_slug,
 )
@@ -8452,6 +8453,7 @@ class SEOContentIslandBulkSyncView(APIView):
             evolution = apply_evolution(org, payload.get('dynamic_scopes'), captured_on, now)
             promoted_slugs = _promote_eligible_islands(org, now)
             edge_count = rebuild_island_edges(org)
+            rebuild_island_regions(org)
 
             snapshot_islands = ContentIsland.objects.filter(organization=org).filter(
                 Q(slug__in=archived_slugs) | ~Q(status=ContentIslandStatus.ARCHIVED)

@@ -1646,6 +1646,30 @@ class ContentIslandOrigin(models.TextChoices):
     MANUAL = "manual", "Manual"
 
 
+class ContentIslandRegion(models.Model):
+    """Stable audience group; display identity survives topic refreshes."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='content_island_regions', db_index=True
+    )
+    slug = models.SlugField(max_length=80)
+    name = models.CharField(max_length=80)
+    name_source = models.CharField(max_length=16, default='fallback',
+        choices=[('fallback', 'Fallback'), ('llm', 'Generated'), ('founder', 'Founder')])
+    color_key = models.CharField(max_length=32)
+    centroid_embedding = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'seo_content_island_region'
+        unique_together = ['organization', 'slug']
+        ordering = ['slug']
+
+    def __str__(self):
+        return self.name
+
+
 class ContentIsland(models.Model):
     """
     A durable topic island for an organization.
@@ -1662,6 +1686,9 @@ class ContentIsland(models.Model):
         related_name='content_islands',
         db_index=True
     )
+
+    region = models.ForeignKey(ContentIslandRegion, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='islands')
 
     # Stable identity - the slug is never re-slugged once assigned.
     slug = models.SlugField(max_length=80)

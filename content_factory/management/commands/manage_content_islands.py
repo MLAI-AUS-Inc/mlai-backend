@@ -4,7 +4,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
-from content_factory.content_islands import rebuild_island_edges
+from content_factory.content_islands import rebuild_island_edges, rebuild_island_regions
 from content_factory.models import ContentIsland, ContentIslandEdge, ContentIslandStatus
 from organizations.models import Organization
 
@@ -71,6 +71,7 @@ class Command(BaseCommand):
                 ]
             )
             rebuild_island_edges(org)
+            rebuild_island_regions(org)
         self.stdout.write(self.style.SUCCESS(f"Restored {slug} -> emerging (misses reset)"))
 
     def _archive(self, org, slug):
@@ -80,6 +81,7 @@ class Command(BaseCommand):
             island.archived_at = timezone.now()
             island.save(update_fields=["status", "archived_at", "updated_at"])
             rebuild_island_edges(org)
+            rebuild_island_regions(org)
         self.stdout.write(self.style.SUCCESS(f"Archived {slug}"))
 
     def _list(self, org):
