@@ -46,6 +46,9 @@ class GoalAuditTests(SimpleTestCase):
         self.organization = Organization(pk=7, domain="fixture.test")
         self.profile = VibeRaisingProfile(pk=8, user=self.user, role=VibeRaisingProfile.ROLE_FOUNDER)
         self.company = VibeRaisingCompany(pk=9, profile=self.profile, organization=self.organization, domain="fixture.test")
+        # The synthetic owner claim is a persistence boundary, just like the
+        # profile/company querysets below; keep the real ownership predicate.
+        self.enterContext(patch("founder_tools.services.organization_owner_user_id", return_value=self.user.pk))
         self.context = FounderCompanyContext(profile=self.profile, company=self.company, organization=self.organization)
         self.connection = WebsiteConnection(organization=self.organization, authorized_by=self.user,
             github_repo="fixture/site", repository_id=10, installation_id="11", generation=1, branch="main",
