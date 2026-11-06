@@ -24,6 +24,10 @@ An unresolved provider result is reconciled by deterministic event identity. A t
 
 ## Maintenance
 
+Linked Google event moves and cancellations are reconciled by the scheduler;
+see [calendar synchronization](mentoring-calendar-sync.md) for supported changes,
+conflict handling and safe treatment of missing/inaccessible events.
+
 Use My sessions for hosted and attended bookings. Existing pending requests remain visible as Legacy requests. Calendar disconnection pauses new booking availability but retains session management and payment history. Reconnect the same Google identity to repair cleanup of events on its original calendar. Existing accepted sessions retain their original terms.
 
 Monitor due provisioning/cleanup work, oldest unresolved attempt, refund/payout state, scheduler failures, provider reconnect state and duplicate-event errors. Run bounded recovery after restoring provider access. Never mark an unknown provider outcome absent merely to clear a task.
