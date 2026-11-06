@@ -284,6 +284,23 @@ def held_article_quality(run) -> bool:
 
 
 RECHECK_PENDING_STATUSES = frozenset({"queued", "running"})
+# Content Factory's article preview quality approval blockers. A recheck only
+# replaces one of these; any other blocker (publish authority, setup, a new
+# approval rejection) is left for its own owner.
+QUALITY_BLOCKER_CODES = frozenset({
+    "article_preview_browser_check_failed", "article_preview_component_style_mismatch",
+    "article_preview_content_incomplete", "article_preview_editorial_review_blocked",
+    "article_preview_editorial_score_unavailable", "article_preview_quality_blocked",
+    "article_preview_quality_rechecking", "article_preview_quality_running",
+    "article_preview_safety_review_required",
+})
+
+
+def quality_blocker(blocker):
+    """True when ``blocker`` is absent or is Content Factory's article quality blocker."""
+    if blocker is None:
+        return True
+    return isinstance(blocker, dict) and blocker.get("code") in QUALITY_BLOCKER_CODES
 
 
 def recheck_acknowledged(remote, held_quality):
@@ -319,6 +336,7 @@ def _recheck_article_quality(run):
     """
     from .vibe_marketing_views import _call_content_factory_run_action
     held = mapping(mapping(run.result).get("article_preview_quality"))
+    held_blocker = mapping(run.result).get("approval_blocker")
     remote = _call_content_factory_run_action(run_id=run.run_id, action="retry-preview-quality",
                                               payload={}, workflow=run.workflow)
     if not recheck_acknowledged(remote, held):
@@ -327,11 +345,12 @@ def _recheck_article_quality(run):
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
         result = dict(mapping(current.result))
-        if mapping(result.get("article_preview_quality")) != held:
-            # A newer revision or check already replaced the held state; keep it.
+        if mapping(result.get("article_preview_quality")) != held or result.get("approval_blocker") != held_blocker:
+            # A newer revision, check or blocker landed since the hold was read; keep it.
             return {"status": "observe", "detail": "A newer quality state is already recorded."}
         result["article_preview_quality"] = remote["article_preview_quality"]
-        result.pop("approval_blocker", None)
+        if quality_blocker(held_blocker):
+            result.pop("approval_blocker", None)
         ContentFactoryRun.objects.filter(pk=current.pk).update(result=result)
     return {"status": "queued", "action": "recheck_article_quality"}
 

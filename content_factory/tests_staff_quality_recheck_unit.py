@@ -41,11 +41,12 @@ class RecheckAcknowledgementTests(SimpleTestCase):
 
 
 class RecheckWriteTests(SimpleTestCase):
-    def run_recheck(self, remote, current_quality=HELD):
+    def run_recheck(self, remote, current_quality=HELD, held_blocker=BLOCKER, current_blocker=None):
+        current_blocker = held_blocker if current_blocker is None else current_blocker
         run = SimpleNamespace(pk=7, run_id="run-1", workflow="article_generation",
-                              result={"article_preview_quality": HELD, "approval_blocker": BLOCKER})
+                              result={"article_preview_quality": HELD, "approval_blocker": held_blocker})
         current = SimpleNamespace(pk=7, result={"article_preview_quality": current_quality,
-                                                "approval_blocker": BLOCKER})
+                                                "approval_blocker": current_blocker})
         manager = Mock()
         manager.select_for_update.return_value.get.return_value = current
         with patch("content_factory.vibe_marketing_views._call_content_factory_run_action",
@@ -76,6 +77,24 @@ class RecheckWriteTests(SimpleTestCase):
         outcome, manager = self.run_recheck(QUEUED, current_quality=newer)
         self.assertEqual(outcome["status"], "observe")
         manager.filter.return_value.update.assert_not_called()
+
+    def test_a_replaced_blocker_with_unchanged_quality_is_never_cleared(self):
+        # Same held quality and preview, but a new approval rejection landed
+        # after the hold was read (e.g. the founder pressed Approve again).
+        for newer in ({"code": "article_preview_safety_review_required", "recorded_at": "later"},
+                      {"code": "website_authority_mismatch", "message": "Reconnect the site."}):
+            with self.subTest(newer=newer):
+                outcome, manager = self.run_recheck(QUEUED, current_blocker=newer)
+                self.assertEqual(outcome["status"], "observe")
+                manager.filter.return_value.update.assert_not_called()
+
+    def test_a_non_quality_blocker_survives_a_positive_recheck(self):
+        other = {"code": "website_authority_mismatch", "message": "Reconnect the site."}
+        outcome, manager = self.run_recheck(QUEUED, held_blocker=other)
+        self.assertEqual(outcome["status"], "queued")
+        written = manager.filter.return_value.update.call_args.kwargs["result"]
+        self.assertEqual(written["approval_blocker"], other)
+        self.assertEqual(written["article_preview_quality"]["status"], "queued")
 
     def test_a_refused_recheck_is_audited_as_refused(self):
         run = SimpleNamespace(result={"article_preview_quality": HELD})
