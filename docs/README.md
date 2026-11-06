@@ -6,6 +6,7 @@ subsystem-specific contracts and runbooks.
 
 - [Private Studio report source](studio-report-source.md) — scoped hours/invoice/payment refresh and missing-data barriers
 - [Contacts store](crm.md) — MLAI Luma guest sync, CSV opt-in import, consent rules and the `crm` migration
+- [System email](system-email.md) — sign-in, reset and notification email through Resend on `notify.mlai.au`, per-message switch off Customer.io
 
 ## Backend maintenance
 

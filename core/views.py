@@ -368,7 +368,7 @@ class SendMagicLinkView(APIView):
                 # A magic link is a bearer credential. Never emit the link or its
                 # signed token—or the destination email—into application logs.
                 logger.info("Generated magic link for user_id=%s app=%s", user.id, app)
-                send_magic_link_email(user, magic_link, message_id="2")
+                send_magic_link_email(user, magic_link, message_id="2", app_context=app)
                 logger.info("Sent magic link to existing user_id=%s app=%s", user.id, app)
             else:
                 logger.info("send-magic-link requested for non-existent email (suppressed) app=%s", app)
@@ -434,7 +434,7 @@ class CreateUserView(APIView):
             magic_link = _append_auth_query_params(magic_link, app, next_path=next_path)
             magic_link_sent = False
             try:
-                send_magic_link_email(user, magic_link, message_id="2")
+                send_magic_link_email(user, magic_link, message_id="2", app_context=app)
                 logger.info("Sent magic link to new user_id=%s app=%s", user.id, app)
                 message = "Account created. Check your email for the magic link to sign in."
                 magic_link_sent = True

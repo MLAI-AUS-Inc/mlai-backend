@@ -18,6 +18,7 @@ from django.utils import timezone
 
 from founder_tools.models import VibeRaisingCompany
 from integrations.services.notification_adapters import _customerio_client
+from system_email.api import routes_to_resend
 from roo.services import CoworkingService
 from vibe_raising.registration import company_is_verified
 
@@ -222,6 +223,96 @@ def _message_data(targets: list[MonthlyUpdateReminderTarget]) -> dict[str, Any]:
     }
 
 
+def _system_email_key(reminder_kind: str) -> str:
+    return "monthly_update_7d" if reminder_kind == MonthlyUpdateReminderKind.SEVEN_DAY else "monthly_update_1d"
+
+
+def _store_outcome(delivery_pk: int, *, status: str, response_payload: dict[str, Any], provider_id: str = "",
+                   error: str = "", dispatched: bool = False) -> None:
+    """Merge the email outcome into the ledger without dropping the chat namespace."""
+    with transaction.atomic():
+        delivery = MonthlyUpdateReminderDelivery.objects.select_for_update().get(pk=delivery_pk)
+        provider_response = {**delivery.provider_response, **response_payload}
+        if "roo_chat" in delivery.provider_response:
+            provider_response["roo_chat"] = delivery.provider_response["roo_chat"]
+        delivery.status = status
+        delivery.provider_response = provider_response
+        delivery.last_error = error
+        fields = ["status", "provider_response", "last_error", "updated_at"]
+        if provider_id:
+            # Field name predates the move; it holds the Resend id for Resend sends.
+            delivery.customerio_delivery_id = provider_id
+            fields.append("customerio_delivery_id")
+        if dispatched:
+            delivery.dispatched_at = timezone.now()
+            fields.append("dispatched_at")
+        delivery.save(update_fields=fields)
+
+
+def _send_reminder_email(delivery, message_key: str, message_data: dict[str, Any]) -> dict[str, Any]:
+    from system_email import api as system_email
+    from system_email.transport_resend import SystemEmailError
+
+    try:
+        result = system_email.send(
+            message_key,
+            to=delivery.recipient_email,
+            idempotency_key=delivery.idempotency_key,
+            context=message_data,
+            user_id=delivery.user_id,
+        )
+    except SystemEmailError as exc:
+        if exc.retryable:
+            # Resend's idempotency key makes a same-day retry safe, so the
+            # next scheduler pass may try again instead of quarantining.
+            _store_outcome(delivery.pk, status=MonthlyUpdateReminderStatus.PENDING,
+                           response_payload={"provider": "resend"}, error=exc.code)
+            return {"status": "retry", "delivery_id": delivery.pk, "error": exc.code}
+        _store_outcome(delivery.pk, status=MonthlyUpdateReminderStatus.UNKNOWN,
+                       response_payload={"provider": "resend"}, error=exc.code)
+        return {"status": "unknown", "delivery_id": delivery.pk, "error": exc.code}
+    _store_outcome(
+        delivery.pk,
+        status=MonthlyUpdateReminderStatus.SENT,
+        response_payload={"provider": "resend", "held_for_review": False, "held_message_data": None},
+        provider_id=result.provider_message_id,
+        dispatched=True,
+    )
+    return {"status": MonthlyUpdateReminderStatus.SENT, "delivery_id": delivery.pk,
+            "provider_delivery_id": result.provider_message_id}
+
+
+def _dispatch_via_system_email(delivery, message_key: str, message_data: dict[str, Any]) -> dict[str, Any]:
+    """Send through our Resend sender, or hold for staff review when drafts are on.
+
+    Held rows use the existing ``drafted`` status; staff release them from the
+    Django admin ("Send held reminders"), which calls ``release_held_reminder``.
+    """
+    if bool(getattr(settings, "MONTHLY_UPDATE_REMINDERS_QUEUE_DRAFT", True)):
+        _store_outcome(
+            delivery.pk,
+            status=MonthlyUpdateReminderStatus.DRAFTED,
+            response_payload={"provider": "resend", "held_for_review": True,
+                              "message_key": message_key, "held_message_data": message_data},
+        )
+        return {"status": MonthlyUpdateReminderStatus.DRAFTED, "delivery_id": delivery.pk, "held_for_review": True}
+    return _send_reminder_email(delivery, message_key, message_data)
+
+
+def release_held_reminder(delivery_pk: int) -> dict[str, Any]:
+    """Send one reminder that was held for review. Other rows are left alone."""
+    with transaction.atomic():
+        delivery = MonthlyUpdateReminderDelivery.objects.select_for_update().get(pk=delivery_pk)
+        response = delivery.provider_response or {}
+        if delivery.status != MonthlyUpdateReminderStatus.DRAFTED or not response.get("held_for_review"):
+            return {"status": "skipped", "reason": "not_held", "delivery_id": delivery.pk}
+        message_key = str(response.get("message_key") or _system_email_key(delivery.reminder_kind))
+        message_data = response.get("held_message_data") or {}
+        delivery.status = MonthlyUpdateReminderStatus.SENDING
+        delivery.save(update_fields=["status", "updated_at"])
+    return _send_reminder_email(delivery, message_key, message_data)
+
+
 def _dispatch_group(targets: list[MonthlyUpdateReminderTarget]) -> dict[str, Any]:
     first = targets[0]
     template_id = _template_id(first.reminder_kind)
@@ -273,6 +364,10 @@ def _dispatch_group(targets: list[MonthlyUpdateReminderTarget]) -> dict[str, Any
                 "updated_at",
             ]
         )
+
+    message_key = _system_email_key(first.reminder_kind)
+    if routes_to_resend(message_key):
+        return _dispatch_via_system_email(delivery, message_key, _message_data(targets))
 
     request_body: dict[str, Any] = {
         "to": first.recipient_email,
@@ -370,10 +465,11 @@ def run_monthly_update_reminder_scheduler(
         if chat_enabled and kind == MonthlyUpdateReminderKind.ONE_DAY
     ]
     email_groups = groups if email_enabled else {}
-    missing_templates = sorted({kind for _, kind in email_groups if not _template_id(kind)})
+    legacy_kinds = {kind for _, kind in email_groups if not routes_to_resend(_system_email_key(kind))}
+    missing_templates = sorted(kind for kind in legacy_kinds if not _template_id(kind))
     if email_groups and missing_templates:
         return {"status": "failed", "reason": "missing_template_ids", "reminder_kinds": missing_templates, "chat_outcomes": chat_outcomes}
-    if email_groups and not str(getattr(settings, "CUSTOMERIO_API_KEY", "") or "").strip():
+    if legacy_kinds and not str(getattr(settings, "CUSTOMERIO_API_KEY", "") or "").strip():
         return {"status": "failed", "reason": "missing_customerio_api_key", "chat_outcomes": chat_outcomes}
 
     outcomes = [_dispatch_group(group) for group in email_groups.values()]

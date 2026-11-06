@@ -271,6 +271,7 @@ INSTALLED_APPS = [
 
     "integrations",
     "crm",
+    "system_email",
 ]
 
 MIDDLEWARE = [
@@ -1218,6 +1219,24 @@ CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS = int(
 )
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
 RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Roo <notifications@mlai.au>')
+# Transactional email sent by our own code through Resend (system_email app).
+# Separate key, domain and webhook from CRM sending; never uses CRM mailboxes or
+# warm-up caps. Each message key listed in SYSTEM_EMAIL_RESEND_MESSAGES (or
+# "all") is sent this way; unlisted keys stay on their legacy provider.
+SYSTEM_EMAIL_RESEND_API_KEY = os.getenv('SYSTEM_EMAIL_RESEND_API_KEY', '').strip()
+MLAI_SYSTEM_FROM_EMAIL = os.getenv(
+    'MLAI_SYSTEM_FROM_EMAIL', 'MLAI <notifications@notify.mlai.au>'
+).strip()
+SYSTEM_EMAIL_REPLY_TO = os.getenv('SYSTEM_EMAIL_REPLY_TO', 'team@mlai.au').strip()
+SYSTEM_EMAIL_UNSUBSCRIBE_MAILTO = os.getenv('SYSTEM_EMAIL_UNSUBSCRIBE_MAILTO', '').strip()
+SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET = os.getenv('SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET', '').strip()
+SYSTEM_EMAIL_RESEND_MESSAGES = tuple(
+    value.strip() for value in os.getenv('SYSTEM_EMAIL_RESEND_MESSAGES', '').split(',') if value.strip()
+)
+SYSTEM_EMAIL_TEST_RECIPIENTS = tuple(
+    value.strip().lower() for value in os.getenv('SYSTEM_EMAIL_TEST_RECIPIENTS', '').split(',') if value.strip()
+)
+SYSTEM_EMAIL_ALERT_SLACK_CHANNEL_ID = os.getenv('SYSTEM_EMAIL_ALERT_SLACK_CHANNEL_ID', '').strip()
 # Customer.io App API key (already used for magic-link emails). When set, it is
 # the preferred transport for notification-channel emails; Resend is fallback.
 CUSTOMERIO_API_KEY = os.getenv('CUSTOMERIO_API_KEY', '')
