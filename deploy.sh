@@ -70,6 +70,17 @@ for crm_setting in $CRM_DEPLOY_SETTINGS; do
 done
 LISTMONK_API_TOKEN="${LISTMONK_API_TOKEN:-}"
 python3 scripts/validate_crm_deploy_config.py
+# Transactional system email (system_email app). SYSTEM_EMAIL_RESEND_MESSAGES
+# is always installed, so clearing the repository variable rolls every message
+# back to its legacy provider. The other settings keep the host's own when empty.
+SYSTEM_EMAIL_RESEND_MESSAGES="${SYSTEM_EMAIL_RESEND_MESSAGES:-}"
+SYSTEM_EMAIL_DEPLOY_SETTINGS="MLAI_SYSTEM_FROM_EMAIL SYSTEM_EMAIL_REPLY_TO SYSTEM_EMAIL_UNSUBSCRIBE_MAILTO SYSTEM_EMAIL_TEST_RECIPIENTS SYSTEM_EMAIL_ALERT_SLACK_CHANNEL_ID"
+for system_email_setting in $SYSTEM_EMAIL_DEPLOY_SETTINGS; do
+    printf -v "$system_email_setting" '%s' "${!system_email_setting:-}"
+    export "$system_email_setting"
+done
+SYSTEM_EMAIL_RESEND_API_KEY="${SYSTEM_EMAIL_RESEND_API_KEY:-}"
+SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET="${SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET:-}"
 # Founder-journey Articles switches, caps, sign-in limits, article preview
 # switches, run snapshot switches and the P1 founder journey switches. Empty values keep the host's own, so a release never switches a
 # founder path off by omission.
@@ -427,6 +438,12 @@ fi
 if [ -n "${CRM_RESEND_WEBHOOK_SECRET:-}" ]; then
     install_remote_env_secret CRM_RESEND_WEBHOOK_SECRET "$CRM_RESEND_WEBHOOK_SECRET"
 fi
+if [ -n "$SYSTEM_EMAIL_RESEND_API_KEY" ]; then
+    install_remote_env_secret SYSTEM_EMAIL_RESEND_API_KEY "$SYSTEM_EMAIL_RESEND_API_KEY"
+fi
+if [ -n "$SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET" ]; then
+    install_remote_env_secret SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET "$SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET"
+fi
 echo "🔐 Updating distinct Roo and internal service credentials (values redacted)..."
 install_remote_env_secret ROO_API_KEY "$ROO_API_KEY"
 install_remote_env_secret INTERNAL_API_KEY "$INTERNAL_API_KEY"
@@ -457,6 +474,12 @@ install_remote_env_value() {
 install_remote_env_value WEBSITE_CONNECTION_WRITE_MODE "$WEBSITE_CONNECTION_WRITE_MODE"
 install_remote_env_value WEBSITE_CONNECTION_CANARY_DOMAINS "$WEBSITE_CONNECTION_CANARY_DOMAINS"
 install_remote_env_value APPROVED_MIGRATION_PLAN_SHA256 "$APPROVED_MIGRATION_PLAN_SHA256"
+install_remote_env_value SYSTEM_EMAIL_RESEND_MESSAGES "$SYSTEM_EMAIL_RESEND_MESSAGES"
+for system_email_setting in $SYSTEM_EMAIL_DEPLOY_SETTINGS; do
+    if [ -n "${!system_email_setting}" ]; then
+        install_remote_env_value "$system_email_setting" "${!system_email_setting}"
+    fi
+done
 
 echo "🔧 Updating MLAI and Valley MCP configuration..."
 install_remote_env_value MLAI_MCP_ENABLED "$MLAI_MCP_ENABLED"
@@ -966,7 +989,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF | tee "$remote_deploy_log"
         *[!0-9]*) echo "Invalid existing web timeout; refusing to replace it." >&2; exit 1 ;;
     esac
     upsert_env_value GUNICORN_TIMEOUT "\$gunicorn_timeout"
-    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY INTERNAL_API_KEY UMAMI_BASE_URL CONTENT_ANALYTICS_HOST_URL COMMUNITY_CHAT_ADAPTER_URL COMMUNITY_CHAT_ADAPTER_TOKEN COMMUNITY_CHAT_EMAIL_CODE_PEPPER COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET CUSTOMERIO_API_KEY CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID
+    print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY INTERNAL_API_KEY UMAMI_BASE_URL CONTENT_ANALYTICS_HOST_URL COMMUNITY_CHAT_ADAPTER_URL COMMUNITY_CHAT_ADAPTER_TOKEN COMMUNITY_CHAT_EMAIL_CODE_PEPPER COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET CUSTOMERIO_API_KEY CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID SYSTEM_EMAIL_RESEND_API_KEY SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET SYSTEM_EMAIL_RESEND_MESSAGES
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
     require_env_value GITHUB_APP_PRIVATE_KEY "Set GITHUB_APP_PRIVATE_KEY to the MLAI Tools GitHub App private key with escaped newlines."

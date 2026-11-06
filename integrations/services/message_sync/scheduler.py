@@ -35,8 +35,14 @@ class LeaseLost(RuntimeError):
 class BudgetDeferred(RuntimeError):
     """The caller must reschedule without consuming a provider-failure attempt."""
 
-    def __init__(self, seconds, *, before_request_method=""):
+    # Closed hold code recorded as the deferred row's `last_error`. Subclasses
+    # name non-quota holds so they stay distinguishable from budget waits.
+    reason = "provider_budget_deferred"
+
+    def __init__(self, seconds, *, before_request_method="", reason=None):
         self.retry_after = max(1, math.ceil(seconds))
+        if reason is not None:
+            self.reason = reason
         # Only durable admission sets this: a provider 429 already used a turn.
         self.before_request_method = before_request_method
         super().__init__("provider_budget_deferred")

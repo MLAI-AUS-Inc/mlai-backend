@@ -15,6 +15,12 @@ class PublicBridgeConsentRequired(RuntimeError):
 
     permanent = True
 
+    def __init__(self, message="", *, reason="consent_required"):
+        # `reason` is a closed code for logs: consent_required or
+        # device_unverified. The message stays the row's `last_error` text.
+        self.reason = reason
+        super().__init__(message)
+
 
 def send_with_ai_consent(delivery, send, **kwargs):
     """Recheck the signed sender and hold their consent lock through Slack I/O.

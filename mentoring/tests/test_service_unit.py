@@ -236,6 +236,16 @@ class TransitionTests(Base):
         self.assertEqual(kw['reference_type'], 'MENTOR_SESSION')
         self.assertEqual(s.status, 'completed')
 
+    def test_payout_is_not_stamped_with_the_mentors_slack_id(self):
+        # The weekly points-admin allowance sums EARN rows by created_by_slack_id.
+        s = make_session('accepted')
+        self.load(s)
+        self.clock = s.ends_at
+        MentoringService.complete(SID, self.actor_mentor)
+        actor = self.points.award.call_args.kwargs['created_by_slack_id']
+        self.assertEqual(actor, 'MENTORING')
+        self.assertNotEqual(actor, s.mentor.user.slack_id)
+
     def test_complete_before_the_session_ends_is_refused(self):
         s = make_session('accepted')
         for when in (NOW, START, s.ends_at - timedelta(seconds=1)):
@@ -546,13 +556,18 @@ class ProfileValidationTests(unittest.TestCase):
             service.validate_profile_update(payload, current or self.cur)
 
     def test_length_bounds_and_price(self):
-        self.bad({'session_minutes': 10})
-        self.bad({'session_minutes': 125})
+        self.bad({'session_minutes': 15})
+        self.bad({'session_minutes': 65})
         self.bad({'session_minutes': 33})
         self.bad({'price_roo': 0})
         self.bad({'price_roo': True})
         self.assertEqual(service.validate_profile_update({'session_minutes': 45, 'price_roo': 60}, self.cur),
                          {'session_minutes': 45, 'price_roo': 60})
+
+    def test_existing_mentor_can_keep_a_length_outside_the_limits(self):
+        self.assertEqual(service.validate_profile_update({'session_minutes': 15}, {'session_minutes': 15}),
+                         {'session_minutes': 15})
+        self.bad({'session_minutes': 20}, {'session_minutes': 15})
 
     def test_location_type_and_no_mentor_supplied_video_link(self):
         self.bad({'location_type': 'either'})

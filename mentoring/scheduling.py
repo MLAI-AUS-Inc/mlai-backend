@@ -30,6 +30,9 @@ def generate_slots(*, rules, tz_name, session_minutes, first_day, last_day, busy
     """
     tz = ZoneInfo(tz_name)
     length = timedelta(minutes=session_minutes)
+    if length <= timedelta(0):
+        # A zero or negative length would never advance the cursor below.
+        return []
     before = timedelta(minutes=buffer_before_minutes)
     after = timedelta(minutes=buffer_after_minutes)
     earliest = now + timedelta(minutes=minimum_notice_minutes)

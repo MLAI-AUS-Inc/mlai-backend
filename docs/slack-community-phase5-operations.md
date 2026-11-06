@@ -97,12 +97,69 @@ observations still order older callbacks after scope rollback, including
 receipts retained by the legacy bot intake. Server-only command fields are
 removed from untrusted metadata.
 
+## Reading held and dropped sends
+
+A held send stays `pending` with a later `available_at` and does not use up a
+provider attempt. Its `last_error` is a fixed code that says why it is held:
+
+| `last_error` | Meaning |
+|---|---|
+| `provider_budget_deferred` | Waiting for Slack quota (shared budget or 429). |
+| `community_bot_reader_unavailable` | A bot post needs a joined member reader for the channel, and none is current. |
+| `community_bot_reader_scope_unavailable` | The current reader grant lacks a read scope the bot post needs. |
+| `legacy_community_send_unproven` | Legacy hold: the row has no enqueue marker, so it is retried every five minutes and never resent blindly. |
+| `community_channel_not_admitted` | The channel is out of the current workspace or channel scope, or processing is paused. |
+| `community_mapping_pending` | The room mapping or sync state changed, or is paused, while the send was running. |
+| `community_member_access_disabled` | A member-room send (either direction) or a member-actor Community post is waiting because member access is switched off. |
+| `community_receipt_unverified` | Slack's response did not yet prove the expected poster. |
+| `community_source_closed` | The source channel was reduced while the send was running. |
+| `member_membership_unproven` | The author has a linked grant, but their channel membership could not be confirmed yet. |
+| `member_delivery_deferred` | Any other hold from the shared send machinery (reconcile reads, response checks) that has no specific code, for member or bot posts. |
+
+A reply whose parent has no Slack message yet is a separate dependency wait:
+its row status is `waiting_parent`, not `pending`, until the parent is mapped.
+
+Permanent eligibility failures still make the row `dead`, and `last_error`
+keeps the exception text (for example `PublicBridgeConsentRequired: Current AI
+sharing permission is required`).
+
+The delivery row (`status`, `last_error`, `available_at`, `attempts`) is the
+source of persisted state. The `slack_member_send` log line is a best-effort
+classification of one attempt, written before the worker saves the row's new
+status. Logging can be skipped (for example with a closed database connection,
+or a transaction that does not commit) and logging failures are ignored, so a
+missing line does not prove that no attempt ran.
+
+When a line is written, it carries the `delivery_id`, an `outcome` and a
+`reason`. This covers failures during actor selection, before any Slack call.
+The line has `poster=member|bot` only after a poster was chosen. A legacy hold
+or a mapping change found during the first room-mapping check has no log line;
+read it from the row's `last_error`. Outcomes, and the row state they usually
+lead to:
+
+- `settled`: posted; the row becomes `completed`.
+- `deferred`: held. `reason` is the same code the row's `last_error` records,
+  or `parent_mapping_pending` for the `waiting_parent` dependency wait above.
+- `dropped`: permanent; the row becomes `dead`. `reason` is `consent_required`
+  (no current AI-sharing consent), `device_unverified` (the signing device is
+  not a current verified device of an active account), or `permanent_failure`.
+- `unavailable`: permanent `MemberDeliveryUnavailable`; the row becomes `dead`.
+- `retry`: provider outcome uncertain. With durable sync (`MESSAGE_SYNC_ENABLED`)
+  the row becomes `failed` with backoff. Without it, the row becomes `dead` once
+  it reaches its attempt limit.
+
+Read the delivery row by `delivery_id` first, and use these log lines to see
+why a missing Chat-to-Slack post was dropped or held. Log lines never contain
+message text, names or tokens.
+
 ## Validation and later gates
 
 The owning label is `integrations.tests_community_member_send_phase5` in both
 canonical SQLite and PostgreSQL lists. Existing
 `integrations.tests_public_bridge_consent`, `integrations.tests_slack_member_access`
 and `integrations.tests_member_delivery_phase4c` remain regression gates.
+`integrations.tests_community_delivery_observability`, also in both lists,
+covers the hold codes and send-log outcomes above without a database.
 The new PostgreSQL-only interleavings exercise device/AI/grant revocation
 through send and settlement. Database tests require the specifically approved
 existing migration files; this document grants no migration permission or
