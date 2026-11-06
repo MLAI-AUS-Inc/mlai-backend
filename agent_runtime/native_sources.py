@@ -1,7 +1,9 @@
-"""Native public-channel adapter through the relay's restricted query protocol.
+"""Native source adapter through the relay's restricted query protocol.
 
 The gateway admission lock is held by its caller. Relay service requests must
 never call back into that lock; ordinary bot-key registry reads are separate.
+Public pilot reads remain exact-resource scoped. Explicit personal-context
+invocations delegate only their canonical owner-signed request to its own adapter.
 """
 
 import base64
@@ -176,13 +178,18 @@ def live_access(owner, scope, resource, *, owner_public_key=None):
 def invocation_context(invocation, *, operation, now=None):
     now = now or timezone.now()
     installation = invocation.installation
-    community, channel = parse_resource(invocation.resource)
-    return {"operation": operation, "community_id": community, "channel_id": channel,
+    from . import personal_context
+    community, channel = parse_resource(personal_context.actual_resource(invocation.resource))
+    context = {"operation": operation, "community_id": community, "channel_id": channel,
         "owner_pubkey": invocation.owner_public_key, "bot_pubkey": installation.public_key,
         "installation_id": str(installation.pk), "grant_generation": invocation.generation,
         "invocation_id": str(invocation.pk), "trigger_event_id": invocation.source_event_id,
         "root_event_id": invocation.thread_id,
         "expires_at": min(int(invocation.expires_at.timestamp()), int(now.timestamp()) + 840)}
+    if personal_context.is_resource(invocation.resource):
+        personal_context.validate_mode(invocation.grant, invocation.resource)
+        context["execution_mode"] = "personal_context"
+    return context
 
 
 def read_invocation(invocation, *, limit=100, cursor=""):
@@ -191,17 +198,25 @@ def read_invocation(invocation, *, limit=100, cursor=""):
     context = invocation_context(invocation, operation="thread")
     for field in ("community_id", "channel_id", "owner_pubkey", "operation"):
         context.pop(field)
+    from . import personal_context
+    if personal_context.is_resource(invocation.resource):
+        context.pop("execution_mode")
+        return personal_context.relay_query(invocation.grant, invocation.resource, "thread",
+            owner_public_key=invocation.owner_public_key, limit=limit, **context)
     return query(invocation.installation.owner, invocation.resource, "thread",
         owner_public_key=invocation.owner_public_key, limit=limit, **context)
 
 
 def send_reply(reply):
     require_native(reply=True)
-    community, _ = parse_resource(reply.invocation.resource)
+    from . import personal_context
+    if personal_context.is_resource(reply.invocation.resource):
+        personal_context.validate_mode(reply.invocation.grant, reply.invocation.resource)
+    community, _ = parse_resource(personal_context.actual_resource(reply.invocation.resource))
     _, config = community_config(community)
     result = _request(config, "/events", reply.event)
     event_id = result.get("event_id")
     if event_id != reply.event.get("id") or result.get("accepted") is not True:
         raise SourceUnavailable("Native relay did not acknowledge the exact reply.")
-    return {"event_id": event_id, "accepted": True, "resource": reply.invocation.resource,
+    return {"event_id": event_id, "accepted": True, "resource": personal_context.actual_resource(reply.invocation.resource),
             "thread_id": reply.invocation.thread_id}

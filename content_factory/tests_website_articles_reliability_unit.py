@@ -45,14 +45,32 @@ class WebsiteJourneyContractTests(SimpleTestCase):
         self.assertEqual(result["repository"]["sourceSha"], "b" * 40)
 
     def test_stale_build_proof_preserves_installed_fact_and_requests_ci_refresh(self):
+        # Without write access, preparation cannot run, so the CI-evidence path remains.
         result = project_journey(company_id="42", domain="example.test", website={"status": "connected", "repositoryId": 123,
             "verifiedSha": "a" * 40, "writePolicy": {"allowed": True}},
-            capabilities={"repositoryAccessVerified": True, "canGenerateArticle": False, "reasonCode": "verification_stale"},
+            capabilities={"repositoryAccessVerified": True, "repositoryWriteVerified": False, "canGenerateArticle": False, "reasonCode": "verification_stale"},
             discovery={"complete": True, "sourceSha": "a" * 40},
             proof={"integrationVerified": True, "buildVerified": False, "verificationStale": True})
         self.assertEqual(result["prerequisites"]["integration"]["status"], "complete")
         self.assertEqual(result["prerequisites"]["verification"]["status"], "stale")
         self.assertEqual(result["nextAction"]["id"], "ci-attestation")
+        self.assertNotIn("verify", result["allowedActions"])
+        self.assertIn("ci-attestation", result["allowedActions"])
+
+    def test_stale_build_proof_offers_the_server_recheck_when_the_site_is_writable(self):
+        result = project_journey(company_id="42", domain="example.test", website={"status": "connected", "repositoryId": 123,
+            "verifiedSha": "a" * 40, "writePolicy": {"allowed": True}},
+            capabilities={"repositoryAccessVerified": True, "repositoryWriteVerified": True, "canGenerateArticle": False,
+                "reasonCode": "verification_stale", "reason": "Check your website integration again."},
+            discovery={"complete": True, "sourceSha": "a" * 40},
+            proof={"integrationVerified": True, "buildVerified": False, "verificationStale": True})
+        self.assertEqual(result["prerequisites"]["verification"]["status"], "stale")
+        self.assertEqual(result["nextAction"], {"id": "prepare", "label": "Check website again", "step": "preview",
+            "reason": "Your website's publishing verification is out of date.", "params": {"retry": True}})
+        prepare = next(action for action in result["actions"] if action["id"] == "prepare")
+        self.assertEqual((prepare["method"], prepare["path"]), ("POST", "/api/v1/my-startup/vibe-marketing/website-connection/prepare"))
+        # The developer CI-evidence form stays available, but is no longer the next step.
+        self.assertIn("ci-attestation", result["allowedActions"])
         self.assertNotIn("verify", result["allowedActions"])
 
     def test_proof_age_source_and_policy_are_independent(self):
@@ -142,7 +160,7 @@ class WebsiteJourneyContractTests(SimpleTestCase):
 
     def test_target_readiness_needs_exact_live_deployment_proof(self):
         website = {"status": "connected", "verifiedSha": "a" * 40, "connectionGeneration": 2, "writePolicy": {"allowed": True}}
-        caps = {"canGenerateArticle": True, "repositoryAccessVerified": True}
+        caps = {"canGenerateArticle": True, "repositoryAccessVerified": True,"repositoryWriteVerified":True}
         partial = project_journey(company_id="42", domain="example.test", website=website, capabilities=caps)
         self.assertTrue(partial["capabilities"]["canOpenPublicationPr"])
         self.assertFalse(partial["capabilities"]["canPublishArticle"])
@@ -176,7 +194,7 @@ class WebsiteJourneyContractTests(SimpleTestCase):
         for suffix in ("", "/", "/disconnect", "/disconnect/", "/purge", "/cancel-operation", "/operations/b761b209-8673-4843-9a48-90b3177bde26"):
             self.assertTrue(resolve(prefix + suffix).func.view_class.__name__.__contains__("WebsiteConnection"))
 
-    def test_account_probe_runs_when_integration_is_blocked(self):
+    def test_forced_account_probe_runs_when_integration_is_blocked(self):
         from .vibe_marketing_views import _article_capabilities_for_context
         config = SimpleNamespace(github_repo="example/site", website_connection=object())
         with patch("content_factory.vibe_marketing_views._github_account_for_context", return_value={"saved": True, "owned": True}), \
@@ -184,8 +202,10 @@ class WebsiteJourneyContractTests(SimpleTestCase):
              patch("content_factory.vibe_marketing_views.resolve_article_system", return_value={}), \
              patch("content_factory.vibe_marketing_views.integration_evidence", return_value={"verified": False, "reasonCode": "website_writes_paused"}), \
              patch("content_factory.vibe_marketing_views._verify_github_repository_access", return_value={"verified": True}) as probe:
-            result = _article_capabilities_for_context(SimpleNamespace(organization=SimpleNamespace(domain="example.test")), config, latest_runs=[])
+            result = _article_capabilities_for_context(SimpleNamespace(organization=SimpleNamespace(domain="example.test")), config, latest_runs=[], force=True)
         probe.assert_called_once()
+        self.assertIs(probe.call_args.kwargs["force"], True)
+        self.assertIs(probe.call_args.kwargs["allow_probe"], True)
         self.assertEqual(result["accountStatus"], "connected")
         self.assertEqual(result["reasonCode"], "website_writes_paused")
 

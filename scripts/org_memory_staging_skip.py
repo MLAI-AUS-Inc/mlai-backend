@@ -13,16 +13,18 @@ and reports (via exit code 0) when the attempt was blocked exclusively by
 missing retrievable evidence, so deploy.sh can skip the binding for this
 release and leave retrieval fail-closed. Every other failure mode — any
 other readiness blocker, apply errors after a passing readiness report, or
-output without a readiness report at all — keeps the deploy hard-failing
-(exit code 1).
+output without a readiness report at all — is distinguished as an operational
+failure (exit code 1). The application deploy keeps retrieval disabled for
+either outcome. Separate Admin Brain activation still requires every readiness
+and governance gate to pass; this classifier never authorizes activation.
 """
 
 import json
 import sys
 
 # Blockers that describe the pilot's pre-ingestion bootstrap state rather
-# than a governance regression. Anything outside this set must fail the
-# deploy loudly.
+# than an operational or governance failure. Other outcomes require operator
+# attention and must never activate retrieval.
 TOLERATED_BLOCKERS = frozenset({"retrievable_evidence_missing"})
 
 
@@ -84,7 +86,7 @@ def main(argv):
         return 0
     print(
         "Admin Brain staging failed for reasons beyond missing retrievable "
-        "evidence; the deploy must fail.",
+        "evidence; retrieval must remain disabled pending operator action.",
         file=sys.stderr,
     )
     return 1

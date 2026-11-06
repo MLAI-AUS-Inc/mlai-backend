@@ -1,6 +1,8 @@
 """Owner-scoped website management and internal worker authorization APIs."""
 
 from functools import wraps
+import importlib
+import re
 import uuid
 
 from rest_framework.response import Response
@@ -15,9 +17,19 @@ from .website_connections import (
 )
 
 
-def _context(request):
+def _context(request, *, portable=False, run_id=None):
+    """Resolve the selected company; ``portable`` owner operations may run without a website.
+
+    With ``portable`` (or a ``run_id``), a new-journey startup with no website
+    resolves for an explicit portable request or one of its portable runs
+    (P1.6, IF-P1-08). Every other request resolves exactly as before.
+    """
     from .vibe_marketing_views import _resolve_context_or_response, _explicit_company_scope_required_response, _get_config
-    context, error = _resolve_context_or_response(request)
+    if portable or run_id:
+        from .no_website_capabilities import resolve_portable_context_or_response
+        context, error = resolve_portable_context_or_response(request, run_id=run_id)
+    else:
+        context, error = _resolve_context_or_response(request)
     if error:
         return None, None, error
     error = _explicit_company_scope_required_response(request, context)
@@ -31,9 +43,16 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
         def wrapped(self, request, *args, **kwargs):
             from .vibe_marketing_views import _run_belongs_to_context
             from workflow_runs.models import ContentFactoryRun
-            context, config, error = _context(request)
+            context, config, error = _context(
+                request, portable=not run_operation and action == "read",
+                run_id=(kwargs.get("run_id") or (args[0] if args else None)) if run_operation else None)
             if error:
                 return error
+            def invoke():
+                from .website_goal_audit import observe_owner_http
+                observe_owner_http(request, context, config, action=kwargs.get("action") or action,
+                    run_id=(kwargs.get("run_id") or (args[0] if args else None)) if run_operation else None)
+                return method(self, request, *args, **kwargs)
             try:
                 from .portable_drafts import explicit_portable_request, original_portable_run
                 if not run_operation and action == "read" and explicit_portable_request(request.data):
@@ -44,15 +63,20 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                             raise WebsiteAuthorityError("website_connection_changed", "The reviewed website connection changed. Refresh before continuing.")
                         with authority_guard({**dict(request.data), "domain": context.organization.domain, "github_repo": current.github_repo}, action="portable"):
                             pass
-                    return method(self, request, *args, **kwargs)
+                    return invoke()
                 run_action = kwargs.get("action")
                 if run_operation and run_action in {"cancel", "deny", "refresh-setup-pr-status"}:
-                    return method(self, request, *args, **kwargs)
+                    return invoke()
                 if run_operation:
                     run_id = kwargs.get("run_id") or (args[0] if args else None)
                     run = ContentFactoryRun.objects.filter(run_id=run_id).first()
                     if run is None or not _run_belongs_to_context(run, context):
                         return Response({"detail": "Run not found."}, status=404)
+                    from .run_reconciliation import authoritative_run
+                    if original_portable_run(run) and run_action == "approve" and authoritative_run(run):
+                        # Owned approval records exact parent review consent;
+                        # publication still requires a separately admitted child.
+                        return invoke()
                     if original_portable_run(run) and run_action not in {"approve", "publish-pr", "promote-bundle", "merge-publish-pr", "retry-preview-quality"}:
                         if connection_contract(request.data):
                             raise WebsiteAuthorityError("website_connection_changed", "A portable draft cannot acquire repository authority.")
@@ -60,13 +84,24 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                             "delivery_mode", "deliveryMode", "resolved_delivery_mode", "resolvedDeliveryMode",
                         )):
                             raise WebsiteAuthorityError("portable_repository_access_denied", "A confirmed portable draft cannot switch to repository delivery. Start a separately reviewed repository run.")
-                        return method(self, request, *args, **kwargs)
+                        return invoke()
                     payload = scoped_run_contract(run)
                     expected = connection_contract(request.data)
                     if expected and any(connection_contract(payload).get(key) != value for key, value in expected.items()):
                         raise WebsiteAuthorityError("website_connection_changed", "This run belongs to a previous website connection.")
+                    from .run_ownership import owner_receipt, admission_enabled
+                    if run_action in {"promote-bundle", "publish-pr"} and (owner_receipt(run) is not None or admission_enabled()):
+                        # This is a new child execution. The canonical controller
+                        # checks actual publisher, retained review source and fresh
+                        # destination before any placeholder or provider request.
+                        with owner_operation_scope(payload):
+                            return invoke()
                 else:
                     requested_repo = str(request.data.get("github_repo") or request.data.get("githubRepo") or config.github_repo or "").strip()
+                    from .vibe_marketing_views import _github_repo_company_conflict_response
+                    conflict = _github_repo_company_conflict_response(context=context, requested_repo=requested_repo)
+                    if conflict:
+                        return conflict
                     expected = connection_contract(request.data)
                     current = config.website_connection
                     newly_bound = False
@@ -89,11 +124,11 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                     effective_action = run_action_authority(run, run_action)
                 with authority_guard(payload, action=effective_action):
                     if local_only:
-                        return method(self, request, *args, **kwargs)
+                        return invoke()
                 # The worker synchronously reauthorizes dispatch and mutations.
                 # Preserve consent identity across HTTP, never the DB row locks.
                 with owner_operation_scope(payload):
-                    return method(self, request, *args, **kwargs)
+                    return invoke()
             except WebsiteAuthorityError as exc:
                 return Response(exc.as_dict(), status=exc.status)
         return wrapped
@@ -109,7 +144,7 @@ class WebsiteConnectionView(APIView):
             return error
         from .website_journey import journey_for_context
         from .website_status import add_status
-        payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config)}
+        payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config, owner_view=True)}
         return Response(add_status(payload, context, config, journey=payload["websiteJourney"]))
 
     def post(self, request):
@@ -117,6 +152,8 @@ class WebsiteConnectionView(APIView):
         if error:
             return error
         try:
+            from .website_goal_audit import observe_owner_http
+            observe_owner_http(request, context, config, action="connection:bind")
             connection = bind_website(config, user=request.user,
                 repo=request.data.get("githubRepo") or request.data.get("github_repo") or config.github_repo,
                 app_root=request.data.get("appRoot", ""), branch=request.data.get("branch", ""),
@@ -142,12 +179,16 @@ class WebsiteConnectionActionView(APIView):
             key = str(request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or request.data.get("client_request_id") or uuid.uuid4())
             if action == "purge" and request.data.get("preserve_published_articles", True) is not True:
                 raise WebsiteAuthorityError("published_content_review_required", "Published articles require a separately reviewed removal proposal.")
+            from .website_goal_audit import observe_owner_http
+            if action != "prepare" and not (action == "github-revoke" and request.data.get("phase", "plan") == "plan"):
+                observe_owner_http(request, context, config, action="connection:" + action)
             if action == "prepare":
                 from .website_prepare import start_prepare, advance_prepare
                 operation = start_prepare(config, expected=dict(request.data), company_id=context.company.pk,
-                    user=request.user, retry=True, target=request.data.get("goal_target", "ready"))
+                    user=request.user, retry=True, target=request.data.get("goal_target", "ready"), consent=request.data.get("setup_consent"))
                 advance_prepare(operation.pk)
                 operation.refresh_from_db()
+                observe_owner_http(request, context, config, action="connection:prepare", initial_setup=True, operation=operation)
             elif action == "disconnect":
                 from .website_disconnect import start_disconnect
                 operation = start_disconnect(config, user=request.user, data=dict(request.data))
@@ -165,7 +206,7 @@ class WebsiteConnectionActionView(APIView):
                 operation = verify_cleanup_deployment(config, data=request.data)
             elif action in {"custom-contract", "ci-attestation"}:
                 from .website_support import owner_support_operation
-                operation = owner_support_operation(context, config, action=action, data=dict(request.data))
+                operation = owner_support_operation(context, config, action=action, data=dict(request.data), user=request.user)
             elif action == "cancel-operation":
                 from .website_operations import cancel_operation
                 operation = cancel_operation(config, data=request.data, idempotency_key=key)
@@ -199,7 +240,10 @@ class WebsiteConnectionActionView(APIView):
                     branch=current.branch, site_url=current.site_url, reconnect=True, expected=request.data)
                 from .website_prepare import start_prepare, advance_prepare
                 config.refresh_from_db()
-                operation = start_prepare(config, company_id=context.company.pk, user=request.user)
+                # A connected website keeps its generation and saved preparation,
+                # so retry that preparation as "prepare" does instead of returning
+                # one that stalled waiting for this reconnect.
+                operation = start_prepare(config, company_id=context.company.pk, user=request.user, retry=True)
                 advance_prepare(operation.pk)
                 operation.refresh_from_db()
             else:
@@ -209,7 +253,7 @@ class WebsiteConnectionActionView(APIView):
             from .website_journey import journey_for_context
             from .website_operations import operation_summary
             from .website_status import add_status
-            payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config),
+            payload = {"websiteConnection": summary_for(config, company_id=context.company.pk), "websiteJourney": journey_for_context(context, config, owner_view=True),
                 "operation": operation_summary(operation) if operation else None}
             return Response(add_status(payload, context, config, journey=payload["websiteJourney"]))
         except WebsiteAuthorityError as exc:
@@ -226,9 +270,109 @@ class WebsiteConnectionOperationView(APIView):
         from .website_models import WebsiteConnectionOperation
         from .website_operations import operation_summary
         operation = WebsiteConnectionOperation.objects.filter(pk=operation_id, connection__organization=context.organization).first()
-        if operation is None:
+        if operation is None or operation.action in {"goal-usage", "goal-alert", "usage-refresh"}:
             return Response({"detail": "Operation not found."}, status=404)
         return Response({"operation": operation_summary(operation)})
+
+
+class WebsiteCostUsageView(APIView):
+    """Read recorded accounting for an explicitly selected authorized company."""
+
+    def get(self, request):
+        context, config, error = _context(request)
+        if error:
+            return error
+        from . import website_cost_ledger as ledger
+        if not ledger.enabled():
+            return Response({"detail": "Accounting not available."}, status=404)
+        goal_id = request.query_params.get("goal_id")
+        if goal_id is not None:
+            try:
+                parsed = str(uuid.UUID(goal_id))
+                if parsed != goal_id:
+                    raise ValueError("Noncanonical goal ID")
+            except (ValueError, AttributeError, TypeError):
+                return Response({"detail": "Invalid goal ID."}, status=400)
+        usage = ledger.read(company_id=context.company.pk, organization_id=context.organization.pk, goal_id=goal_id)
+        from .founder_journey_cohort import is_new_journey
+        if not getattr(getattr(request, "user", None), "is_staff", False) and is_new_journey(context.organization, config):
+            # P1.11 (IF-P1-18): founders on the new journey see counts and
+            # points only; USD, SHAs and operation ids are staff details.
+            usage = founder_cost_usage(usage)
+        return Response({"usage": usage}, headers={"Cache-Control": "private, no-store"})
+
+
+_SHA_VALUE = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?")
+_OPERATION_ID_KEYS = frozenset({"goalid", "goal_id", "operationid", "operation_id", "goaloperationid", "goal_operation_id"})
+
+
+def founder_cost_usage(value):
+    """A copy of a cost-usage payload without USD amounts, SHAs or operation UUIDs.
+
+    Keys naming a USD amount (``model_usd``), a SHA (``*sha``) or an operation
+    id (``goalId``, ``operationId``) are dropped, as is any string value that is
+    a 40- or 64-character hex digest. Counts, coverage and points are kept.
+    """
+    if isinstance(value, dict):
+        kept = {}
+        for key, item in value.items():
+            name = str(key).lower()
+            if name.startswith("usd") or name.endswith("usd") or "_usd" in name or name.endswith("sha") or name in _OPERATION_ID_KEYS:
+                continue
+            if isinstance(item, str) and _SHA_VALUE.fullmatch(item):
+                continue
+            kept[key] = founder_cost_usage(item)
+        return kept
+    if isinstance(value, list):
+        return [founder_cost_usage(item) for item in value if not (isinstance(item, str) and _SHA_VALUE.fullmatch(item))]
+    return value
+
+
+SETUP_OWNER_APPROVAL_MODULE = "content_factory.website_setup_owner_approval"
+
+
+def setup_owner_approval_hooks():
+    """The owner-click module (IF-P1-17), or None while it is not installed.
+
+    None means every caller keeps today's setup approve and merge path. Only a
+    missing module counts as absent; an error inside the module is raised.
+    """
+    try:
+        return importlib.import_module(SETUP_OWNER_APPROVAL_MODULE)
+    except ModuleNotFoundError as exc:
+        if exc.name not in {SETUP_OWNER_APPROVAL_MODULE, "content_factory"}:
+            raise
+        return None
+
+
+def setup_owner_approval_snapshot(organization):
+    """The marker's ``setupApproval`` and ``publishAutomatically`` before an owner click.
+
+    :func:`restore_setup_owner_approval` puts them back when Content Factory
+    then rejects the approve, so a failed approve never leaves "Publish
+    automatically" on or an ``auto`` receipt for a run that was not approved.
+    """
+    from .founder_journey_cohort import read_marker
+    marker = read_marker(organization) or {}
+    return {"setup_approval": marker.get("setupApproval"), "publish_automatically": marker.get("publishAutomatically")}
+
+
+def setup_approve_rejected(remote_data) -> bool:
+    """True when ``control_article_run`` answers this setup approve with an error.
+
+    Mirrors its three approve refusals: a setup pull request that could not be
+    created, a 400/404/409/422 from Content Factory, and any other error.
+    """
+    remote_status_code = int(remote_data.get("content_factory_status_code") or 0)
+    return (remote_data.get("status") == "setup_pr_create_failed" or remote_status_code in {400, 404, 409, 422}
+            or bool(remote_data.get("error")))
+
+
+def restore_setup_owner_approval(organization, snapshot):
+    """Put back the owner-click keys :func:`setup_owner_approval_snapshot` saw (no other key changes)."""
+    from .founder_journey_cohort import update_marker
+    update_marker(organization, setup_approval=snapshot.get("setup_approval"),
+                  publish_automatically=snapshot.get("publish_automatically"))
 
 
 class WebsiteConnectionAuthorizeView(APIView):
@@ -240,10 +384,15 @@ class WebsiteConnectionAuthorizeView(APIView):
     def get(self, request):
         try:
             action = str(request.query_params.get("action") or "read")
+            if action not in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation", "cancel_receipt"}:
+                from .website_connections import require_run_not_stopped
+                require_run_not_stopped(dict(request.query_params.items()))
             with authority_guard(dict(request.query_params.items()), action="read" if action == "ci_attestation" else action) as connection:
+                if action not in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation", "cancel_receipt"}:
+                    require_run_not_stopped(dict(request.query_params.items()), lock=True)
                 if action == "ci_attestation":
                     from .website_verification import ci_attestation_for
-                    return Response(ci_attestation_for(connection, dict(request.query_params.items())))
+                    return Response(ci_attestation_for(connection, dict(request.query_params.items()), query=True))
                 portable = request.query_params.get("action") == "portable"
                 from .website_operations import deletion_epoch
                 return Response({"allowed": True, **contract_for(connection), "state": connection.state,
@@ -315,6 +464,9 @@ class WebsiteMutationView(APIView):
                         if data.get(key) and not (key == "status" and row.status == "applied" and data[key] != "applied"):
                             setattr(row, key, data[key])
                     row.save(update_fields=["head_sha", "pr_url", "branch", "status", "updated_at"])
-                return Response({"id": str(row.pk), "created": created, "patch_digest": row.patch_digest}, status=201 if created else 200)
+                from .article_publication_observation import register_intent
+                intent_id = register_intent(connection, row, data)
+                return Response({"id": str(row.pk), "created": created, "patch_digest": row.patch_digest,
+                    **({"article_publication_intent_id": intent_id} if intent_id else {})}, status=201 if created else 200)
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)

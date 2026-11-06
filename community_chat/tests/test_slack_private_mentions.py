@@ -1,6 +1,7 @@
 """Database-free checks for private mention delivery and history repair."""
 
 from contextlib import ExitStack
+from datetime import datetime, timezone as dt_timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +27,52 @@ RENDERED = (
 
 
 class PrivateSlackMentionTests(SimpleTestCase):
+    @patch("integrations.services.message_sync.presentation.record_presentation_locked")
+    @patch("integrations.services.message_sync.publication.record_publication_locked")
+    def test_event_batch_counts_each_original_parked_time_only_after_adapter_success(self, publish, present):
+        from integrations.services.message_sync import telemetry
+
+        grant, conversation, first = self.fixture()
+        second = SimpleNamespace(**first.__dict__)
+        second.pk, second.source_message_id, second.save = 43, "1750000000.000002", MagicMock()
+        first.metadata = {**first.metadata, "event_routing_v1": {"parked_at": 100.0, "key": "opaque-one", "path": "event"}}
+        second.metadata = {**second.metadata, "event_routing_v1": {"parked_at": 105.0, "key": "opaque-two", "path": "event"}}
+        clock, callbacks = [110.0], []
+
+        def acknowledge(payloads):
+            self.assertEqual(len(payloads), 2)
+            clock[0] = 125.0
+            return [{"message_id": "first"}, {"message_id": "second"}]
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(mirror.transaction, "atomic"))
+            stack.enter_context(patch.object(mirror.transaction, "on_commit", side_effect=lambda fn, **_: callbacks.append(fn)))
+            stack.enter_context(patch.object(mirror.timezone, "now", side_effect=lambda: datetime.fromtimestamp(clock[0], dt_timezone.utc)))
+            grants = stack.enter_context(patch.object(mirror.SlackDmMirrorGrant, "objects"))
+            conversations = stack.enter_context(patch.object(mirror.SlackDmMirrorConversation, "objects"))
+            rows = stack.enter_context(patch.object(mirror.SlackDmMirrorDelivery, "objects"))
+            grants.select_related.return_value.filter.return_value.first.return_value = grant
+            grants.select_for_update.return_value.select_related.return_value.filter.return_value.first.return_value = grant
+            conversations.select_for_update.return_value.filter.return_value.first.return_value = conversation
+            rows.select_for_update.return_value.filter.return_value = [first, second]
+            stack.enter_context(patch.object(mirror, "_refresh_slack_grant_token_if_due"))
+            stack.enter_context(patch.object(mirror, "_history_delivery_author_pubkey", return_value="owner"))
+            authorized = stack.enter_context(patch.object(mirror, "_assert_private_delivery_authorized_locked"))
+            send = stack.enter_context(patch.object(mirror.BuzzBridgeClient, "deliver_private_batch", side_effect=acknowledge))
+            metric = stack.enter_context(patch.object(telemetry, "record_latency"))
+            mirror._deliver_private_batch([first, second])
+            send.assert_called_once()
+            self.assertEqual(authorized.call_count, 4)
+            self.assertEqual([first.encrypted_text, second.encrypted_text], ["", ""])
+            metric.assert_not_called()
+            self.assertEqual(len(callbacks), 2)
+            for callback in callbacks:
+                callback()
+        self.assertEqual([call.args for call in metric.call_args_list], [
+            ("staged_delivered", 25000), ("staged_delivered_event", 25000),
+            ("staged_delivered", 20000), ("staged_delivered_event", 20000),
+        ])
+
     def test_private_queue_keeps_ids_until_authorized_profiles_are_available(self):
         self.assertEqual(mirror._slack_message_text({"text": RAW}), RAW)
         self.assertEqual(render_private_slack_mentions(RAW, PROFILES), RENDERED)

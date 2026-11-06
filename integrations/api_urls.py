@@ -1,14 +1,16 @@
 from django.urls import path
 from . import api_views
 from . import api_views_bridge
-from .api_views_bridge_actor import CommunityBridgeRooActorView
+from .api_views_bridge_actor import CommunityBridgeRooActorView, PrivateBridgeRooActorView
 from . import api_views_connectors
 from . import api_views_finance
 from . import api_views_luma
 from . import api_views_reconciliation
+from .api_views_studio_reports import StudioReportPrepareView
 from startup_updates import api_views as startup_update_api_views
 
 urlpatterns = [
+    path('studio-reports/prepare', StudioReportPrepareView.as_view(), name='studio_reports_prepare'),
     # GitHub Integration
     path('github/', api_views.GithubTokenIdentityView.as_view(), name='github_integration_list'),  # POST create/update
     path('github/<str:slack_user_id>/', api_views.GithubTokenIdentityView.as_view(), name='github_integration_detail'), # GET, PATCH
@@ -367,6 +369,8 @@ urlpatterns = [
     path('startup-updates/runs/<str:run_id>/founder-review/auto-approve', startup_update_api_views.StartupUpdateFounderReviewAutoApproveView.as_view(), name='startup_updates_founder_review_auto_approve'),
     path('startup-updates/runs/<str:run_id>/curated-timeline', startup_update_api_views.StartupUpdateCuratedTimelineView.as_view(), name='startup_updates_curated_timeline'),
     path('startup-updates/runs/<str:run_id>/source-evidence-refresh', startup_update_api_views.StartupUpdateSourceEvidenceRefreshView.as_view(), name='startup_updates_source_evidence_refresh'),
+    path('startup-updates/runs/<str:run_id>/execution', startup_update_api_views.StartupUpdateExecutionView.as_view(), name='startup_updates_execution'),
+    path('startup-updates/runs/<str:run_id>/source-preflight', startup_update_api_views.StartupUpdateSourcePreflightView.as_view(), name='startup_updates_source_preflight'),
     path('startup-updates/runs/<str:run_id>/evidence-snapshot', startup_update_api_views.StartupUpdateEvidenceSnapshotView.as_view(), name='startup_updates_evidence_snapshot'),
     path('startup-updates/runs/<str:run_id>/draft-results', startup_update_api_views.StartupUpdateDraftResultsView.as_view(), name='startup_updates_draft_results'),
     path('startup-updates/drafts', startup_update_api_views.StartupUpdateDraftListView.as_view(), name='startup_updates_draft_list'),
@@ -374,6 +378,7 @@ urlpatterns = [
 
     # Community bridge
     path('bridge/roo/actor', CommunityBridgeRooActorView.as_view(), name='community_bridge_roo_actor'),
+    path('bridge/roo/dm-actor', PrivateBridgeRooActorView.as_view(), name='private_bridge_roo_actor'),
     path('bridge/slack/events', api_views_bridge.SlackCommunityBridgeEventView.as_view(), name='community_bridge_slack_events'),
     path('bridge/buzz/events', api_views_bridge.BuzzCommunityBridgeEventView.as_view(), name='community_bridge_buzz_events'),
 ]

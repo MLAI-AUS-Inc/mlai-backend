@@ -11,6 +11,7 @@ urlpatterns = [
     path("enrollments/<uuid:enrollment_id>/", native_views.NativeEnrollmentDetailView.as_view()),
     path("enrollments/<uuid:enrollment_id>/confirm/", native_views.NativeEnrollmentConfirmView.as_view()),
     path("installations/<uuid:installation_id>/state/", native_views.NativeInstallationStateView.as_view()),
+    path("installations/<uuid:installation_id>/mentions/", native_views.NativePersonalMentionView.as_view()),
     path("internal/native/registry/<str:public_key>/", native_views.NativeRegistryView.as_view()),
     path("connected/", views.ConnectedAgentsView.as_view(), name="agent-connected"),
     path("channels/", views.EligibleChannelsView.as_view()),

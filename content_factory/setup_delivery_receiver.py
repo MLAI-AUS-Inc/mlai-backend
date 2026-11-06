@@ -28,6 +28,13 @@ NAMESPACE = "delivery_v1"
 TERMINAL = {"completed", "cancelled", "denied"}
 LEASE_SECONDS = 120
 RECEIPT_LIMIT = 2048
+ARTICLE_WORKFLOWS = {"direct_generate","confirmed_topic"}
+
+
+def apply_enabled(envelope):
+    """Article and setup enrollment can be rolled back independently."""
+    flag="CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED" if envelope["workflow"] in ARTICLE_WORKFLOWS else "CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED"
+    return getattr(settings,flag,False)
 
 
 class DeliveryReceiptConflict(ValueError):
@@ -102,24 +109,36 @@ def _locked_context(envelope):
         pk=scope["operation_id"], connection=website, action="workflow").first()
     if operation is None:
         _scope_error("website_operation_changed")
-    if (operation.payload or {}).get("setup_delivery_v1") != {"schema_version": 1}:
+    article=envelope["workflow"] in ARTICLE_WORKFLOWS
+    marker="article_delivery_v1" if article else "setup_delivery_v1"
+    if (operation.payload or {}).get(marker) != {"schema_version": 1}:
         _scope_error("delivery_not_enrolled")
+    if article:
+        from .setup_delivery_enrollment import article_stream
+        if not article_stream(operation.payload.get("article_delivery_request") or {}):
+            _scope_error("delivery_not_enrolled")
     run = ContentFactoryRun.objects.select_for_update().filter(run_id=envelope["run_id"]).first()
     if run is not None:
         receipt = _metadata(run).get("receipts", {}).get(envelope.get("event_id"), {})
         historical_ack = (receipt.get("processed_at") and receipt.get("payload_sha256") == envelope.get("payload_sha256"))
         if run.organization_id != website.organization_id or not (_original_scope_matches(run, scope) or historical_ack):
             _scope_error("website_scope_mismatch")
-        if run.workflow != envelope["workflow"]:
+        from .setup_delivery_enrollment import delivery_workflow,article_stream
+        if delivery_workflow(run) != envelope["workflow"]:
             _scope_error("website_run_changed")
+        if article and (not article_stream(run.run_request or {}) or any(
+            (run.run_request or {}).get(key)!=(operation.payload.get("article_delivery_request") or {}).get(key)
+            for key in ("first_article_goal_id","first_article_goal_operation_id"))):
+            _scope_error("website_scope_mismatch")
     else:
         # A new remote ID needs the backend's reserved dispatch, not a company
         # name or arbitrary operation asserted by the worker.
         saved = operation.payload or {}
-        if (saved.get("setup_delivery_scope") != scope
+        prefix="article_delivery" if article else "setup_delivery"
+        if (saved.get(prefix+"_scope") != scope
                 or operation.generation != scope["connection_generation"]
                 or saved.get("client_request_id") != scope["client_request_id"]
-                or saved.get("workflow") != envelope["workflow"]
+                or saved.get("article_delivery_workflow" if article else "workflow") != envelope["workflow"]
                 or saved.get("run_id") not in (None, "", scope["client_request_id"], envelope["run_id"])
                 or operation.state not in {"pending", "running"}):
             _scope_error("website_dispatch_unproven")
@@ -193,6 +212,8 @@ def _record_receipt(run, envelope, nonce, disposition, now):
 
 def _proof_guard(envelope):
     """Verify remote source before locks when a snapshot carries scan evidence."""
+    if envelope["workflow"] in ARTICLE_WORKFLOWS:
+        return nullcontext(None)
     result = envelope["body"]["state_projection"]["result"]
     original = ContentFactoryRun.objects.filter(run_id=envelope["run_id"]).first()
     if (original is not None and original.status in {"completed", "failed", "blocked"}
@@ -301,7 +322,22 @@ def _project_state(run, operation, envelope, *, website, proof_connection=None):
     """Persist validated current state without notification, refund or action."""
     from .service_views import _merge_django_owned_run_result
     from .website_operations import observe_workflow_status
-    projection, authoritative = _setup_proof_projection(run, website, envelope)
+    from .workflow_order import received_order, original_admission
+    order_admitted = original_admission(run, operation, envelope)
+    step_order = received_order(run, operation, envelope)
+    if envelope["workflow"] in ARTICLE_WORKFLOWS:
+        # Durable article transport records the outcome, not publication proof.
+        # The canonical article reader still verifies quality/approval/live
+        # evidence. Sparse callbacks cannot erase its richer saved evidence.
+        projection=deepcopy(envelope["body"]["state_projection"])
+        observed={key:value for key,value in projection["result"].items() if key in {
+            "failure","failure_occurrence_id","failure_class","failure_fingerprint","error_code","retryable","usage","failed_step","repair_state"}}
+        projection["result"]={**deepcopy(run.result or {}),**observed}
+        projection["verification_summary"]=deepcopy(run.verification_summary or {})
+        projection["acceptance_summary"]=deepcopy(run.acceptance_summary or {})
+        authoritative=True
+    else:
+        projection, authoritative = _setup_proof_projection(run, website, envelope)
     # Approval is owned by the backend. Worker labels never supply that proof.
     incoming_approval = projection["approval_state"]
     if run.approval_state in {"approved", "denied"} or incoming_approval in {"approved", "denied"} and incoming_approval != run.approval_state:
@@ -316,13 +352,24 @@ def _project_state(run, operation, envelope, *, website, proof_connection=None):
     failure = projection["failure"]
     run.error = failure.get("user_message", "") if failure else ""
     run.last_event_emitted_at = parse_datetime(envelope["emitted_at"])
+    order_fields = []
+    if order_admitted:
+        # A higher current snapshot can come from an older producer. Its absent
+        # optional metadata must not leave a previous semantic order current.
+        run.step_order = step_order if step_order is not None else []
+        order_fields.append("step_order")
     run.save(update_fields=["status", "current_step", "approval_state", "resume_available",
-        "verification_summary", "acceptance_summary", "result", "error", "last_event_emitted_at", "updated_at"])
-    for index, (step_key, state) in enumerate(projection["step_states"].items()):
+        "verification_summary", "acceptance_summary", "result", "error", "last_event_emitted_at", "updated_at", *order_fields])
+    states = projection["step_states"]
+    ordered_states = ((key, states[key]) for key in step_order) if step_order is not None else states.items()
+    for index, (step_key, state) in enumerate(ordered_states):
         ContentFactoryRunStep.objects.update_or_create(run=run, step_key=step_key,
             defaults={"display_order": index, "status": state["status"],
                       "required": state["required"], "attempts": state["attempts"]})
     metadata = _metadata(run)
+    if order_admitted:
+        metadata["workflow_order"] = {"version": 1, "available": step_order is not None,
+            "execution": list(_version(envelope)), "step_keys": list(states)}
     metadata["latest"] = {"execution": list(_version(envelope)), "state_sha256": envelope["state_sha256"],
         "scope": deepcopy(envelope["scope"]), "received_at": timezone.now().isoformat()}
     metadata["waiting_acknowledged"] = run.status in {"awaiting_approval", "awaiting_confirmation", "awaiting_delivery_mode"}
@@ -345,6 +392,10 @@ def _project_state(run, operation, envelope, *, website, proof_connection=None):
 
 def receive_setup_delivery(payload, *, expected_kind=None, path_run_id=None, pull_pin=None):
     """Validate before writes, claim durably, then apply under original fences."""
+    from .run_owned_observations import maybe_receive_owned_observation
+    observation = maybe_receive_owned_observation(payload, run_id=path_run_id, expected_kind=expected_kind)
+    if observation is not None:
+        return observation
     from .setup_delivery_contract import DeliveryContractError, validate_envelope
     try:
         envelope = validate_envelope(payload, expected_kind=expected_kind, path_run_id=path_run_id)
@@ -385,15 +436,17 @@ def receive_setup_delivery(payload, *, expected_kind=None, path_run_id=None, pul
             historical = run is not None and run.status in {"completed", "failed", "blocked"} and before in {"observation_only", "ignored_stale"}
             if not historical:
                 _check_current_scope(website, operation, run, envelope)
-            if not getattr(settings, "CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED", False):
+            if not apply_enabled(envelope):
                 return Response(acknowledgement(envelope, "pending", code="delivery_apply_disabled",
                     acknowledged=False, retryable=True), status=503)
             if run is None:
-                run = ContentFactoryRun.objects.create(run_id=envelope["run_id"], workflow=envelope["workflow"],
+                article=envelope["workflow"] in ARTICLE_WORKFLOWS
+                prefix="article_delivery" if article else "setup_delivery"
+                run = ContentFactoryRun.objects.create(run_id=envelope["run_id"], workflow=operation.payload.get("workflow") if article else envelope["workflow"],
                     organization_id=website.organization_id, domain=envelope["scope"]["domain"],
                     github_repo=envelope["scope"]["github_repo"], run_request={
-                        **deepcopy(operation.payload.get("setup_delivery_request") or {}), **deepcopy(envelope["scope"]),
-                        "setup_delivery_v1": {"schema_version": 1}})
+                        **deepcopy(operation.payload.get(prefix+"_request") or {}), **deepcopy(envelope["scope"]),
+                        prefix+"_v1": {"schema_version": 1}})
                 operation.payload = {**operation.payload, "run_id": run.run_id}
                 operation.save(update_fields=["payload", "updated_at"])
             metadata = _metadata(run)
@@ -439,6 +492,9 @@ def receive_setup_delivery(payload, *, expected_kind=None, path_run_id=None, pul
             else:
                 disposition = "duplicate" if decision == "no_change" else decision
             _record_receipt(run, envelope, nonce, disposition, now)
+            if pull_pin is not None and disposition == "applied":
+                from .website_operational_alert_delivery import reserve_repair
+                reserve_repair(website, run, envelope, now=now)
             return Response(acknowledgement(envelope, disposition), status=200)
     except DeliveryReceiptConflict:
         return Response(acknowledgement(envelope, "quarantined", code="delivery_identity_conflict",

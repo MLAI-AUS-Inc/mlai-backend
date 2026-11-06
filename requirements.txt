@@ -38,6 +38,7 @@ firebase-admin==6.6.0
 Pillow==11.0.0
 PyGithub>=2.0.0
 pydantic>=2.6
+PyYAML==6.0.3  # Read-only deployment workflow detection; no object construction.
 # The Watt engine input lives in requirements-engine.txt. Regenerate the shared
 # requirements.lock from both inputs whenever either changes.
 

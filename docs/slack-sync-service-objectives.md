@@ -218,3 +218,36 @@ verified device; the import proceeds at normal background priority. Activation
 still requires the B2/B3 measurements and the human operations rollout. See the
 [implementation record](chat-responsiveness-implementation-2026-10-13.md) for
 source validation and outstanding production checks.
+
+### Targeted routing of parked private events (prepared 20 October 2026)
+
+Group-DM and private-channel callbacks are parked as owner-scoped ciphertext
+until discovery re-reads membership, even when the room is already live. With
+`MESSAGE_SYNC_TARGETED_STAGED_ROUTING=true` (default `false`; requires
+`MESSAGE_SYNC_ENABLED=true`), each owner's discovery turn handles up to three
+parked channels after explicit opens and before device fan-out, recovery,
+prefetch and the directory page. Each channel gets one fresh
+`conversations.info` and the existing paged `conversations.members` read under
+the same grant authority, shared budgets and discovery lease, then the
+unchanged `_discover_conversation` and staged-event drain. A brand-new group DM
+or private channel with a message therefore becomes the owner's room without a
+tap; consent, private-channel consent, Slack Connect exclusion, the history
+window and the all-device audience are unchanged.
+
+A type the grant cannot read is never probed, because Slack's `missing_scope`
+revokes the grant; such events are discarded as the sweep's type filter would.
+Archived (outside all-history consent) and Slack Connect sources are retired
+exactly as a directory listing would. Unavailable or non-member sources are
+discarded without delivery. Untyped events on partially scoped grants,
+sources without positive membership, closed new sources and rooms that are not
+live after provisioning stay parked with a bounded retry time, and the sweep
+remains the fallback. The checkpoint
+`slack_targeted_staged_routing_v1` holds only channel IDs, due times and attempt
+counts.
+
+Every staged drain now logs `slack_staged_routed grant_id=… path=… events=…
+latency_ms=…` (oldest parked event to delivery-queue insert) and records the
+`staged_routed` aggregate in `message_sync_status`. This also measures the
+sweep path while the flag is off. A membership fingerprint that skips the
+re-check for live rooms is not implemented: without membership-change event
+subscriptions there is no signal that could invalidate it safely.

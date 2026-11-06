@@ -24,8 +24,12 @@ def resolve_content_billing_user(requester, domain):
     from founder_tools.services import user_may_use_organization
     from .billing import normalize_content_factory_domain
     organization = Organization.objects.select_related("billing_user").filter(domain=normalize_content_factory_domain(domain)).first()
-    if organization is None or not user_may_use_organization(requester, organization):
+    if organization is None:
         return requester
+    if not user_may_use_organization(requester, organization):
+        from founder_tools.startup_team import member_may_spend
+        if not member_may_spend(requester, organization):
+            return requester
     return billing_user_for_organization(organization, requester)
 
 
@@ -43,15 +47,19 @@ def billing_summary(organization, requester):
     """Return a fresh company-aware balance and the free preparation quote."""
     from roo.services import PointsService
     from .billing import get_content_factory_article_cost_points
-    payer = billing_user_for_organization(organization, requester)
+    from founder_tools.services import user_may_use_organization
+    owner = user_may_use_organization(requester, organization)
+    payer = resolve_content_billing_user(requester, organization.domain)
     balance = PointsService.get_balance(payer)
     points = int(balance.get("digital_service_balance_microroo") or 0) // 1_000_000
-    cost = get_content_factory_article_cost_points(organization.domain)
+    cost = get_content_factory_article_cost_points(organization.domain, user=requester)
     return {"setupPoints": 0, "articlePoints": cost, "balance": points,
-        "signedInAccount": mask_billing_email(requester.email), "billingAccount": mask_billing_email(payer.email),
-        "companyBillingEnabled": bool(organization.billing_user_id), "billingFounderIsYou": payer.pk == requester.pk,
+        "signedInAccount": mask_billing_email(requester.email),
+        "billingAccount": mask_billing_email(payer.email) if owner or payer.pk == requester.pk else "Company points",
+        "companyBillingEnabled": bool(organization.billing_user_id and payer.pk == organization.billing_user_id),
+        "billingFounderIsYou": payer.pk == requester.pk,
         "canPrepare": True, "canGenerate": points >= cost,
-        "otherFounderHasPoints": other_founder_has_points(organization, requester, cost) if points < cost else False}
+        "otherFounderHasPoints": other_founder_has_points(organization, requester, cost) if owner and points < cost else False}
 
 
 class CompanyBillingView(APIView):

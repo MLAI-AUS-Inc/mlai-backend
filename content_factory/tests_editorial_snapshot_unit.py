@@ -243,6 +243,7 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
             "ContentFactoryRunStep": self.steps, "ContentFactoryRunStepAttempt": self.attempts,
             "ContentFactoryRunStatus": SimpleNamespace(QUEUED="queued", BLOCKED="blocked", FAILED="failed", DENIED="denied", CANCELLED="cancelled", COMPLETED="completed"),
             "ContentFactoryApprovalState": SimpleNamespace(NOT_REQUIRED="not_required"),
+            "ContentFactoryStepStatus": SimpleNamespace(PENDING="pending"),
             "DURABLE_ACTIVE_RUN_STATUSES": ACTIVE_RUN_STATUSES, "sanitize_json_for_postgres": deepcopy,
             "EditorialRunConflict": EditorialRunConflict, "merge_editorial_run_snapshot": merge_editorial_run_snapshot,
             "BRIEF_KEYS": BRIEF_KEYS, "deepcopy": deepcopy,
@@ -274,7 +275,16 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
                                       "content_factory.setup_delivery_receiver": delivery})
         seam.start()
         self.addCleanup(seam.stop)
-        names = {"_apply_run_snapshot", "_sync_content_factory_run_snapshot", "_content_factory_run_snapshot_unchanged", "_merge_django_owned_run_result", "_merge_django_owned_run_request"}
+        # The real R3 selector now reads the same retained rows before handing
+        # unmarked snapshots to this legacy persistence seam. Keep that read
+        # truthful; do not replace the ownership predicate or its decision.
+        model_seam = patch("workflow_runs.models.ContentFactoryRun", self.model)
+        model_seam.start()
+        self.addCleanup(model_seam.stop)
+        owner_atomic = patch("content_factory.run_ownership.transaction", SimpleNamespace(atomic=self.atomic))
+        owner_atomic.start()
+        self.addCleanup(owner_atomic.stop)
+        names = {"_apply_run_snapshot", "_sync_content_factory_run_snapshot", "_content_factory_run_snapshot_unchanged", "_merge_django_owned_run_result", "_merge_django_owned_run_request", "_run_fields", "_step_fields", "_attempt_fields", "_assign_changed_fields", "_parse_optional_datetime"}
         tree = ast.parse((root / "service_views.py").read_text())
         nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in names) or
                  (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id.startswith("_DJANGO_OWNED_RUN_RESULT_") for t in n.targets))]
@@ -316,11 +326,11 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         return row
 
     def query(self, **kwargs):
-        return SimpleNamespace(first=lambda: self.rows.get(kwargs["run_id"]))
+        return SimpleNamespace(first=lambda: self.rows.get(kwargs.get("run_id")))
 
     def locked_query(self, **kwargs):
         self.assertTrue(self.in_transaction)
-        self.calls.append(("lock", kwargs["run_id"]))
+        self.calls.append(("lock", kwargs.get("run_id")))
         return self.query(**kwargs)
 
     def save_snapshot(self, *, run_id, defaults):
@@ -343,7 +353,7 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         return self.ns["_sync_content_factory_run_snapshot"](run_id="run-1", data=incoming, step_states={})
 
     def put(self, payload, run_id="run-1"):
-        return self.ns["_snapshot_put_under_test"](self.view, SimpleNamespace(data=payload), run_id)
+        return self.ns["_snapshot_put_under_test"](self.view, SimpleNamespace(data=payload, headers={}), run_id)
 
     def test_actual_snapshot_preserves_the_brief_and_exact_retry_is_a_noop(self):
         incoming = {"workflow": "article_generation", "domain": "example.test", "status": "running", "run_request": {"worker_only": 1}}
@@ -441,13 +451,60 @@ class EditorialSnapshotPersistenceSeamTests(unittest.TestCase):
         self.assertEqual(self.rows["race-run"].run_request["editorial_brief"]["country"], "NZ")
         self.model.objects.update_or_create.assert_not_called()
 
+    def by_meaning(self):
+        from unittest.mock import patch
+        return patch("content_factory.snapshot_meaning.merge_by_meaning_enabled", return_value=True)
+
+    def test_by_meaning_put_accepts_charge_spelling_and_keeps_saved_values(self):
+        self.existing.run_request.update(roo_points_ledger_id="123", roo_points_cost=6)
+        before = deepcopy(self.existing.run_request)
+        incoming = {"workflow": "article_generation", "status": "running",
+                    "run_request": {"roo_points_ledger_id": 123, "roo_points_cost": "6"}}
+        refused = self.put(incoming)  # Flag off: the exact comparison still refuses,
+        # and not as final, or the worker would block the run over a spelling.
+        self.assertEqual((refused.status_code, refused.data.get("retryable")), (409, None))
+        self.assertEqual(self.existing.run_request, before)
+        with self.by_meaning():
+            response = self.put(incoming)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.existing.run_request, before)
+        self.assertNotIn("snapshot_drift_v1", self.existing.result)
+
+    def test_by_meaning_put_keeps_the_stored_brief_and_counts_drift(self):
+        incoming = snapshot()
+        incoming["run_request"]["editorial_brief"]["reader_task"] = "Private conflicting task"
+        with self.by_meaning():
+            response = self.put(incoming)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(self.existing.run_request["editorial_brief"], selected_brief())
+            drift = self.existing.result["snapshot_drift_v1"]
+            self.assertEqual((drift["count"], drift["fields"]), (1, {"run_request.editorial_brief": 1}))
+            self.assertNotIn("Private conflicting task", str(self.existing.result))
+            # A worker echo of the counter cannot reset the backend's record.
+            self.put({"workflow": "article_generation", "status": "running",
+                      "result": {"snapshot_drift_v1": {"schema_version": 1, "count": 0, "fields": {}}}})
+        self.assertEqual(self.existing.result["snapshot_drift_v1"]["count"], 1)
+
+    def test_by_meaning_put_still_refuses_a_real_charge_change(self):
+        self.existing.run_request.update(roo_points_ledger_id="123", roo_points_cost=6)
+        before = deepcopy(self.existing.run_request)
+        with self.by_meaning():
+            for change in ({"roo_points_ledger_id": "forged"}, {"roo_points_ledger_id": None}, {"roo_points_cost": 0}):
+                with self.subTest(change=change):
+                    response = self.put({"workflow": "article_generation", "status": "running", "run_request": change})
+                    self.assertEqual((response.status_code, response.data["retryable"]), (409, False))
+                    self.assertEqual(self.existing.run_request, before)
+
     def test_terminal_and_cancelled_callbacks_keep_existing_response_contract(self):
         incoming = {"workflow": "article_generation", "status": "running"}
         self.existing.status = "cancelled"
         self.assertEqual(self.put(incoming).data["error"], "run_cancelled")
         self.existing.status = "completed"
         self.assertEqual(self.put(incoming).data["sync_status"], "ignored_terminal_state")
-        self.assertNotIn("transaction", self.calls)
+        # The new ownership selector may read-lock an unmarked row; it must
+        # not write a Run or any steps after this legacy terminal response.
+        self.assertNotIn("write", self.calls)
+        self.steps.objects.update_or_create.assert_not_called()
 
     def test_sqlite_retry_rereads_before_sync_and_preserves_brief(self):
         calls = 0

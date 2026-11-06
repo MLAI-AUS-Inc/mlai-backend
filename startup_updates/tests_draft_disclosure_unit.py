@@ -32,7 +32,7 @@ class DraftDisclosureContractTests(SimpleTestCase):
         )
         self.run = SimpleNamespace(
             run_id="synthetic-disclosure-run", save=MagicMock(),
-            run_request={"evidence_snapshots": {"2026-10-01": {"snapshot_id": 52, "expected_revision": None}}},
+            run_request={"draft_months": ["2026-10-01"], "evidence_snapshots": {"2026-10-01": {"snapshot_id": 52, "expected_revision": None}}},
         )
 
     def item(self, **overrides):
@@ -41,7 +41,7 @@ class DraftDisclosureContractTests(SimpleTestCase):
             "structured_memo": copy.deepcopy(self.memo), **overrides}
 
     def submit(self, item):
-        request = SimpleNamespace(data={"drafts": [item]})
+        request = SimpleNamespace(data={"drafts": [item]}, headers={})
         return StartupUpdateDraftResultsView.post.__wrapped__(
             StartupUpdateDraftResultsView(), request, self.run.run_id,
         )
@@ -122,3 +122,79 @@ class DraftDisclosureContractTests(SimpleTestCase):
         serializer = DraftResultsSerializer(data={"drafts": [self.item(audience="everyone")]})
         self.assertFalse(serializer.is_valid())
         self.assertIn("audience", serializer.errors["drafts"][0])
+
+    def test_generated_financial_sharing_uses_only_the_pinned_founder_choice(self):
+        self.run.run_request["financial_history_selection"] = {"enabled": True, "shareAmounts": False}
+        item = self.item(structured_memo={**self.memo,
+            "_financial_history_selection": {"enabled": True, "shareAmounts": True},
+            "financial_history": {"snapshot": {"revenue": 99999}},
+        })
+        with ExitStack() as stack:
+            self.seams(stack)
+            save = stack.enter_context(patch("startup_updates.revisions.save_revision", side_effect=self.save_revision))
+            generated = self.submit(item)
+        self.assertEqual(generated.status_code, 200)
+        memo = save.call_args.args[1]
+        self.assertEqual(memo["_financial_history_selection"], {"enabled": True, "shareAmounts": False, "refresh": False})
+        self.assertNotIn("financial_history", memo)
+
+
+class LegacyDraftAudienceSelectionTests(SimpleTestCase):
+    """New legacy drafts inherit saved owner choices; existing drafts keep theirs."""
+    def setUp(self):
+        from django.contrib.auth import get_user_model
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        from organizations.models import Organization
+        from startup_updates.models import MonthlyUpdateDraft, UserStartupBinding
+        from workflow_runs.models import ContentFactoryRun
+        self.organization = Organization(pk=16, domain='example.test')
+        self.user = get_user_model()(pk=22)
+        self.profile = VibeRaisingProfile(pk=23, user=self.user)
+        self.company = VibeRaisingCompany(pk=24, organization=self.organization,
+            profile=self.profile, domain=self.organization.domain, default_audience_visibility=['just_me'])
+        self.profile.active_company = self.company
+        self.binding = UserStartupBinding(pk=25, user=self.user, organization=self.organization)
+        self.run = ContentFactoryRun(pk=26, run_id='legacy-owned-generation', domain=self.organization.domain,
+            organization=self.organization, run_request={'binding_id': 25, 'audience_visibility': ['community']})
+        self.draft = MonthlyUpdateDraft(pk=27, organization=self.organization,
+            month=date(2026, 10, 1), audience_visibility=['just_me'], structured_memo={'_month_sequence': 1})
+
+    def seams(self, stack):
+        binding = stack.enter_context(patch('startup_updates.services.UserStartupBinding.objects'))
+        binding.select_related.return_value.filter.return_value.first.return_value = self.binding
+        profile = stack.enter_context(patch('founder_tools.models.VibeRaisingProfile.objects'))
+        profile.select_related.return_value.prefetch_related.return_value.filter.return_value.first.return_value = self.profile
+        return binding
+
+    def test_new_draft_uses_saved_run_choice_but_an_existing_private_draft_is_preserved(self):
+        from startup_updates.services import upsert_monthly_update_draft
+        for created, expected in ((True, ['community']), (False, ['just_me'])):
+            with self.subTest(created=created), ExitStack() as stack:
+                self.seams(stack)
+                stack.enter_context(patch('startup_updates.update_identity.resolve_update', return_value=(self.draft, created)))
+                save = stack.enter_context(patch('startup_updates.services.MonthlyUpdateDraft.objects.update_or_create',
+                    return_value=(self.draft, False)))
+                # Exercise the actual body with ORM seams; transaction execution
+                # remains covered by the separately assigned database suite.
+                upsert_monthly_update_draft.__wrapped__(organization=self.organization, month=self.draft.month,
+                    run=self.run, structured_memo={'highlights': ['Saved choice']}, model_name='synthetic')
+                self.assertEqual(save.call_args.kwargs['defaults']['audience_visibility'], expected)
+
+    def test_saved_private_choice_is_not_expanded_by_later_company_defaults(self):
+        from startup_updates.services import _default_audience_visibility_for_monthly_update
+        self.run.run_request['audience_visibility'] = ['just_me']
+        self.company.default_audience_visibility = ['public']
+        with ExitStack() as stack:
+            self.seams(stack)
+            self.assertEqual(_default_audience_visibility_for_monthly_update(
+                organization=self.organization, run=self.run), ['just_me'])
+
+    def test_a_choice_without_an_organization_binding_stays_private(self):
+        from startup_updates.services import _default_audience_visibility_for_monthly_update
+        with ExitStack() as stack:
+            binding = self.seams(stack)
+            binding.select_related.return_value.filter.return_value.first.return_value = None
+            self.assertEqual(_default_audience_visibility_for_monthly_update(
+                organization=self.organization, run=self.run), ['just_me'])
+            binding.select_related.return_value.filter.assert_called_once_with(
+                id=25, organization=self.organization)

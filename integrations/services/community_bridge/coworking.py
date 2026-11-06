@@ -112,7 +112,8 @@ def dispatch_coworking_request(delivery, thread_ts):
     url, key = configuration
     try:
         with _consented_identity(delivery) as identity:
-            response = requests.post(
+            from .member_delivery import legacy_send
+            response = legacy_send(delivery, requests.post,
                 url, headers={"Authorization": f"Bearer {key}"},
                 json={**_booking_payload(delivery, identity), "thread_ts": thread_ts},
                 timeout=(5, 120), allow_redirects=False,
@@ -131,7 +132,8 @@ def _post_coworking_root(delivery, text, parent_ts):
 
     # The root itself mentions Roo, so it needs the same boundary as /api/mention.
     with _consented_identity(delivery):
-        return SlackBridgeClient.post_message(
+        from .member_delivery import legacy_send
+        return legacy_send(delivery, SlackBridgeClient.post_message,
             channel_id=delivery["target_channel_id"], text=text, thread_ts=parent_ts,
             client_msg_id=str(uuid5(NAMESPACE_URL, f"mlai-community-bridge:{delivery['id']}")),
         )

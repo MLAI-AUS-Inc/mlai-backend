@@ -97,6 +97,12 @@ class MessageSyncDeployConfigTests(unittest.TestCase):
                         self.assertNotEqual(result.returncode, 0)
                         self.assertEqual(env_file.read_text(), before)
 
+    def test_recent_history_requires_durable_sync_and_valid_boolean(self):
+        validate({"MESSAGE_SYNC_RECENT_HISTORY_ENABLED": "false"})
+        for value in ("yes", "true"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "RECENT_HISTORY"):
+                validate({"MESSAGE_SYNC_RECENT_HISTORY_ENABLED": value})
+
     def test_disabled_needs_no_new_credentials(self):
         validate({})
 
@@ -134,6 +140,7 @@ class MessageSyncDeployConfigTests(unittest.TestCase):
         }
         validate(valid)
         validate({**valid, "MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED": "true"})
+        validate({**valid, "MESSAGE_SYNC_RECENT_HISTORY_ENABLED": "true"})
         validate({**valid, "SLACK_OWNER_INVENTORY_ENABLED": "true"})
         private = {**valid, "MESSAGE_SYNC_SLACK_USER_APP_ID": "APRIVATE",
                    "MESSAGE_SYNC_SLACK_USER_SIGNING_SECRET": "a" * 32,
@@ -157,7 +164,7 @@ if __name__ == "__main__":
 
 
 class ResponsivenessConfigTests(unittest.TestCase):
-    flags = {"MESSAGE_SYNC_OPEN_PRIORITY_ENABLED": "true", "MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED": "false", "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR": "6", "MESSAGE_SYNC_DEVICE_FANOUT_BATCH": "0"}
+    flags = {"MESSAGE_SYNC_RECENT_HISTORY_ENABLED": "false", "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED": "true", "MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED": "false", "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR": "6", "MESSAGE_SYNC_DEVICE_FANOUT_BATCH": "0", "MESSAGE_SYNC_TARGETED_STAGED_ROUTING": "false"}
 
     def test_flags_are_wired_through_every_configuration_surface(self):
         root = Path(__file__).resolve().parents[1]
@@ -209,6 +216,48 @@ class DependencyVerdictFlagConfigTests(ResponsivenessConfigTests):
         self.assertEqual(self.flags['COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED'], 'false')
 
 
+class PermanentMemberConfigTests(unittest.TestCase):
+    retired = ('SLACK_MEMBER_CHANNELS_ENABLED', 'SLACK_COMMUNITY_SEND_AS_MEMBER',
+               'SLACK_COMMUNITY_SOURCE', 'MESSAGE_SYNC_EVENT_ROUTING')
+
+    def test_deployment_cannot_restore_retired_flags_or_bot_source(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in ('.github/workflows/deploy.yml', 'deploy.sh', 'mlai/settings.py', '.env.example',
+                     'scripts/upsert_env_value_from_stdin.sh', 'scripts/validate_message_sync_deploy_config.py'):
+            source = (root / name).read_text()
+            for key in self.retired:
+                with self.subTest(path=name, key=key):
+                    self.assertNotIn(key, source)
+        for name in ('integrations/services/slack_member_access.py',
+                     'integrations/services/community_bridge/community_source.py',
+                     'integrations/services/community_bridge/community_delivery.py',
+                     'integrations/services/message_sync/member_history.py',
+                     'integrations/services/message_sync/history.py',
+                     'integrations/services/message_sync/event_routing.py'):
+            for key in self.retired:
+                self.assertNotIn(key, (root / name).read_text())
+
+    def test_remote_upsert_rejects_retired_keys_without_touching_existing_values(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            sandbox = Path(directory)
+            (sandbox / 'scripts').mkdir()
+            shutil.copy(root / 'scripts/upsert_env_value_from_stdin.sh', sandbox / 'scripts')
+            target = sandbox / '.env'
+            for key in self.retired:
+                before = 'KEEP_ME=yes\n' + key + '=old\n'
+                target.write_text(before)
+                result = subprocess.run(['bash', 'scripts/upsert_env_value_from_stdin.sh', key],
+                    cwd=sandbox, input='false', text=True, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 64)
+                self.assertEqual(target.read_text(), before)
+
+    def test_inventory_still_requires_shared_processing_pause(self):
+        with self.assertRaisesRegex(ValueError, 'requires MESSAGE_SYNC_ENABLED=true'):
+            validate({'SLACK_OWNER_INVENTORY_ENABLED': 'true', 'MESSAGE_SYNC_ENABLED': 'false'})
+        validate({})
+
+
 class DeviceFanoutConfigTests(unittest.TestCase):
     def test_batch_bounds_and_durable_sync_requirement(self):
         for value in ('-1', '51', '1.5', '10\nX=1'):
@@ -222,3 +271,14 @@ class DeviceFanoutConfigTests(unittest.TestCase):
             validate({**valid, 'MESSAGE_SYNC_DEVICE_FANOUT_BATCH': value})
         with self.assertRaisesRegex(ValueError, 'requires MESSAGE_SYNC_ENABLED=true'):
             validate({'MESSAGE_SYNC_DEVICE_FANOUT_BATCH': '10'})
+
+
+class TargetedStagedRoutingConfigTests(unittest.TestCase):
+    def test_targeted_routing_requires_durable_sync(self):
+        validate({'MESSAGE_SYNC_TARGETED_STAGED_ROUTING': 'false'})
+        with self.assertRaisesRegex(ValueError, 'MESSAGE_SYNC_TARGETED_STAGED_ROUTING requires MESSAGE_SYNC_ENABLED=true'):
+            validate({'MESSAGE_SYNC_TARGETED_STAGED_ROUTING': 'true'})
+        valid = {'MESSAGE_SYNC_ENABLED': 'true', 'COMMUNITY_BRIDGE_PRODUCTION_ENABLED': 'true',
+                 'MESSAGE_SYNC_SLACK_APP_ID': 'ATEST', 'MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID': 'TTEST',
+                 'SLACK_BRIDGE_WORKSPACE_ID': 'TTEST', 'MESSAGE_SYNC_SLACK_APP_TOKEN': 'xapp-synthetic'}
+        validate({**valid, 'MESSAGE_SYNC_TARGETED_STAGED_ROUTING': 'true'})

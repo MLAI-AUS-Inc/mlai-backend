@@ -55,6 +55,16 @@
             "generation_blocked",
             "generation_failed",
             "generation_recovering",
+            "article_progress",
+            "article_review_ready",
+            "article_review_fallback_ready",
+            "article_review_preview_not_available",
+            "article_review_preview_failed",
+            "content_ready",
+            "generation_pr_opened",
+            "style_review_failed",
+            "preview_ready",
+            "draft_pr_created",
             "scaffold_complete",
             "scan_complete",
             "scan_progress"
@@ -69,6 +79,8 @@
     "workflow": {
       "enum": [
         "article_system_setup",
+        "direct_generate",
+        "confirmed_topic",
         "repo_scan"
       ]
     },
@@ -715,6 +727,143 @@
                 },
                 "verification_kit_required": {
                   "$ref": "#/$defs/bounded"
+                },
+                "usage": {
+                  "type": "object",
+                  "properties": {
+                    "version": {
+                      "const": 1
+                    },
+                    "run_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_.:-]{1,100}$"
+                    },
+                    "generation": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "state_version": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "model_calls": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1000000000000
+                    },
+                    "tokens": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1000000000000
+                    },
+                    "builds": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1000000000000
+                    },
+                    "previews": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1000000000000
+                    },
+                    "provider_seconds": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1000000000000
+                    },
+                    "active_seconds": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1000000000000
+                    },
+                    "model_usd": {
+                      "type": [
+                        "number",
+                        "null"
+                      ],
+                      "minimum": 0,
+                      "maximum": 1000000000000
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "run_id",
+                    "generation",
+                    "state_version",
+                    "model_calls",
+                    "tokens",
+                    "builds",
+                    "previews",
+                    "provider_seconds",
+                    "active_seconds",
+                    "model_usd"
+                  ],
+                  "additionalProperties": false
+                },
+                "strategy_exhausted": {
+                  "type": "object",
+                  "properties": {
+                    "version": {
+                      "const": 1
+                    },
+                    "rung": {
+                      "enum": [
+                        "adopt",
+                        "native_collection",
+                        "deterministic",
+                        "model_adapter",
+                        "agent"
+                      ]
+                    },
+                    "goal_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_.:-]{1,100}$"
+                    },
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "binding": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "failure_code": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "evidence_digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "rung",
+                    "goal_id",
+                    "revision",
+                    "binding",
+                    "failure_code",
+                    "evidence_digest"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "additionalProperties": false

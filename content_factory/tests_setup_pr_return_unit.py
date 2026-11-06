@@ -56,8 +56,8 @@ class OpenSetupPullRequestTests(SimpleTestCase):
     def test_finds_the_newest_open_pull_request_on_the_current_head(self):
         found, rows = self.lookup(open_setup_run("newest"), open_setup_run("older"))
         self.assertEqual(found.run_id, "newest")
-        self.assertEqual(rows.call_args.kwargs["run_request__connection_generation"], 3)
-        self.assertEqual(rows.call_args.kwargs["run_request__website_connection_id"], "website")
+        self.assertIn(("run_request__connection_generation", 3), rows.call_args.args[0].children[1].children)
+        self.assertIn(("run_request__website_connection_id", "website"), rows.call_args.args[0].children[1].children)
 
     def test_a_pull_request_built_on_an_older_head_is_not_resumed(self):
         found, _ = self.lookup(open_setup_run(base=OLD))
@@ -285,20 +285,32 @@ class StopPreparingKeepsOpenPullRequestTests(SimpleTestCase):
             if kwargs.get("workflow") == "article_system_setup":
                 return [open_setup_run()]
             rows = MagicMock()
+            rows.filter.return_value = rows
+            rows.__iter__.side_effect = lambda: iter([scan])
             rows.values_list.return_value = ["queued-scan"]
             rows.first.return_value = None
             rows.update.side_effect = lambda **values: updates.append((kwargs, values))
             return rows
         with patch("content_factory.website_connections.authority_guard", return_value=nullcontext(op.connection)), \
                 patch("workflow_runs.models.ContentFactoryRun.objects.filter", side_effect=runs), \
+                patch("workflow_runs.models.ContentFactoryRun.objects.select_for_update") as locked, \
                 patch.object(operations.WebsiteConnectionOperation.objects, "get_or_create",
                     return_value=(Mock(), True)) as followup:
+            scan = SimpleNamespace(pk=42, result={}, run_id="queued-scan", organization_id=7, domain="fixture.test", github_repo=op.connection.github_repo,
+                workflow="repo_scan", run_request={"operation_id": str(op.pk), "operation_attempt": 1,
+                    "website_connection_id": str(op.connection.pk), "connection_generation": 3, "deletion_epoch": 0})
+            locked.return_value.filter.return_value.order_by.return_value = [scan]
             operations.cancel_operation(config, data={"website_connection_id": str(uuid4()), "connection_generation": 3,
                 "operation_id": str(op.pk)}, idempotency_key="stop")
         self.assertEqual(op.state, "cancelled")
-        cancelled = [kwargs["run_id__in"] for kwargs, values in updates if values.get("status") == "cancelled"]
-        self.assertEqual(cancelled, [["queued-scan"]])
+        cancelled = [kwargs["pk__in"] for kwargs, values in updates if values.get("status") == "cancelled"]
+        self.assertEqual(cancelled, [[scan.pk]])
         self.assertEqual(followup.call_args.kwargs["defaults"]["payload"]["cancel_run_ids"], ["queued-scan"])
+        from .website_cancellation_retirement import run_binding
+        self.assertEqual(followup.call_args.kwargs["defaults"]["payload"]["cancel_run_bindings"], {scan.run_id: run_binding(scan)})
+        original = run_binding(scan)
+        scan.run_request["operation_attempt"] = 2
+        self.assertNotEqual(run_binding(scan), original)
 
 
 class JourneyNextStepTests(SimpleTestCase):

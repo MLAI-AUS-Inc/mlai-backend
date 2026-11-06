@@ -1,5 +1,6 @@
 """One-click Slack DM migration controls for Community Home."""
 
+import logging
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -53,6 +54,7 @@ from .throttles import (
     SlackSnapshotDeviceThrottle,
 )
 
+logger = logging.getLogger(__name__)
 
 def _import_history_days(data, *, default=30):
     days = data.get("history_days", default)
@@ -108,6 +110,9 @@ def _slack_endpoint_error_response(exc: Exception) -> Response:
     """Translate infrastructure failures without exposing provider details."""
 
     if isinstance(exc, DatabaseError):
+        logger.warning(
+            "community_chat_dependency_wait endpoint=slack_api dependency=database reason=database_unavailable"
+        )
         return Response(
             {"error": "slack_storage_unavailable"},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -251,6 +256,7 @@ class SlackOwnerConversationView(SlackOwnerInventoryApiView):
                 limit=request.query_params.get("limit", "50"),
                 cursor=request.query_params.get("cursor", ""),
                 unread_only=unread == "1",
+                catalog_kinds=request.headers.get("X-MLAI-Slack-Catalog-Kinds"),
             )
         except InventoryError as exc:
             response = self.inventory_error_response(exc)
@@ -279,6 +285,7 @@ class SlackOwnerConversationOpenView(SlackOwnerInventoryApiView):
                 request.user,
                 public_key=getattr(request, "community_chat_public_key", None),
                 slack_conversation_id=request.data.get("slack_conversation_id"),
+                catalog_kinds=request.headers.get("X-MLAI-Slack-Catalog-Kinds"),
             )
             response = Response(payload, status=status_code)
         except InventoryError as exc:
@@ -300,6 +307,9 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
 
     def get_throttles(self):
         if self.request.method == "GET":
+            self.community_chat_throttle_scope = "community_chat_slack_snapshot_device"
+            return [SlackSnapshotDeviceThrottle(), SlackSnapshotAccountThrottle()]
+        if self.request.method == "PATCH" and self.request.data.get("action") == "page_history":
             self.community_chat_throttle_scope = "community_chat_slack_snapshot_device"
             return [SlackSnapshotDeviceThrottle(), SlackSnapshotAccountThrottle()]
         if self.request.method == "PATCH" and self.request.data.get("action") in {"mark_read", "mark_unread"}:
@@ -349,6 +359,7 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
                 authenticated_public_key=getattr(
                     request, "community_chat_public_key", None
                 ),
+                catalog_kinds=request.headers.get("X-MLAI-Slack-Catalog-Kinds"),
             )
         )
 
@@ -486,6 +497,24 @@ class SlackDmMirrorView(SlackDmMirrorApiView):
                 return _slack_endpoint_error_response(exc)
             except SlackDmMirrorError as exc:
                 raise ValidationError({"slack": str(exc)}) from exc
+        if request.data.get("action") == "page_history":
+            from integrations.services.slack_history_pages import request_history_page
+            from integrations.services.slack_owner_inventory_api import InventoryError
+            try:
+                response = Response(request_history_page(
+                    request.user,
+                    public_key=getattr(request, "community_chat_public_key", None),
+                    channel_id=request.data.get("channel_id"),
+                    request_key=request.data.get("request_key"),
+                ))
+                response["Cache-Control"] = "private, no-store"
+                return response
+            except InventoryError as exc:
+                return Response({"error": exc.code}, status=exc.status_code)
+            except (SlackDmMirrorCredentialError, SlackDmMirrorUpstreamError,
+                    SlackClientError, DatabaseError, BudgetDeferred,
+                    SlackDmMirrorRateLimited) as exc:
+                return _slack_endpoint_error_response(exc)
         if request.data.get("action") == "refresh_channel":
             from integrations.services.slack_chat_refresh import (
                 request_conversation_refresh,

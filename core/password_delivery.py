@@ -91,7 +91,7 @@ def deliver_password_reset_email(delivery_id):
 
     try:
         reset_link = _decrypt_reset_link(delivery.encrypted_reset_link)
-        send_password_reset_email(challenge.user, reset_link)
+        send_password_reset_email(challenge.user, reset_link, delivery_id=delivery.id)
     except InvalidToken:
         logger.error(
             'Password reset delivery payload could not be decrypted delivery_id=%s',

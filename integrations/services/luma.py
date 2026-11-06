@@ -51,6 +51,13 @@ class LumaAttendeeReportService:
         self.session = session or requests.Session()
         self.timeout = timeout
 
+    def get_calendar(self) -> Dict[str, Any]:
+        """Read the authenticated calendar identity for this API key."""
+        payload = self._get("/v1/calendars/get", params={})
+        if not isinstance(payload.get("id"), str) or not payload["id"].strip():
+            raise LumaAPIError("Luma did not return a calendar identity.")
+        return payload
+
     def build_attendee_report(
         self,
         *,
@@ -157,6 +164,42 @@ class LumaAttendeeReportService:
                 "sort_direction": "desc",
             },
         )
+
+    def list_crm_events(self) -> List[Dict[str, Any]]:
+        """Read all approved calendar listings, including view-only and external events.
+
+        Unlike the managed-only reconciliation catalogue, CRM visibility does
+        not imply permission to read guests. Exhaust pagination before callers
+        write anything; malformed or incomplete pages must not look complete.
+        """
+        if not self.api_key:
+            raise LumaConfigurationError("LUMA_API_KEY is not configured on mlai-backend.")
+        events: List[Dict[str, Any]] = []
+        cursor = None
+        seen_cursors = set()
+        for _ in range(100):
+            params: Dict[str, Any] = {
+                "pagination_limit": 100,
+                "sort_column": "start_at",
+                "sort_direction": "desc",
+                "status": "approved",
+                "access": ["manage", "view"],
+                "platforms": ["luma", "external"],
+            }
+            if cursor:
+                params["pagination_cursor"] = cursor
+            page = self._get("/v1/calendars/events/list", params=params)
+            entries = page.get("entries")
+            if not isinstance(entries, list) or any(not isinstance(row, dict) for row in entries):
+                raise LumaAPIError("Luma returned an invalid calendar page.")
+            events.extend(entries)
+            if not page.get("has_more"):
+                return events
+            cursor = str(page.get("next_cursor") or "").strip()
+            if not cursor or cursor in seen_cursors:
+                raise LumaAPIError("Luma returned incomplete calendar pagination.")
+            seen_cursors.add(cursor)
+        raise LumaAPIError("Luma calendar pagination exceeded the request budget.")
 
     def list_upcoming_events(
         self,
@@ -385,7 +428,10 @@ class LumaAttendeeReportService:
             "next_cursor": page.get("next_cursor") or None,
         }
 
-    def list_guests(self, *, event_id: str, approval_status: str = "approved") -> List[Dict[str, Any]]:
+    def list_guests(
+        self, *, event_id: str, approval_status: Optional[str] = "approved"
+    ) -> List[Dict[str, Any]]:
+        """Return an event's guests; ``approval_status=None`` returns every status."""
         params = {
             "event_id": event_id,
             "approval_status": approval_status,

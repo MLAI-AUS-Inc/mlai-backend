@@ -45,8 +45,12 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
         return query
 
     def setUp(self):
+        self.enterContext(patch("startup_updates.benefits.has_monthly_update_discount", return_value=False))
         # B2 also reads reserved goal rows before allowing legacy redispatch.
         self.enterContext(patch.object(WebsiteConnectionOperation.objects, "filter", return_value=self.rows()))
+        # No event-owned child is saved in these database-free legacy cases.
+        # Individual child-read scopes below still supply their actual row.
+        self.enterContext(patch.object(ContentFactoryRun.objects, "filter", return_value=self.rows()))
         self.user = get_user_model()(pk=4, is_active=True, email="founder@example.test")
         self.org = Organization(pk=7, domain="fixture.test")
         self.website = WebsiteConnection(organization=self.org, authorized_by=self.user,
@@ -181,6 +185,35 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
         self.assertTrue(self.op.payload["manual_setup_example_cleanup_retry"])
         self.assertEqual(self.op.generation, 3)
 
+    def test_retry_after_source_changed_rescans_instead_of_reusing_the_old_scan(self):
+        for code in ("SOURCE_CHANGED", "WEBSITE_SOURCE_CHANGED"):
+            self.setUp()
+            self.op.state = "stopped"
+            self.op.receipt.update(reason_code=code, failure_class="unsupported", completed_steps=["verify-access", "scan"],
+                user_action={"id": "choose_article_channel"})
+            with self.subTest(code=code), \
+                    patch.object(prepare, "authority_guard", return_value=nullcontext(self.website)), \
+                    patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)), \
+                    patch.object(ContentFactoryRun.objects, "filter", return_value=self.rows(first=self.child)):
+                prepare.start_prepare(self.config, expected=contract_for(self.website), retry=True)
+            self.assertEqual(self.op.state, "pending")
+            self.assertEqual(self.op.receipt["current_step"], "scan")
+            for key in ("scan_run_id", "setup_run_id", "completed_steps"):
+                self.assertNotIn(key, self.op.receipt)
+            self.assertTrue(self.op.payload["source_reverify"])
+            self.assertEqual(self.op.payload["attempt"], 2)
+            self.assertNotIn("manual_setup_example_cleanup_retry", self.op.payload)
+
+    def test_retry_of_other_stopped_failures_keeps_the_saved_scan(self):
+        self.op.state = "stopped"
+        self.op.receipt.update(reason_code="website_prepare_step_failed")
+        with patch.object(prepare, "authority_guard", return_value=nullcontext(self.website)), \
+                patch.object(WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)), \
+                patch.object(ContentFactoryRun.objects, "filter", return_value=self.rows(first=self.child)):
+            prepare.start_prepare(self.config, expected=contract_for(self.website), retry=True)
+        self.assertEqual(self.op.receipt["scan_run_id"], "old-scan")
+        self.assertNotIn("source_reverify", self.op.payload)
+
     def test_other_needs_user_children_and_unrequested_cleanup_retry_stay_saved(self):
         for retry, action_id in ((False, "remove_setup_example"), (True, "merge_pr"), (True, "review_setup"),
                 (True, "review_github_permissions"), (True, "authorize_github"), (True, "deploy_site"),
@@ -289,7 +322,7 @@ class SetupExampleCleanupActionTests(SimpleTestCase):
             stack.enter_context(patch.object(views.http_client, "delete"))
             stale_access = {"verified": True, "writable": True, "branch": "main", "sha": "a" * 40}
             stack.enter_context(patch.object(views.cache, "get", side_effect=lambda key:
-                stale_access if key.startswith("articles-repository-access-v1:") else None))
+                stale_access if key.startswith("articles-repository-access-v2:") else None))
             for method, result in (("set", None), ("add", True), ("delete", None)):
                 stack.enter_context(patch.object(views.cache, method, return_value=result))
             queue = stack.enter_context(patch.object(views, "_queue_content_factory_run", return_value=worker_run))

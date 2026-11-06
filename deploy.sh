@@ -22,8 +22,11 @@ MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED="${MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABL
 COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED="${COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED:-false}"
 COMMUNITY_CHAT_INBOX_ERASURE_ENABLED="${COMMUNITY_CHAT_INBOX_ERASURE_ENABLED:-false}"
 MESSAGE_SYNC_TARGETED_READ_POLLING="${MESSAGE_SYNC_TARGETED_READ_POLLING:-false}"
+MESSAGE_SYNC_RECENT_HISTORY_ENABLED="${MESSAGE_SYNC_RECENT_HISTORY_ENABLED:-false}"
+SLACK_MEMBER_CHANNEL_ALLOWED_IDS="${SLACK_MEMBER_CHANNEL_ALLOWED_IDS:-}"
 MESSAGE_SYNC_OPEN_PRIORITY_ENABLED="${MESSAGE_SYNC_OPEN_PRIORITY_ENABLED:-true}"
 MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED="${MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED:-false}"
+MESSAGE_SYNC_TARGETED_STAGED_ROUTING="${MESSAGE_SYNC_TARGETED_STAGED_ROUTING:-false}"
 MESSAGE_SYNC_DEVICE_FANOUT_BATCH="${MESSAGE_SYNC_DEVICE_FANOUT_BATCH:-0}"
 MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR="${MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR:-6}"
 MESSAGE_SYNC_INBOX_READ_EXPORT="${MESSAGE_SYNC_INBOX_READ_EXPORT:-false}"
@@ -58,6 +61,24 @@ VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN="${VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN:-}"
 export VALLEY_MCP_ENABLED VALLEY_MCP_PUBLIC_BASE_URL
 export COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN
 python3 scripts/validate_valley_mcp_deploy_config.py
+# CRM switches and delivery settings. Empty values keep the host's own, so a
+# release never switches the CRM off by omission.
+CRM_DEPLOY_SETTINGS="COMMUNITY_CHAT_CRM_ENABLED CRM_LUMA_SYNC_ENABLED CRM_SENDING_ENABLED CRM_SMS_ENABLED CRM_WHATSAPP_ENABLED CRM_WARMUP_ENABLED CRM_ENGAGEMENT_REFRESH_ENABLED CRM_SUBSTACK_ACTIVITY_ENABLED LISTMONK_BASE_URL LISTMONK_API_USER TWILIO_MESSAGING_SERVICE_SID CRM_RESEND_MONITORED_SENDERS CRM_WARMUP_RUN_ID CRM_ENGAGEMENT_REFRESH_HOUR"
+for crm_setting in $CRM_DEPLOY_SETTINGS; do
+    printf -v "$crm_setting" '%s' "${!crm_setting:-}"
+    export "$crm_setting"
+done
+LISTMONK_API_TOKEN="${LISTMONK_API_TOKEN:-}"
+python3 scripts/validate_crm_deploy_config.py
+# Founder-journey Articles switches, caps, sign-in limits, article preview
+# switches, run snapshot switches and the P1 founder journey switches. Empty values keep the host's own, so a release never switches a
+# founder path off by omission.
+ARTICLES_DEPLOY_SETTINGS="ARTICLES_FREE_SETUP_RESEARCH_ENABLED ARTICLES_FREE_FIRST_ARTICLE_ENABLED ARTICLES_FIRST_ARTICLE_GOAL_ENABLED ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED CONTENT_FACTORY_PORTABLE_PREVIEW_REARM ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED ARTICLES_RUN_EVENTS_ENABLED ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED ARTICLES_RUN_JOB_SHADOW_READ_ENABLED ARTICLES_RUN_JOB_READ_ENABLED MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED MY_STARTUP_FOUNDER_JOURNEY_API_ENABLED MY_STARTUP_FOUNDER_JOURNEY_OPT_IN_ENABLED COMMUNITY_CHAT_ONE_STEP_JOIN_ENABLED COMMUNITY_CHAT_INVITE_TOKENS_ENABLED MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED COMMUNITY_CHAT_REVIEW_CLEARED_EMAIL_ENABLED COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED MY_STARTUP_ONE_FIELD_START_ENABLED MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED ARTICLES_FIRST_ARTICLE_CARD_ENABLED ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED ARTICLES_DRAFT_TOOLS_ENABLED ARTICLES_LIVE_URL_VERIFICATION_ENABLED MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED ARTICLES_FREE_SETUP_AUTOFILL_DAILY_CAP ARTICLES_FREE_SETUP_BASELINE_DAILY_CAP ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK AUTH_THROTTLE_IP_CODE_REQUESTS_PER_HOUR AUTH_THROTTLE_IP_VERIFY_PER_10M AUTH_THROTTLE_IP_PASSWORD_PER_10M AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M COMMUNITY_CHAT_INVITE_TOKEN_DEFAULT_TTL_HOURS COMMUNITY_CHAT_INVITE_TOKEN_MAX_TTL_HOURS COMMUNITY_CHAT_DEVICE_AUTH_MAX_LIFETIME_SECONDS ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE ARTICLES_WORKSHOP_WINDOWS MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS COMMUNITY_CHAT_INVITE_RESOLVE_RATE CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE"
+for articles_setting in $ARTICLES_DEPLOY_SETTINGS; do
+    printf -v "$articles_setting" '%s' "${!articles_setting:-}"
+    export "$articles_setting"
+done
+python3 scripts/validate_articles_deploy_config.py
 MLAI_MCP_NATIVE_AGENTS_ENABLED="${MLAI_MCP_NATIVE_AGENTS_ENABLED:-false}"
 AGENT_RUNTIME_ENABLED="${AGENT_RUNTIME_ENABLED:-false}"
 AGENT_RUNTIME_NATIVE_ENABLED="${AGENT_RUNTIME_NATIVE_ENABLED:-false}"
@@ -69,6 +90,8 @@ AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT="${AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT:-1}"
 AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY="${AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY:-}"
 AGENT_RUNTIME_NATIVE_REGISTRY_KEY="${AGENT_RUNTIME_NATIVE_REGISTRY_KEY:-}"
 COMMUNITY_CHAT_ROLE_SERVICE_TOKEN="${COMMUNITY_CHAT_ROLE_SERVICE_TOKEN:-}"
+AGENT_RUNTIME_COMMUNITY_ENABLED="${AGENT_RUNTIME_COMMUNITY_ENABLED:-false}"
+AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED="${AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED:-false}"
 AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT="${AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT:-false}"
 AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES="${AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES:-1440}"
 AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP="${AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP:-200}"
@@ -78,7 +101,6 @@ AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY="${AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY:-
 AGENT_RUNTIME_NATIVE_DURABLE_WATCH="${AGENT_RUNTIME_NATIVE_DURABLE_WATCH:-false}"
 AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS="${AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS:-600}"
 AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS="${AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS:-86400}"
-AGENT_RUNTIME_NATIVE_LAPSE_ALERTS="${AGENT_RUNTIME_NATIVE_LAPSE_ALERTS:-false}"
 AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED="${AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED:-false}"
 MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED="${MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED:-false}"
 MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS="${MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS:-0}"
@@ -87,6 +109,8 @@ export AGENT_RUNTIME_NATIVE_REPLIES_ENABLED AGENT_RUNTIME_MCP_EVENTS_ENABLED
 export AGENT_RUNTIME_NATIVE_COMMUNITIES AGENT_RUNTIME_DOT_SETUP_URL AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT
 export AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY AGENT_RUNTIME_NATIVE_REGISTRY_KEY
 export COMMUNITY_CHAT_ROLE_SERVICE_TOKEN
+export AGENT_RUNTIME_COMMUNITY_ENABLED
+export AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED
 export AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT
 export AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES
 export AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP
@@ -96,7 +120,6 @@ export AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY
 export AGENT_RUNTIME_NATIVE_DURABLE_WATCH
 export AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS
 export AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS
-export AGENT_RUNTIME_NATIVE_LAPSE_ALERTS
 export AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED
 export MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED
 export MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS
@@ -124,7 +147,7 @@ case "$MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED" in
     *) echo "MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED must be true or false." >&2; exit 1 ;;
 esac
 export MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED
-for responsiveness_flag in MESSAGE_SYNC_OPEN_PRIORITY_ENABLED MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED; do
+for responsiveness_flag in MESSAGE_SYNC_OPEN_PRIORITY_ENABLED MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED MESSAGE_SYNC_RECENT_HISTORY_ENABLED MESSAGE_SYNC_TARGETED_STAGED_ROUTING; do
     case "${!responsiveness_flag}" in
         true|TRUE|True) printf -v "$responsiveness_flag" '%s' true ;;
         false|FALSE|False) printf -v "$responsiveness_flag" '%s' false ;;
@@ -132,6 +155,7 @@ for responsiveness_flag in MESSAGE_SYNC_OPEN_PRIORITY_ENABLED MESSAGE_SYNC_UNREA
     esac
     export "$responsiveness_flag"
 done
+export SLACK_MEMBER_CHANNEL_ALLOWED_IDS
 if ! [[ "$MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR" =~ ^[1-9][0-9]{0,2}$ ]] || [ "$MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR" -gt 256 ]; then
     echo "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR must be an integer from 1 to 256." >&2
     exit 1
@@ -250,14 +274,9 @@ if [ "$COMMUNITY_BRIDGE_PRODUCTION_ENABLED" = "true" ]; then
         "${SLACK_BRIDGE_SIGNING_SECRET:-}"
         "${SLACK_BRIDGE_BOT_USER_ID:-}"
         "${SLACK_BRIDGE_WORKSPACE_ID:-}"
-        "${SLACK_BRIDGE_CHANNEL_ID:-}"
-        "${SLACK_BRIDGE_CHANNEL_NAME:-}"
         "${BUZZ_BRIDGE_ADAPTER_URL:-}"
         "${BUZZ_BRIDGE_ADAPTER_TOKEN:-}"
         "${BUZZ_BRIDGE_CALLBACK_SECRET:-}"
-        "${BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID:-}"
-        "${BUZZ_BRIDGE_DESTINATION_CHANNEL_ID:-}"
-        "${BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME:-}"
     )
     for bridge_value in "${bridge_values[@]}"; do
         [ -n "$bridge_value" ] && bridge_present=$((bridge_present + 1))
@@ -279,19 +298,7 @@ import re
 
 if not re.fullmatch(r"T[A-Z0-9]+", os.environ["SLACK_BRIDGE_WORKSPACE_ID"]):
     raise SystemExit("SLACK_BRIDGE_WORKSPACE_ID must be a Slack workspace ID")
-if not re.fullmatch(r"C[A-Z0-9]+", os.environ["SLACK_BRIDGE_CHANNEL_ID"]):
-    raise SystemExit("SLACK_BRIDGE_CHANNEL_ID must be a public Slack channel ID")
-if not re.fullmatch(r"[a-z0-9_-]{1,80}", os.environ["SLACK_BRIDGE_CHANNEL_NAME"]):
-    raise SystemExit("SLACK_BRIDGE_CHANNEL_NAME must be a valid public channel name")
-if os.environ["BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID"] != "chat.mlai.au":
-    raise SystemExit("BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID must be chat.mlai.au")
-if not re.fullmatch(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-    os.environ["BUZZ_BRIDGE_DESTINATION_CHANNEL_ID"],
-):
-    raise SystemExit("BUZZ_BRIDGE_DESTINATION_CHANNEL_ID must be a lowercase UUID")
-if not re.fullmatch(r"[a-z0-9_-]{1,80}", os.environ["BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"]):
-    raise SystemExit("BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME must be a valid channel name")
+
 PY
 else
     echo "ℹ️ Community bridge production activation is disabled; staged bridge settings will not be installed."
@@ -414,6 +421,12 @@ if [ -n "${MLAI_CHAT_ACCOUNT_KEY_SECRET:-}" ]; then
 fi
 echo "🔐 Updating Linear channel issue credential (value redacted)..."
 install_remote_env_secret LINEAR_API_KEY "$LINEAR_API_KEY"
+if [ -n "$LISTMONK_API_TOKEN" ]; then
+    install_remote_env_secret LISTMONK_API_TOKEN "$LISTMONK_API_TOKEN"
+fi
+if [ -n "${CRM_RESEND_WEBHOOK_SECRET:-}" ]; then
+    install_remote_env_secret CRM_RESEND_WEBHOOK_SECRET "$CRM_RESEND_WEBHOOK_SECRET"
+fi
 echo "🔐 Updating distinct Roo and internal service credentials (values redacted)..."
 install_remote_env_secret ROO_API_KEY "$ROO_API_KEY"
 install_remote_env_secret INTERNAL_API_KEY "$INTERNAL_API_KEY"
@@ -460,12 +473,22 @@ install_remote_env_value VALLEY_MCP_PUBLIC_BASE_URL "$VALLEY_MCP_PUBLIC_BASE_URL
 if [ -n "$COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED" ]; then
     install_remote_env_value COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED "$COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED"
 fi
+for crm_setting in $CRM_DEPLOY_SETTINGS; do
+    if [ -n "${!crm_setting}" ]; then
+        install_remote_env_value "$crm_setting" "${!crm_setting}"
+    fi
+done
+for articles_setting in $ARTICLES_DEPLOY_SETTINGS; do
+    if [ -n "${!articles_setting}" ]; then
+        install_remote_env_value "$articles_setting" "${!articles_setting}"
+    fi
+done
 if [ -n "$VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN" ]; then
     install_remote_env_value VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN "$VALLEY_MCP_DOMAIN_VERIFICATION_TOKEN"
 fi
 for native_flag in MLAI_MCP_NATIVE_AGENTS_ENABLED AGENT_RUNTIME_ENABLED AGENT_RUNTIME_NATIVE_ENABLED \
     AGENT_RUNTIME_NATIVE_REPLIES_ENABLED AGENT_RUNTIME_MCP_EVENTS_ENABLED AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT \
-    AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT \
+    AGENT_RUNTIME_COMMUNITY_ENABLED AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED AGENT_RUNTIME_NATIVE_ALWAYS_ADMIT \
     AGENT_RUNTIME_NATIVE_QUEUE_TTL_MINUTES \
     AGENT_RUNTIME_NATIVE_ADMISSION_DAILY_CAP \
     AGENT_RUNTIME_NATIVE_LIMIT_TIMEZONE \
@@ -474,7 +497,6 @@ for native_flag in MLAI_MCP_NATIVE_AGENTS_ENABLED AGENT_RUNTIME_ENABLED AGENT_RU
     AGENT_RUNTIME_NATIVE_DURABLE_WATCH \
     AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS \
     AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS \
-    AGENT_RUNTIME_NATIVE_LAPSE_ALERTS \
     AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED \
     MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED \
     MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS; do
@@ -497,11 +519,14 @@ fi
 # The app-level token travels only through SSH stdin. Never reuse an OAuth
 # bot/user token: recipient expansion is a separate Slack authorization surface.
 install_remote_env_value MESSAGE_SYNC_ENABLED "$MESSAGE_SYNC_ENABLED"
+install_remote_env_value MESSAGE_SYNC_RECENT_HISTORY_ENABLED "$MESSAGE_SYNC_RECENT_HISTORY_ENABLED"
+install_remote_env_value SLACK_MEMBER_CHANNEL_ALLOWED_IDS "$SLACK_MEMBER_CHANNEL_ALLOWED_IDS"
 install_remote_env_value COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED "$COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED"
 install_remote_env_value MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED "$MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED"
 install_remote_env_value MESSAGE_SYNC_OPEN_PRIORITY_ENABLED "$MESSAGE_SYNC_OPEN_PRIORITY_ENABLED"
 install_remote_env_value MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED "$MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED"
 install_remote_env_value MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR "$MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR"
+install_remote_env_value MESSAGE_SYNC_TARGETED_STAGED_ROUTING "$MESSAGE_SYNC_TARGETED_STAGED_ROUTING"
 install_remote_env_value MESSAGE_SYNC_DEVICE_FANOUT_BATCH "$MESSAGE_SYNC_DEVICE_FANOUT_BATCH"
 for inbox_flag_name in \
     COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED COMMUNITY_CHAT_INBOX_ERASURE_ENABLED \
@@ -722,7 +747,18 @@ fi
 
 # 2. Run setup commands on the server
 echo "🔧 Configuring server..."
-ssh "$DEPLOY_SSH_TARGET" <<EOF
+# SSH hands this script to the remote shell on stdin, and bash reads stdin one
+# command at a time. A host command that reads stdin (Compose exec attaches it
+# even with -T) would swallow the rest of the script, and the shell would then
+# exit 0 having skipped every later step. On 25 Oct 2026 that skipped the
+# release tail and left the migration writer pause marker behind. Bash parses
+# the whole group below before running any of it, and the group's stdin is
+# /dev/null, so no command can reach the script text.
+remote_deploy_log=$(mktemp)
+trap 'rm -f "$remote_deploy_log"' EXIT
+remote_deploy_completed="Remote deployment script completed for $APP_RELEASE."
+ssh "$DEPLOY_SSH_TARGET" <<EOF | tee "$remote_deploy_log"
+{
     set -euo pipefail
 
     verify_current_main_release_on_host() {
@@ -870,6 +906,10 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # .env may retain a failed release's marker even when the old container
     # never changed. Use the serving container as rollback truth.
     previous_app_release=\$(docker compose exec -T web sh -lc 'printf "%s" "\$APP_RELEASE"' </dev/null 2>/dev/null || read_env_value APP_RELEASE)
+    # The staging .env may already be false; capture the running contract so a
+    # code-only rollback does not silently disable established member discovery.
+    previous_owner_inventory_enabled=\$(docker compose exec -T web sh -lc 'printf "%s" "\$SLACK_OWNER_INVENTORY_ENABLED"' </dev/null 2>/dev/null || printf false)
+    case "\$previous_owner_inventory_enabled" in true|false) ;; *) echo "Invalid previous owner inventory state" >&2; exit 1 ;; esac
     upsert_env_value APP_RELEASE "$APP_RELEASE"
     upsert_env_value HEALTH_HACK_AI_BUDGET_MODE "enforce"
     # Keep the atomic worst-case reservation aligned with Roo's enforced model
@@ -908,7 +948,24 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # cold imports and 30-second worker timeouts. Firebase initializes a
     # Firestore gRPC client during route import, so warming must be post-fork.
     upsert_env_value GUNICORN_WORKERS "4"
-    upsert_env_value GUNICORN_TIMEOUT "90"
+    # Preserve the serving web timeout across code-only deployments. A host's
+    # .env can lag an explicit runtime override used by long Studio reports.
+    if ! gunicorn_timeout=\$(docker compose exec -T web sh -lc 'printf "%s" "\$GUNICORN_TIMEOUT"' </dev/null 2>/dev/null); then
+        gunicorn_timeout=""
+    fi
+    if [ -z "\$gunicorn_timeout" ]; then
+        gunicorn_timeout=\$(read_env_value GUNICORN_TIMEOUT)
+    fi
+    # Compose accepts quoted integer values in .env as well as bare values.
+    case "\$gunicorn_timeout" in
+        \"*\") gunicorn_timeout=\${gunicorn_timeout#\"}; gunicorn_timeout=\${gunicorn_timeout%\"} ;;
+        \'*\') gunicorn_timeout=\${gunicorn_timeout#\'}; gunicorn_timeout=\${gunicorn_timeout%\'} ;;
+    esac
+    gunicorn_timeout=\${gunicorn_timeout:-90}
+    case "\$gunicorn_timeout" in
+        *[!0-9]*) echo "Invalid existing web timeout; refusing to replace it." >&2; exit 1 ;;
+    esac
+    upsert_env_value GUNICORN_TIMEOUT "\$gunicorn_timeout"
     print_redacted_env_status CONTENT_FACTORY_URL GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY VALLEY_HARNESS_URL REDIS_URL ROO_SERVICE_URL ROO_SIM_PATIENT_KEY HEALTH_HACK_API_KEY ROO_API_KEY INTERNAL_API_KEY UMAMI_BASE_URL CONTENT_ANALYTICS_HOST_URL COMMUNITY_CHAT_ADAPTER_URL COMMUNITY_CHAT_ADAPTER_TOKEN COMMUNITY_CHAT_EMAIL_CODE_PEPPER COMMUNITY_CHAT_EMAIL_CODE_DELIVERY_SECRET CUSTOMERIO_API_KEY CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID
     require_env_value CONTENT_FACTORY_URL "Set CONTENT_FACTORY_URL to http://<content-factory-private-ip>:8000 for the cross-droplet Content Factory deployment."
     require_env_value GITHUB_APP_ID "Set GITHUB_APP_ID to the MLAI Tools GitHub App id so Content Factory can receive installation tokens."
@@ -949,6 +1006,23 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     unset retired_committee_container_ids
 
     source scripts/runtime-services.sh
+    # The reconciler remains independent from issuance so uncertain coupon
+    # writes continue to drain when new quotes are switched off.
+    if [ "\$(read_env_value ROO_EVENT_DISCOUNT_WORKER_ENABLED)" = "true" ]; then
+        runtime_services+=("\${event_discount_runtime_services[@]}")
+    elif [ "\$(read_env_value ROO_EVENT_DISCOUNTS_ENABLED)" = "true" ]; then
+        echo "Event discount issuance requires its supervised reconciliation worker."
+        exit 1
+    else
+        docker compose stop event-discount-worker || true
+        docker compose rm -f event-discount-worker || true
+    fi
+    if [ "\$(read_env_value AGENT_RUNTIME_COMMUNITY_ENABLED)" = "true" ]; then
+        runtime_services+=("\${community_agent_runtime_services[@]}")
+    else
+        docker compose stop community-agent-worker || true
+        docker compose rm -f community-agent-worker || true
+    fi
     if [ "\$(read_env_value MLAI_MCP_NATIVE_AGENTS_ENABLED)" = "true" ]; then
         runtime_services+=("\${native_agent_runtime_services[@]}")
         native_agent_worker_enabled=1
@@ -1024,7 +1098,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     # command-substituted on the deploying runner.)
     echo "🧪 Running deployment preflight..."
     compose_run_web python manage.py deploy_preflight
-    compose_run_web python scripts/validate_native_agent_deploy_config.py
+    compose_run_web python scripts/validate_native_agent_deploy_config.py --provider
 
     previous_runtime_container_ids=()
     previous_scheduler_container_id=""
@@ -1190,6 +1264,12 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     schema_transition_started=0
     schema_transition_completed=0
     writer_pause_sentinel=/run/mlai-backend-writers-paused
+    describe_writer_pause_sentinel() {
+        local paused_release paused_at
+        paused_release=\$(head -n 1 "\$writer_pause_sentinel" 2>/dev/null || true)
+        paused_at=\$(date -u -r "\$writer_pause_sentinel" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || true)
+        printf '%s (release %s, written %s)' "\$writer_pause_sentinel" "\${paused_release:-unknown}" "\${paused_at:-at an unknown time}"
+    }
     writer_watchdog_units_to_restore=()
     pause_host_writer_watchdogs() {
         local units unit exec_start active_state watchdog_processes watchdog_status
@@ -1255,6 +1335,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         local service container_ids container_id running
         if [ -e "\$writer_pause_sentinel" ]; then
             echo "❌ A prior migration writer pause is still active; operator review is required." >&2
+            echo "   \$(describe_writer_pause_sentinel)" >&2
             return 1
         fi
         # The host watchdog must see the pause before any Compose service is
@@ -1381,8 +1462,14 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
             fi
         fi
 
-        echo "⚠️ Deployment failed after runtime services were paused; disabling Slack owner inventory for recovery."
-        upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "false" || true
+        # Incomplete schema transitions returned above with all writers stopped.
+        # A compatible old-image rollback restores its actual enabled state;
+        # completed schema transitions use the reviewed new runtime setting.
+        recovery_inventory_enabled="\${slack_owner_inventory_enabled:-false}"
+        if [ "\$migration_started" != "1" ]; then
+            recovery_inventory_enabled="\${previous_owner_inventory_enabled:-false}"
+        fi
+        upsert_env_value SLACK_OWNER_INVENTORY_ENABLED "\$recovery_inventory_enabled" || return
         if [ "\$migration_started" != "1" ]; then
             # No schema changed, so the previous image is the last known-good
             # release even if a replacement container has already started.
@@ -1526,6 +1613,12 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
         compose_run_web python manage.py migrate --check --noinput
         schema_transition_completed=1
     else
+        # A code-only release never pauses writers, so a marker here was left
+        # by an earlier migration deploy. Surface it now instead of when the
+        # next migration deploy refuses to start.
+        if [ -e "\$writer_pause_sentinel" ]; then
+            echo "::warning title=Stale migration writer pause::\$(describe_writer_pause_sentinel) is still present. Host watchdogs stay stood down, and the next migration deploy will stop until an operator reviews and removes it."
+        fi
         # Confirm the migration graph still has no pending work before the new
         # binary replaces live services. This cannot apply a migration.
         compose_run_web python manage.py migrate --check --noinput
@@ -1537,17 +1630,6 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF
     echo "✅ Running post-migration deployment checks..."
     compose_run_web python manage.py deploy_postmigrate
 
-    if [ "$bridge_present" -gt 0 ]; then
-        echo "🌉 Upserting the reviewed Slack to MLAI Chat channel mapping..."
-        compose_run_web python manage.py upsert_community_bridge_channel \
-            --slack-workspace-id "$SLACK_BRIDGE_WORKSPACE_ID" \
-            --slack-channel-id "$SLACK_BRIDGE_CHANNEL_ID" \
-            --slack-channel-name "$SLACK_BRIDGE_CHANNEL_NAME" \
-            --destination-platform buzz \
-            --destination-workspace-id "$BUZZ_BRIDGE_DESTINATION_WORKSPACE_ID" \
-            --destination-channel-id "$BUZZ_BRIDGE_DESTINATION_CHANNEL_ID" \
-            --destination-channel-name "$BUZZ_BRIDGE_DESTINATION_CHANNEL_NAME"
-    fi
 
     if [ "\$org_memory_production_deploy_enabled" = "true" ]; then
         approval_manifest="/root/mlai-backend-operations/pilot-approval.json"
@@ -1698,13 +1780,12 @@ PY
             # back off before the runtime services start.
             echo "⚠️ Admin Brain pilot staging skipped: the pilot has no retrievable evidence yet."
             echo "⚠️ Keeping the Admin Brain query API disabled; retrieval remains fail-closed."
-            echo "⚠️ The next deploy after ingestion restores evidence will stage and activate the binding."
+            echo "⚠️ Use Activate Admin Brain after its readiness checks recover."
             upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"
         else
-            echo "❌ Admin Brain production staging failed; aborting the deploy."
-            rm -f "\$stage_stdout"
-            # Fail via a command (not exit) so the ERR trap restores web.
-            false
+            echo "⚠️ Admin Brain production staging failed; continuing the app deploy with retrieval disabled."
+            echo "⚠️ Resolve the readiness blockers, then use Activate Admin Brain."
+            upsert_env_value ORG_MEMORY_QUERY_API_ENABLED "false"
         fi
         rm -f "\$stage_stdout"
         unset stage_operator activation_operator approval_hash approval_hash_short
@@ -1774,8 +1855,8 @@ PY
 
     if [ "\$bridge_worker_enabled" != "1" ]; then
         echo "🧹 Stopping disabled community bridge services..."
-        docker compose stop bridge-worker bridge-reconciler bridge-retention || true
-        docker compose rm -f bridge-worker bridge-reconciler bridge-retention || true
+        docker compose stop bridge-worker bridge-retention || true
+        docker compose rm -f bridge-worker bridge-retention || true
     fi
 
     if [ "\$analytics_sync_enabled" != "1" ]; then
@@ -1892,6 +1973,12 @@ if slugs != expected:
         unset meeting_room_api_key meeting_rooms_body
     fi
 
+    if [ "\$bridge_worker_enabled" = "1" ]; then
+        echo "🌉 Verifying the current member sync worker..."
+        # Compose exec still attaches stdin with -T; preserve the SSH script.
+        docker compose exec -T bridge-worker python manage.py message_sync_status --check --local-worker </dev/null
+    fi
+
     echo "🛠️ Verifying external Django admin assets..."
     admin_login_ok=0
     for attempt in \$(seq 1 12); do
@@ -1970,7 +2057,17 @@ if slugs != expected:
     for rollback_tag in "\${rollback_tags[@]}"; do
         docker image rm "\$rollback_tag" >/dev/null 2>&1 || true
     done
+    echo "$remote_deploy_completed"
+} </dev/null
 EOF
+
+# A remote shell that stops early still exits 0, and the release check below
+# passes as soon as the new web slot serves. Neither proves the release checks,
+# candidate cleanup or writer pause cleanup ran, so require the final line too.
+if ! grep -qxF "$remote_deploy_completed" "$remote_deploy_log"; then
+    echo "❌ The remote deployment script ended before its final step; later release checks and cleanup did not run." >&2
+    exit 1
+fi
 
 # Independently verify the release outside SSH so an early remote exit can
 # never turn a skipped migration/restart into a successful deployment.

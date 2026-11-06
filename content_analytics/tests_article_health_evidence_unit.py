@@ -164,7 +164,7 @@ class ReportEvidenceLoaderUnitTests(unittest.TestCase):
         from content_analytics.services import reports
         search = Mock()
         search.objects.filter.return_value.values.return_value.annotate.return_value.order_by.return_value = [{
-            "article_id": "article-1", "clicks": Decimal("12"), "impressions": Decimal("400"),
+            "article_id": "article-1", "clicks": Decimal("12"), "total_impressions": Decimal("400"),
             "position_weight": Decimal("2400"), "data_through": date(2026, 9, 25),
         }]
         state = Mock()

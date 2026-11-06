@@ -16,7 +16,8 @@ def _child(op, connection):
         workflow="article_system_setup").first()
     if not run:
         return None
-    saved = mapping(run.run_request)
+    from .website_run_authority import execution_request
+    saved = mapping(execution_request(run))
     if (saved.get("website_connection_id") != str(connection.pk)
             or saved.get("connection_generation") != connection.generation
             or saved.get("repository_id") != connection.repository_id
@@ -91,7 +92,7 @@ def collect_proofs(op, context, config, journey, *, now):
             put("integrated", "verified_target", sha=source, evidence={"target_id": target.target_key,
                 "contract_digest": contract_digest}, at=target.updated_at)
         if ci and build_proof_fresh(connection, target, {"repositorySourceSha": source, "repositoryBranch": connection.branch}, now=now):
-            put("previewed", "authenticated_ci", sha=source, run_id=ci.get("run_id"), evidence=ci,
+            put("previewed", "authenticated_hosted" if ci.get("attestation_origin") == "authenticated_hosted" else "authenticated_ci", sha=source, run_id=ci.get("run_id"), evidence=ci,
                 at=ci.get("checked_at") or ci.get("verified_at"))
             deployment = connection.operations.filter(generation=connection.generation, action="deployment-verify", state="completed",
                 payload__source_sha=source, payload__target_id=target.target_key).order_by("-created_at", "-pk").first()
@@ -112,7 +113,8 @@ def collect_proofs(op, context, config, journey, *, now):
 
     child = _child(op, connection)
     if child:
-        result, saved = mapping(child.result), mapping(child.run_request)
+        from .website_run_authority import execution_request
+        result, saved = mapping(child.result), mapping(execution_request(child))
         head = result.get("branch_commit_sha")
         preview = mapping(result.get("directory_quality_verification"))
         exact = (isinstance(head, str) and SHA.fullmatch(head)
@@ -148,4 +150,7 @@ def collect_proofs(op, context, config, journey, *, now):
                 evidence={"target_id": target.target_key, "contract_digest": contract_digest,
                           "ci_evidence_digest": ci.get("evidence_digest")},
                 at=proofs["previewed"]["at"])
+    if mapping(op.receipt.get("goal")).get("target")=="first_article_live":
+        from .website_first_article import proofs as article_proofs
+        proofs.update(article_proofs(op,context,config,source=source,now=now))
     return proofs, source

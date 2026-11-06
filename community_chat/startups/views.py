@@ -24,6 +24,7 @@ from .presentation import update_payload
 from .publication import approved_updates
 from .lifecycle import delete_update, source_capabilities, validate_generation_sources
 from .source_preferences import source_preferences
+from vibe_raising.financial_refresh_views import FinancialRefreshView, FinancialRefreshStatusView
 
 
 def enabled():
@@ -70,17 +71,30 @@ class BootstrapView(ChatStartupAccess, APIView):
 
     def get(self, request):
         profile = get_or_create_founder_profile(request.user)
+        capabilities = {"manual": True, "generation": True, "community": True, "public": True,
+                        "delete": True, "draftReadyPush": False}
+        if getattr(settings, 'MY_STARTUP_TEAM_ENABLED', False):
+            from founder_tools.startup_team import member_companies
+            capabilities['hasStartupWorkspace'] = bool(profile.companies.exists() or member_companies(request.user))
         return Response({
             "enabled": True, "accountId": str(request.user.community_chat_profile_id),
             "relayUrl": settings.COMMUNITY_CHAT_RELAY_URL,
             "profile": FounderProfileSerializer(profile).data,
-            "capabilities": {"manual": True, "generation": True, "community": True, "public": True,
-                "delete": True, "draftReadyPush": False},
+            "capabilities": capabilities,
         })
 
 
 class CompaniesView(ChatStartupAccess, FounderToolsCompanyView):
     requires_company = False
+
+
+class RefreshFinancialsView(ChatStartupAccess, FinancialRefreshView):
+    """Use the same owner-scoped refresh through revocable Chat authentication."""
+
+
+class RefreshFinancialsStatusView(ChatStartupAccess, FinancialRefreshStatusView):
+    """Keep financial polling in Chat's dedicated poll throttle bucket."""
+    startup_read_bucket = "poll"
 
 
 class ActiveCompanyView(ChatStartupAccess, FounderToolsActiveCompanyView):
@@ -175,6 +189,11 @@ class SourcesView(ChatStartupAccess, ConnectorSourcesStatusView):
             sources = [source_capabilities(source, preferences=preferences) for source in response.data.get("sources", [])]
             from .website_connections import website_connection_sources
             sources.extend(website_connection_sources(request.user, self.company))
+            from crm.access import crm_access
+            can_select_crm = crm_access(request)["can_view"]
+            for source in sources:
+                source["canSelectCrmAccounts"] = can_select_crm and source.get("provider") == "luma"
+
             response.data = {**response.data, "sources": sources, "connections": sources}
         return response
 
@@ -184,24 +203,6 @@ class GenerateView(ChatStartupAccess, founder.VibeRaisingEmailDraftStartView):
 
     def post(self, request):
         validate_generation_sources(request.data)
-        # Check the effective selection before the shared view can debit or queue.
-        # Notes/documents are usable without an OAuth source; revoked accounts
-        # and missing property selections require an explicit client decision.
-        from integrations.services.external_connectors import serialize_source_status
-        selected = founder._include_manual_source_if_needed(
-            request.data.get("inputSources", request.data.get("input_sources", [])),
-            manual_document_ids=founder._get_requested_manual_document_ids(request),
-            manual_summary=founder._get_requested_manual_summary(request),
-        )
-        rows = serialize_source_status(request.user, organization=self.company.organization).get("sources", [])
-        by_key = {row.get("key"): source_capabilities(row) for row in rows if isinstance(row, dict)}
-        unavailable = [key for key in selected if key != "manual_documents" and
-            (by_key.get(key, {}).get("status") not in {"connected", "ready"}
-             or by_key.get(key, {}).get("usableForUpdates") is False
-             or by_key.get(key, {}).get("available") is False)]
-        if unavailable:
-            return Response({"detail": "Reconnect or remove unavailable sources before generating.",
-                "code": "startup_update_sources_unavailable", "unavailableSources": unavailable}, status=409)
         try:
             return super().post(request)
         except ConnectorConfigurationError as exc:
@@ -242,3 +243,21 @@ class UploadSessionView(ChatStartupAccess, founder.VibeRaisingManualDocumentUplo
 
 class UploadCompleteView(ChatStartupAccess, founder.VibeRaisingManualDocumentUploadCompleteView):
     pass
+
+
+class ResumeView(ChatStartupAccess, APIView):
+    """Resume the exact saved generation after checking ownership and revisions."""
+    def post(self, request, run_id):
+        from django.db import transaction
+        from startup_updates.execution import claim_execution
+        with transaction.atomic():
+            run = get_object_or_404(ContentFactoryRun.objects.select_for_update(), run_id=run_id,
+                workflow=founder.STARTUP_UPDATE_WORKFLOW, domain=self.company.organization.domain)
+            binding = self.company.organization.user_startup_bindings.filter(pk=(run.run_request or {}).get("binding_id"), user=request.user).first()
+            if binding is None:
+                raise NotFound("Generation not found.")
+            claim_execution(run, owner=f"founder-resume:{request.user.pk}", resume=True)
+        dispatched = founder._dispatch_run_to_valley(run)
+        if not dispatched:
+            return Response(founder._valley_dispatch_failure_payload(run, dispatched), status=503)
+        return Response({"runId": run.run_id, "status": run.status})

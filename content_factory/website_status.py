@@ -7,21 +7,23 @@ from . import website_goal as goals
 from .website_goal_evidence import source_for
 
 OWNER_ACTIONS = {"authorize_github", "review_github_permissions", "review_setup", "merge_pr", "deploy_site",
-                 "choose_articles_page", "remove_setup_example"}
+                 "choose_articles_page", "remove_setup_example", "choose_article_channel", "review_draft"}
 
 
 def _action(raw, operation_id, *, owner=False, run_ids=(), repository=""):
     from urllib.parse import urlsplit
     value = goals.mapping(raw)
     identifier = value.get("id")
+    from .registry_policy import LEGACY_WIRE_ACTION_IDS
+    identifier = LEGACY_WIRE_ACTION_IDS.get(identifier, identifier)
     if not isinstance(identifier, str) or owner and identifier not in OWNER_ACTIONS:
         return {"id": "inspect_goal", "label": "View details", "operationId": operation_id}
     labels = {"authorize_github": "Authorize GitHub", "review_github_permissions": "Review GitHub permissions",
-        "review_setup": "Review setup", "merge_pr": "Merge setup PR", "deploy_site": "Deploy your site",
-        "choose_articles_page": "Choose articles page", "remove_setup_example": "Review example cleanup"}
+        "review_setup": "Review setup", "review_draft":"Review first article", "merge_pr": "Merge pull request", "deploy_site": "Deploy your site",
+        "choose_article_channel": "Choose articles channel", "choose_articles_page": "Choose articles page", "remove_setup_example": "Review example cleanup"}
     result = {"id": identifier if identifier in OWNER_ACTIONS else "inspect_goal", "label": labels.get(identifier, "View details")}
     run_id = value.get("run_id")
-    if not run_id and identifier in {"review_setup", "merge_pr", "deploy_site", "remove_setup_example"}:
+    if not run_id and identifier in {"review_setup", "review_draft", "merge_pr", "deploy_site", "remove_setup_example"}:
         run_id = next((item for item in run_ids if isinstance(item, str) and item), None)
     if run_id in run_ids and isinstance(run_id, str) and 0 < len(run_id) <= 100 and all(c.isalnum() or c in "-_.:" for c in run_id):
         result["runId"] = run_id
@@ -49,6 +51,7 @@ def _action(raw, operation_id, *, owner=False, run_ids=(), repository=""):
 def project_status(op, *, scope, source_sha, journey, now=None):
     """Project only persisted schedules and current proof, with terminal precedence."""
     from .website_failure_redaction import redact_secret_text
+    from .article_publication_policy import journey_can_publish
     now = now or timezone.now()
     receipt = goals.mapping(op.receipt)
     goal = receipt.get("goal")
@@ -66,9 +69,9 @@ def project_status(op, *, scope, source_sha, journey, now=None):
     disconnected = op.action == "disconnect" and op.state == "completed"
     done = disconnected or (op.state == "completed" and current_access and (valid
         and all(not item["required"] or item["state"] == "passed" for item in milestones)
-        or legacy and goals.mapping(journey.get("capabilities")).get("canPublishArticle") is True))
+        or legacy and journey_can_publish(journey)))
     action = _action(receipt.get("user_action") or {**goals.mapping(receipt.get("prompt")), "id": goals.mapping(receipt.get("prompt")).get("action")}, str(op.pk), owner=True,
-        run_ids=(receipt.get("setup_run_id"), receipt.get("child_run_id")), repository=op.connection.github_repo) if op.state == "needs_user" else None
+        run_ids=(receipt.get("setup_run_id"), receipt.get("child_run_id"),receipt.get("first_article_run_id"),receipt.get("first_article_publish_run_id")), repository=op.connection.github_repo) if op.state == "needs_user" else None
     schedule = op.next_attempt_at if op.state in {"pending", "running"} else None
     if terminal:
         state = "stopped"
@@ -87,6 +90,8 @@ def project_status(op, *, scope, source_sha, journey, now=None):
             message = "The saved goal does not match the current website. Refresh the website details."
         elif op.state in {"pending", "running"} and not schedule:
             message = "The goal has no recorded recovery schedule. Review its recorded details."
+        elif receipt.get("budget_stop_reason"):
+            message = "The articles goal reached its execution budget. Review its recorded usage."
         elif op.state == "completed":
             message = "Current website proof has changed or expired. Refresh website verification."
         elif not terminal and not goals.enrolled(op.connection.organization_id):
@@ -108,6 +113,71 @@ def project_status(op, *, scope, source_sha, journey, now=None):
         "milestones": milestones, "expectedTime": None, "mode": "goal" if not legacy else "legacy"}
 
 
+def _p2_flags_on() -> bool:
+    return bool(getattr(settings, "ARTICLES_FAILURE_POLICY_V2_ENABLED", False)
+                or getattr(settings, "MY_STARTUP_CANONICAL_ACTION_IDS_ENABLED", False))
+
+
+def add_p2_fields(result, op, *, organization):
+    """The P2 additions (IF-P2-05, IF-P2-06), for a P2-cohort organisation only.
+
+    With canonical action ids on, the action travels as its canonical ask with
+    the registry label; with them off it keeps today's id. ``copyId`` is added
+    only while ``copy_id_for`` returns one (the policy flag on and the org in the
+    P2 cohort), and never for a finished goal. A legacy organisation, or any
+    organisation with both flags off, gets ``result`` back unchanged.
+    """
+    if not _p2_flags_on() or not isinstance(result, dict):
+        return result
+    from . import registry_policy
+    from .p2_foundation import p2_applies, policy_v2_applies
+    if not p2_applies(organization):
+        return result
+    state = result.get("state")
+    if state == "done":
+        return result
+    receipt = goals.mapping(op.receipt)
+    code = receipt.get("reason_code")
+    registered = registry_policy.is_registered(code)
+    action = result.get("action")
+    stored_action = goals.mapping(receipt.get("user_action"))
+    stored_id = stored_action.get("id") or goals.mapping(receipt.get("prompt")).get("action")
+    ask = (registry_policy.founder_ask_for_code(code, organization) if registered
+           else registry_policy.canonical_action_id(stored_id) if stored_id != "review_setup" else None)
+    if state == "needs_you" and isinstance(action, dict):
+        if ask is not None:
+            # Preserve an equivalent legacy alias until old clients can read
+            # canonical ids. A lossy stored review_setup never overrides the code.
+            current = registry_policy.canonical_action_id(action.get("id"))
+            if registry_policy.canonical_ids_enabled() or current != ask:
+                from .website_failure_contract import load_registry
+                identifier = registry_policy.wire_action_id(ask)
+                label = (load_registry()["actions"].get(ask) if registry_policy.canonical_ids_enabled()
+                         else _action({"id": identifier}, result.get("operationId"), owner=True).get("label"))
+                result["action"] = ({**action, "id": identifier, **({"label": label} if label else {})}
+                                    if identifier else None)
+        elif registered and policy_v2_applies(organization):
+            # A pre-P2 receipt can call a strategy failure a founder ask.
+            # The registry owns the P2 meaning; there is no founder action.
+            result["action"] = None
+    copy_id = registry_policy.copy_id_for(code, organization=organization, terminal=state == "stopped",
+                                          self_heal=goals.mapping(receipt.get("self_heal_v1")) or None)
+    if not registered and state == "needs_you" and ask and ask != "approve_setup":
+        candidate = f"ask_{ask}"
+        if candidate in _founder_copy_ids() and policy_v2_applies(organization):
+            copy_id = candidate
+    if state == "needs_you" and result.get("action") is None:
+        result["state"] = "stopped" if copy_id == "stopped" else "working"
+    if copy_id is not None:
+        result["copyId"] = copy_id
+    return result
+
+
+def _founder_copy_ids() -> frozenset:
+    from .website_failure_contract import load_registry
+    return frozenset(load_registry().get("founder_copy_ids") or ())
+
+
 def status_for_context(context, config, *, journey, now=None):
     """Select one current owned operation; feature-off responses remain unchanged."""
     if not getattr(settings, "ARTICLES_WEBSITE_STATUS_V1_ENABLED", False) or config.website_connection is None:
@@ -124,13 +194,24 @@ def status_for_context(context, config, *, journey, now=None):
             "connectionGeneration": connection.generation, "goalId": None, "target": None,
             "configurationRevision": connection.configuration_version,
             "milestones": [], "expectedTime": None, "mode": "goal"}
-    return project_status(op, scope=goals.scope_for(connection, context.company.pk),
-        source_sha=source_for(connection, journey), journey=journey, now=now)
+    scope, source = goals.scope_for(connection, context.company.pk), source_for(connection, journey)
+    result = project_status(op, scope=scope, source_sha=source, journey=journey, now=now)
+    result = add_p2_fields(result, op, organization=connection.organization)
+    from .website_native_inventory import add_display
+    result = add_display(result, op)
+    if getattr(settings, "ARTICLES_WEBSITE_DOCTOR_ENABLED", False):
+        from .website_doctor import read_doctor
+        result["doctor"] = read_doctor(op, scope=scope, source_sha=source, milestones=result["milestones"])
+    return result
 
 
 def add_status(payload, context, config, *, journey):
     """Add the shared server contract only when the status rollout is enabled."""
     result = status_for_context(context, config, journey=journey)
     if result is not None:
+        from .website_setup_consent import setup_plan
+        plan = setup_plan(context, config, journey)
+        if plan is not None:
+            result["setupPlan"] = plan
         payload["websiteStatus"] = result
     return payload

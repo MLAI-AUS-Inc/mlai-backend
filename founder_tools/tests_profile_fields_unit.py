@@ -148,7 +148,7 @@ class ProfileSaveRegistrationTests(SimpleTestCase):
     def test_sparse_profile_save_preserves_registration_without_abr_call(self):
         from founder_tools import views
         company_id = uuid4()
-        company = Obj(id=company_id, abn="saved-abn", acn="saved-acn", registered=True,
+        company = Obj(id=company_id, organization_id=None, abn="saved-abn", acn="saved-acn", registered=True,
                       save=Mock(), refresh_from_db=Mock())
         profile = Obj(pk=1, role="founder", active_company_id=company_id)
         with patch.object(views, "get_or_create_founder_profile", return_value=profile), \
@@ -160,13 +160,13 @@ class ProfileSaveRegistrationTests(SimpleTestCase):
              patch.object(views, "set_unverified_company_abn") as set_abn, \
              patch.object(views, "FounderCompanySerializer", return_value=Obj(data={"name": "New name"})):
             profiles.return_value.get.return_value = profile
-            response = views.FounderToolsCompanyView.post.__wrapped__(views.FounderToolsCompanyView(),
+            response = views.FounderToolsCompanyView()._save_company(
                 Obj(user=Obj(), data={"companyId": str(company_id), "name": "New name"}))
             self.assertEqual(response.status_code, 200)
             self.assertEqual((company.abn, company.acn, company.registered), ("saved-abn", "saved-acn", True))
             verify.assert_not_called()
             set_abn.assert_not_called()
-            views.FounderToolsCompanyView.post.__wrapped__(views.FounderToolsCompanyView(),
+            views.FounderToolsCompanyView()._save_company(
                 Obj(user=Obj(), data={"companyId": str(company_id), "name": "New name", "abn": ""}))
             set_abn.assert_called_once_with(company, None)
             verify.assert_called_once_with(company, abn="saved-abn", acn=None)

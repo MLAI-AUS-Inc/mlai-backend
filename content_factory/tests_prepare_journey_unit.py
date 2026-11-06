@@ -14,6 +14,9 @@ from . import tests_one_click_operations_unit as fixtures
 
 
 class FrozenPrepareContextTests(SimpleTestCase):
+    def setUp(self):
+        self.enterContext(patch("startup_updates.benefits.has_monthly_update_discount", return_value=False))
+
     @staticmethod
     def rows(*, first=None, exists=False):
         """Replace persistence access while leaving preparation/projection real."""
@@ -160,6 +163,22 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.advance({"setup": self.setup_handler(captured)})
         self.assertEqual((captured[0]["article_surface_mode"], captured[0]["article_surface_url"]), ("none", "/articles"))
 
+    def test_legacy_hosted_site_still_dispatches_repository_setup(self):
+        setup = Mock(return_value={"run_id": "setup-child"})
+        self.advance({"setup": setup, "scan": setup, "verify-access": setup})
+        setup.assert_called_once()
+        self.assertEqual(self.op.state, "pending")
+        self.assertEqual(self.op.receipt["setup_run_id"], "setup-child")
+
+    def test_stale_hosted_capabilities_offer_repository_setup(self):
+        caps = {"repositoryAccessVerified": True, "repositoryWriteVerified": True, "accountAccessVerified": True,
+                "canPublishHostedArticle": True, "hostedSite": {"state": "active", "baseUrl": "https://fixture.test/blog/"}}
+        journey = self.journey(capabilities=caps)
+        self.assertIn("prepare", journey["allowedActions"])
+        self.assertIn("setup", journey["allowedActions"])
+        self.assertNotIn("canPublishHostedArticle", journey["capabilities"])
+        self.assertNotIn("hostedSite", journey["capabilities"])
+
     def test_verified_access_with_incomplete_repository_stops_after_repeat(self):
         self.facts["repository"] = None
         handler = Mock(return_value={"status": "completed"})
@@ -202,8 +221,10 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.config.github_repo = self.op.connection.github_repo
         with patch("content_factory.website_connections.authority_guard", return_value=nullcontext(self.op.connection)), \
                 patch("workflow_runs.models.ContentFactoryRun.objects.filter") as rows, \
+                patch("workflow_runs.models.ContentFactoryRun.objects.select_for_update") as locked, \
                 patch.object(operations.WebsiteConnectionOperation.objects, "get_or_create", return_value=(Mock(), True)):
             rows.return_value.first.return_value = None
+            locked.return_value.filter.return_value.order_by.return_value = []
             rows.return_value.values_list.return_value = []
             operations.cancel_operation(self.config, data={"website_connection_id": str(uuid4()), "connection_generation": 3,
                 "operation_id": str(self.op.pk)}, idempotency_key="cancel")
@@ -221,7 +242,8 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.op.state = "needs_user"
         self.op.receipt = {"current_step": "merge", "child_run_id": "existing-pr-child"}
         with patch.object(prepare, "authority_guard", return_value=nullcontext(self.op.connection)), \
-                patch.object(prepare.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)):
+                patch.object(prepare.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)), \
+                patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=[]):
             prepare.start_prepare(self.config, expected={}, retry=True)
         self.assertEqual(self.op.receipt["child_run_id"], "existing-pr-child")
         self.assertEqual(self.op.state, "pending")

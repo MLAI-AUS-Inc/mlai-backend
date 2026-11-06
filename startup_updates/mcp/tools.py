@@ -21,7 +21,7 @@ from startup_updates.update_identity import resolve_update
 from .oauth import company_for, valid_grant
 from .config import STARTUP_IDENTITY_SCOPES, mlai_url
 
-NARRATIVE_FIELDS = {"summary": "summary", "highlights": "highlights", "challenges": "lowlights",
+NARRATIVE_FIELDS = {"startupOverview": "startupOverview", "summary": "summary", "highlights": "highlights", "challenges": "lowlights",
     "learnings": "learnings", "next30Days": "next_30_days", "asks": "asks"}
 SOURCE_FIELDS = frozenset({"provider", "url", "title", "occurredAt"})
 SAVE_FIELDS = frozenset({"companyId", "month", "requestId", "updateId", "expectedRevision", "narrative", "sources", "coverageNotes"})
@@ -46,7 +46,7 @@ TOOLS = [
     {"name": "save_narrative_draft", "title": "Save a private narrative draft", "description": "Save a private monthly update for founder review. Only narrative and source references are accepted. Financial metrics and publishing cannot be changed. Retry using the same requestId; existing draft edits require expectedRevision.",
         "inputSchema": object_schema({"companyId": COMPANY, "month": MONTH, "requestId": {"type": "string", "format": "uuid"},
             "updateId": {"type": "integer", "minimum": 1}, "expectedRevision": {"type": ["integer", "null"]},
-            "narrative": object_schema({field: {"type": "string", "maxLength": 20000} for field in NARRATIVE_FIELDS}, ["summary"]),
+            "narrative": object_schema({field: {"type": "string", "maxLength": 2000 if field == "startupOverview" else 20000} for field in NARRATIVE_FIELDS}, ["summary"]),
             "sources": {"type": "array", "maxItems": 100, "items": object_schema({field: {"type": "string"} for field in SOURCE_FIELDS}, ["provider", "title"])},
             "coverageNotes": {"type": "string", "maxLength": 10000}}, ["companyId", "month", "requestId", "narrative"]),
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
@@ -82,9 +82,10 @@ def validate_save(arguments):
     narrative = arguments["narrative"]
     if not isinstance(narrative, dict) or set(narrative) - NARRATIVE_FIELDS.keys() or not narrative.get("summary"):
         raise ValidationError("Provide a summary and supported narrative sections only.")
-    for value in narrative.values():
-        if not isinstance(value, str) or len(value) > 20000:
-            raise ValidationError("Narrative sections must be text of at most 20,000 characters.")
+    for field, value in narrative.items():
+        limit = 2000 if field == "startupOverview" else 20000
+        if not isinstance(value, str) or len(value) > limit:
+            raise ValidationError(f"{field} must be text of at most {limit:,} characters.")
     sources = arguments.get("sources", [])
     if not isinstance(sources, list) or len(sources) > 100:
         raise ValidationError("Provide at most 100 source references.")
@@ -160,9 +161,16 @@ def _brief(company, month, activity_window=None):
     period = reporting_period(month, zone, as_of=now)
     window = _activity_window(activity_window, period, now)
     return {"companyId": str(company.pk), "startup": {"name": company.name, "domain": company.organization.domain,
-        "description": getattr(profile, "short_description", ""), "stage": getattr(profile, "stage", "")},
+        "description": getattr(profile, "short_description", ""), "stage": getattr(profile, "stage", ""),
+        "problemSolved": getattr(profile, "problem_solved", ""), "targetAudience": getattr(profile, "target_audience", "")},
         "month": month.isoformat()[:7], "reportingPeriod": period, "activityWindow": window,
         "sections": list(NARRATIVE_FIELDS), "instructions": [
+            "Write for both the founder's team and a community reader who has never heard of this startup. Use simple conversational language, not jargon or unexplained acronyms.",
+            "Start with startupOverview: one or two short sentences describing what the startup does, who it helps and the problem it solves, using only the supplied startup description, problemSolved and targetAudience. Leave it blank if this context is missing; do not guess.",
+            "Keep the monthly summary to one or two bullets and each other section to at most four bullets, with one or two short sentences per bullet. Combine related activity and do not repeat the same fact across sections or write a commit log.",
+            "Keep material uncertainty, risks and limitations beside the claims they qualify, in plain language. Put retrieval, source-coverage and writing-workflow notes only in coverageNotes, not in the reader-facing update.",
+            "Make each bullet self-contained: explain what happened and why it matters. Briefly explain unfamiliar names or necessary technical terms. Keep useful facts and distinctions between completed work, tests, plans and uncertainty; do not exaggerate progress.",
+            "For each ask, use the source's actual request and explain who could help and what they can do. Include timing or an introduction target only if supplied; do not invent needs, deadlines or contact details.",
             "Search the user's already-connected sources within activityWindow: include startInclusive and exclude endExclusive. This is the narrative source window; reportingPeriod remains the calendar financial period.",
             "Distinguish completed work from plans; include source links and dated evidence when available.",
             f"Record the narrative source window in coverageNotes as startInclusive={window['startInclusive']}; endExclusive={window['endExclusive']}. These dates describe agent-supplied coverage, not verified financial evidence.",
@@ -233,7 +241,7 @@ def save_draft(principal, arguments):
     for incoming, field in NARRATIVE_FIELDS.items():
         if incoming in arguments["narrative"]:
             value = arguments["narrative"][incoming].strip()
-            memo[field] = value if field == "summary" else [line.strip() for line in value.splitlines() if line.strip()]
+            memo[field] = value if field in {"summary", "startupOverview"} else [line.strip() for line in value.splitlines() if line.strip()]
     memo["_agent_sources"] = copy.deepcopy(arguments.get("sources", []))
     memo["_agent_provenance"] = {"kind": "agent_supplied", "client": principal.grant["clientName"],
         "submitted_at": timezone.now().isoformat(), "coverage_notes": arguments.get("coverageNotes", "")}

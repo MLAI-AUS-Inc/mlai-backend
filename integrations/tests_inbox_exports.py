@@ -90,6 +90,47 @@ class InboxExportTests(SimpleTestCase):
             self.assertEqual(response.status_code, expected)
 
 
+class CursorDependencySignalTests(SimpleTestCase):
+    def test_retry_dependencies_are_classified_without_callback_or_exception_contents(self):
+        from django.db import DatabaseError
+        from community_chat.adapter import MembershipAdapterUnavailable
+        for error, dependency, reason in (
+            (DatabaseError("synthetic-private-database-details"), "database", "database_unavailable"),
+            (MembershipAdapterUnavailable("synthetic-private-adapter-details"), "relay_adapter", "adapter_unavailable"),
+            (RuntimeError("inbox_delivery_link_pending"), "bridge_delivery", "anchor_pending"),
+            (RuntimeError("private_inbox_anchor_pending"), "bridge_delivery", "anchor_pending"),
+            (RuntimeError("synthetic-private-cursor-details"), "read_cursor", "processing_unavailable"),
+        ):
+            request = APIRequestFactory().post("/callback", InboxExportTests().payload(), format="json")
+            with self.subTest(dependency=dependency, reason=reason), patch(
+                "integrations.api_views_bridge.BuzzBridgeClient.validate_callback_signature", return_value=True,
+            ), patch.object(exports, "accept", side_effect=error), self.assertLogs(
+                "integrations.api_views_bridge", level="WARNING",
+            ) as logged:
+                response = BuzzCommunityBridgeEventView.as_view()(request)
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.data, {"error": "read_cursor_retry"})
+            self.assertEqual(len(logged.output), 1)
+            self.assertIn(f"dependency={dependency} reason={reason}", logged.output[0])
+            self.assertNotIn("synthetic-private", str(logged.output))
+            self.assertNotIn("account_key", str(logged.output))
+
+    @override_settings(MESSAGE_SYNC_INBOX_READ_EXPORT=False)
+    def test_disabled_export_is_a_configuration_signal_and_unsigned_requests_cannot_emit_it(self):
+        for valid in (False, True):
+            request = APIRequestFactory().post("/callback", InboxExportTests().payload(), format="json")
+            with patch(
+                "integrations.api_views_bridge.BuzzBridgeClient.validate_callback_signature", return_value=valid,
+            ), patch("integrations.api_views_bridge.logger") as logger:
+                response = BuzzCommunityBridgeEventView.as_view()(request)
+            self.assertEqual(response.status_code, 503 if valid else 403)
+            if valid:
+                self.assertIn("reason=inbox_export_disabled", logger.info.call_args.args[0])
+            else:
+                logger.info.assert_not_called()
+                logger.warning.assert_not_called()
+
+
 class PublicAnchorDeliveryTests(SimpleTestCase):
     link = InboxExportTests.link
 

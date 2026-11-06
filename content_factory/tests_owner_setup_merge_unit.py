@@ -59,11 +59,21 @@ def lookup(run, key):
 class Runs(list):
     """The ContentFactoryRun queries _find_owned_merge makes, over in-memory rows."""
 
-    def filter(self, **lookups):
+    def filter(self, *conditions, **lookups):
         def matches(run, key, expected):
+            if key.endswith("__isnull"):
+                value, _ = lookup(run, key.removesuffix("__isnull"))
+                return (value is None) == expected
             value, folded = lookup(run, key)
             return str(value).casefold() == str(expected).casefold() if folded else value == expected
-        return Runs(run for run in self if all(matches(run, key, value) for key, value in lookups.items()))
+        def condition(run, value):
+            if isinstance(value, tuple):
+                return matches(run, *value)
+            children = [condition(run, child) for child in value.children]
+            answer = any(children) if value.connector == "OR" else all(children)
+            return not answer if value.negated else answer
+        return Runs(run for run in self if all(condition(run, value) for value in conditions)
+            and all(matches(run, key, value) for key, value in lookups.items()))
 
     def order_by(self, *fields):
         return self
@@ -130,7 +140,7 @@ class OwnerSetupMergeFixture(SimpleTestCase):
         """Read-only synthetic GitHub; any repository write fails the test."""
         from integrations.services import github_app
         from workflow_runs.models import ContentFactoryRun
-        stack.enter_context(patch.object(ContentFactoryRun.objects, "filter", side_effect=lambda **kw: Runs(self.runs).filter(**kw)))
+        stack.enter_context(patch.object(ContentFactoryRun.objects, "filter", side_effect=lambda *conditions, **kw: Runs(self.runs).filter(*conditions, **kw)))
         stack.enter_context(patch.object(ContentFactoryRun.objects, "select_for_update", side_effect=self.lock_run))
         stack.enter_context(patch.object(reconciliation.OrganizationContentConfig.objects, "select_for_update", side_effect=self.lock_config))
         stack.enter_context(patch.object(authority, "authority_guard", side_effect=lambda *a, **kw: nullcontext(self.website)))

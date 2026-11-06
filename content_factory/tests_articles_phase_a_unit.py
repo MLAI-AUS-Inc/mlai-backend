@@ -91,7 +91,8 @@ class RetryIdentityTests(SimpleTestCase):
         op.receipt = {"child_run_id": "stale-proof", "deployment_attempts": 7, "current_step": "setup"}
         with patch.object(prepare, "authority_guard", return_value=nullcontext(op.connection)), \
                 patch.object(prepare.WebsiteConnectionOperation.objects, "get_or_create", return_value=(op, False)), \
-                patch.object(prepare, "_cancel_prepare_child") as cancel:
+                patch.object(prepare, "_cancel_prepare_child") as cancel, \
+                patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=journey_fixtures.FrozenPrepareContextTests.rows(first=None)):
             prepare.start_prepare(fixture.config, expected={}, retry=True)
         cancel.assert_called_once()
         self.assertIsNone(op.receipt["child_run_id"])
@@ -320,6 +321,7 @@ class SourceProofTests(SimpleTestCase):
         website.authorized_by = fixture.user
         website.authorized_by_id = fixture.user.pk
         website.operations = Mock()
+        website.operations.filter.return_value.order_by.return_value.first.return_value = None
         fixture.op.state = "running"
         with patch.object(WebsiteConnection.objects, "select_related") as connections, \
                 patch.object(OrganizationContentConfig.objects, "filter") as configs, \
@@ -332,4 +334,5 @@ class SourceProofTests(SimpleTestCase):
             companies.return_value.first.return_value = fixture.context.company
             operations.return_value.update.return_value = 0
             self.assertIsNone(prepare.wake_prepare_for_source(website.pk, organization_id=7))
-        website.operations.filter.assert_not_called()
+        website.operations.filter.assert_called_once_with(generation=3, action="prepare")
+        website.operations.filter.return_value.update.assert_not_called()

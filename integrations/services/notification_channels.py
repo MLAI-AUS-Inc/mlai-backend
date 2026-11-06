@@ -320,6 +320,7 @@ def send_email_verification(channel: NotificationChannel) -> None:
         text=text,
         html_body=html_body,
         idempotency_key=f"channel-verify:{channel.id}:{channel.verification_send_count}",
+        message_key="notification_channel_verify",
     )
     if not success:
         error = (
@@ -327,7 +328,7 @@ def send_email_verification(channel: NotificationChannel) -> None:
             or response_payload.get("message")
             or response_payload
         )
-        if str(error) == "email_not_configured" or "is not configured" in str(error):
+        if str(error) in {"email_not_configured", "system_email_unconfigured"} or "is not configured" in str(error):
             raise ChannelActionError(
                 "email_not_configured",
                 "Email sending is not configured.",

@@ -115,6 +115,24 @@ the client's Accept header, while retaining throttling and method restrictions.
 - `get_draft_status`: return scoped draft/revision identity and its private review
   URL.
 
+The brief includes the saved startup description, problem solved and target
+audience. Its writing instructions ask for a short `startupOverview`, followed
+by self-contained bullets in simple conversational language for readers who do
+not know the startup. Unfamiliar terms need explanation; plans and uncertainty
+must remain clear. Requests for help must come from supplied evidence, with no
+invented contacts, deadlines or needs. Missing profile context is left blank.
+The summary uses one or two bullets; other sections use up to four, each with
+one or two short sentences. Related activity is combined without repetition.
+Material uncertainty stays beside the relevant claim; retrieval and workflow
+notes belong only in private `coverageNotes`.
+
+`narrative.startupOverview` is optional text of at most 2,000 characters. It is
+saved as a scalar in the existing revision memo. Omission preserves an existing
+overview; an explicit empty string clears it. The overview remains an external
+agent assertion requiring exact-version founder review. The corresponding core
+Pulse overview change must be present so editors, community disclosure and
+exports carry the reviewed text and financial redaction includes it.
+
 Save uses existing `resolve_update`, `capture_snapshot` and `save_revision`
 services. Existing edits retain the exact financial snapshot. New drafts capture
 server-owned financial evidence. Top-level and nested narrative/source schemas

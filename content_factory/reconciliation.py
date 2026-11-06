@@ -37,6 +37,7 @@ indexed query per tick and nothing else.
 """
 
 import logging
+from copy import deepcopy
 from datetime import timedelta
 from typing import Optional
 
@@ -50,20 +51,21 @@ from django.utils.dateparse import parse_datetime
 
 from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
 
+from .run_status_contract import ACTIVE
+from .nightly_refresh_reconciliation import admitted_nightly_refresh, nightly_refresh_candidates
+from .run_reconciliation import authoritative_run, legacy_event_rows
+
 logger = logging.getLogger(__name__)
 
 # Runs in these statuses are owned by content-factory: progress arrives via
 # callbacks, so one that stops updating is either still (slowly) working,
 # lost its terminal callback, or never existed remotely at all.
-ACTIVE_RUN_STATUSES = (
-    ContentFactoryRunStatus.QUEUED,
-    ContentFactoryRunStatus.RUNNING,
-)
+ACTIVE_RUN_STATUSES = tuple(sorted(ACTIVE))
 
-# content-factory's GET /api/runs/{run_id} reads the durable store for these
-# workflows only (main.py _load_durable_run). A 404 for any other workflow is
-# inconclusive — the run may exist but be invisible to that endpoint — so the
-# sweep never probes them.
+# Workflows admitted to the existing reconciliation population. CF also reads
+# discovery from its workflow-independent artifact paths, but admitting it
+# requires an explicit creation-time boundary to avoid replaying old history.
+# Keep other workflows out until their status/recovery contracts are verified.
 DURABLY_READABLE_WORKFLOWS = frozenset(
     {
         "repo_scan",
@@ -102,8 +104,13 @@ def _setting_int(name: str, default: int) -> int:
 
 def _legacy_delivery_rows(json_field):
     """Keep absent JSON paths: SQL NOT-equality alone also excludes NULL paths."""
-    path = f"{json_field}__setup_delivery_v1__schema_version"
-    return Q(**{path + "__isnull": True}) | ~Q(**{path: 1})
+    setup = f"{json_field}__setup_delivery_v1__schema_version"
+    article = f"{json_field}__article_delivery_v1__schema_version"
+    rows = (Q(**{setup + "__isnull": True}) | ~Q(**{setup: 1})) & (
+        Q(**{article + "__isnull": True}) | ~Q(**{article: 1}))
+    # The admitted event owner has its own all-workflow pull path. This
+    # legacy selector must never re-adopt a mutable status snapshot for it.
+    return rows & legacy_event_rows() if json_field == "run_request" else rows
 
 
 def _stale_after() -> timedelta:
@@ -116,6 +123,50 @@ def _probe_interval() -> timedelta:
 
 def _batch_limit() -> int:
     return _setting_int("CONTENT_FACTORY_RECONCILIATION_BATCH_LIMIT", 10)
+
+
+def discovery_reconciliation_since(value):
+    """Parse an explicit aware admission boundary; absent/invalid disables it."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = parse_datetime(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed is not None and timezone.is_aware(parsed) else None
+
+
+def _stale_run_candidates(now):
+    return ContentFactoryRun.objects.filter(
+        status__in=ACTIVE_RUN_STATUSES,
+        updated_at__lt=now - _stale_after(),
+    ).filter(
+        Q(reconciled_at__isnull=True) | Q(reconciled_at__lt=now - _probe_interval())
+    ).filter(_legacy_delivery_rows("run_request")).order_by("updated_at", "pk")
+
+
+def preview_discovery_reconciliation(*, created_since, limit=10, now=None):
+    """Count a bounded discovery cohort without providers, repairs or writes.
+
+    This previews candidate selection only. Remote status and eventual actions
+    remain unknown. The broader reconciliation sweep is never called here.
+    """
+    since = discovery_reconciliation_since(created_since)
+    if since is None or type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("An aware ISO creation boundary and a limit from 1 to 100 are required.")
+    candidates = _stale_run_candidates(now or timezone.now()).filter(
+        workflow="auto_discovery", created_at__gte=since,
+    )
+    selected = list(candidates.values_list("status", flat=True)[:limit])
+    return {
+        "mode": "read_only_candidate_preview",
+        "created_since": since.isoformat(),
+        "limit": limit,
+        "eligible": candidates.count(),
+        "selected": len(selected),
+        "selected_by_status": {status: selected.count(status) for status in sorted(set(selected))},
+        "remote_actions": "not_probed",
+    }
 
 
 def _remote_base_url() -> str:
@@ -138,7 +189,7 @@ def _remote_headers() -> dict:
 def _stamp_reconciled(run_id: str, now) -> None:
     # .update() skips auto_now, so the probe stamp does not disturb the
     # updated_at staleness signal the sweep itself keys on.
-    ContentFactoryRun.objects.filter(run_id=run_id).update(reconciled_at=now)
+    ContentFactoryRun.objects.filter(run_id=run_id).filter(legacy_event_rows()).update(reconciled_at=now)
 
 
 def _finalize_run_failure(run_id: str, *, error: str, outcome: str, now) -> bool:
@@ -183,7 +234,10 @@ def _finalize_run_failure(run_id: str, *, error: str, outcome: str, now) -> bool
                 if request.get("operation_attempt") != operation.payload.get("attempt", 1):
                     return False
         run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first()
-        if run is None or run.status not in ACTIVE_RUN_STATUSES or run.organization_id != original["organization_id"]:
+        if run is None or authoritative_run(run) or run.status not in ACTIVE_RUN_STATUSES or run.organization_id != original["organization_id"]:
+            return False
+        nightly_refresh = run.workflow == "island_refresh"
+        if nightly_refresh and (not admitted_nightly_refresh(run) or run.run_request != request):
             return False
         try:
             current_binding = connection_contract(run.run_request or {})
@@ -194,7 +248,7 @@ def _finalize_run_failure(run_id: str, *, error: str, outcome: str, now) -> bool
             return False
         result = dict(run.result or {})
         result["reconciliation"] = {"outcome": outcome, "checked_at": now.isoformat()}
-        result["reconciliation_refund_pending"] = True
+        result["reconciliation_refund_pending"] = not nightly_refresh
         run.status = ContentFactoryRunStatus.FAILED
         run.error = error
         run.resume_available = False
@@ -214,6 +268,8 @@ def _finalize_run_failure(run_id: str, *, error: str, outcome: str, now) -> bool
             operation.state = "cancelled"
             operation.receipt = {**(operation.receipt or {}), "status": "failed", "reason_code": outcome, "run_id": run.run_id}
             operation.save(update_fields=["state", "receipt", "updated_at"])
+    if nightly_refresh:
+        return True
     try:
         _refund_failed_run(run, reason=outcome)
     except Exception:
@@ -226,6 +282,8 @@ def _adopt_remote_payload(run: ContentFactoryRun, payload: dict) -> str:
     Sync the remote run snapshot into the local row; returns the normalized
     status the run now carries.
     """
+    if authoritative_run(run):
+        return run.status
     from content_factory.service_views import _sync_content_factory_run_snapshot
     from workflow_runs.status import normalize_run_status
 
@@ -236,6 +294,36 @@ def _adopt_remote_payload(run: ContentFactoryRun, payload: dict) -> str:
     step_states = payload.get("step_states") or payload.get("steps") or {}
     if not isinstance(step_states, dict):
         step_states = {}
+    if run.workflow in {"auto_discovery", "island_refresh"}:
+        # Status polling does not return the admitted request or identity.
+        # Preserve those from the current row, not the pre-network snapshot,
+        # and let a callback/cancellation that already finished it win.
+        with transaction.atomic():
+            current = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).first()
+            if current is None or authoritative_run(current):
+                return run.status
+            if current.workflow != run.workflow or current.status not in ACTIVE_RUN_STATUSES:
+                return current.status
+            if current.workflow == "island_refresh" and not admitted_nightly_refresh(current):
+                raise ValueError("Nightly refresh has no admitted saved recovery scope.")
+            if sync_payload["workflow"] != current.workflow:
+                raise ValueError("Research status belongs to another workflow.")
+            for key in ("run_id", "job_id", "task_id"):
+                if payload.get(key) not in (None, "", current.run_id):
+                    raise ValueError("Research status belongs to another execution.")
+            remote_request = payload.get("run_request")
+            for key in ("domain", "github_repo", "slack_user_id"):
+                saved = getattr(current, key) or ""
+                for observation in (payload, remote_request if isinstance(remote_request, dict) else {}):
+                    observed = observation.get(key)
+                    if observed not in (None, "") and observed != saved:
+                        raise ValueError("Research status changes the saved identity.")
+                sync_payload[key] = saved
+            sync_payload["run_request"] = deepcopy(current.run_request or {})
+            observed, _ = _sync_content_factory_run_snapshot(
+                run_id=current.run_id, data=sync_payload, step_states=step_states,
+            )
+            return observed.status
     from .website_connections import authority_guard, needs_repository_authority, scoped_run_contract
     from .website_contract import WebsiteAuthorityError, connection_contract
     from .portable_drafts import portable_run_update_allowed
@@ -298,22 +386,18 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
     """
     now = now or timezone.now()
     limit = limit if isinstance(limit, int) and limit > 0 else _batch_limit()
-    stale_cutoff = now - _stale_after()
-    probe_cutoff = now - _probe_interval()
-
-    candidates = list(
-        ContentFactoryRun.objects.filter(
-            status__in=ACTIVE_RUN_STATUSES,
-            updated_at__lt=stale_cutoff,
-        )
-        .filter(Q(reconciled_at__isnull=True) | Q(reconciled_at__lt=probe_cutoff))
-        .filter(
-            Q(run_id__startswith=PLACEHOLDER_RUN_ID_PREFIX)
-            | Q(workflow__in=DURABLY_READABLE_WORKFLOWS)
-        )
-        .filter(_legacy_delivery_rows("run_request"))
-        .order_by("updated_at")[:limit]
+    covered = Q(run_id__startswith=PLACEHOLDER_RUN_ID_PREFIX) | Q(workflow__in=DURABLY_READABLE_WORKFLOWS)
+    discovery_since = discovery_reconciliation_since(
+        getattr(settings, "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE", ""),
     )
+    if discovery_since is not None:
+        covered |= Q(workflow="auto_discovery", created_at__gte=discovery_since)
+    nightly_since = discovery_reconciliation_since(
+        getattr(settings, "CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE", ""),
+    )
+    if nightly_since is not None:
+        covered |= nightly_refresh_candidates(nightly_since)
+    candidates = list(_stale_run_candidates(now).filter(covered)[:limit])
 
     summary = {
         "status": "completed",
@@ -325,6 +409,7 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
         "errors": 0,
         "recovery_requested": 0,
         "failed_stalled": 0,
+        "cancelled_stalled": 0,
     }
     from .setup_delivery_reconciliation import run_setup_delivery_reconciliation_sweep
     summary.update(run_setup_delivery_reconciliation_sweep(limit=limit, now=now))
@@ -332,6 +417,10 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
     summary["settled_restart_receipts"] = _reconcile_restart_receipts(limit=limit, now=now)
     summary["redriven"] = _redrive_fixed_runs(limit=limit, now=now)
     summary["refusal_alerts"] = report_repeated_refusals(limit=limit, now=now)
+    summary["queued_denied_refunds"] = _queue_denied_article_refunds(limit=limit, now=now)
+    summary["queued_dispatch_rejected_refunds"] = _queue_dispatch_rejected_article_refunds(limit=limit, now=now)
+    summary["queued_unrecoverable_refunds"] = _queue_unrecoverable_article_refunds(limit=limit, now=now)
+    summary["settled_exhausted_articles"] = _settle_exhausted_article_runs(limit=limit, now=now)
     _settle_sweep_refunds(limit=limit)
     if not candidates:
         return summary
@@ -341,6 +430,8 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
     recovery_supported = None
 
     for run in candidates:
+        if run.workflow == "island_refresh" and not admitted_nightly_refresh(run):
+            continue
         summary["checked"] += 1
 
         from .dispatch_binding import run_is_dispatch_token_keyed
@@ -413,7 +504,14 @@ def run_content_factory_reconciliation_sweep(*, limit: Optional[int] = None, now
             try:
                 from workflow_runs.status import normalize_run_status
                 remote_status = normalize_run_status(payload.get("status"))
-                if remote_status in ACTIVE_RUN_STATUSES and remote_heartbeat_stale(payload, now=now):
+                # CF's lease-aware orphan sweeper owns research worker recovery.
+                # CF's /recover endpoint currently supports article orchestration
+                # only; do not start its cancel/refund ladder for research.
+                if (
+                    run.workflow not in {"auto_discovery", "island_refresh"}
+                    and remote_status in ACTIVE_RUN_STATUSES
+                    and remote_heartbeat_stale(payload, now=now)
+                ):
                     if recovery_supported is None:
                         recovery_supported = worker_recovery_supported(base_url=base_url, headers=headers)
                     if not recovery_supported:
@@ -536,7 +634,7 @@ def recovery_was_accepted(payload):
 def _claim_run_recovery(run, now):
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update().filter(run_id=run.run_id, status__in=ACTIVE_RUN_STATUSES).first()
-        if not current or (current.result or {}).get("reconciliation_recovery"):
+        if not current or authoritative_run(current) or (current.result or {}).get("reconciliation_recovery"):
             return False
         result = {**(current.result or {}), "reconciliation_recovery": {"requested_at": now.isoformat(), "accepted": False}}
         ContentFactoryRun.objects.filter(pk=current.pk, status__in=ACTIVE_RUN_STATUSES).update(result=result, reconciled_at=now)
@@ -546,7 +644,7 @@ def _claim_run_recovery(run, now):
 def _record_recovery_result(run_id, *, accepted, now):
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id, status__in=ACTIVE_RUN_STATUSES).first()
-        if current:
+        if current and not authoritative_run(current):
             result = dict(current.result or {})
             result["reconciliation_recovery"] = {**result.get("reconciliation_recovery", {}),
                 "accepted": accepted, "checked_at": now.isoformat()}
@@ -555,11 +653,16 @@ def _record_recovery_result(run_id, *, accepted, now):
 
 def recover_stalled_run(run, *, base_url, headers, now):
     """Ask the worker once; after five minutes without progress, fence and refund."""
+    if authoritative_run(run):
+        return "authoritative_owned"
     previous = (run.result or {}).get("reconciliation_recovery") or {}
     requested_at = _timestamp(previous.get("requested_at"))
     if previous:
         if requested_at and now - requested_at < timedelta(minutes=5):
             return "waiting_for_recovery"
+        from .run_state import ARTICLE_WORKFLOWS
+        if getattr(run, "workflow", None) in ARTICLE_WORKFLOWS:
+            return _stop_stalled_article(run, base_url=base_url, headers=headers, now=now)
         try:
             requests.post(f"{base_url}/api/runs/{run.run_id}/cancel", headers=headers,
                 json={"reason": "worker_heartbeat_lost"}, timeout=(3, 15))
@@ -581,39 +684,343 @@ def recover_stalled_run(run, *, base_url, headers, now):
     return "recovery_requested" if accepted else "recovery_unconfirmed"
 
 
+def _stop_stalled_article(run, *, base_url, headers, now):
+    """A recovery deadline requests a stop; it never proves that a write failed."""
+    if authoritative_run(run):
+        return "authoritative_owned"
+    from .article_publication_evidence import cancellation_receipt
+    from .website_cancellation_retirement import expected_article_cancellation
+    from .service_views import _apply_cancellation_receipt
+    from .run_cancellation import cancellation_request_fields
+    # A lost worker heartbeat is a system stop, never the owner's (IF-20).
+    reasons = cancellation_request_fields("worker_heartbeat_lost", "system")
+    original_result = deepcopy(run.result)
+    result = dict(original_result or {})
+    attempts = result.get("article_stop_attempts", 0)
+    if type(attempts) is not int or attempts >= 3:
+        return "recovery_unconfirmed"
+    claimed_result = {**result, "article_stop_attempts": attempts + 1}
+    # Sweeps can hold the same stale snapshot. Claim against its result as well
+    # as its heartbeat, without making our own HTTP attempt look like progress.
+    claimed = ContentFactoryRun.objects.filter(pk=run.pk, status=run.status,
+        updated_at=run.updated_at, result=original_result).update(result=claimed_result)
+    if not claimed:
+        return "callback_won"
+    try:
+        response = requests.post(f"{base_url}/api/runs/{run.run_id}/cancel", headers=headers,
+            json={"reason": "worker_heartbeat_lost", **reasons,
+                "expected_cancellation_v1": expected_article_cancellation(run)}, timeout=(3, 15))
+        remote = response.json() if response.status_code in {200, 202} else {}
+        if cancellation_receipt(run, remote) is not None:
+            # An older worker does not echo the reason; ours still labels the stop.
+            incoming = {**reasons, **dict(remote.get("result") or {})}
+            for key in ("article_cancellation_v1", "publication_evidence_v1"):
+                if key in remote:
+                    incoming[key] = remote[key]
+            receipt = _apply_cancellation_receipt(run.run_id, {"domain": run.domain, "status": "cancelled", "result": incoming})
+            if receipt.status_code == 200:
+                return "cancelled_stalled"
+    except Exception:
+        logger.warning("article_stall_stop_unconfirmed run_id=%s", run.run_id)
+    if attempts == 2:
+        finalized = ContentFactoryRun.objects.filter(pk=run.pk, status=run.status,
+            updated_at=run.updated_at, result=claimed_result).update(
+            status="blocked", resume_available=False,
+            error="Worker cancellation could not be verified. Publication and payment need reconciliation.",
+            result={**claimed_result, "article_settlement_status": "needs_reconciliation"})
+        if not finalized:
+            return "callback_won"
+    return "recovery_unconfirmed"
+
+
 def _refund_failed_run(run, *, reason):
+    if authoritative_run(run):
+        return None
+    from .no_delivery_refunds import enabled, refund_decision, apply_refund_decision
+    if enabled():
+        return apply_refund_decision(run, refund_decision(run))
     from .billing_lineage import ARTICLE_CHARGE_PREFIX, original_article_spend_for_run, paid_article_request
+    from .article_publication_evidence import refund_reconciliation_reason
     from integrations.services.article_generation import refund_content_factory_request_for_user
-    request = run.run_request or {}
-    terminal_receipt = (run.result or {}).get("article_terminal_refund")
-    paid_obligation = isinstance(terminal_receipt, dict) and terminal_receipt.get("paid_obligation") is True
-    ledger = original_article_spend_for_run(run)
-    refund = None
-    if ledger and ledger.user:
-        request = {**request, "client_request_id": ledger.idempotency_key.removeprefix(ARTICLE_CHARGE_PREFIX)}
-        refund = refund_content_factory_request_for_user(user=ledger.user, actor_id=ledger.created_by_slack_id or "",
-            article_request=request, resolved_domain=run.domain, reason=reason)
-        if refund is None:
-            raise ValueError("The recorded spend's refund could not be verified.")
-    elif paid_article_request(request) or paid_obligation:
-        raise ValueError("The recorded spend could not be resolved for refund.")
-    # Refund I/O may overlap a worker receipt. Merge the fresh result under a
-    # brief lock rather than replacing it with our pre-refund snapshot.
+    # Credit is local ledger I/O. Keep the run lock through the idempotent credit
+    # so a later callback cannot replace the checked evidence midway through it.
     with transaction.atomic():
+        from organizations.models import Organization
+        if getattr(run, "organization_id", None):
+            Organization.objects.select_for_update().filter(pk=run.organization_id).first()
         current = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).first()
-        if current:
-            result = dict(current.result or {})
-            if isinstance(result.get("article_terminal_refund"), dict):
-                result["article_terminal_refund"] = {**result["article_terminal_refund"],
-                    "status": "refunded" if refund else "not_required"}
-                if refund:
-                    result["article_terminal_refund"]["refund_ledger_id"] = str(refund.pk)
-            current.result = {**result, "reconciliation_refund_pending": False}
+        if current is None or authoritative_run(current):
+            return
+        result = dict(current.result or {})
+        terminal_receipt = result.get("article_terminal_refund")
+        receipt = dict(terminal_receipt) if isinstance(terminal_receipt, dict) else {}
+        if receipt.get("status") in {"refunded", "not_required"}:
+            return
+        if (current.run_request or {}).get("first_article_goal_operation_id"):
+            # A legacy child outbox cannot credit the parent's shared spend after
+            # a different repair child delivers. Preserve the obligation under
+            # its original goal owner; the goal's own refund outbox settles it.
+            current.result = {**result, "article_settlement_owner": "first_article_goal",
+                "article_terminal_refund": {**receipt, "status": "deferred_to_goal"},
+                "reconciliation_refund_pending": True}
             current.save(update_fields=["result"])
+            return
+        stop_reason = refund_reconciliation_reason(current)
+        if stop_reason:
+            if stop_reason == "stop_required" and receipt.get("status") == "needs_reconciliation":
+                stop_reason = "needs_reconciliation"
+            current.result = {**result, "article_terminal_refund": {**receipt, "status": stop_reason},
+                "reconciliation_refund_pending": True}
+            current.save(update_fields=["result"])
+            return
+        request = current.run_request or {}
+        from .first_article_entitlement import entitled_request, release_entitlement
+        if entitled_request(request):
+            # A free first article has no spend to credit. Its stop releases the
+            # attempt once, unless another run of its lineage delivered or is going.
+            released = release_entitlement(organization=current.organization_id, run=current, reason=reason)
+            current.result = {**result, "reconciliation_refund_pending": False, "article_terminal_refund": {
+                **receipt, "status": "not_required",
+                "entitlement_released": released or receipt.get("entitlement_released") is True}}
+            current.save(update_fields=["result"])
+            return None
+        paid_obligation = receipt.get("paid_obligation") is True or receipt.get("billing_resolution_required") is True
+        ledger = original_article_spend_for_run(current)
+        refund = None
+        if ledger and ledger.user:
+            request = {**request, "client_request_id": ledger.idempotency_key.removeprefix(ARTICLE_CHARGE_PREFIX)}
+            refund = refund_content_factory_request_for_user(user=ledger.user, actor_id=ledger.created_by_slack_id or "",
+                article_request=request, resolved_domain=current.domain, reason=reason)
+            if refund is None:
+                raise ValueError("The recorded spend's refund could not be verified.")
+        elif paid_article_request(request) or paid_obligation:
+            raise ValueError("The recorded spend could not be resolved for refund.")
+        if receipt:
+            result["article_terminal_refund"] = {**receipt, "status": "refunded" if refund else "not_required"}
+            if refund:
+                result["article_terminal_refund"]["refund_ledger_id"] = str(refund.pk)
+        current.result = {**result, "reconciliation_refund_pending": False}
+        current.save(update_fields=["result"])
+        return refund
+
+
+def _queue_denied_article_refunds(*, limit, now):
+    """Reserve the credit of a paid run refused before delivery; its stop still decides.
+
+    A refused run can end denied with its failure callback superseded, so no
+    terminal callback reserves the obligation. The exhausted-run sweep then
+    obtains the worker's bound stop receipt before ``_refund_failed_run`` credits.
+    """
+    from .article_publication_evidence import denied_refund_code
+    from .first_article_entitlement import entitled_request
+    from .run_state import ARTICLE_WORKFLOWS
+    from organizations.models import Organization
+    count = 0
+    candidates = ContentFactoryRun.objects.filter(status="denied", workflow__in=ARTICLE_WORKFLOWS,
+        updated_at__lt=now - _stale_after(), result__article_terminal_refund__isnull=True).filter(
+        _legacy_delivery_rows("run_request")).order_by("updated_at")[:limit]
+    for candidate in candidates:
+        code = denied_refund_code(candidate)
+        if not code:
+            continue
+        # Same lock order as _refund_failed_run; a callback may have queued or
+        # settled this obligation, or recorded an effect, since selection.
+        with transaction.atomic():
+            if candidate.organization_id:
+                Organization.objects.select_for_update().filter(pk=candidate.organization_id).first()
+            run = ContentFactoryRun.objects.select_for_update().filter(pk=candidate.pk).first()
+            if run is None or authoritative_run(run) or "article_terminal_refund" in (run.result or {}) or denied_refund_code(run) != code:
+                continue
+            run.result = {**(run.result or {}), "reconciliation_refund_pending": True,
+                "article_terminal_refund": {"status": "pending", "paid_obligation": not entitled_request(run.run_request),
+                    "job_id": run.run_id, "error_code": code[:100], "settlement_reason": "denied_without_delivery"}}
+            run.save(update_fields=["result"])
+        try:
+            _refund_failed_run(run, reason=f"Article run was refused before delivery ({code}).")
+        except Exception:
+            logger.warning("content_factory_denied_refund_pending run_id=%s", run.run_id)
+        count += 1
+    return count
+
+
+def _queue_unrecoverable_article_refunds(*, limit, now):
+    """Reserve the credit of a paid run that failed with no way to continue; its stop still decides.
+
+    Such a failure needs a user action the run cannot offer, and no callback
+    reserves its obligation. The exhausted-run sweep then obtains the worker's
+    bound stop receipt before ``_refund_failed_run`` credits.
+    """
+    from .article_publication_evidence import unrecoverable_refund_code
+    from .first_article_entitlement import entitled_request
+    from .run_state import ARTICLE_WORKFLOWS
+    from organizations.models import Organization
+    count = 0
+    candidates = ContentFactoryRun.objects.filter(status="failed", workflow__in=ARTICLE_WORKFLOWS, resume_available=False,
+        updated_at__lt=now - _stale_after(), result__article_terminal_refund__isnull=True).filter(
+        _legacy_delivery_rows("run_request")).order_by("updated_at")[:limit]
+    for candidate in candidates:
+        from .no_delivery_refunds import enabled, refund_decision, apply_refund_decision
+        if enabled():
+            apply_refund_decision(candidate, refund_decision(candidate, now=now), now=now)
+            continue
+        code = unrecoverable_refund_code(candidate)
+        if not code:
+            continue
+        # Same lock order as _refund_failed_run and a restart's reservation; a
+        # callback, effect or replacement draft may have arrived since selection.
+        with transaction.atomic():
+            if candidate.organization_id:
+                Organization.objects.select_for_update().filter(pk=candidate.organization_id).first()
+            run = ContentFactoryRun.objects.select_for_update().filter(pk=candidate.pk).first()
+            if (run is None or authoritative_run(run) or "article_terminal_refund" in (run.result or {}) or unrecoverable_refund_code(run) != code
+                    or ContentFactoryRun.objects.filter(Q(run_request__original_billing_source_run_id=run.run_id)
+                        | Q(run_request__billing_source_run_id=run.run_id)).exists()):
+                continue
+            run.result = {**(run.result or {}), "reconciliation_refund_pending": True,
+                "article_terminal_refund": {"status": "pending", "paid_obligation": not entitled_request(run.run_request),
+                    "job_id": run.run_id, "error_code": code[:100], "settlement_reason": "failed_without_recovery"}}
+            run.save(update_fields=["result"])
+        try:
+            _refund_failed_run(run, reason=f"Article run failed with no way to continue ({code}).")
+        except Exception:
+            logger.warning("content_factory_unrecoverable_refund_pending run_id=%s", run.run_id)
+        count += 1
+    return count
+
+
+def _queue_dispatch_rejected_article_refunds(*, limit, now):
+    """Credit a paid run whose first snapshot the backend refused, once its key proves it.
+
+    Content Factory fails that run locally without a terminal callback, so no
+    obligation is reserved, and its stop endpoint cannot bind a scope the
+    backend never merged. Its dispatch-key record, bound to this run, is the
+    no-work proof. Any other answer keeps the charge for reconciliation.
+    """
+    from .article_publication_evidence import DISPATCH_REJECTED, dispatch_rejected_refund_candidate
+    from .first_article_entitlement import entitled_request
+    from .run_state import ARTICLE_WORKFLOWS
+    from .vibe_marketing_views import _content_factory_remote_config, _lookup_content_factory_dispatch_by_key
+    from organizations.models import Organization
+    remote = _content_factory_remote_config()
+    if not remote["enabled"]:
+        return 0
+    count = 0
+    candidates = ContentFactoryRun.objects.filter(status="failed", workflow__in=ARTICLE_WORKFLOWS,
+        result__error_code=DISPATCH_REJECTED, updated_at__lt=now - _stale_after(),
+        result__article_terminal_refund__isnull=True).filter(
+        Q(reconciled_at__isnull=True) | Q(reconciled_at__lt=now - _probe_interval())).filter(
+        _legacy_delivery_rows("run_request")).order_by("updated_at")[:limit]
+    for candidate in candidates:
+        if not dispatch_rejected_refund_candidate(candidate):
+            continue
+        key = str(candidate.run_request["client_request_id"]).strip()
+        outcome, payload = _lookup_content_factory_dispatch_by_key(remote, key)
+        if outcome == "unknown":
+            # An unreachable worker or a key still mid-claim proves nothing.
+            ContentFactoryRun.objects.filter(pk=candidate.pk).update(reconciled_at=now)
+            continue
+        backend_code = str(payload.get("error") or "").removeprefix("backend_rejected:").strip()[:100]
+        proved = bool(outcome == "rejected" and backend_code and str(payload.get("run_id") or "") == candidate.run_id
+            and payload.get("run_status") == "failed")
+        # Same lock order as _refund_failed_run; a restart may have reused the
+        # charge, or a callback reserved the obligation, since selection.
+        with transaction.atomic():
+            if candidate.organization_id:
+                Organization.objects.select_for_update().filter(pk=candidate.organization_id).first()
+            run = ContentFactoryRun.objects.select_for_update().filter(pk=candidate.pk).first()
+            if (run is None or authoritative_run(run) or "article_terminal_refund" in (run.result or {}) or not dispatch_rejected_refund_candidate(run)
+                    or ContentFactoryRun.objects.filter(Q(run_request__original_billing_source_run_id=run.run_id)
+                        | Q(run_request__billing_source_run_id=run.run_id)).exists()):
+                continue
+            result = {**(run.result or {}), "reconciliation_refund_pending": True,
+                "article_terminal_refund": {"status": "pending" if proved else "needs_reconciliation",
+                    "paid_obligation": not entitled_request(run.run_request), "job_id": run.run_id,
+                    "settlement_reason": "dispatch_rejected_without_delivery" if proved else "dispatch_rejection_unconfirmed"}}
+            if proved:
+                result["dispatch_rejection_v1"] = {"version": 1, "run_id": run.run_id, "client_request_id": key,
+                    "key_status": "failed", "backend_code": backend_code, "checked_at": now.isoformat()}
+            run.result = result
+            run.save(update_fields=["result"])
+        count += 1
+        if not proved:
+            logger.warning("content_factory_dispatch_rejected_refund_unconfirmed run_id=%s outcome=%s", run.run_id, outcome)
+            continue
+        try:
+            _refund_failed_run(run, reason=f"Article start was refused before any work began ({backend_code}).")
+        except Exception:
+            logger.warning("content_factory_dispatch_rejected_refund_pending run_id=%s", run.run_id)
+    return count
+
+
+def _settle_exhausted_article_runs(*, limit, now):
+    """Ask the worker to fence exhausted work; elapsed time never proves no effects."""
+    from .article_publication_evidence import TERMINAL_REFUND_STATUSES, exhausted_article_candidate, cancellation_receipt
+    from .website_cancellation_retirement import expected_article_cancellation
+    from .run_state import ARTICLE_WORKFLOWS
+    from .vibe_marketing_views import _call_content_factory_run_action
+    from .service_views import _apply_cancellation_receipt
+    from .run_cancellation import cancellation_request_fields
+    # Settling an exhausted or no-value run is a system stop (IF-20).
+    reasons = cancellation_request_fields("system_stop", "system")
+    count = 0
+    candidates = ContentFactoryRun.objects.filter(status__in=["blocked", *sorted(TERMINAL_REFUND_STATUSES)], workflow__in=ARTICLE_WORKFLOWS,
+        updated_at__lt=now - _stale_after()).filter(
+        Q(reconciled_at__isnull=True) | Q(reconciled_at__lt=now - _probe_interval())).filter(legacy_event_rows()).order_by("updated_at")[:limit]
+    for run in candidates:
+        from .no_delivery_refunds import enabled, refund_decision, apply_refund_decision
+        if enabled():
+            decision = refund_decision(run, now=now)
+            if decision.get('why') in {'retry_pending', 'policy_pending', 'goal_settlement_owned'}:
+                continue
+            apply_refund_decision(run, decision, now=now)
+            # Publication-unknown still needs the original bound stop protocol.
+            if decision.get('why') != 'publication_unresolved':
+                continue
+        if not exhausted_article_candidate(run):
+            continue
+        original_result = deepcopy(run.result)
+        result = dict(original_result or {})
+        attempts = result.get("article_settlement_attempts", 0)
+        if type(attempts) is not int or attempts >= 3:
+            continue
+        claimed_result = {**result, "article_settlement_attempts": attempts + 1,
+            "article_settlement_status": "needs_reconciliation" if attempts == 2 else "stop_pending"}
+        if attempts == 2 and run.status in TERMINAL_REFUND_STATUSES:
+            claimed_result["article_terminal_refund"] = {**dict(result.get("article_terminal_refund") or {}),
+                "status": "needs_reconciliation"}
+        # Claim before remote I/O. Preserve evidence-only writes as well as
+        # preventing duplicate sweeps from spending the same attempt.
+        claimed = ContentFactoryRun.objects.filter(pk=run.pk, status=run.status, updated_at=run.updated_at,
+            reconciled_at=run.reconciled_at, result=original_result).update(reconciled_at=now, result=claimed_result)
+        if not claimed:
+            continue
+        try:
+            remote = _call_content_factory_run_action(run_id=run.run_id, action="cancel", workflow=run.workflow,
+                payload={"reason": "article_terminal_no_value" if run.status in TERMINAL_REFUND_STATUSES else "article_budget_exhausted",
+                    **reasons, "expected_cancellation_v1": expected_article_cancellation(run)}, transport_errors_are_pending=True)
+            if cancellation_receipt(run, remote) is None:
+                continue
+            incoming = {**reasons, **dict(remote.get("result") or {})}
+            for key in ("article_cancellation_v1", "publication_evidence_v1"):
+                if key in remote:
+                    incoming[key] = remote[key]
+            response = _apply_cancellation_receipt(run.run_id, {"domain": run.domain, "status": "cancelled",
+                "result": incoming})
+            if response.status_code == 200:
+                count += 1
+        except Exception:
+            # Keep the claimed attempt durable and continue the batch. Never log
+            # provider bodies or turn unavailable evidence into a credit.
+            logger.warning("article_settlement_pending run_id=%s", run.run_id)
+    return count
 
 
 def _settle_sweep_refunds(*, limit):
-    for run in ContentFactoryRun.objects.filter(status__in=["failed", "cancelled"], result__reconciliation_refund_pending=True).filter(_legacy_delivery_rows("run_request"))[:limit]:
+    from .article_publication_evidence import TERMINAL_REFUND_STATUSES
+    for run in ContentFactoryRun.objects.filter(status__in=sorted(TERMINAL_REFUND_STATUSES), result__reconciliation_refund_pending=True).filter(_legacy_delivery_rows("run_request") |
+            Q(result__article_cancellation_v1__purpose="article_cancellation")).filter(
+            Q(result__article_terminal_refund__status__isnull=True) |
+            ~Q(result__article_terminal_refund__status__in=["needs_reconciliation", "deferred_to_goal"])).filter(legacy_event_rows())[:limit]:
         try:
             if (run.run_request or {}).get("pending_billing_refund"):
                 from .vibe_marketing_views import _process_pending_dispatch_refund
@@ -672,7 +1079,9 @@ def _reconcile_orphan_operations(*, limit, now):
 
 
 def _lookup_orphan_child(op):
-    """A missing local child does not prove that a timed-out POST was rejected."""
+    """A missing child does not prove that a timed-out POST was rejected."""
+    if _operation_has_event_owner(op):
+        return "unknown", {}
     from .vibe_marketing_views import _content_factory_remote_config, _lookup_content_factory_dispatch_by_key
     key = op.payload.get("client_request_id")
     if not key:
@@ -735,7 +1144,7 @@ def _reconcile_restart_receipts(*, limit, now):
         with transaction.atomic():
             current = ContentFactoryRun.objects.select_for_update().filter(pk=original.pk).first()
             saved = (current.result or {}).get("restart_receipt") if current else None
-            if not current or not saved or saved.get("client_request_id") != key or saved.get("state") != "pending":
+            if not current or authoritative_run(current) or not saved or saved.get("client_request_id") != key or saved.get("state") != "pending":
                 continue
             receipt = {**saved, "state": state, "reused_authorization": "accepted" if state == "completed" else "released",
                 "finished_at": now.isoformat(), "reconciled": True, "charged": False, "dispatch_outcome": outcome}
@@ -752,7 +1161,7 @@ def _reconcile_restart_receipts(*, limit, now):
                     count = existing_count + 1
                 current.result.update(restart_child_run_id=child_id, user_action_count=max(existing_count, count))
                 child = ContentFactoryRun.objects.select_for_update().filter(run_id=child_id, organization_id=current.organization_id).first()
-                if child:
+                if child and not authoritative_run(child):
                     child_count = (child.result or {}).get("user_action_count")
                     child_count = child_count if type(child_count) is int and child_count >= 0 else 0
                     child.result = {**(child.result or {}), "user_action_count": max(child_count, count)}
@@ -766,6 +1175,8 @@ def _reconcile_restart_receipts(*, limit, now):
 
 
 def _adopt_orphan_child(op, remote_payload):
+    if _operation_has_event_owner(op):
+        raise ValueError("The admitted event owner retains this dispatch identity.")
     from .vibe_marketing_views import _create_local_run
     from .website_connections import contract_for
     from .website_operations import bind_operation_run
@@ -784,6 +1195,8 @@ def _adopt_orphan_child(op, remote_payload):
 
 def _refund_orphan_operation(op):
     """Retry a failed receipt's idempotent refund until its saved spend settles."""
+    if _operation_has_event_owner(op):
+        return
     from roo.models import Ledger
     from integrations.services.article_generation import refund_content_factory_request_for_user
     from .website_models import WebsiteConnectionOperation
@@ -801,12 +1214,25 @@ def _refund_orphan_operation(op):
             current.save(update_fields=["receipt", "updated_at"])
 
 
+def _operation_has_event_owner(op):
+    """A legacy operation sweep cannot race an admitted run's key owner."""
+    key = (op.payload or {}).get("client_request_id")
+    website = getattr(op, "connection", None)
+    if not key or website is None:
+        return False
+    return ContentFactoryRun.objects.filter(organization_id=website.organization_id,
+        result__run_owner_v1__authority__event_protocol=1,
+        result__run_owner_v1__identity__dispatch_key=key).exists()
+
+
 def _redrive_fixed_runs(*, limit, now):
     base_url = _remote_base_url()
     if not base_url:
         return 0
     candidates = list(ContentFactoryRun.objects.filter(status="blocked", updated_at__lt=now - timedelta(minutes=10),
         workflow__in=DURABLY_READABLE_WORKFLOWS).filter(_legacy_delivery_rows("run_request")).filter(Q(result__sweep_redrive_attempted__isnull=True) | Q(result__sweep_redrive_attempted=False))[:limit])
+    from .failure_policy_engine import owns_recovery
+    candidates = [run for run in candidates if not owns_recovery(run, now=now)]
     if not candidates:
         return 0
     try:
@@ -859,7 +1285,7 @@ def _deliver_pending_refusal_alerts(*, limit, now):
     from uuid import NAMESPACE_URL, uuid5
     import re
     channel = str(getattr(settings, "CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID", "") or "").strip()
-    if not re.fullmatch(r"[CG][A-Z0-9]{8,}", channel):
+    if not re.fullmatch(r"[CGD][A-Z0-9]{8,}", channel):
         return 0
     from integrations.services.slack import SlackService
     candidates = ContentFactoryRun.objects.filter(updated_at__gte=now - timedelta(days=1),

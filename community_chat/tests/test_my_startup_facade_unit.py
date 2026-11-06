@@ -49,6 +49,18 @@ class MyStartupFacadeTests(SimpleTestCase):
         self.assertEqual(self.get_object_or_404.call_args.kwargs, {"pk": COMPANY, "profile__user": self.user})
         self.assertEqual(views.BootstrapView.authentication_classes, (MyStartupAuthentication,))
 
+    def test_usage_detail_inherits_chat_auth_company_scope_and_literal_route(self):
+        with patch.object(views.websites.WebsiteCostUsageView, "get", return_value=Response({"usage": {}})) as read:
+            response = self.call(views.WebsiteCostUsageView)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response["Cache-Control"], "private, no-store")
+            self.assertEqual(self.get_object_or_404.call_args.kwargs, {"pk": COMPANY, "profile__user": self.user})
+            self.assertEqual(self.call(views.WebsiteCostUsageView, authenticated=False).status_code, 401)
+            self.assertEqual(read.call_count, 1)
+        for suffix in ("", "/"):
+            match = resolve("/api/v1/my-startup/vibe-marketing/website-connection/usage" + suffix)
+            self.assertEqual(match.func.view_class, views.WebsiteCostUsageView)
+
     def test_missing_auth_or_company_and_conflicting_body_scope_fail_closed(self):
         with patch.object(views.marketing.VibeMarketingSettingsView, "put") as save:
             self.assertEqual(self.call(views.SettingsView, method="put", authenticated=False).status_code, 401)
@@ -66,6 +78,15 @@ class MyStartupFacadeTests(SimpleTestCase):
             self.user_may_use_organization.return_value = False
             self.assertEqual(self.call(views.CompaniesView, method="post", data={"name": "Changed"}).status_code, 404)
         save.assert_not_called()
+
+    def test_account_read_survives_a_foreign_selection_without_company_lookup(self):
+        self.get_object_or_404.side_effect = Http404
+        with patch.object(views.CurrentUserView, "get", return_value=Response({"id": 7})):
+            response = self.call(views.AccountView)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(self.call(views.AccountView, authenticated=False).status_code, 401)
+        self.get_object_or_404.assert_not_called()
+        self.user_may_use_organization.assert_not_called()
 
     def test_creation_has_no_selected_company_and_requires_draft_research(self):
         with patch.object(views.marketing.VibeMarketingAutofillView, "post", return_value=Response({"runId": "r"})) as research:

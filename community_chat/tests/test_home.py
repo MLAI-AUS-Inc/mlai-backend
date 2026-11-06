@@ -56,6 +56,12 @@ class CommunityHomeTests(APITestCase):
             microroo_initialized=True,
         )
 
+    @override_settings(MENTOR_BOOKING_ENABLED=True)
+    def test_home_exposes_enabled_mentor_booking(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["feature_flags"]["mentor_booking"])
+
     @override_settings(COMMUNITY_CHAT_ROO_PUBLIC_KEY="AB" * 32)
     def test_home_returns_only_configured_roo_public_identity(self):
         response = self.client.get(self.url)
@@ -176,10 +182,10 @@ class CommunityHomeTests(APITestCase):
         )
         self.assertEqual(response.data["earn_actions"][0]["points"], 4)
         self.assertEqual(response.data["earn_actions"][1]["points"], 10)
-        self.assertEqual(
-            response.data["earn_actions"][1]["description"],
-            "Complete and save a ready monthly update for your verified company.",
-        )
+        update_description = response.data["earn_actions"][1]["description"]
+        self.assertIn("10 Roo points if shared publicly or with the MLAI community", update_description)
+        self.assertIn("Private approvals earn 5 Roo points and do not unlock discounts", update_description)
+        self.assertIn("30 days from first approval", update_description)
         self.assertEqual(
             response.data["earn_actions"][4]["command"],
             f"@Roo task claim {visible.task_code}",
@@ -195,7 +201,13 @@ class CommunityHomeTests(APITestCase):
         self.assertFalse(rewards["UNLIMITED"]["can_afford"])
         self.assertEqual(
             response.data["feature_flags"],
-            {"link_love": False, "meeting_rooms": True, "coworking_booking": False},
+            {
+                "link_love": False,
+                "meeting_rooms": True,
+                "coworking_booking": False,
+                "event_discounts": False,
+                "mentor_booking": False,
+            },
         )
 
     def test_response_does_not_expose_other_members_or_private_roo_fields(self):

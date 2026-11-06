@@ -1,17 +1,21 @@
 """Pure guards for immutable certified website and backend-owned run evidence."""
 from datetime import timedelta
+import re
 
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from .website_contract import WebsiteAuthorityError, evidence_digest, template_validation
 
 
-PROOF_STATUSES = frozenset({"passed", "verified", "preview_verified"})
 NO_DELIVERY_REFUND_CODES = frozenset({
     "INTERNAL_ERROR", "UNCLASSIFIED", "RUN_BUDGET_EXHAUSTED", "ONBOARDING_MODEL_BUDGET_EXHAUSTED",
     "EDITORIAL_REJECTED", "EXPORT_EDITORIAL_REJECTED", "DELIVERY_REVIEW_DRIFT", "SOURCE_CHANGED",
-    "ARTICLE_DIRECTORY_AGENT_PROVIDER_ERROR",
+    # Authority refusal codes arrive lowercase and are matched upper-cased.
+    "WEBSITE_SOURCE_CHANGED", "ARTICLE_DIRECTORY_AGENT_PROVIDER_ERROR",
+    # Content Factory's own code when this backend refuses without naming one.
+    "CONNECTION_AUTHORIZATION_FAILED",
 })
 
 
@@ -25,31 +29,49 @@ def proof_stamp(proof, *, now=None):
     return stamp
 
 
+DIGEST = re.compile(r"[a-f0-9]{64}")
+
+
+def sealed_contract(contract):
+    """A target whose contract digest and live marker a setup sealed into its verification kit."""
+    contract = contract if isinstance(contract, dict) else {}
+    marker = contract.get("live_marker") if isinstance(contract.get("live_marker"), dict) else {}
+    return bool(DIGEST.fullmatch(str(contract.get("contract_digest") or "")) and DIGEST.fullmatch(str(marker.get("value") or "")))
+
+
 def target_update_allowed(previous, incoming, *, generation, sha):
-    """A weaker scan cannot overwrite an exact-generation certified target."""
+    """Scans cannot rewrite an accepted certificate at its exact source."""
     if previous is None:
         return True
     if previous.generation != generation:
         raise WebsiteAuthorityError("website_target_generation_migration_required",
             "This target belongs to an older generation. The reviewed target-key migration is required.")
+    from .website_publishing_inputs import has_candidate
+    if "requiredProofVersion" in (getattr(previous, "capabilities", None) or {}):
+        # Protocol enrollment is backend-owned. Even an identical worker echo
+        # must not replace capabilities and erase this durable requirement.
+        return False
+    if has_candidate(previous.contract) and not has_candidate(incoming):
+        # An unverified proposal still requires its stronger protocol. Dropping
+        # the candidate must not let a scan restore a legacy ready flag.
+        return False
+    if sealed_contract(previous.contract) and not DIGEST.fullmatch(str((incoming or {}).get("contract_digest") or "")):
+        # Setup sealed this target's identity into the repository's own
+        # verification kit, whose CI proof names that digest. A rescan's
+        # re-detection of the same key, carrying no digest, cannot erase it:
+        # La Vie's post-merge rescan (25 Oct 2026) dropped digest f737dcf3, so
+        # the kit's proof at the merged commit matched nothing.
+        return False
     if not previous.verified_at or previous.source_sha != sha:
         return True
-    proof = incoming.get("verification") if isinstance(incoming.get("verification"), dict) else {}
-    accepted = (previous.contract or {}).get("verification") or {}
-    preview_only = accepted.get("status") == "preview_verified" and not previous.capabilities.get("publishingReady")
-    statuses = PROOF_STATUSES if preview_only else {"passed", "verified"}
-    if proof.get("status") not in statuses or proof.get("source_sha") != sha:
-        return False
-    if evidence_digest(incoming) == evidence_digest(previous.contract):
-        return True
-    stamp = proof_stamp(proof)
-    return bool(stamp and stamp >= previous.verified_at
-        and incoming.get("delivery_adapter") == previous.adapter
-        and (preview_only or incoming.get("publish_capability") in {"direct", "hook"}))
+    # A copied or refreshed timestamp does not attest changed routes, commands,
+    # stores or publisher inputs. Provider attestation has its own guarded write
+    # path; scan proposals remain in WebsiteScanSnapshot until reverified there.
+    return evidence_digest(incoming) == evidence_digest(previous.contract)
 
 
 def protect_certified_config(config, defaults, *, sha=""):
-    """Keep selected certified contracts until an equal or newer proof replaces them."""
+    """Keep selected certified contracts separate from worker scan proposals."""
     connection = getattr(config, "website_connection", None) if config else None
     if connection is None:
         return defaults
@@ -57,23 +79,19 @@ def protect_certified_config(config, defaults, *, sha=""):
     if not isinstance(incoming, list):
         incoming = list(getattr(config, "publish_targets", None) or [])
     by_key = {str(item.get("target_id") or item.get("id")): item for item in incoming if isinstance(item, dict)}
-    certified = list(connection.targets.filter(generation=connection.generation,
-        source_sha=connection.verified_sha, verified_at__isnull=False))
-    for row in certified:
+    protected = list(connection.targets.filter(
+        Q(source_sha=connection.verified_sha, verified_at__isnull=False)
+        | Q(contract__contract__has_key="publishing_inputs_v1")
+        | Q(capabilities__has_key="requiredProofVersion"), generation=connection.generation))
+    for row in protected:
         candidate = by_key.get(row.target_key)
         if candidate is None or not target_update_allowed(row, candidate, generation=connection.generation, sha=connection.verified_sha):
             by_key[row.target_key] = row.contract
     selected = str(getattr(config, "default_publish_target_id", "") or "")
-    if any(row.target_key == selected for row in certified):
-        proposed = str(defaults.get("default_publish_target_id") or selected)
-        replacement = by_key.get(proposed) or {}
-        proof = replacement.get("verification") or {}
-        replacement_stamp = proof_stamp(proof)
-        selected_stamp = next(row.verified_at for row in certified if row.target_key == selected)
-        if proposed != selected and not (proof.get("status") in {"passed", "verified"}
-                and proof.get("source_sha") == connection.verified_sha
-                and replacement_stamp and replacement_stamp >= selected_stamp):
-            defaults["default_publish_target_id"] = selected
+    if any(row.target_key == selected for row in protected):
+        # This helper is used by worker config/scan writes, not owner target
+        # selection. Even another certified target is not a new selection.
+        defaults["default_publish_target_id"] = selected
     if "publish_targets" in defaults:
         defaults["publish_targets"] = list(by_key.values())
     return defaults
@@ -87,13 +105,24 @@ def safe_template_seed(body):
 
 def delivered_content(run):
     """Conservatively detect persisted delivery before granting no-value refunds."""
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import has_verified_delivery
+        return has_verified_delivery(run)
     result = getattr(run, "result", None) or {}
+    from django.conf import settings
+    if getattr(settings, "ARTICLES_REGISTRY_REFUNDS_ENABLED", False) and result.get("draft_ready_v1"):
+        return True
     acceptance = getattr(run, "acceptance_summary", None) or {}
     package = result.get("content_package") or result.get("contentPackage") or {}
     package = package if isinstance(package, dict) else {}
-    return bool(acceptance.get("content_packaged") or package.get("content_packaged")
+    pr_delivery = bool(result.get("pr_url"))
+    if pr_delivery and result.get("publication_evidence_v1") is not None:
+        from .article_publication_evidence import publication_state
+        pr_delivery = publication_state(run) != "setup_only"
+    return bool(pr_delivery or acceptance.get("content_packaged") or package.get("content_packaged")
         or package.get("contentPackaged") or any(result.get(key) for key in
-            ("article", "content", "markdown", "pr_url", "publish_url", "live_url")))
+            ("article", "content", "markdown", "publish_url", "live_url")))
 
 
 def publish_child_binding(config, source_run, payload, remote_data, *, reviewed_source=None):
@@ -109,7 +138,10 @@ def publish_child_binding(config, source_run, payload, remote_data, *, reviewed_
         raise WebsiteAuthorityError("website_repository_changed", "This saved draft belongs to an older website repository. Start a newly reviewed publishing draft.")
     original_request = getattr(source_run, "run_request", None) or {}
     if original_request.get("expected_source_sha") and original_request["expected_source_sha"] != connection.verified_sha:
-        raise WebsiteAuthorityError("website_source_changed", "The verified website source changed since this draft. Review a new publishing revision.")
+        # A newly admitted publication may consume a separately reviewed ref.
+        # Its source remains pinned; only the fresh destination uses default.
+        from .run_review_source import publication_binding_source
+        publication_binding_source(source_run, connection)
     target = connection.targets.filter(generation=connection.generation,
         target_key=getattr(config, "default_publish_target_id", None), source_sha=connection.verified_sha,
         verified_at__isnull=False).first()

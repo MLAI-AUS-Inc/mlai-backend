@@ -1,0 +1,10 @@
+Hi {{ first_name|default:"there" }},
+
+Your {{ product_name|default:"MLAI Chat" }} code is: {{ verification_code }}
+
+Enter it to sign in. It expires in {{ expires_minutes }} minute{{ expires_minutes|pluralize }} and works once.
+
+If you didn't ask for this code, you can ignore this email. Nobody can sign in without it.{% if support_url %}
+Need help? {{ support_url }}{% endif %}
+
+MLAI · https://mlai.au

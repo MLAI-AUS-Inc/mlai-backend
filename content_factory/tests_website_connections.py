@@ -340,6 +340,41 @@ class WebsiteDatabaseFixture:
 
 @override_settings(ROO_API_KEY='synthetic-test-key', INTERNAL_API_KEY='synthetic-test-key')
 class WebsiteLifecycleTests(WebsiteDatabaseFixture, TestCase):
+    def test_disconnect_keeps_financial_outbox_rows_and_their_original_leases(self):
+        from .website_first_article_refunds import ACTION
+        generation = self.website.generation
+        retained = []
+        for state in ("pending", "running", "needs_attention"):
+            parent = WebsiteConnectionOperation.objects.create(connection=self.website,
+                generation=generation, action="prepare", state="cancelled",
+                idempotency_key="refund-parent-" + state,
+                receipt={"goal": {"goal_id": state}, "first_article_billing": {"status": "reserved"}})
+            receipt = {"status": "credit_pending", "original_marker": state}
+            due = timezone.now() + timedelta(minutes=3)
+            row = WebsiteConnectionOperation.objects.create(connection=self.website,
+                generation=generation, action=ACTION, state=state, attempts=2,
+                next_attempt_at=due, receipt=receipt,
+                idempotency_key=f"{self.website.pk}:goal-refund:{parent.pk}",
+                payload={"goal_operation_id": str(parent.pk), "goal_id": state})
+            retained.append((row, state, due, receipt))
+        unpaid = WebsiteConnectionOperation.objects.create(connection=self.website,
+            generation=generation, action="prepare", state="running", idempotency_key="new-refund-parent",
+            receipt={"goal": {"goal_id": "new"}, "first_article_billing": {"status": "reserved"}})
+        scan = WebsiteConnectionOperation.objects.create(connection=self.website,
+            generation=generation, action="scan", state="pending", idempotency_key="cancelled-scan")
+
+        transition_connection(self.config, action="disconnect", expected=self.binding)
+
+        for row, state, due, receipt in retained:
+            row.refresh_from_db()
+            self.assertEqual((row.state, row.attempts, row.next_attempt_at, row.receipt), (state, 2, due, receipt))
+        scan.refresh_from_db()
+        self.assertEqual(scan.state, "cancelled")
+        created = WebsiteConnectionOperation.objects.get(idempotency_key=f"{self.website.pk}:goal-refund:{unpaid.pk}")
+        self.assertEqual(created.state, "pending")
+        self.assertEqual(created.generation, generation)
+        self.assertEqual(created.receipt, {"status": "credit_pending"})
+
     def test_source_change_can_record_setup_merge_without_promoting_readiness(self):
         from . import vibe_marketing_views as marketing
         from .website_connections import owner_write_guard, scoped_run_contract
@@ -642,6 +677,22 @@ class WebsiteLifecycleTests(WebsiteDatabaseFixture, TestCase):
         self.assertEqual(result['deletions'], [])
         self.assertEqual(result['retained'], ['content/0.md', 'content/1.md'])
         self.assertEqual(get.call_count, 2)
+
+    def test_completed_scan_clears_the_reset_scan_prompt(self):
+        transition_connection(self.config, action='reset', expected=self.binding)
+        self.website.refresh_from_db()
+        self.assertIn('scan_required', [item['code'] for item in self.website.blockers])
+        record_scan_evidence(self.website, {'repository_inventory': {'source_sha': SHA, 'discovery_complete': True}})
+        self.website.refresh_from_db()
+        self.assertNotIn('scan_required', [item['code'] for item in self.website.blockers])
+        self.assertTrue(self.website.capabilities['inventoryReady'])
+
+    def test_partial_scan_keeps_the_reset_scan_prompt(self):
+        transition_connection(self.config, action='reset', expected=self.binding)
+        self.website.refresh_from_db()
+        record_scan_evidence(self.website, {'repository_inventory': {'source_sha': SHA, 'discovery_complete': False}})
+        self.website.refresh_from_db()
+        self.assertIn('scan_required', [item['code'] for item in self.website.blockers])
 
     def test_reset_archives_invalid_templates_and_preserves_run_history(self):
         self.config.article_template = '# EXISTING ARTIFACT\ncontaminated'
@@ -1208,6 +1259,35 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
             bind_website(self.config, user=None, repo='example/site', reconnect=True, expected={})
         self.website.refresh_from_db()
         self.assertEqual(self.website.state, 'disconnected')
+
+    @patch('content_factory.website_connections.verify_repository_access')
+    def test_reconnecting_a_connected_website_keeps_its_setup_and_running_work(self, verify):
+        # 29 Oct 2026 audit: "Reconnect website" on a connected site bumped the
+        # generation, cancelled running work and cleared publish targets.
+        verify.return_value = {'repository_id': 123, 'github_repo': 'example/site', 'installation_id': '46', 'branch': 'main'}
+        running = WebsiteConnectionOperation.objects.create(connection=self.website, generation=self.website.generation,
+            action='setup', state='running', idempotency_key='running-setup')
+        generation = self.website.generation
+        connection = bind_website(self.config, user=None, repo='example/site', app_root=self.website.app_root,
+            branch=self.website.branch, site_url=self.website.site_url, reconnect=True, expected=self.binding)
+        self.assertEqual(connection.pk, self.website.pk)
+        self.website.refresh_from_db(); running.refresh_from_db(); self.config.refresh_from_db()
+        self.assertEqual((self.website.generation, self.website.state, self.website.installation_id), (generation, 'connected', '46'))
+        self.assertEqual(running.state, 'running')
+        self.assertEqual(self.config.publish_targets, [{'target_id': 'native'}])
+        self.assertTrue(self.config.auto_publish)
+        self.assertTrue(self.website.capabilities['publishingReady'])
+
+    @patch('content_factory.website_connections.verify_repository_access')
+    def test_reconnecting_a_paused_website_still_starts_a_new_generation(self, verify):
+        verify.return_value = {'repository_id': 123, 'github_repo': 'example/site', 'installation_id': '45', 'branch': 'main'}
+        transition_connection(self.config, action='pause', expected=self.binding)
+        self.website.refresh_from_db()
+        paused_generation = self.website.generation
+        bind_website(self.config, user=None, repo='example/site', app_root=self.website.app_root, branch=self.website.branch,
+            site_url=self.website.site_url, reconnect=True, expected=contract_for(self.website))
+        self.website.refresh_from_db()
+        self.assertEqual((self.website.state, self.website.generation), ('connected', paused_generation + 1))
 
     @patch('content_factory.website_connections.verify_repository_access')
     def test_explicit_default_branch_selection_rebinds_custom_branch(self, verify):

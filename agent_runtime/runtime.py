@@ -211,7 +211,7 @@ def claim_task(*, worker_id, access_checker=None, now=None):
     if not isinstance(worker_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", worker_id):
         raise AgentRuntimeError("invalid_worker_id")
     recover_tasks(now=now)
-    due = AgentTask.objects.filter(status__in=("queued", "retry"), available_at__lte=now)
+    due = AgentTask.objects.filter(status__in=("queued", "retry"), available_at__lte=now).exclude(grant__installation__app_id="mlai-community")
     # Sample grants first: a large queue owned by one saturated member must
     # not occupy every candidate slot and prevent other members being served.
     candidate_grants = list(due.values("grant_id").annotate(oldest=Min("available_at"))
@@ -340,7 +340,10 @@ def revoke_grant(grant_id, *, owner, now=None):
         grant.save(update_fields=("revoked_at", "generation", "updated_at"))
     AgentCredential.objects.filter(grant=grant, revoked_at__isnull=True).update(revoked_at=now)
     AgentResponsibility.objects.filter(grant=grant).update(is_active=False)
-    AgentSubscription.objects.filter(grant=grant).update(is_active=False)
+    from .event_webhooks import stop_delivery
+    for subscription in locked(AgentSubscription.objects.filter(grant=grant, is_active=True, delivery__mode="webhook")):
+        stop_delivery(subscription, "grant_revoked", grant=grant, now=now)
+    AgentSubscription.objects.filter(grant=grant, is_active=True).update(is_active=False)
     if getattr(grant.installation, "community_id", None) is not None:
         from .models import AgentInvocation, AgentInvocationReply
         AgentInvocation.objects.filter(grant=grant, status="pending").update(status="cancelled")
@@ -383,7 +386,7 @@ def recover_tasks(*, now=None, limit=100):
     if not feature_enabled():
         return 0
     recovered = 0
-    ids = list(AgentTask.objects.filter(status="running", lease_expires_at__lte=now)
+    ids = list(AgentTask.objects.filter(status="running", lease_expires_at__lte=now).exclude(grant__installation__app_id="mlai-community")
                .order_by("lease_expires_at").values_list("pk", flat=True)[:min(1000, limit)])
     for task_id in ids:
         with transaction.atomic():

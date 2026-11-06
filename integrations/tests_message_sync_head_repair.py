@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, override_settings
 
-from integrations.services.message_sync import head_repair as repair, history, private_history
+from integrations.services.message_sync import head_repair as repair, history, private_history, member_history
 from integrations.services.message_sync.scheduler import validate_checkpoint
 
 
@@ -296,7 +296,7 @@ class HeadRepairPageIntegrationTests(SimpleTestCase):
     now = 1_800_000_000
 
     def test_public_head_persists_only_completed_upper_and_reuses_it_next_pass(self):
-        channel = SimpleNamespace(pk=1, slack_workspace_id="T1", slack_channel_id="C1",
+        channel = SimpleNamespace(pk=1, audience="community", slack_workspace_id="T1", slack_channel_id="C1",
                                   destination_platform="buzz", destination_workspace_id="relay", destination_channel_id="room",
                                   enabled=True)
         state = SimpleNamespace(public_channel=channel, public_channel_id=1, private_conversation_id=None,
@@ -307,13 +307,19 @@ class HeadRepairPageIntegrationTests(SimpleTestCase):
         with patch.object(history.time, "time", return_value=self.now), patch.object(history.transaction, "atomic", side_effect=nullcontext), patch.object(
             history, "locked_job", return_value=(state, None)
         ), patch.object(history.CommunityBridgeChannel.objects, "select_for_update") as channel_lock, patch.object(
-            history.SlackBridgeClient, "get_client", return_value=client
+            history.SlackDmMirrorConversation.objects, "filter"
+        ) as private_owner, patch.object(
+            member_history, "guard_page"
         ), patch.object(history, "finish_job") as finish:
             channel_lock.return_value.get.return_value = channel
-            history.public_page(lease, state)
+            private_owner.return_value.exists.return_value = False
+            history._public_page(lease, state, client=client, member_authority="synthetic-member-scope")
             self.assertEqual(state.head_cursor["completed_upper"], f"{self.now}.999999")
             self.assertEqual(finish.call_args.kwargs["delay_seconds"], 120)
-            history.public_page(lease, state)
+            history._public_page(lease, state, client=client, member_authority="synthetic-member-scope")
+        private_owner.assert_called_with(slack_workspace_id="T1", slack_conversation_id="C1")
+        self.assertEqual(private_owner.call_count, 2)
+        self.assertEqual(private_owner.return_value.exists.call_count, 2)
         self.assertEqual(client.conversations_history.call_args.kwargs["oldest"], f"{self.now - 300}.000000")
 
     def test_private_head_keeps_authority_fences_and_incremental_watermark(self):

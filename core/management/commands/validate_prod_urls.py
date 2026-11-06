@@ -218,10 +218,20 @@ def _validate_community_chat_contract(errors: list[str]) -> None:
     # ordinary login option; email-code and device auth remain required below.
     if not _as_bool(getattr(settings, "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED", False)):
         errors.append("COMMUNITY_CHAT_DEVICE_AUTH_ENABLED must be true in production.")
-    if not _as_clean_string(
+    from system_email.api import resend_message_keys, routes_to_resend
+
+    codes_on_resend = routes_to_resend("chat_sign_in_code")
+    if not codes_on_resend and not _as_clean_string(
         getattr(settings, "CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID", "")
     ):
         errors.append("CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID is required in production.")
+    if resend_message_keys():
+        for name in ("SYSTEM_EMAIL_RESEND_API_KEY", "MLAI_SYSTEM_FROM_EMAIL", "SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET"):
+            if not _as_clean_string(getattr(settings, name, "")):
+                errors.append(f"{name} is required while SYSTEM_EMAIL_RESEND_MESSAGES routes email to Resend.")
+        system_key = _as_clean_string(getattr(settings, "SYSTEM_EMAIL_RESEND_API_KEY", ""))
+        if system_key and system_key == _as_clean_string(getattr(settings, "RESEND_API_KEY", "")):
+            errors.append("SYSTEM_EMAIL_RESEND_API_KEY must be a separate key from RESEND_API_KEY.")
 
     adapter_url = _as_clean_string(getattr(settings, "COMMUNITY_CHAT_ADAPTER_URL", ""))
     parsed_adapter = _parse_http_url("COMMUNITY_CHAT_ADAPTER_URL", adapter_url, errors)
@@ -263,7 +273,7 @@ def _validate_community_chat_contract(errors: list[str]) -> None:
     django_secret = _as_clean_string(getattr(settings, "SECRET_KEY", ""))
     if django_secret and django_secret in populated:
         errors.append("MLAI Chat email and membership-adapter secrets must not reuse SECRET_KEY.")
-    if not _as_clean_string(getattr(settings, "CUSTOMERIO_API_KEY", "")):
+    if not codes_on_resend and not _as_clean_string(getattr(settings, "CUSTOMERIO_API_KEY", "")):
         errors.append("CUSTOMERIO_API_KEY is required for MLAI Chat email-code delivery.")
 
 

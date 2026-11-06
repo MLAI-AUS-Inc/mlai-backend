@@ -2,11 +2,22 @@
 
 import json
 import re
+import hashlib
 from functools import lru_cache
 from pathlib import Path
 
 # Preserve the existing bounded pass-through for workspace-specific shortcodes.
 SLACK_REACTION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_+\-]{0,61}$")
+SLACK_CUSTOM_NAME_RE = re.compile(r"^[a-z0-9_+\-]{1,100}$")
+
+
+def custom_shortcode(name: str) -> str:
+    """Keep provider names displayable within NIP-30 and the 64-scalar limit."""
+    if not SLACK_CUSTOM_NAME_RE.fullmatch(name):
+        return ""
+    if len(name) <= 62 and "+" not in name and name[0].isalnum():
+        return name
+    return "slack_" + hashlib.sha256(name.encode()).hexdigest()[:40]
 
 
 @lru_cache(maxsize=1)
@@ -15,6 +26,8 @@ def _emoji_maps() -> tuple[dict[str, str], dict[str, str]]:
         (Path(__file__).parent / "community_bridge" / "slack_emoji.json").read_text()
     )
     to_native = data["shortcodes"]
+    extra = json.loads((Path(__file__).parent / "community_bridge" / "slack_emoji_extra.json").read_text())
+    to_native.update(extra["shortcodes"])
     to_slack = {native: name for name, native in reversed(list(to_native.items()))}
     # Preserve established spellings and tolerate text-style heart reactions.
     to_slack.update({"👍": "thumbsup", "❤": "heart"})
@@ -27,10 +40,11 @@ def slack_reaction_to_emoji(value: str) -> str:
     mapped = _emoji_maps()[0].get(reaction)
     if mapped:
         return mapped
-    return f":{reaction}:" if SLACK_REACTION_NAME_RE.fullmatch(reaction) else ""
+    shortcode = custom_shortcode(reaction)
+    return f":{shortcode}:" if shortcode else ""
 
 
-def emoji_to_slack_reaction(value: str) -> str:
+def emoji_to_slack_reaction(value: str, *, catalog=None) -> str:
     """Encode every supported Unicode variant without dropping its skin tone."""
     reaction = str(value or "").strip()
     mapped = _emoji_maps()[1].get(reaction)
@@ -38,6 +52,9 @@ def emoji_to_slack_reaction(value: str) -> str:
         return mapped
     if reaction.startswith(":") and reaction.endswith(":"):
         shortcode = reaction[1:-1]
+        for source_name, item in (catalog or {}).items():
+            if item.get("shortcode") == shortcode:
+                return source_name
         if shortcode in _emoji_maps()[0] or SLACK_REACTION_NAME_RE.fullmatch(shortcode):
             return shortcode
     return ""

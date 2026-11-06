@@ -176,7 +176,8 @@ class CompanyDomainChangeGuardTests(TestCase):
             COMPANIES_URL, {"name": "Bar Impostor", "domain": "bar.example", "registered": True}, format="json"
         )
         self.assertEqual(response.status_code, 409)
-        self.assertIn("already linked", str(response.data["detail"]))
+        self.assertEqual(response.data["code"], "company_domain_claimed")
+        self.assertEqual(response.data["detail"], "This startup is already on MLAI.")
         self.assertEqual(VibeRaisingCompany.objects.filter(profile__user=self.user).count(), 0)
 
     def test_twin_endpoint_honours_the_same_guard(self):

@@ -154,8 +154,17 @@ def _refresh_status(conversation):
         coverage = archive
     if sync and sync.last_error_code:
         state = "error"
-    elif sync and coverage.get("classification") in {None, "incomplete", "unknown"}:
+    elif sync and not failed and not scan_error and coverage.get("classification") in {None, "incomplete", "unknown"}:
         state = "syncing"
+    from integrations.services.message_sync import recent_history
+    marker = recent_history.private_progress(conversation) if recent_history.enabled() else None
+    # A paused deep archive is idle, not a never-ending initial import. This is
+    # availability only; history_scan_complete retains its full-archive meaning.
+    preload_idle = bool(marker is not None and (marker.metadata or {}).get("complete") is not None
+            and recent_history.private_page_limit(conversation, 50) == 0
+            and not pending and not failed and not scan_error and not (sync and sync.last_error_code))
+    if preload_idle:
+        state = "complete"
     return {
         "source_coverage": coverage,
         "channel_id": str(conversation.mlai_channel_id),
@@ -165,6 +174,7 @@ def _refresh_status(conversation):
         ),
         "history_days": conversation.grant.history_days,
         "history_scan_complete": conversation.history_backfilled_at is not None,
+        "history_preload_complete": preload_idle,
         "last_synced_at": conversation.history_backfilled_at,
         **counts,
         "retryable": state == "error",

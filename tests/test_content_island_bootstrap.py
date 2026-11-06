@@ -10,6 +10,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.signing import TimestampSigner
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -345,11 +346,15 @@ class IslandGraphPayloadTests(ContentIslandBootstrapTestCase):
 
 class IslandFlagOffLegacyPayloadTests(ContentIslandBootstrapTestCase):
     def _payload_with_and_without_islands(self):
-        with_islands = self.bootstrap("summary")
-        ContentIslandEdge.objects.filter(organization=self.organization).delete()
-        ContentIslandKeyword.objects.filter(island__organization=self.organization).delete()
-        ContentIsland.objects.filter(organization=self.organization).delete()
-        without_islands = self.bootstrap("summary")
+        # Signed company URLs include second-resolution timestamps. Hold that
+        # unrelated input fixed while comparing the entire feature-flag payload.
+        timestamp = TimestampSigner().timestamp()
+        with patch.object(TimestampSigner, "timestamp", return_value=timestamp):
+            with_islands = self.bootstrap("summary")
+            ContentIslandEdge.objects.filter(organization=self.organization).delete()
+            ContentIslandKeyword.objects.filter(island__organization=self.organization).delete()
+            ContentIsland.objects.filter(organization=self.organization).delete()
+            without_islands = self.bootstrap("summary")
         return with_islands, without_islands
 
     @override_settings(CONTENT_ISLANDS_ENABLED=False)

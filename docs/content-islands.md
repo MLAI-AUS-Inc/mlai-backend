@@ -1,5 +1,9 @@
 # Content islands
 
+Scheduled nightly refresh recovery is documented in
+[nightly refresh reconciliation](nightly-refresh-reconciliation.md). Its saved
+scheduler contract excludes the paid brief-led research described below.
+
 The founder dashboard has two actions beside Map/List: **Create an island** for
 exploring a new subject, and **Find more islands** for normal company discovery.
 The duplicate creation card, Learn more button and summary chips are removed.
@@ -79,6 +83,14 @@ worker's normal run-sync callback performs this even after the browser closes;
 status polling also reconciles it. The existing ledger refund idempotency key is
 used. A new deliberate attempt after a terminal result uses a new request ID.
 
+`POST /api/v1/vibe-marketing/runs/<runId>/cancel` also accepts company-owned,
+brief-led island research. It confirms the worker has stopped before recording
+cancellation and refunding the original payer. A timeout or unconfirmed worker
+response returns a retryable error and leaves the run available for polling.
+Completed research keeps its measured results if completion wins the race.
+Unresolved dispatches must first resolve their worker identity. Scheduled island
+refreshes are excluded. The browser retains the topic brief after cancellation.
+
 ### Select several measured themes
 
 The results screen has individual checkboxes, Select all/Clear selection, and a
@@ -132,6 +144,30 @@ This uses the existing run JSON, island membership and snapshot models; no schem
 migration is required. Existing manual islands do not change behavior unless a
 founder selects their measured theme through the batch flow. A theme already
 managed by another research brief is reused without transferring ownership.
+
+## Remove an island
+
+Selecting an island on the map or list offers **Remove island** with a confirm
+step. `POST /api/v1/vibe-marketing/islands/<slug>/remove` (also under
+`/api/v1/my-startup/vibe-marketing/`, with or without a trailing slash) uses the
+authenticated company context, returns `{"removed": "<slug>"}` or 404, and is
+safe to repeat.
+
+Removal archives the island, stamps `ContentIsland.removed_at` (migration
+`content_factory.0047`) and recomputes edges. Memberships, snapshots and article
+history are kept; nothing is deleted. The island is released from its research
+selection: its proposal IDs leave `selected_ids`/`managed_proposal_ids`, its slug
+leaves `managed_slugs`, and the revision increments so an in-flight refresh built
+from the old selection is stale. The researched theme can therefore be chosen
+again from the same results.
+
+Refreshes never receive archived islands, so a removed theme could otherwise be
+born again. Bulk sync skips a birth whose centroid has cosine similarity of at
+least 0.90 with a removed island's centroid, never revives a removed slug, and
+reports these as `suppressed`. Evolution of selected themes drops groups that
+match a removed island the same way. Adding the theme again through research
+adoption or the custom island endpoint clears `removed_at` and makes it visible.
+Declined-topic history is unchanged.
 
 ## Existing manual islands and older clients
 

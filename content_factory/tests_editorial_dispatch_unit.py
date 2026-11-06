@@ -7,6 +7,7 @@ database and network guards. ORM/HTTP/billing seams are controlled fixtures,
 so these tests do not prove persistence, SQL races or real billing.
 """
 import ast
+import copy
 from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone as dt_timezone
@@ -26,6 +27,7 @@ if not settings.configured:
 
 from rest_framework import status
 from rest_framework.response import Response
+from .article_voice import article_voice_for_dispatch
 from .editorial_catalog import approve_catalog, article_brief_for_catalog, update_catalog
 from .tests_editorial_catalog_unit import approval_payload
 from .tests_editorial_catalog_unit import approved_catalog, draft_catalog, edit_payload
@@ -49,7 +51,8 @@ class CurrentArticleBriefTests(unittest.TestCase):
     def test_ci_includes_the_no_database_editorial_regressions(self):
         workflow = (Path(__file__).resolve().parent.parent / ".github/workflows/deploy.yml").read_text()
         step = workflow.split("- name: Run no-database editorial contract checks\n", 1)[1].split("\n    - ", 1)[0]
-        self.assertIn("python -m unittest", step)
+        self.assertIn("python scripts/test_without_database.py", step)
+        self.assertNotIn("python -m unittest", step)
         for module in ("tests_editorial_catalog_unit", "tests_editorial_catalog_api_unit", "tests_editorial_snapshot_unit", "tests_editorial_revision_unit", "tests_article_admission_notice_unit"):
             self.assertIn("content_factory." + module, step)
         self.assertNotIn("manage.py", step)
@@ -149,11 +152,13 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             seam = patch.object(dispatch_outbox, target, value); seam.start(); self.addCleanup(seam.stop)
         model_seam = patch.object(dispatch_models, "ContentFactoryDispatchOutbox", SimpleNamespace(objects=Mock()))
         model_seam.start(); self.addCleanup(model_seam.stop)
-        self.ns = {"__name__": "content_factory.vibe_marketing_views", "__package__": "content_factory",
+        from content_factory.article_request_identity import ContentFactoryDispatchOutbox
+        self.enterContext(patch.object(ContentFactoryDispatchOutbox.objects, "filter", return_value=SimpleNamespace(first=lambda: None)))
+        self.ns = {"__name__": "content_factory.vibe_marketing_views", "__package__": "content_factory", "copy": copy,
             "transaction": SimpleNamespace(atomic=nullcontext),
             "Organization": SimpleNamespace(objects=SimpleNamespace(select_for_update=lambda: SimpleNamespace(get=lambda **kw: self.org))),
             "ContentFactoryRun": SimpleNamespace(objects=SimpleNamespace(select_for_update=lambda: SimpleNamespace(get=lambda **kw: self.run))),
-            "_reserve_article_start_connection": lambda *args: None,
+            "_reserve_article_start_connection": lambda *args, **kwargs: None,
             "_validate_article_start_admission": lambda *args: None,
             "_validate_article_start_reservation": lambda *args: None,
 
@@ -192,16 +197,17 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             "_refund_roo_points_for_article_start": self.refund, "_refund_roo_points_for_content_island_topic_start": Mock(),
             "charge_content_factory_request_for_user": self.charge, "InsufficientRooPointsError": type("Insufficient", (Exception,), {}),
             "build_roo_points_authorization_payload": lambda **kwargs: {"roo_points_billing_status": kwargs["billing_status"]},
-            "get_content_factory_ai_agent_required_points": lambda domain: 6, "get_content_factory_article_cost_points": lambda domain: 6, "_roo_points_balance_for_user": lambda user: 20,
+            "get_content_factory_ai_agent_required_points": lambda domain: 6, "get_content_factory_article_cost_points": lambda domain, **kwargs: 12, "_roo_points_balance_for_user": lambda user: 20,
             "_resolve_context_or_response": lambda request: (self.context, None),
             "_setup_blocked_response_for_generation": lambda *args, **kwargs: None,
             "match_covered_topic": lambda **kwargs: None, "_github_repo_operable": lambda config: True,
             "article_system_ready": lambda config: True, "resolve_article_system": lambda config: {},
             "normalize_authors": lambda authors: authors, "resolve_default_author": lambda *args: None,
+            "article_voice_for_dispatch": article_voice_for_dispatch,
         }
         from content_factory.commands import ContentCommand
         self.ns["ContentCommand"] = ContentCommand
-        names = {"start_article_generation", "_run_mapping", "_request_value", "_bool_from_request", "_refresh_article_editorial_payload", "_friendly_content_factory_error", "_blocked_worker_payload",
+        names = {"start_article_generation", "_run_mapping", "_request_value", "_bool_from_request", "_normalize_portable_article_payload", "_refresh_article_editorial_payload", "_friendly_content_factory_error", "_blocked_worker_payload",
                  "_restart_article_payload_from_run", "_reserve_article_restart", "_restart_article_run", "_charge_roo_points_for_article", "_queue_content_factory_run", "_queue_content_factory_run_authorized",
                  "_run_result_from_remote", "_resolve_dispatch_token_run", "_fail_unconfirmed_dispatch_run"}
         tree = ast.parse(Path(__file__).with_name("vibe_marketing_views.py").read_text())
@@ -257,7 +263,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         self.refund.assert_not_called()
 
     def start(self, data=None):
-        return self.ns["_article_start_under_test"](None, SimpleNamespace(user=self.user, data=data if data is not None else {
+        return self.ns["_article_start_under_test"](None, SimpleNamespace(user=self.user, headers={}, data=data if data is not None else {
             "topic": "Delivery", "editorial_brief": selected_brief(),
         }))
 
@@ -268,6 +274,22 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         self.assertEqual(self.posted[0]["editorial_brief"], selected_brief())
         self.assertEqual(self.charge.call_args.kwargs["article_request"]["editorial_brief"], selected_brief())
         self.config_model.objects.filter.assert_called_with(organization=self.org)
+
+    def test_start_and_restart_carry_the_saved_voice_with_its_digest(self):
+        self.strategy = self.config.pillar_strategy = {**self.strategy, "article_voice": {
+            "schemaVersion": 1, "version": 2, "updatedAt": "2026-10-23T00:00:00Z", "preset": "builder_peer",
+            "category": "general", "dimensions": {"register": 2, "stance": 2, "energy": 0, "humour": 1, "convention": 0},
+            "readerExpertise": "practitioner", "narrator": "brand_we", "voiceCard": [], "stances": [],
+            "avoidWords": [], "preferWords": [],
+        }}
+        result = self.start({"topic": "Delivery", "editorialBrief": selected_brief()})
+        self.assertEqual(result.status_code, 202)
+        voice = self.posted[0]["article_voice"]
+        self.assertEqual((voice["preset"], voice["version"]), ("builder_peer", 2))
+        self.assertRegex(voice["sha256"], "^[0-9a-f]{64}$")
+        child, error = self.ns["_restart_article_run"](run=self.run, context=self.context)
+        self.assertIsNone(error)
+        self.assertEqual(self.posted[-1]["article_voice"]["sha256"], voice["sha256"])
 
     def test_actual_start_handler_rejects_explicit_invalid_brief_before_effects(self):
         result = self.start({"topic": "Delivery", "editorial_brief": None})
@@ -391,14 +413,14 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
 
     def test_current_policy_is_checked_before_new_charge(self):
         self.strategy = retired_catalog()
-        result = self.ns["_charge_roo_points_for_article"](SimpleNamespace(user=self.user, data={}), context=self.context,
+        result = self.ns["_charge_roo_points_for_article"](SimpleNamespace(user=self.user, data={"expectedCostPoints": 6}), context=self.context,
                                                          payload={"editorial_brief": selected_brief()})
         self.assertEqual(result[3].status_code, 400)
         self.charge.assert_not_called()
 
     def test_valid_charge_keeps_the_resolved_brief_and_billing_contract(self):
         payload = {"editorialBrief": selected_brief()}
-        result = self.ns["_charge_roo_points_for_article"](SimpleNamespace(user=self.user, data={}), context=self.context, payload=payload)
+        result = self.ns["_charge_roo_points_for_article"](SimpleNamespace(user=self.user, data={"expectedCostPoints": 6}), context=self.context, payload=payload)
         self.assertIsNone(result[3])
         self.assertEqual(self.charge.call_args.kwargs["article_request"]["editorial_brief"], selected_brief())
         self.assertNotIn("editorialBrief", payload)
@@ -668,7 +690,8 @@ class AtomicArticleChargeTests(unittest.TestCase):
             self.assertEqual(kwargs['billing_user_id'], 7)
             self.assertEqual(kwargs['payload']['roo_points_requested_by_user_id'], 2)
             self.assertEqual(kwargs['payload']['roo_points_billing_user_id'], 7)
-        with patch.object(views, '_quoted_price_response', return_value=None), \
+        with patch.object(views, 'get_content_factory_article_cost_points', return_value=6), \
+                patch('content_factory.p2_foundation.merge_policy_for', return_value=None), \
                 patch.object(views, '_refresh_article_editorial_payload', return_value=None), \
                 patch.object(views, '_reserve_article_start_connection', return_value=None), \
                 patch.object(views, '_validate_article_start_admission', side_effect=admission), \
@@ -678,7 +701,7 @@ class AtomicArticleChargeTests(unittest.TestCase):
                 patch.object(views.transaction, 'atomic', atomic), \
                 patch.object(views, 'charge_content_factory_request_for_user', side_effect=charge), \
                 patch.object(dispatch_outbox, 'reserve_dispatch', side_effect=reserve):
-            result = views._charge_roo_points_for_article(SimpleNamespace(user=requester, data={}),
+            result = views._charge_roo_points_for_article(SimpleNamespace(user=requester, data={'expectedCostPoints': 6}),
                 context=context, payload={'delivery_mode': 'content_only', 'client_request_id': 'article-key'})
         self.assertIsNone(result[3])
         self.assertEqual(events, ['admitted', 'charged', 'reserved', 'committed'])

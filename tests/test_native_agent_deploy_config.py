@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 
-from scripts.validate_native_agent_deploy_config import FLAGS, validate, validate_single
+from scripts.validate_native_agent_deploy_config import FLAGS, OPTIONAL_FLAGS, validate, validate_single
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMUNITIES = json.dumps({"9277de1c-c526-47cb-876c-7402b087b3d8": {
@@ -25,6 +25,20 @@ def active():
 
 
 class NativeAgentDeployConfigTests(unittest.TestCase):
+    def test_personal_context_is_explicit_and_needs_the_existing_gateway(self):
+        validate({})
+        validate({**active(), "AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED": "true"})
+        for invalid in ("yes", "TRUE", "1"):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                validate({"AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED": invalid})
+        with self.assertRaises(ValueError):
+            validate({"AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED": "true"})
+        workflow = (ROOT / ".github/workflows/deploy.yml").read_text()
+        self.assertIn("AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED: ${{ vars.AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED || 'false' }}", workflow)
+        deploy = (ROOT / "deploy.sh").read_text()
+        self.assertIn('AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED="${AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED:-false}"', deploy)
+        self.assertIn("export AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED", deploy)
+
     def test_dormant_configuration_and_complete_explicit_activation(self):
         validate({})
         validate({"AGENT_RUNTIME_NATIVE_COMMUNITIES": "{}"})
@@ -99,6 +113,31 @@ class NativeAgentDeployConfigTests(unittest.TestCase):
         for key in active():
             self.assertIn(key, workflow)
 
+    def test_personal_context_stdin_uses_native_validation_and_keeps_unknown_keys_rejected(self):
+        key = "AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            for name in ("upsert_env_value_from_stdin.sh", "validate_native_agent_deploy_config.py"):
+                shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
+            env_file = root / ".env"
+            env_file.write_text("UNRELATED_SETTING=preserved\n")
+            def upsert(setting, value):
+                return subprocess.run(["bash", str(root / "scripts/upsert_env_value_from_stdin.sh"), setting],
+                    input=value, text=True, capture_output=True, env={"PATH": os.defpath}, check=False)
+            accepted = upsert(key, "false")
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertEqual(env_file.read_text(), "UNRELATED_SETTING=preserved\n" + key + "=false\n")
+            before = env_file.read_bytes()
+            for setting, value in ((key, "yes"), (key, "TRUE"), (key, "false\nINJECT=true"),
+                    (key + "_UNREVIEWED", "false")):
+                with self.subTest(setting=setting, value=value):
+                    rejected = upsert(setting, value)
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertEqual(env_file.read_bytes(), before)
+                    if setting != key:
+                        self.assertEqual(rejected.returncode, 64)
+
 
 class MaekSafetyConfigTests(unittest.TestCase):
     # This is the reviewed rollout contract, independent of runtime imports.
@@ -112,7 +151,6 @@ class MaekSafetyConfigTests(unittest.TestCase):
         "AGENT_RUNTIME_NATIVE_DURABLE_WATCH": "false",
         "AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS": "600",
         "AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS": "86400",
-        "AGENT_RUNTIME_NATIVE_LAPSE_ALERTS": "false",
         "AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED": "false",
         "MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED": "false",
         "MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS": "0",
@@ -175,7 +213,8 @@ class MaekSafetyConfigTests(unittest.TestCase):
             (root / "scripts").mkdir()
             for name in ("upsert_env_value_from_stdin.sh", "validate_native_agent_deploy_config.py"):
                 shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
-            for key, default in self.defaults.items():
+            values = {**dict.fromkeys(OPTIONAL_FLAGS, "false"), **self.defaults}
+            for key, default in values.items():
                 with self.subTest(key=key):
                     env_file = root / ".env"
                     env_file.write_text("KEEP_ME=yes\n")
@@ -185,7 +224,39 @@ class MaekSafetyConfigTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn(key + "=" + default + "\n", env_file.read_text())
                     before = env_file.read_bytes()
-                    result = subprocess.run(command, input="invalid value\nINJECT=true", text=True,
-                                            capture_output=True, env={"PATH": os.defpath}, timeout=5)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertEqual(before, env_file.read_bytes())
+                    for invalid in ("invalid value", "false\nINJECT=true"):
+                        result = subprocess.run(command, input=invalid, text=True,
+                                                capture_output=True, env={"PATH": os.defpath}, timeout=5)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(before, env_file.read_bytes())
+
+class CommunityDeployConfigTests(unittest.TestCase):
+    def test_community_is_off_by_default_and_requires_gateway_and_host_provider(self):
+        validate({})
+        with self.assertRaises(ValueError):
+            validate({"AGENT_RUNTIME_COMMUNITY_ENABLED": "true"})
+        enabled = {**active(), "AGENT_RUNTIME_COMMUNITY_ENABLED": "true"}
+        validate(enabled)
+        with self.assertRaises(ValueError):
+            validate(enabled, check_provider=True)
+        configured = {**enabled, "AGENT_RUNTIME_MODEL_BASE_URL": "https://model.example/v1",
+            "AGENT_RUNTIME_MODEL_API_KEY": "synthetic-only-provider-key", "AGENT_RUNTIME_MODEL_NAME": "test-model",
+            "AGENT_RUNTIME_MODEL_INPUT_MICROUNITS_PER_MILLION": "1000000",
+            "AGENT_RUNTIME_MODEL_OUTPUT_MICROUNITS_PER_MILLION": "1000000"}
+        validate(configured, check_provider=True)
+        for change in ({"AGENT_RUNTIME_MODEL_BASE_URL": "http://model.example"},
+                       {"AGENT_RUNTIME_MODEL_INPUT_MICROUNITS_PER_MILLION": "0"},
+                       {"AGENT_RUNTIME_MODEL_API_KEY": "invalid\nkey"}):
+            with self.assertRaises(ValueError):
+                validate({**configured, **change}, check_provider=True)
+
+    def test_community_worker_is_separate_and_in_shutdown_inventory(self):
+        compose = (ROOT / "docker-compose.yml").read_text().split("  community-agent-worker:\n", 1)[1].split("\n  db:", 1)[0]
+        self.assertIn("profiles: [community-agent]", compose)
+        self.assertIn("run_community_agent", compose)
+        self.assertIn("migrate --check --noinput", compose)
+        self.assertNotIn("migrate --noinput", compose)
+        inventory = (ROOT / "scripts/runtime-services.sh").read_text()
+        self.assertIn('"${community_agent_runtime_services[@]}"', inventory.split("all_runtime_writer_services=(", 1)[1])
+        self.assertIn('AGENT_RUNTIME_COMMUNITY_ENABLED=false', (ROOT / ".env.example").read_text())
+        self.assertIn("scripts/validate_native_agent_deploy_config.py --provider", (ROOT / "deploy.sh").read_text())

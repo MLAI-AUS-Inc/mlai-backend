@@ -1,0 +1,290 @@
+{
+  "original_request": {
+    "run_id": "article-original",
+    "workflow": "direct_generate",
+    "github_repo": "fixture/site",
+    "client_request_id": "paid-original-request",
+    "website_connection_id": "ebceaa66-d38b-4655-b5be-33744b119f76",
+    "connection_generation": 2,
+    "repository_id": 17,
+    "operation_id": "e6251339-94ed-44cd-81eb-e67e67b60834",
+    "operation_attempt": 1,
+    "deletion_epoch": 0,
+    "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "domain": "fixture.test"
+  },
+  "mutation": {
+    "website_connection_id": "ebceaa66-d38b-4655-b5be-33744b119f76",
+    "connection_generation": 2,
+    "repository_id": 17,
+    "operation_id": "e6251339-94ed-44cd-81eb-e67e67b60834",
+    "operation_attempt": 1,
+    "deletion_epoch": 0,
+    "domain": "fixture.test",
+    "github_repo": "fixture/site",
+    "mutation_id": "7f5af19eb93029085a1f9d88ab1c0a32a38f70368010f6fe69b27865b30bd6e8",
+    "run_id": "article-original",
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch": "content/article-article-",
+    "files": [
+      {
+        "path": "stories/article.html",
+        "ownership": "created",
+        "kind": "published_article",
+        "operation": "create",
+        "before_sha256": null,
+        "after_sha256": "c28d6739b77a261f06e558657a593bcc42fc8b313121561a58d32175f031bb2b",
+        "before_mode": null,
+        "after_mode": null
+      }
+    ],
+    "status": "proposed",
+    "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "article_publication_intent_v1": {
+      "version": 1,
+      "purpose": "article_publication",
+      "run_id": "article-original",
+      "goal_id": null,
+      "scope": {
+        "website_connection_id": "ebceaa66-d38b-4655-b5be-33744b119f76",
+        "connection_generation": 2,
+        "repository_id": 17,
+        "github_repo": "fixture/site",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "operation_id": "e6251339-94ed-44cd-81eb-e67e67b60834",
+        "operation_attempt": 1,
+        "deletion_epoch": 0,
+        "client_request_id": "paid-original-request"
+      },
+      "generation": 0,
+      "mutation_id": "7f5af19eb93029085a1f9d88ab1c0a32a38f70368010f6fe69b27865b30bd6e8",
+      "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "tree_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "branch_name": "content/article-article-",
+      "push_repository": {
+        "id": 17,
+        "full_name": "fixture/site"
+      },
+      "files_digest": "af0a6f6cf6fac4f7825cc143de1258e888a7bfb1d0cd92a31525f6e5aefb70ad",
+      "file_count": 1,
+      "intent_id": "61073f651891a22bd3cb0ff8f9f914d9ab1db3780c36c28f5bbd4350081c3624"
+    }
+  },
+  "intent": {
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch_name": "content/article-article-",
+    "file_count": 1,
+    "files_digest": "af0a6f6cf6fac4f7825cc143de1258e888a7bfb1d0cd92a31525f6e5aefb70ad",
+    "generation": 0,
+    "goal_id": null,
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "intent_id": "61073f651891a22bd3cb0ff8f9f914d9ab1db3780c36c28f5bbd4350081c3624",
+    "mutation_id": "7f5af19eb93029085a1f9d88ab1c0a32a38f70368010f6fe69b27865b30bd6e8",
+    "purpose": "article_publication",
+    "push_repository": {
+      "full_name": "fixture/site",
+      "id": 17
+    },
+    "run_id": "article-original",
+    "scope": {
+      "client_request_id": "paid-original-request",
+      "connection_generation": 2,
+      "deletion_epoch": 0,
+      "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "github_repo": "fixture/site",
+      "operation_attempt": 1,
+      "operation_id": "e6251339-94ed-44cd-81eb-e67e67b60834",
+      "repository_id": 17,
+      "website_connection_id": "ebceaa66-d38b-4655-b5be-33744b119f76"
+    },
+    "tree_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "version": 1
+  },
+  "cancelled": {
+    "status": "cancelled",
+    "job_id": "article-original",
+    "run_id": "article-original",
+    "workflow": "direct_generate",
+    "current_step": "cancelled",
+    "message": "Article work stopped; external publication needs reconciliation.",
+    "cleanup": {
+      "artifacts": {
+        "status": "retained",
+        "reason": "publication_or_delivery_reconciliation"
+      },
+      "live_preview": {
+        "status": "stopped",
+        "attempts": 1,
+        "cleanup_pending": false,
+        "reason": "preview_stopped",
+        "retain_repository_branch": true
+      }
+    },
+    "reconciliation_required": true,
+    "article_cancellation_v1": {
+      "version": 1,
+      "purpose": "article_cancellation",
+      "run_id": "article-original",
+      "goal_id": null,
+      "scope": {
+        "website_connection_id": "ebceaa66-d38b-4655-b5be-33744b119f76",
+        "connection_generation": 2,
+        "repository_id": 17,
+        "github_repo": "fixture/site",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "operation_id": "e6251339-94ed-44cd-81eb-e67e67b60834",
+        "operation_attempt": 1,
+        "deletion_epoch": 0,
+        "client_request_id": "paid-original-request"
+      },
+      "generation": 0,
+      "state_version": 4,
+      "outcome": "unknown",
+      "cancelled": true,
+      "watermark": {
+        "operation_id": "e6251339-94ed-44cd-81eb-e67e67b60834",
+        "attempt": 1,
+        "cancelled": true
+      },
+      "delivered_value": null,
+      "receipt_id": "c71d52c03723beb3f784bec3acf441cefb074815ed34d7ef55c00d5cf766acb7"
+    },
+    "publication_evidence_v1": {
+      "version": 1,
+      "purpose": "article",
+      "run_id": "article-original",
+      "goal_id": null,
+      "scope": {
+        "website_connection_id": "ebceaa66-d38b-4655-b5be-33744b119f76",
+        "connection_generation": 2,
+        "repository_id": 17,
+        "github_repo": "fixture/site",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "operation_id": "e6251339-94ed-44cd-81eb-e67e67b60834",
+        "operation_attempt": 1,
+        "deletion_epoch": 0,
+        "client_request_id": "paid-original-request"
+      },
+      "generation": 0,
+      "state": "pending",
+      "kind": "unknown"
+    },
+    "job_url": "/api/runs/article-original"
+  },
+  "observation": {
+    "provider": "github",
+    "intent_id": "61073f651891a22bd3cb0ff8f9f914d9ab1db3780c36c28f5bbd4350081c3624",
+    "repository": {
+      "full_name": "fixture/site",
+      "id": 17
+    },
+    "branch_name": "content/article-article-",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "tree_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "acknowledged": {
+    "intent_id": "61073f651891a22bd3cb0ff8f9f914d9ab1db3780c36c28f5bbd4350081c3624",
+    "publication_evidence_v1": {
+      "version": 1,
+      "purpose": "article",
+      "run_id": "article-original",
+      "goal_id": null,
+      "scope": {
+        "client_request_id": "paid-original-request",
+        "connection_generation": 2,
+        "deletion_epoch": 0,
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "github_repo": "fixture/site",
+        "operation_attempt": 1,
+        "operation_id": "e6251339-94ed-44cd-81eb-e67e67b60834",
+        "repository_id": 17,
+        "website_connection_id": "ebceaa66-d38b-4655-b5be-33744b119f76"
+      },
+      "generation": 0,
+      "state": "observed",
+      "kind": "branch",
+      "branch_name": "content/article-article-",
+      "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "local_mutation": {
+    "website_connection_id": "ebceaa66-d38b-4655-b5be-33744b119f76",
+    "connection_generation": 2,
+    "repository_id": 17,
+    "operation_id": "e6251339-94ed-44cd-81eb-e67e67b60834",
+    "operation_attempt": 1,
+    "deletion_epoch": 0,
+    "domain": "fixture.test",
+    "github_repo": "fixture/site",
+    "mutation_id": "7f5af19eb93029085a1f9d88ab1c0a32a38f70368010f6fe69b27865b30bd6e8",
+    "run_id": "article-original",
+    "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "branch": "content/article-article-",
+    "files": [
+      {
+        "path": "stories/article.html",
+        "ownership": "created",
+        "kind": "published_article",
+        "operation": "create",
+        "before_sha256": null,
+        "after_sha256": "c28d6739b77a261f06e558657a593bcc42fc8b313121561a58d32175f031bb2b",
+        "before_mode": null,
+        "after_mode": null
+      }
+    ],
+    "status": "proposed",
+    "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "original_files": [
+      {
+        "schema_version": 1,
+        "path": "stories/article.html",
+        "connection_id": "ebceaa66-d38b-4655-b5be-33744b119f76",
+        "connection_generation": 2,
+        "repository_id": "17",
+        "branch": "content/article-article-",
+        "run_id": "article-original",
+        "kind": "published_article",
+        "ownership": "created",
+        "operation": "create",
+        "before_content": null,
+        "before_encoding": "utf-8",
+        "before_sha256": null,
+        "after_sha256": "c28d6739b77a261f06e558657a593bcc42fc8b313121561a58d32175f031bb2b",
+        "before_mode": null,
+        "after_mode": null
+      }
+    ],
+    "article_publication_intent_v1": {
+      "version": 1,
+      "purpose": "article_publication",
+      "run_id": "article-original",
+      "goal_id": null,
+      "scope": {
+        "website_connection_id": "ebceaa66-d38b-4655-b5be-33744b119f76",
+        "connection_generation": 2,
+        "repository_id": 17,
+        "github_repo": "fixture/site",
+        "expected_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "operation_id": "e6251339-94ed-44cd-81eb-e67e67b60834",
+        "operation_attempt": 1,
+        "deletion_epoch": 0,
+        "client_request_id": "paid-original-request"
+      },
+      "generation": 0,
+      "mutation_id": "7f5af19eb93029085a1f9d88ab1c0a32a38f70368010f6fe69b27865b30bd6e8",
+      "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "tree_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "branch_name": "content/article-article-",
+      "push_repository": {
+        "id": 17,
+        "full_name": "fixture/site"
+      },
+      "files_digest": "af0a6f6cf6fac4f7825cc143de1258e888a7bfb1d0cd92a31525f6e5aefb70ad",
+      "file_count": 1,
+      "intent_id": "61073f651891a22bd3cb0ff8f9f914d9ab1db3780c36c28f5bbd4350081c3624"
+    }
+  }
+}

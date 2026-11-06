@@ -4,8 +4,14 @@ from . import service_views as views
 from .website_views import WebsiteConnectionAuthorizeView, WebsiteMutationView
 from .website_current import WebsiteCurrentConnectionView
 from .website_verification import WebsiteCiAttestationView
+from .website_runtime_observation import WebsiteRuntimeObservationView
+from .preview_domain_claim import PreviewDomainClaimServiceView
+from .run_execution_control_views import RunExecutionTicketView
 
 urlpatterns = [
+    path('articles/runtime-observation/', WebsiteRuntimeObservationView.as_view(), name='articles_runtime_observation'),
+    path('preview-domain-claim/', PreviewDomainClaimServiceView.as_view(), name='content_factory_preview_domain_claim'),
+    path('preview-domain-claim', PreviewDomainClaimServiceView.as_view()),
     path('connections/current', WebsiteCurrentConnectionView.as_view()),
     path('connections/current/', WebsiteCurrentConnectionView.as_view()),
     path('connections/ci-attestation', WebsiteCiAttestationView.as_view()),
@@ -60,6 +66,8 @@ urlpatterns = [
     path('runs/<str:run_id>/preview', views.ContentFactoryRunPreviewView.as_view(), name='content_factory_run_preview_no_slash'),
     path('runs/<str:run_id>/artifacts/', views.ContentFactoryRunArtifactsView.as_view(), name='content_factory_run_artifacts'),
     path('runs/<str:run_id>/artifacts', views.ContentFactoryRunArtifactsView.as_view(), name='content_factory_run_artifacts_no_slash'),
+    path('runs/<str:run_id>/execution-ticket/', RunExecutionTicketView.as_view(), name='content_factory_execution_ticket'),
+    path('runs/<str:run_id>/execution-ticket', RunExecutionTicketView.as_view()),
     path('runs/<str:run_id>/<str:action>/', views.ContentFactoryRunControlView.as_view(), name='content_factory_run_control'),
     path('runs/<str:run_id>/<str:action>', views.ContentFactoryRunControlView.as_view(), name='content_factory_run_control_no_slash'),
 ]

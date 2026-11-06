@@ -1,20 +1,37 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
+from community_chat.admin_authority import MemberAudienceAuthorityAdminMixin
 from .models import (
     AccountBan,
     GlobalSettings,
     PasswordResetChallenge,
     PasswordResetEmailDelivery,
     User,
+    UserEmailAlias,
 )
 from .forms import CustomUserCreationForm, CustomUserChangeForm
 
 
-class UserAdmin(BaseUserAdmin):
+class UserEmailAliasInline(admin.TabularInline):
+    model = UserEmailAlias
+    extra = 0
+    can_delete = False
+    readonly_fields = ('email', 'verified_at', 'created_at')
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+
+class UserAdmin(MemberAudienceAuthorityAdminMixin, BaseUserAdmin):
+    inlines = (UserEmailAliasInline,)
     add_form = CustomUserCreationForm
     form = CustomUserChangeForm
     actions = ('ban_mlai_accounts',)
+
+    def get_inlines(self, request, obj=None):
+        """Show read-only alias history only for an existing account."""
+        return super().get_inlines(request, obj) if obj is not None else ()
 
     @admin.action(description='Ban selected MLAI accounts (retain email)')
     def ban_mlai_accounts(self, request, queryset):
@@ -30,7 +47,7 @@ class UserAdmin(BaseUserAdmin):
     model = User
     list_display = ('email', 'first_name', 'last_name', 'slack_id', 'is_staff', 'email_verified_at', 'date_joined', 'updated', 'avatar_preview')
     list_filter = ('is_staff', 'is_superuser', 'is_active', 'groups')
-    search_fields = ('email', 'first_name', 'last_name', 'slack_id')
+    search_fields = ('email', 'email_aliases__email', 'first_name', 'last_name', 'slack_id')
     ordering = ('email',)
     
     fieldsets = (

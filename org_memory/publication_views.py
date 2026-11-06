@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .slack_privacy import exclude_members_publications
+
 from django.conf import settings
 from rest_framework import status
 from rest_framework.response import Response
@@ -91,12 +93,15 @@ class OrgMemoryPublicationView(APIView):
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
-    def _get_publication(self, request, publication_id):
-        return (
-            MemoryPublication.objects.filter(
+    def _get_publication(self, request, publication_id, *, for_revocation=False):
+        rows = MemoryPublication.objects.filter(
                 pk=publication_id,
                 organization=request.org_memory_actor.organization,
             )
+        if not for_revocation:
+            rows = exclude_members_publications(rows)
+        return (
+            rows
             .select_related(
                 "source_content_type",
                 "review_item",
@@ -124,9 +129,9 @@ class OrgMemoryPublicationListCreateView(OrgMemoryPublicationView):
                 {"detail": "limit must be between 1 and 200."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        rows = MemoryPublication.objects.filter(
+        rows = exclude_members_publications(MemoryPublication.objects.filter(
             organization=request.org_memory_actor.organization,
-        ).select_related(
+        )).select_related(
             "source_content_type",
             "review_item",
             "published_item",
@@ -270,7 +275,7 @@ class OrgMemoryPublicationRevokeView(OrgMemoryPublicationView):
         data = request.data if isinstance(request.data, dict) else {}
         if data.get("confirm") is not True:
             raise PublicationError("Publication revocation requires confirm=true.")
-        publication = self._get_publication(request, publication_id)
+        publication = self._get_publication(request, publication_id, for_revocation=True)
         if publication is None:
             return Response(
                 {"detail": "Publication was not found."},
@@ -283,6 +288,8 @@ class OrgMemoryPublicationRevokeView(OrgMemoryPublicationView):
             idempotency_key=request.headers.get("Idempotency-Key"),
         )
         publication.refresh_from_db()
+        if not exclude_members_publications(MemoryPublication.objects.filter(pk=publication.pk)).exists():
+            return Response({"id": str(publication.pk), "status": publication.status, "created": created})
         return Response(
             {
                 **_publication_payload(publication),

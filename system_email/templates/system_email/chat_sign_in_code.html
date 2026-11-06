@@ -1,0 +1,12 @@
+{% extends "system_email/base.html" %}
+{% block content %}
+<tr>
+  <td style="padding:32px;">
+    <p style="margin:0;font-size:14px;color:#6b7280;letter-spacing:.04em;text-transform:uppercase;">{{ product_name|default:"MLAI Chat" }}</p>
+    <h1 style="margin:8px 0 0;font-size:22px;line-height:1.3;color:#111827;">Hi {{ first_name|default:"there" }}, here is your code</h1>
+    <p style="margin:20px 0 0;font-size:32px;line-height:1.2;letter-spacing:.3em;font-weight:700;color:#111827;font-family:SFMono-Regular,Menlo,Consolas,monospace;">{{ verification_code }}</p>
+    <p style="margin:20px 0 0;font-size:15px;line-height:1.6;color:#4b5563;">Enter it in {{ product_name|default:"MLAI Chat" }} to sign in. It expires in {{ expires_minutes }} minute{{ expires_minutes|pluralize }} and works once.</p>
+    <p style="margin:16px 0 0;font-size:14px;line-height:1.6;color:#6b7280;">If you didn't ask for this code, you can ignore this email. Nobody can sign in without it.{% if support_url %} Need help? <a href="{{ support_url }}" style="color:#2563eb;">Contact support</a>.{% endif %}</p>
+  </td>
+</tr>
+{% endblock %}

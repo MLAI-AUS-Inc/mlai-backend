@@ -5,16 +5,26 @@ from .website_contract import evidence_digest
 from .website_discovery import discovery_snapshot
 from .website_operations import deletion_epoch, operation_summary
 from .activation import VERIFICATION_MAX_AGE
+from .article_publication_policy import can_publish_article
 from django.utils import timezone
 from datetime import timedelta
 
 # The button names the action; the step's reason sentence travels beside it.
 NEXT_ACTION_LABELS = {"verify-access": "Check GitHub access", "scan": "Scan repository",
     "permissions": "Review GitHub permissions", "setup": "Set up articles",
-    "ci-attestation": "Recheck verification", "verify": "Verify website"}
+    "ci-attestation": "Recheck verification", "verify": "Verify website", "prepare": "Check website again"}
 # Cleanup, re-verification and dispatch follow-ups run in the background and can
 # stay queued for days. None of them is the owner's current website operation.
-BACKGROUND_OPERATION_ACTIONS = ("cancel-operation", "source-reverify", "worker_followup")
+BACKGROUND_OPERATION_ACTIONS = ("cancel-operation", "source-reverify", "worker_followup", "superseded-setup-cleanup")
+# While the server re-checks a website's source, the proof that check renews is
+# reported as running instead of as an action for the owner to take.
+SOURCE_CHECK_FACTS = {"inventory": "scan", "verification": "preview", "deployment": "activation"}
+SOURCE_CHECK_WINDOW = timedelta(hours=24)
+SOURCE_CHANGED_REASON = "Checking your latest website changes."
+SOURCE_RECHECK_REASON = "Checking your website again."
+# Proof a live-URL verified (new-journey) website never needs: no workflow file
+# is written and no CI artifact is read.
+LIVE_URL_SKIPPED_REQUIREMENTS = frozenset({"workflows_permission", "ci_artifact_digest"})
 
 
 def fact(complete=False, *, code="", reason="", status=None, verified_at=None, operation=None):
@@ -23,8 +33,13 @@ def fact(complete=False, *, code="", reason="", status=None, verified_at=None, o
         "reason": "" if complete else reason, "verifiedAt": verified_at, "operationId": operation}
 
 
-def project_journey(*, company_id, domain, website=None, capabilities=None, discovery=None, target=None, operation=None, epoch=0, proof=None, source_runs=None, ci_source_runs=None, permissions=None, setup_pull_request=None):
-    """Project verified facts without interpreting legacy completion ticks."""
+def project_journey(*, company_id, domain, website=None, capabilities=None, discovery=None, target=None, operation=None, epoch=0, proof=None, source_runs=None, ci_source_runs=None, permissions=None, setup_pull_request=None, source_check=None):
+    """Project verified facts without interpreting legacy completion ticks.
+
+    ``source_check`` names the server's own re-check of the current source,
+    still in flight, for the owner's view only: preparation keeps acting on the
+    unmasked facts.
+    """
     website, capabilities, target = mapping(website), mapping(capabilities), mapping(target)
     setup_pr = mapping(setup_pull_request)
     discovery = discovery or discovery_snapshot({})
@@ -43,7 +58,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     deployed = bool(deployment.get("status") == "passed" and deployment.get("source_sha") == website.get("verifiedSha")
         and deployment.get("connection_generation") == website.get("connectionGeneration") and deployment.get("target_id") == target.get("key")
         and deployment.get("public_url") and deployment.get("checked_at"))
-    live_ready = verified and deployed
+    live_ready = can_publish_article(integration_verified=verified,
+        write_verified=capabilities.get("repositoryWriteVerified") is True and write_allowed,deployment_verified=deployed)
     reason_code = capabilities.get("reasonCode") or "integration_required"
     reason = capabilities.get("reason") or "Prepare and verify your articles integration."
     if not authoring_supported:
@@ -65,9 +81,13 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     verification_stale = proof.get("verificationStale") is True
     # Current verification paths use in-repository CI. Once its proof is
     # current, publishing needs neither workflow-file writes nor CI reads.
-    workflow_needed = not proof.get("integrationVerified", verified)
-    ci_attestation_needed = proof.get("ciAttestationRequired") is True and not deployed
-    ci_read_needed = not proof.get("buildVerified", verified) or verification_stale or ci_attestation_needed
+    hosted_selected = proof.get("hostedVerificationSelected") is True
+    # New-journey sites are verified by their live blog page (IF-P1-16): no
+    # workflow file, no CI read and no CI attestation is ever needed for them.
+    live_selected = proof.get("liveVerificationSelected") is True
+    workflow_needed = not hosted_selected and not live_selected and not proof.get("integrationVerified", verified)
+    ci_attestation_needed = not live_selected and proof.get("ciAttestationRequired") is True and not deployed
+    ci_read_needed = not hosted_selected and not live_selected and (not proof.get("buildVerified", verified) or verification_stale or ci_attestation_needed)
     workflow_missing = workflow_needed and grants.get("workflows") is not True
     ci_missing = ci_read_needed and not (grants.get("checks") is True and grants.get("statuses") is True)
     permissions_ready = not (workflow_missing or ci_missing)
@@ -94,7 +114,7 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "verification": fact(proof.get("buildVerified", verified) and not ci_attestation_needed,
             code="ci_attestation_required" if ci_attestation_needed else "verification_stale" if verification_stale else reason_code,
             reason="Authenticate native CI proof for this exact target and operation." if ci_attestation_needed else
-                "Rerun native CI verification and attest the current source." if verification_stale else reason,
+                "Your website's publishing verification is out of date." if verification_stale else reason,
             status="stale" if verification_stale else None, verified_at=capabilities.get("verifiedAt")),
         "deployment": fact(deployed, code="deployment_verification_required", reason="Verify the deployed public articles route.", verified_at=deployment.get("checked_at")),
     }
@@ -139,13 +159,37 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     next_step = next((step for step in steps if step["status"] != "complete"), None)
     action_id = {"github": "verify-access", "repository": "verify-access", "scan": "scan", "permissions": "permissions", "integration": "setup",
         "preview": "ci-attestation" if verification_stale else "verify", "activation": "verify"}.get(next_step["id"] if next_step else "")
+    if action_id == "ci-attestation" and "prepare" in allowed:
+        # Expired proof of an installed integration is renewed by the server's
+        # own re-check: preparation re-reads the sealed CI check and the live
+        # route. Pasting exported CI evidence stays a support action.
+        action_id = "prepare"
     next_action = {"id": action_id, "label": NEXT_ACTION_LABELS[action_id], "step": next_step["id"],
         "reason": next_step["reason"]} if next_step and action_id in allowed else None
+    if next_action and action_id == "prepare":
+        next_action["params"] = {"retry": True}
     if next_action and setup_pr and next_step["id"] in {"scan", "integration"}:
         # MLAI Chat opens the saved setup run for "Review setup changes", where Publish
         # lives. Until preparation returns to this PR, the setup page's Prepare does.
         next_action = {**next_action, "setupRunId": setup_pr.get("runId"),
             "label": "Review setup changes" if setup_pr.get("savedSetup") else "Return to your setup pull request"}
+    checking = mapping(source_check)
+    checking = {"status": "running", "reason": checking.get("reason") or SOURCE_CHANGED_REASON,
+        "operationId": checking.get("operationId")} if checking and write_allowed and not setup_pr \
+        and prerequisites["integration"]["status"] == "complete" else None
+    if checking:
+        # A pushed source is re-scanned and re-verified automatically. Until that
+        # check settles, its proof is being checked, not waiting on the owner;
+        # only a failed check offers an action. Reason codes stay the facts'.
+        for key in SOURCE_CHECK_FACTS:
+            if prerequisites[key]["status"] in {"needs_action", "stale"}:
+                prerequisites[key] = {**prerequisites[key], **checking}
+        for step in steps:
+            if (step["id"] in SOURCE_CHECK_FACTS.values() or step["id"] == "articles") and step["status"] in {"needs_action", "stale"}:
+                step.update(checking)
+        if next_step and next_step["status"] == "running":
+            next_action = None
+    source_checking = bool(checking and any(step["status"] == "running" for step in steps))
     repository = {"id": website.get("repositoryId"), "name": website.get("githubRepo", ""), "branch": website.get("branch", ""),
         "appRoot": website.get("appRoot", ""), "sourceSha": website.get("verifiedSha") or discovery.get("sourceSha"), "targetId": target.get("key"),
         "observedSourceSha": capabilities.get("repositorySourceSha"),
@@ -156,13 +200,15 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     return {"version": 2, "companyId": str(company_id), "domain": domain,
         "revision": evidence_digest({"website": website, "capabilities": capabilities, "discovery": discovery, "operation": operation}),
         "connectionId": website.get("connectionId"), "connectionGeneration": website.get("connectionGeneration"),
-        "proofContract": {"version": 1, "requirements": ["pinned_source_sha", "safe_publish_target", "build_proof", "browser_proof", "workflows_permission", "ci_artifact_digest", "live_verification"]},
+        "proofContract": {"version": 1, "requirements": [requirement for requirement in ("pinned_source_sha", "safe_publish_target",
+            "build_proof", "browser_proof", "workflows_permission", "ci_artifact_digest", "live_verification")
+            if not live_selected or requirement not in LIVE_URL_SKIPPED_REQUIREMENTS]},
         "configurationRevision": website.get("configurationVersion", 0), "deletionEpoch": epoch, "repository": repository,
         "pricing": {"setupPoints": 0, "requiredPoints": 0, "free": True},
         "policy": {"allowed": write_allowed, "reasonCode": "" if write_allowed else reason_code, "reason": "" if write_allowed else reason},
-        "reasonCode": "" if verified else reason_code, "reason": "" if verified else reason,
+        "reasonCode": "" if verified else reason_code, "reason": "" if verified else checking["reason"] if source_checking else reason,
         "prerequisites": prerequisites, "steps": steps,
-        "capabilities": {"canRead": access, "canScan": bool(access and connected), "canPrepare": "setup" in allowed,
+        "capabilities": {"canRead": access, "canScan": bool(access and connected), "canPrepare": "setup" in allowed,"repositoryWriteVerified":capabilities.get("repositoryWriteVerified") is True,
             "canPreview": bool(mapping(website.get("capabilities")).get("previewSupported") and write_allowed),
             "canGeneratePortableDraft": bool(capabilities.get("canGeneratePortableDraft", company_id)), "canGenerateArticle": verified, "canOpenPublicationPr": verified,
             "canPublishArticle": live_ready, "canMerge": bool(write_allowed and proof.get("reviewedMergeReady")), "canDisconnect": bool(website), "canPurge": bool(website), "canCleanup": "cleanup" in allowed},
@@ -218,6 +264,14 @@ def build_proof_fresh(connection, target, capabilities, *, now=None):
         for stamp in (target_stamp, connection.last_verified_at))
 
 
+def deployment_receipt_current(receipt, *, now=None):
+    """A live-route receipt counts within the same age limit publication enforces."""
+    from .incident_guards import proof_stamp
+    now = now or timezone.now()
+    stamp = proof_stamp(mapping(receipt), now=now)
+    return bool(stamp and now - VERIFICATION_MAX_AGE <= stamp)
+
+
 def current_operation(connection):
     """The owner's current website operation in this generation, if any.
 
@@ -235,8 +289,39 @@ def current_operation(connection):
     return latest
 
 
-def journey_for_context(context, config, *, capabilities=None):
-    """Load current-generation facts only; authenticated account probes stay live."""
+def source_check_in_flight(connection, latest, capabilities=None, *, now=None):
+    """The server's unsettled re-check of this website's source, if any.
+
+    That is a preparation reopened for the source, or the background check a
+    push queued (which also runs when no preparation could be reopened). A
+    check that has failed without retry, or that is a day old, is not reported:
+    its facts then ask the owner to act.
+    """
+    now = now or timezone.now()
+    since = now - SOURCE_CHECK_WINDOW
+    check = None
+    if (latest is not None and latest.action == "prepare" and latest.state in {"pending", "running"}
+            and mapping(latest.payload).get("source_reverify") and latest.updated_at and latest.updated_at >= since):
+        check = latest
+    else:
+        queued = connection.operations.filter(generation=connection.generation, action="source-reverify", state="pending",
+            created_at__gte=since).order_by("-created_at")[:5]
+        check = next((row for row in queued if mapping(row.receipt).get("retryable") is not False), None)
+    if check is None:
+        return None
+    observed = mapping(capabilities).get("repositorySourceSha") or ""
+    changed = (any(mapping(item).get("code") == "repository_source_changed" for item in connection.blockers or [])
+        or observed not in ("", connection.verified_sha)
+        or mapping(check.payload).get("source_sha") not in (None, "", connection.verified_sha))
+    return {"operationId": str(check.pk), "reason": SOURCE_CHANGED_REASON if changed else SOURCE_RECHECK_REASON}
+
+
+def journey_for_context(context, config, *, capabilities=None, owner_view=False):
+    """Load current-generation facts only; authenticated account probes stay live.
+
+    ``owner_view`` reports the server's own in-flight source re-check as running
+    for the owner; preparation reads the unmasked journey to choose its step.
+    """
     from .website_connections import summary_for
     if capabilities is None:
         from .vibe_marketing_views import _article_capabilities_for_context
@@ -244,6 +329,7 @@ def journey_for_context(context, config, *, capabilities=None):
     website = summary_for(config, company_id=context.company.pk)
     connection = config.website_connection
     discovery, target, operation, epoch, proof, source_runs, ci_source_runs = None, None, None, 0, {}, [], []
+    source_check = None
     if connection:
         website["hasMutationHistory"] = connection.repository_mutations.exists()
         from django.db.models import Q
@@ -263,20 +349,40 @@ def journey_for_context(context, config, *, capabilities=None):
         if deployment and selected and (deployment.receipt.get("artifact_digest") != mapping(selected.contract.get("live_marker")).get("value")
                 or deployment.receipt.get("contract_digest") != selected.contract.get("contract_digest")):
             deployment = None
+        if deployment and not deployment_receipt_current(deployment.receipt):
+            # Publication refuses an expired live receipt (live_deployment_verified),
+            # so the journey must not report it as a complete deployment either.
+            deployment = None
         target = {"key": selected.target_key, "sourceSha": selected.source_sha, "adapter": selected.adapter, "contract": selected.contract, "deployment_receipt": deployment.receipt if deployment else {}} if selected else None
         preview_proof = mapping(mapping(preview_target.contract).get("verification")) if preview_target else {}
         prepared = bool(preview_target and preview_target.source_sha == connection.verified_sha and preview_proof.get("status") in {"passed", "verified", "preview_verified"})
         fresh = prepared and build_proof_fresh(connection, preview_target, capabilities)
         from .website_verification import current_ci_attestation
+        from .website_live_verification import applicable as live_url_applicable, selected as live_url_selected
+        # Live-URL proof stands in for CI only where activation accepts it: a
+        # target that needs sealed execution proof keeps the CI requirements.
+        live_selected = live_url_selected(getattr(context, "organization", None)) and (
+            selected is None or live_url_applicable(selected))
         proof = {"integrationVerified": prepared, "buildVerified": fresh, "verificationStale": prepared and not fresh,
             "verifiedAdapter": preview_target.adapter if fresh else None,
-            "ciAttestationRequired": bool(fresh and current_ci_attestation(connection, selected, capabilities=capabilities) is None)}
+            "ciAttestationRequired": bool(not live_selected and fresh
+                and current_ci_attestation(connection, selected, capabilities=capabilities) is None)}
+        if live_selected:
+            proof["liveVerificationSelected"] = True
         cleanup = connection.operations.filter(generation=connection.generation, action="cleanup", state="awaiting_deployment").order_by("-created_at").first()
         if cleanup:
             proof.update(cleanupAwaitingDeployment=True, cleanupOperationId=str(cleanup.pk))
         proof["reviewedMergeReady"] = connection.repository_mutations.filter(generation=connection.generation, status="applied").exclude(head_sha="").exists() and bool(connection.capabilities.get("previewSupported"))
         latest = current_operation(connection)
+        from .website_hosted_verification import enabled as hosted_enabled
+        from .website_setup_consent import valid as valid_consent
+        from .website_goal import scope_matches, scope_for
+        saved_goal = mapping(mapping(getattr(latest, "receipt", None)).get("goal"))
+        if hosted_enabled(connection) and valid_consent(saved_goal) and scope_matches(saved_goal.get("scope"), scope_for(connection, context.company.pk)):
+            proof["hostedVerificationSelected"] = saved_goal["consent"]["answers"]["ci_mode"] == "hosted"
         operation = operation_summary(latest) if latest else None
+        if owner_view:
+            source_check = source_check_in_flight(connection, latest, capabilities)
         epoch = deletion_epoch(connection)
         from workflow_runs.models import ContentFactoryRun
         source_runs = [{"runId": row.run_id, "workflow": row.workflow, "status": row.status,
@@ -312,6 +418,11 @@ def journey_for_context(context, config, *, capabilities=None):
                 "prUrl": result.get("pr_url") or setup.get("pr_url") or None, "status": setup.get("status"),
                 "blockedReason": result.get("merge_blocked_reason") or None,
                 "savedSetup": (pending.get("setup_run_id") or pending.get("setupRunId")) == run.run_id}
-    return project_journey(company_id=context.company.pk, domain=context.organization.domain, website=website,
+    journey = project_journey(company_id=context.company.pk, domain=context.organization.domain, website=website,
         capabilities=capabilities, discovery=discovery, target=target, operation=operation, epoch=epoch, proof=proof, source_runs=source_runs, ci_source_runs=ci_source_runs, permissions=grants,
-        setup_pull_request=setup_pull_request)
+        setup_pull_request=setup_pull_request, source_check=source_check)
+    from .founder_journey_cohort import is_new_journey
+    if is_new_journey(context.organization, config):
+        from .founder_display_copy import plain_founder_journey
+        return plain_founder_journey(journey)
+    return journey

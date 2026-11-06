@@ -411,6 +411,12 @@ class Command(BaseCommand):
         from roo.apple_models import AppleIapTransaction
         if AppleIapTransaction.objects.filter(user__in=(source, target)).exists():
             raise CommandError("Accounts with Apple purchases require purchase-aware support before merging.")
+        # Coupon ownership and unknown provider outcomes must survive account
+        # cleanup. A generic merge cannot safely reparent these private receipts.
+        from roo.models import EventDiscountQuote, EventDiscountRedemption
+        if (EventDiscountQuote.objects.filter(user__in=(source, target)).exists()
+                or EventDiscountRedemption.objects.filter(user__in=(source, target)).exists()):
+            raise CommandError("Accounts with event discount receipts require event-aware support before merging.")
         self._assert_no_external_identity_state(source)
         invalidate_unused_slack_founder_link_requests(source, target)
 

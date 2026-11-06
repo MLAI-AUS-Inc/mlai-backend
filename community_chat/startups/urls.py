@@ -5,6 +5,8 @@ from .public_views import PublicUpdateView
 from .connections import ConnectView, DisconnectView, connect_browser
 
 urlpatterns = [
+    path("financial-refresh/", views.RefreshFinancialsView.as_view()),
+    path("financial-refresh/<str:refresh_id>/", views.RefreshFinancialsStatusView.as_view()),
     path("agent-connection/", AgentConnectionView.as_view(), name="chat_startups_agent_connection"),
     path("agent-connection/authorization/<str:request_id>/", AgentAuthorizationView.as_view(), name="chat_startups_agent_authorization"),
     path("public/<int:update_id>/", PublicUpdateView.as_view(), name="chat_startups_public_update"),
@@ -24,6 +26,7 @@ urlpatterns = [
     path("runs/active/", views.ActiveRunView.as_view()),
     path("runs/<str:run_id>/", views.RunView.as_view()),
     path("runs/<str:run_id>/results/", views.ResultsView.as_view()),
+    path("runs/<str:run_id>/retry/", views.ResumeView.as_view()),
     path("runs/<str:run_id>/cancel/", views.CancelView.as_view()),
     path("documents/", views.DocumentsView.as_view()),
     path("documents/session/", views.UploadSessionView.as_view()),

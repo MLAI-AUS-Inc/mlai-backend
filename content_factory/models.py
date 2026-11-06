@@ -485,6 +485,21 @@ class ContentFactoryJob(models.Model):
         db_table = 'content_factory_job'
         ordering = ['-created_at']
 
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        """Capture loaded metadata for an explicit concurrency-safe fact patch."""
+        instance = super().from_db(db, field_names, values)
+        from .run_backend_facts import capture_fact_baseline
+        capture_fact_baseline(instance)
+        return instance
+
+    def refresh_from_db(self, using=None, fields=None, from_queryset=None):
+        """Refresh the pure metadata baseline together with a refreshed value."""
+        super().refresh_from_db(using=using, fields=fields, from_queryset=from_queryset)
+        if fields is None or "request_meta" in fields:
+            from .run_backend_facts import capture_fact_baseline
+            capture_fact_baseline(self)
+
     def __str__(self):
         return f"{self.job_id} ({self.status}) - {self.domain}"
 
@@ -1137,6 +1152,15 @@ class WrittenArticle(models.Model):
         blank=True,
         related_name='articles'
     )
+    # The same execution's run, filled by backfill_run_job_fields. Replaces
+    # `job` once the job/run merge removes ContentFactoryJob.
+    run = models.ForeignKey(
+        "workflow_runs.ContentFactoryRun",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="written_articles",
+    )
 
     # Historical writing decisions. Never resolve labels from today's catalogue.
     editorial_snapshot = models.JSONField(null=True, blank=True, default=None)
@@ -1685,6 +1709,9 @@ class ContentIsland(models.Model):
     first_seen_at = models.DateTimeField(default=timezone.now)
     promoted_at = models.DateTimeField(null=True, blank=True)
     archived_at = models.DateTimeField(null=True, blank=True)
+    # Set when the founder removes the island. It stays archived, and refreshes
+    # do not re-create a near-identical theme until the founder adds it again.
+    removed_at = models.DateTimeField(null=True, blank=True)
     last_refreshed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

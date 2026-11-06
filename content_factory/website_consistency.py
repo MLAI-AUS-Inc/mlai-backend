@@ -82,11 +82,13 @@ def repair_operation(operation_id, *, expected_generation, expected_updated_at, 
             child.error = "The owning website operation is terminal."
             child.save(update_fields=["status", "resume_available", "error", "updated_at"])
             # Keep an original-scope remote stop durable; no network call or refund.
+            from .website_cancellation_retirement import bindings_for
             WebsiteConnectionOperation.objects.get_or_create(idempotency_key=f"{connection.pk}:consistency-stop:{op.pk}:{child.run_id}",
                 defaults={"connection": connection, "generation": expected_generation, "action": "cancel-operation",
                     "state": "pending", "next_attempt_at": now, "payload": {"cancel_run_ids": [child.run_id],
                         "stop_preview_run_ids": [child.run_id], "previous_generation": expected_generation,
-                        "cancelled_operation_id": str(op.pk)}, "receipt": {"status": "consistency_repair"}})
+                        "cancelled_operation_id": str(op.pk), "cancel_run_bindings": bindings_for([child])},
+                    "receipt": {"status": "consistency_repair"}})
             applied.append("terminal_parent_active_child")
         if applied:
             repairs = list(goals.mapping(op.receipt).get("consistency_repairs") or [])[-15:]

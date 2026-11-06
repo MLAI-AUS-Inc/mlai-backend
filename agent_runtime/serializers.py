@@ -67,12 +67,12 @@ class InvocationReplySerializer(InvocationSerializer):
 
 class EnrollmentSerializer(StrictSerializer):
     community_id = serializers.UUIDField()
-    app_id = serializers.ChoiceField(choices=("openai-dot",))
+    app_id = serializers.ChoiceField(choices=("openai-dot", "mlai-community"))
     name = serializers.CharField(max_length=100)
     resource = serializers.CharField(max_length=300)
     idempotency_key = serializers.CharField(max_length=160)
     owner_public_key = serializers.RegexField(r"^[0-9a-f]{64}$")
-    consent_version = serializers.ChoiceField(choices=("dot-public-thread-v1",))
+    consent_version = serializers.ChoiceField(choices=("dot-public-thread-v1", "community-public-thread-v1"))
 
     def validate_name(self, value):
         if len(value.encode("utf-8")) > 100 or "\x00" in value:
@@ -87,6 +87,13 @@ class EnrollmentConfirmSerializer(StrictSerializer):
 
 class InstallationStateSerializer(StrictSerializer):
     state = serializers.ChoiceField(choices=("paused", "active"))
+
+
+class PersonalMentionSerializer(StrictSerializer):
+    community_id = serializers.UUIDField()
+    channel_id = serializers.UUIDField()
+    event_id = serializers.RegexField(r"^[0-9a-f]{64}$")
+    owner_public_key = serializers.RegexField(r"^[0-9a-f]{64}$")
 
 
 class EventsSerializer(ResourceSerializer):

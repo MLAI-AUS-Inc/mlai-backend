@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from django.test import TestCase
 from rest_framework import status
-from rest_framework.test import APIClient
+from tests.website_fixtures import CallbackFixtureClient
 
 from content_factory.models import ContentFactoryJob
 
@@ -36,7 +36,7 @@ def _event_payload(event_type, job_id, **extra):
 
 class ArticleReviewPreviewEventTests(TestCase):
     def setUp(self):
-        self.client = APIClient()
+        self.client = CallbackFixtureClient()
         self.api_key = "test_roo_key"
         os.environ["ROO_API_KEY"] = self.api_key
         os.environ["INTERNAL_API_KEY"] = self.api_key

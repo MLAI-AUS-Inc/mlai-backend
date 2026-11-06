@@ -8,6 +8,36 @@ from django.utils import timezone
 
 
 class CustomUserManager(BaseUserManager):
+    def for_email(self, email):
+        normalized = self.normalize_email(email)
+        return self.filter(
+            models.Q(email__iexact=normalized)
+            | models.Q(pk__in=UserEmailAlias.objects.using(self.db).filter(
+                email__iexact=normalized,
+            ).values('user_id'))
+        )
+
+    def resolve_email(self, email):
+        return self.for_email(email).first()
+
+    def get_by_natural_key(self, username):
+        # Django password login (including JWT/admin) must use the same identity.
+        return self.for_email(username).get()
+
+    def get_or_create_for_email(self, email, *, defaults=None):
+        from django.db import transaction
+        from .email_aliases import lock_email_namespace
+
+        email = self.normalize_email(email)
+        with transaction.atomic(using=self.db):
+            lock_email_namespace(email, using=self.db)
+            user = self.resolve_email(email)
+            if user is not None:
+                return user, False
+            values = dict(defaults or {})
+            values.pop('email', None)
+            return self.create(email=email, **values), True
+
     @classmethod
     def normalize_email(cls, email):
         """Return the canonical account identifier used by every auth flow."""
@@ -80,15 +110,23 @@ class User(AbstractBaseUser, PermissionsMixin):
     def save(self, *args, **kwargs):
         self.email = type(self).objects.normalize_email(self.email)
         from .account_bans import guard_account_save
+        from .email_aliases import guard_primary_email
         from django.db import transaction
 
         # Ban and account updates share a user-first boundary, so an in-flight
         # magic link or Slack profile refresh cannot undo a completed ban.
         with transaction.atomic(using=kwargs.get('using')):
+            current = None
             if self.pk:
-                current = type(self).objects.select_for_update().filter(pk=self.pk).only('auth_version').first()
+                current = type(self).objects.select_for_update().filter(pk=self.pk).only('auth_version', 'email').first()
                 if current:
                     self.auth_version = max(self.auth_version, current.auth_version)
+            update_fields = kwargs.get('update_fields')
+            if current is None or (
+                (update_fields is None or 'email' in update_fields)
+                and current.email != self.email
+            ):
+                guard_primary_email(self, using=kwargs.get('using') or self._state.db or 'default')
             guard_account_save(self)
             super().save(*args, **kwargs)
 
@@ -104,6 +142,31 @@ class User(AbstractBaseUser, PermissionsMixin):
     def set_password(self, raw_password):
         super().set_password(raw_password)
         self.password_set_at = timezone.now() if raw_password is not None else None
+
+    def __str__(self):
+        return self.email
+
+
+class UserEmailAlias(models.Model):
+    """Operator-approved alternate identifier; outbound mail uses user.email."""
+
+    user = models.ForeignKey(User, on_delete=models.PROTECT, related_name='email_aliases')
+    email = models.EmailField(max_length=254)
+    created_at = models.DateTimeField(default=timezone.now)
+    verified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(Lower('email'), name='core_user_email_alias_ci_unique')]
+
+    def save(self, *args, **kwargs):
+        from django.db import transaction
+        from .email_aliases import guard_alias_email
+
+        self.email = User.objects.normalize_email(self.email)
+        using = kwargs.get('using') or self._state.db or 'default'
+        with transaction.atomic(using=using):
+            guard_alias_email(self, using=using)
+            super().save(*args, **kwargs)
 
     def __str__(self):
         return self.email

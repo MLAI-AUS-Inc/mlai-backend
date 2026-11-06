@@ -5,3 +5,9 @@ class ContentFactoryConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
     name = 'content_factory'
     verbose_name = 'Content Factory'
+
+    def ready(self):
+        from . import checks  # noqa: F401
+        from . import job_mirror  # noqa: F401  (Job -> run dual-write receivers)
+        from . import run_fact_guards  # noqa: F401 (canonical fact and charge history fences)
+        from . import founder_funnel_events  # noqa: F401 (after-commit journey observations)

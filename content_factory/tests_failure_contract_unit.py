@@ -156,12 +156,82 @@ class FingerprintTests(SimpleTestCase):
         original = classify_failure("DIRECTORY_STYLE_REVIEW_FAILED", "style")
         self.assertEqual(validate_failure(original), original)
         for key, value in (("code", {}), ("schema_version", True), ("registry_version", True), ("fingerprint_version", True),
-                           ("registry_sha256", "0" * 64), ("retryable", True), ("failure_class", "transient"),
+                           ("registry_sha256", "0" * 63), ("registry_sha256", "Z" * 64), ("retryable", True), ("failure_class", "transient"),
+                           ("failure_class", ["unhashable"]), ("code", "token=opaque"), ("user_message", "token=opaque"),
                            ("action", {"id": "authorize_github", "label": "Authorize", "url": None})):
             with self.subTest(key=key):
                 modified = {**original, key: value}
                 with self.assertRaises(FailureContractError):
                     validate_failure(modified)
+
+class MembershipTests(SimpleTestCase):
+    """Receivers accept codes by membership; registry_sha256 is diagnostic only."""
+
+    def test_membership_accepts_unknown_codes_and_registry_drift(self):
+        from .website_failure_contract import classify_failure, legacy_view, load_registry, validate_failure
+        drifted = {**classify_failure("DIRECTORY_STYLE_REVIEW_FAILED", "style"), "registry_sha256": "0" * 64,
+                   "user_message": "An older copy of the same failure message."}
+        # Founder copy for a registered code stays this registry's, whatever the emitter sent.
+        registered = load_registry()["by_code"]["DIRECTORY_STYLE_REVIEW_FAILED"]
+        with self.assertLogs("content_factory.website_failure_contract", "WARNING") as logs:
+            self.assertEqual(validate_failure(drifted), {**drifted, "user_message": registered["user_message"]})
+        self.assertIn("failure_registry_drift code=DIRECTORY_STYLE_REVIEW_FAILED user_message", "".join(logs.output))
+        self.assertEqual(legacy_view(drifted), registered["legacy"])
+        owner = classify_failure("GITHUB_ACCESS_REQUIRED", "access")
+        owner["action"] = {**owner["action"], "label": "An older label for the same step"}
+        self.assertEqual(validate_failure(owner), owner)
+        for source, failure_class in (("DIRECTORY_STYLE_REVIEW_FAILED", "repairable"), ("worker_unavailable", "transient"),
+                                      ("GITHUB_ACCESS_REQUIRED", "needs_user"), ("invalid_connection_contract", "unsupported")):
+            with self.subTest(failure_class=failure_class):
+                failure = {**classify_failure(source, "style"), "code": "FUTURE_CF_CODE"}
+                with self.assertLogs("content_factory.website_failure_contract", "WARNING") as logs:
+                    self.assertEqual(validate_failure(failure), failure)
+                self.assertIn("failure_registry_drift code=FUTURE_CF_CODE", "".join(logs.output))
+                self.assertEqual(legacy_view(failure), {"code": "FUTURE_CF_CODE", "failure_class": failure_class,
+                                                        "retryable": failure_class == "transient"})
+
+    def test_unknown_class_or_owner_action_gets_the_safe_default(self):
+        from .website_failure_contract import classify_failure, load_registry, validate_failure
+        base = {**classify_failure("DIRECTORY_STYLE_REVIEW_FAILED", "style"), "code": "FUTURE_CF_CODE"}
+        generic = load_registry()["by_code"]["UNREGISTERED_FAILURE_CODE"]
+        for change in ({"failure_class": "future_class"}, {"failure_class": "future_class", "retryable": True},
+                       {"failure_class": "needs_user", "action": {"id": "future_action", "label": "Next step", "url": None}},
+                       {"failure_class": "needs_user", "action": None}):
+            with self.subTest(change=change):
+                result = validate_failure({**base, **change})
+                self.assertEqual((result["code"], result["failure_fingerprint"]), (base["code"], base["failure_fingerprint"]))
+                self.assertEqual((result["failure_class"], result["retryable"], result["action"]), ("unsupported", False, None))
+                self.assertEqual(result["user_message"], generic["user_message"])
+
+    def test_resolve_failure_applies_an_unknown_code_by_its_class_without_contract_invalid(self):
+        from .website_failure_contract import classify_failure, resolve_failure
+        known = classify_failure("worker_unavailable", "setup")
+        future = {**known, "code": "FUTURE_CF_CODE"}
+        result = {"failure": future, "error_code": "FUTURE_CF_CODE", "failure_class": "transient", "retryable": True}
+        resolved = resolve_failure("FUTURE_CF_CODE", result, apply=True)
+        self.assertFalse(resolved["contract_invalid"])
+        self.assertEqual((resolved["code"], resolved["failure_class"], resolved["retryable"]), ("FUTURE_CF_CODE", "transient", True))
+        odd = {**future, "failure_class": "future_class"}
+        resolved = resolve_failure("FUTURE_CF_CODE", {**result, "failure": odd, "failure_class": "future_class"}, apply=True)
+        self.assertFalse(resolved["contract_invalid"])
+        self.assertEqual((resolved["failure_class"], resolved["retryable"]), ("unsupported", False))
+        mismatched = resolve_failure("FUTURE_CF_CODE", {**result, "failure_class": "repairable"}, apply=True)
+        self.assertTrue(mismatched["contract_invalid"])
+
+    def test_codes_emitted_before_registration_keep_their_emitter_class(self):
+        from .website_failure_contract import classify_failure, load_registry, validate_failure
+        for code, failure_class, action_id in (("ARTICLE_STATIC_VERIFICATION_FAILED", "unsupported", None),
+                                               ("ARTICLE_PLAN_SCHEMA_MISMATCH", "unsupported", None),
+                                               ("NO_KEYWORDS", "needs_user", "review_setup"),
+                                               ("REVIEW_PROVIDER_UNAVAILABLE", "transient", None),
+                                               ("repo_code_build", "repairable", None)):
+            with self.subTest(code=code):
+                entry = load_registry()["by_code"][code]
+                self.assertEqual((entry["failure_class"], entry["action_id"]), (failure_class, action_id))
+                failure = classify_failure(code, "verify_build")
+                self.assertEqual(failure["code"], code)
+                self.assertEqual(validate_failure(failure), failure)
+
 
 @override_settings(ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=("7",))
 class ProviderAndEnrollmentTests(SimpleTestCase):
@@ -300,6 +370,49 @@ class ScannerTests(SimpleTestCase):
             for field in ("path", "function", "field", "expression"):
                 self.assertEqual(audit[field], rows[audit["site_sha256"]][field])
 
+    def test_article_price_admission_sites_are_exact_financial_denials(self):
+        import json
+        from scripts.check_failure_contract import ROOT, inventory, site_key
+        manifest = json.loads((ROOT / "contracts/failure-emitter-scopes.json").read_text())
+        expected = {
+            ("content_factory/content_views.py", "post", "getattr(exc, 'code', 'article_quote_unavailable')"),
+            ("integrations/services/article_generation.py", "_article_billing_user", "exc.code"),
+            *(("integrations/services/article_generation.py", function, "'content_factory_billing_key_conflict'") for function in (
+                "_original_article_admission_points", "_require_article_job_payment.conflict", "_require_confirm_child_payment",
+                "_charge_deferred_discovery_job_if_needed", "_charge_discovery_article_locked")),
+        }
+        audits = [entry for entry in manifest["nonfailure_sites"] if entry["owner"] == "backend.article_pricing"]
+        self.assertEqual({(entry["path"], entry["function"], entry["expression"]) for entry in audits}, expected)
+        self.assertEqual(len(audits), 7)
+        rows = {site_key(row): row for row in inventory()}
+        for entry in audits:
+            self.assertEqual(entry["adapter"], "nonfailure_category")
+            self.assertEqual(entry["field"], "code")
+            self.assertEqual(entry["test"], f"{__name__}.ScannerTests.test_article_price_admission_sites_are_exact_financial_denials")
+            self.assertIn("not a causal Articles run failure", entry["category"])
+            self.assertIn(entry["site_sha256"], rows)
+
+    def test_article_financial_audit_does_not_cover_another_function_or_code(self):
+        import json
+        from scripts.check_failure_contract import ROOT, check_emitters
+        root, _ = self.fixture_root()
+        path = "integrations/services/article_generation.py"
+        audit = next(entry for entry in json.loads((ROOT / "contracts/failure-emitter-scopes.json").read_text())["nonfailure_sites"]
+            if entry["path"] == path and entry["function"] == "_original_article_admission_points")
+        (root / "contracts/failure-emitter-scopes.json").write_text(json.dumps({"dynamic_adapters": [], "nonfailure_sites": [audit]}))
+        module = root / path
+        module.parent.mkdir(parents=True)
+        source = 'def _original_article_admission_points():\n    error.code = "content_factory_billing_key_conflict"\n'
+        module.write_text(source)
+        self.assertEqual(check_emitters(root)[0], [])
+        for changed in (source.replace("_original_article_admission_points", "other_billing_function"),
+                source.replace("content_factory_billing_key_conflict", "unreviewed_billing_code")):
+            with self.subTest(changed=changed):
+                module.write_text(changed)
+                errors, _ = check_emitters(root)
+                self.assertTrue(any("unregistered code literal" in error for error in errors))
+                self.assertTrue(any("stale emitter audit" in error for error in errors))
+
     def test_ast_covers_constructor_mutations_constants_enums_and_finite_strings(self):
         from scripts.check_failure_contract import python_emissions
         source = '''
@@ -335,6 +448,11 @@ def emit():
         lock = {"schema_version": 1, "source_repository": SOURCE_REPOSITORY, "source_revision": "a" * 40, "files": files}
         (root / "contracts/failure-codes.lock.json").write_text(json.dumps(lock))
         (root / "contracts/failure-emitter-scopes.json").write_text(json.dumps({"dynamic_adapters": [], "nonfailure_sites": []}))
+        # P2: the checker also verifies the vendored pre-P2 overlay against its fixture.
+        from scripts.check_failure_contract import OVERLAY_PATH, PRE_P2_FIXTURE_PATH
+        for name in (OVERLAY_PATH, PRE_P2_FIXTURE_PATH):
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_bytes((ROOT / name).read_bytes())
         return root, lock
 
     def test_unknown_literal_and_unbounded_dynamic_fail_with_safe_locations(self):
@@ -364,18 +482,32 @@ def emit():
         with self.assertRaisesRegex(ContractCheckError, "immutable_commit"):
             verify_vendor(root)
 
-    def test_remote_parity_uses_exact_revision_and_refuses_changed_bytes(self):
-        from scripts.check_failure_contract import verify_vendor, ContractCheckError, ARTIFACTS
+    def test_remote_parity_uses_exact_revision_and_reports_changed_bytes_as_drift(self):
+        import json
+        from scripts.check_failure_contract import verify_vendor, ARTIFACTS, canonical_bytes
         root, lock = self.fixture_root()
         seen = []
         def fetch(path, revision, token):
             seen.append((path, revision))
             self.assertEqual(token, "synthetic-read-only")
             return (root / path).read_bytes()
-        verify_vendor(root, remote=True, token="synthetic-read-only", fetch=fetch)
+        self.assertEqual(verify_vendor(root, remote=True, token="synthetic-read-only", fetch=fetch), [])
         self.assertEqual(seen, [(path, lock["source_revision"]) for path in ARTIFACTS])
-        with self.assertRaisesRegex(ContractCheckError, "source_byte_mismatch"):
-            verify_vendor(root, remote=True, token="synthetic-read-only", fetch=lambda *args: b"changed")
+        registry = json.loads((root / ARTIFACTS[0]).read_text())
+        first, second = registry["codes"][0], registry["codes"][1]
+        peer = deepcopy(registry)
+        peer["codes"] = [dict(first, failure_class="transient" if first["failure_class"] != "transient" else "unsupported"),
+                         dict(second, code="FUTURE_CF_CODE"), *registry["codes"][2:]]
+        def drifted(path, revision, token):
+            return canonical_bytes(peer) if path == ARTIFACTS[0] else b"changed"
+        drift = verify_vendor(root, remote=True, token="synthetic-read-only", fetch=drifted)
+        self.assertIn(f"DRIFT {ARTIFACTS[0]}: only in Content Factory: FUTURE_CF_CODE", drift)
+        self.assertIn(f"DRIFT {ARTIFACTS[0]}: only here: {second['code']}", drift)
+        self.assertTrue(any(line.startswith(f"DRIFT {ARTIFACTS[0]}: {first['code']} is {first['failure_class']} here") for line in drift))
+        self.assertIn(f"DRIFT {ARTIFACTS[1]}: bytes differ from the pinned Content Factory revision", drift)
+        hostile = verify_vendor(root, remote=True, token="synthetic-read-only",
+                                fetch=lambda path, *args: canonical_bytes({"codes": [{"code": "token=ghp_private", "failure_class": "x"}]}) if path == ARTIFACTS[0] else (root / path).read_bytes())
+        self.assertNotIn("ghp_private", str(hostile))
 
 @override_settings(ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED=True, ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS=("7",),
                    CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED=True, ROO_API_KEY="fixture-service-key")

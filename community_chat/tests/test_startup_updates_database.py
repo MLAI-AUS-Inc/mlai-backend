@@ -1,12 +1,14 @@
 """Database integration tests. Require explicit approval of the migration inventory."""
 from datetime import timedelta
 import uuid
+from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 from community_chat.account_sessions import issue_account_session
 from community_chat.models import CommunityChatEmailCodeChallenge
+from startup_updates.models import MonthlyUpdateApproval, MonthlyUpdateDraft
 
 BASE = '/api/v1/community-chat/startups/'
 ORIGIN = 'https://chat.example'
@@ -68,6 +70,14 @@ class ChatStartupJourneyTests(TestCase):
         self.assertNotIn('evidenceSnapshot', community)
         self.assertNotIn('PRIVATE SOURCE NOTES', str(community))
 
+    def test_blank_update_cannot_be_approved(self):
+        update = self.save(summary='')
+        response = self.approve(update)
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(response.data['detail'], 'Write at least one section of your update before publishing.')
+        self.assertIsNone(MonthlyUpdateDraft.objects.get(pk=update['id']).published_at)
+        self.assertFalse(MonthlyUpdateApproval.objects.exists())
+
     def test_sibling_company_cannot_read_or_approve_update(self):
         update = self.save()
         other = self.client.post(BASE + 'companies/', {'name': 'Sibling', 'createNew': True}, format='json').data['id']
@@ -95,3 +105,43 @@ class ChatStartupJourneyTests(TestCase):
         self.assertEqual(edited['id'], update['id'])
         self.assertNotEqual(edited['revisionId'], update['revisionId'])
         self.assertNotIn('customerInterviews', edited['metrics'])
+
+    def test_financial_history_save_preview_opt_in_and_cached_refresh_round_trip(self):
+        from startup_updates.evidence_contract import content_hash
+        from startup_updates.models import MonthlyEvidenceSnapshot
+        from startup_updates.revisions import save_revision
+        from startup_updates.tests_financial_history_unit import evidence_payload, replace_totals
+        initial = self.save(month='August')
+        draft = MonthlyUpdateDraft.objects.get(pk=initial['id'])
+        payload = evidence_payload()
+        snapshot = MonthlyEvidenceSnapshot.objects.create(organization=draft.organization, month=draft.month,
+            payload=payload, content_hash=content_hash(payload))
+        seeded = save_revision(draft, {'summary': 'We launched.'}, snapshot=snapshot,
+            expected_revision=initial['revisionId'], validation={'groundedness_status': 'founder_asserted'})
+        saved = self.save(month='August', updateId=draft.pk, expectedRevision=seeded.pk,
+            metrics={}, audienceVisibility='community', financialHistorySelection={'enabled': True, 'shareAmounts': False})
+        self.assertEqual(saved['financialHistorySelection'], {'enabled': True, 'shareAmounts': False})
+        self.assertEqual(saved['financialHistory']['points'][-1]['revenue'], 100)
+        detail = self.client.get(BASE + f'updates/{draft.pk}/', {'company_id': self.company})
+        self.assertEqual(detail.data['communityPreview']['financialHistory'], saved['financialHistory'])
+        self.assertNotIn('evidenceSnapshot', detail.data['communityPreview'])
+        self.assertEqual(self.approve(saved).status_code, 200)
+        published = self.client.get(BASE + 'community/').data['updates'][0]
+        fresh_payload = evidence_payload()
+        replace_totals(fresh_payload, -1, 9000, 300)
+        latest = MonthlyEvidenceSnapshot.objects.create(organization=draft.organization, month=draft.month,
+            payload=fresh_payload, content_hash=content_hash(fresh_payload))
+        with patch('startup_updates.revisions.capture_snapshot', return_value=latest) as capture:
+            amounts = self.save(month='August', updateId=draft.pk, expectedRevision=saved['revisionId'],
+                metrics={}, audienceVisibility='community', financialHistorySelection={'enabled': True, 'shareAmounts': True})
+            capture.assert_not_called()
+            self.assertEqual(amounts['financialHistory']['points'][-1]['revenue'], 600)
+            refreshed = self.save(month='August', updateId=draft.pk, expectedRevision=amounts['revisionId'],
+                metrics={}, audienceVisibility='community', financialHistorySelection={'enabled': True, 'shareAmounts': True, 'refresh': True})
+            capture.assert_called_once_with(draft.organization, draft.month)
+        self.assertEqual(refreshed['financialHistory']['points'][-1]['revenue'], 9000)
+        self.assertEqual(self.client.get(BASE + 'community/').data['updates'][0], published)
+        detail = self.client.get(BASE + f'updates/{draft.pk}/', {'company_id': self.company})
+        self.assertEqual(detail.data['communityPreview']['financialHistory'], refreshed['financialHistory'])
+        self.assertEqual(self.approve(refreshed).status_code, 200)
+        self.assertEqual(self.client.get(BASE + 'community/').data['updates'][0]['financialHistory']['points'][-1]['revenue'], 9000)

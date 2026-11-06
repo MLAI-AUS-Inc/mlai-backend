@@ -45,6 +45,16 @@ def _retry_after_seconds(raw: str | None) -> int:
             return 60
 
 
+def xero_cooldown_seconds(tenant_id: str | None) -> int:
+    """Return the shared remaining app/tenant wait without making a provider call."""
+    key = _xero_cooldown_key("https://api.xero.com/api.xro/2.0/", {"Xero-Tenant-Id": tenant_id or ""})
+    if not key:
+        return 0
+    from django.core.cache import cache
+    deadline = cache.get(key)
+    return max(0, math.ceil(deadline - time.time())) if deadline else 0
+
+
 def _xero_backoff_response(url: str, seconds: int) -> requests.Response:
     response = requests.Response()
     response.status_code = 429

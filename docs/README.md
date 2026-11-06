@@ -4,6 +4,10 @@ Start with the repository [`README`](../README.md) and
 [`ARCHITECTURE`](../ARCHITECTURE.md). Use this index to find current
 subsystem-specific contracts and runbooks.
 
+- [Private Studio report source](studio-report-source.md) — scoped hours/invoice/payment refresh and missing-data barriers
+- [Contacts store](crm.md) — MLAI Luma guest sync, CSV opt-in import, consent rules and the `crm` migration
+- [System email](system-email.md) — sign-in, reset and notification email through Resend on `notify.mlai.au`, per-message switch off Customer.io
+
 ## Backend maintenance
 
 - [26 September release integration](backend-refactor-release-2026-09-26.md) — current-main fixes, validation and pending migration approval
@@ -18,16 +22,38 @@ subsystem-specific contracts and runbooks.
 
 ## Production API
 
+- [Alternate sign-in emails and account repairs](email-aliases.md) — identity resolution, delivery policy, and reviewed merges
+
 - [Backend API web handoff](backend-api-web-handoff.md) — verified ingress,
   first adoption, code-only route flips, rollback, and migration limits
 
 ## Content Factory
 
+- [Job to Run cutover](run-job-cutover.md) — parity, copied identity, historical coverage and rollback
+- [Topic discovery reconciliation](discovery-reconciliation.md) — bounded cohort preview, saved scope and activation boundary
+- [Nightly island refresh reconciliation](nightly-refresh-reconciliation.md) — new scheduler contract, bounded preview and separate rollout
+
+- [19 October backend consolidation audit](articles-backend-rollup-audit-2026-10-19.md) — retained reliability fixes, deferred prototypes, exact component heads and release boundaries
+
+- [Interrupted article publication observation](articles-publication-observation.md) — bounded positive GitHub evidence, exact original intent and preserved settlement obligations
+- [Original queued article admission](articles-dispatch-admission.md) — original target/source checks before retrying paid work and held legacy identities
+- [R3 original goal audit](articles-r3-original-goal-audit-2026-10-18.md) — persisted partial owner observations, public unknown counts and remaining external coverage
+- [R2 bootstrap memory and optional profiling](articles-r2-bootstrap-memory-2026-10-18.md) — independent extraction, unchanged recycling and scoped disposable CI
+- [R4 fixture rollout inspection and refund retention](articles-r4-rollout-refunds-2026-10-18.md) — read-only flags and enrollment diagnostics, unknown CF observations, and credits retained through disconnect
+- [E3 original inventory count disclosure](articles-e3-native-inventory-display-2026-10-17.md) — scoped “We found N” observations and immutable producer parity, with no readiness grant
+
+- [F2 bootstrap summary and rendering](articles-f2-bootstrap-summary-2026-10-16.md) — default compact reads, explicit full details, and remaining latency/overlay validation
+- [F3 recorded usage and operational alerts](articles-f3-cost-accounting-2026-10-16.md) — original-run accounting, company coverage and durable budget/stall/repair notices
+- [G6 preview cleanup deadline](articles-g6-preview-cleanup-2026-10-16.md) — durable 24-hour lifecycle limit and one scoped operational incident
+
 - [Articles B1 failure contract](articles-b1-implementation-2026-10-14.md) — immutable taxonomy, trusted enrollment, emitter coverage and regression/provenance evidence
 - [Articles B5 setup delivery](articles-b5-implementation-2026-10-14.md) — durable receipts, pure reconciliation and initial implementation evidence
 - [Articles B2 goal runner design](articles-b2-design-2026-10-14.md) — proposed milestone proofs, per-site execution and one backend status for Chat
 - [B2 implementation and validation](articles-b2-implementation-2026-10-14.md)
+- `inspect_articles_zoo_scope --observation <recorded-night.json>` reads saved original-goal/run ownership in a fresh PostgreSQL REPEATABLE READ, READ ONLY snapshot. It emits only safe IDs and closed binding digests; missing lineage remains unknown. It produces scope evidence only, never runtime eligibility, deployment proof or a qualifying zoo night. Collect before adoption/disconnect changes the original selected connection. No flags, providers or saved state are changed.
 - [Continuous one-shot implementation progress](articles-continuous-implementation-2026-10-14.md)
+- [E2 hosted attempt and recovery design](articles-e2-build-recovery-2026-10-16.md) — temporary preview branches and gated recovery for scoped partial environment receipts
+- [E1 site fingerprint](articles-e1-site-fingerprint-2026-10-15.md) — bounded immutable facts, source validation, strategy/deploy hints and pinned producer parity
 
 - [Articles Phase 2 design approvals](articles-phase2-design-notes-2026-10-12.md) — all eight designs approved; implementation waits for Phase 1 deployment
 
@@ -41,9 +67,13 @@ subsystem-specific contracts and runbooks.
 
 ## Community chat APIs
 
+- [Dependency signals and polling callers](community-chat-dependency-signals.md) — source-level G3 tracing for preview, Slack storage and cursor callback waits
+
 - [MLAI remote MCP](mlai-mcp.md) — unified Pulse, Articles and explicit-channel Community capabilities with legacy audience isolation
 
 - [Personal Dot on MLAI MCP](mlai-mcp-native-dot.md) — fresh installation-bound consent, mention events and native replies on the existing connection
+
+- [Personal Maek and Maek · community](mlai-community-agent.md) — separate guest identity, tool-free inference and opt-in rollout
 
 - [Valley remote MCP](valley-mcp.md) — client installation, scoped OAuth consent, private narrative handoff and rollout
 
@@ -62,6 +92,7 @@ subsystem-specific contracts and runbooks.
 
 - [`community-chat-account-profile.md`](community-chat-account-profile.md)
 - [`community-chat-test-results-2026-09-07.md`](community-chat-test-results-2026-09-07.md) — disposable backend regression evidence
+- [Mentor booking](mentoring.md) — invite-only mentors, Roo payments, availability and staff review; [main rollout](mentoring-main-rollout.md).
 - [`community-chat-home.md`](community-chat-home.md)
 - [`community-chat-roo-dm.md`](community-chat-roo-dm.md) — owner-scoped Slack Roo chat
 - [`community-chat-coworking.md`](community-chat-coworking.md) — signed booking handoff to Public Roo
@@ -76,6 +107,18 @@ release evidence may describe earlier deployment stages; verify current runtime
 state when using those operational documents.
 
 - [`mlai-chat-bridge-contract.md`](mlai-chat-bridge-contract.md)
+- [Permanent Slack member operations](slack-member-permanent-operations.md) — member-only strategy, processing pause, reader holds and recovery
+- [Member read ownership](slack-member-read-cleanup-inventory.md) — current token boundaries and retained bot writes
+- [Member-authorized repair](slack-member-repair.md) — durable, bounded recovery without a legacy replay path
+- [Slack member migration: Phase 0 operations](slack-member-phase0-operations.md) — read-only coverage command and owner baseline checks
+- [Slack member migration: Phase 3 foundations](slack-member-phase3-operations.md) — disabled configuration, exact migration proposal and rollout gates
+- [Slack member migration: Phase 4a operations](slack-member-phase4a-operations.md) — feature-off release, scoped public intake, membership epochs and audience reduction gates
+- [Phase 4b member-token history](slack-member-phase4b-operations.md) — current reader/source/audience fences, pagination scope and feature-off rollout holds.
+- [Phase 4c Members delivery](slack-member-phase4c-operations.md) — immutable Slack actors/requests, current audience fences and combined Chat release gates.
+- [Phase 5 Community posting](slack-community-phase5-operations.md) — scoped member selection, verified-account bot fallback and immutable original-poster retries.
+- [Historical Phase 6 source comparison](slack-community-phase6-operations.md) — superseded rollout modes and observation gates; use permanent operations for current behavior.
+- [Private Slack first-event routing: Phase 8](slack-event-routing-phase8.md) — owner leases, disabled rollout and confirmed-delivery latency evidence
+- [Slack member-sync evidence](slack-member-sync-facts.md) — owner decisions, documented contracts and outstanding live observations
 - [`slack-unfinished-conversation-recovery.md`](slack-unfinished-conversation-recovery.md) — reviewed recovery of existing unfinished private mirrors
 - [`mlai-chat-bridge-staging.md`](mlai-chat-bridge-staging.md)
 - [`mlai-chat-membership-bootstrap.md`](mlai-chat-membership-bootstrap.md)
@@ -107,6 +150,10 @@ rollout sequence.
   private scoring-data boundary and runtime provisioning contract.
 
 ## Roo
+
+- [Roo awards to members without Slack](roo-chat-only-points.md)
+
+- [Roo event discounts](roo-event-discounts.md) — private quotes, general-point holds, one-use Luma coupons and supervised reconciliation.
 
 - [`roo-points-gst.md`](roo-points-gst.md) — inclusive GST checkout, payment evidence and release configuration
 
@@ -142,5 +189,8 @@ identified as current by a maintained architecture document.
 - [Startup Progress dashboard and chart disclosure](startup-progress.md)
 
 - [Chat startup updates](community-chat-startup-updates.md): founder setup, draft, review, approval and community API.
+- [Pulse generation reliability](pulse-generation-reliability.md): source preflight, exact worker receipts, fenced recovery, bounded collection and local acceptance checks.
+- [Pulse financial refresh](pulse-financial-refresh.md): independent provider refresh, immutable chart previews, scoped saves and preserved writing/publication.
+- [Shared update benefits](shared-update-benefits.md): sharing requirements, grandfathered discounts, points and rollout dependencies.
 
 - [Website connection lifecycle and repository consent](website-connections.md) — schema, API, revocation, reviewed cleanup, and local verification.

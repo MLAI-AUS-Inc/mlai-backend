@@ -17,6 +17,7 @@ from startup_updates.models import (
     MonthlyEvidenceSnapshot, MonthlyUpdateApproval, MonthlyUpdateDraft,
     MonthlyUpdateRevision, StartupEvent, StartupMetricObservation, StartupProfile,
 )
+from startup_updates.review_policy import has_narrative
 
 
 class RevisionConflict(APIException):
@@ -24,10 +25,24 @@ class RevisionConflict(APIException):
     default_detail = "This update changed. Reload and review the latest revision."
 
 
+class EmptyUpdate(APIException):
+    """A string detail, unlike ValidationError's list, reaches the founder verbatim."""
+    status_code = 400
+    default_code = "empty_update"
+    default_detail = "Write at least one section of your update before publishing."
+
+
 def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base_snapshot=None):
     profile, _ = StartupProfile.objects.get_or_create(organization=organization)
     try:
         request = (run.run_request or {}) if run else {}
+        config = request.get("reporting_config")
+        if isinstance(config, dict):
+            profile = copy.copy(profile)
+            profile.default_currency = config["currency"]
+            profile.reporting_timezone = config["timezone"]
+            profile.kpi_definitions = copy.deepcopy(config["kpi_definitions"])
+            profile.reporting_config_version = config["config_version"]
         zone = request.get("reporting_timezone") or profile.reporting_timezone
         window_end = request.get("financial_cutoff") or request.get("backfill_window_end")
         if base_snapshot is not None:
@@ -62,7 +77,8 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     definitions_by_key = {item.get("key"): item for item in definitions}
     metrics = []
     for key in sorted(keys):
-        candidates = by_key.get(key, [])
+        from startup_updates.connection_scope import metric_in_scope
+        candidates = [item for item in by_key.get(key, []) if metric_in_scope(item, request.get("source_connection_pins"), run_id=run.pk if run else None)]
         # Revenue is only from deterministic financial publishers.
         if key == "revenue":
             candidates = [item for item in candidates if (
@@ -102,14 +118,26 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     payload = financial_snapshot_from_metrics(period, metrics, definitions)
     payload.pop("hash", None)
     payload["organization_id"] = organization.pk
-    payload["startup"] = {"id": organization.pk, "name": organization.name, "stage": profile.stage, "description": profile.short_description}
+    # This small context survives the worker's removal of the larger, deduplicated
+    # startup_context. Both writer and verifier use this frozen description.
+    background = request.get("startup_context") or {}
+    payload["startup"] = {
+        "id": organization.pk, "name": background.get("company_name", organization.name),
+        "stage": background.get("stage", profile.stage),
+        "description": background.get("short_description", profile.short_description),
+        "short_description": background.get("short_description", profile.short_description),
+        "problem_solved": background.get("problem_solved", getattr(profile, "problem_solved", "")),
+        "target_audience": background.get("target_audience", getattr(profile, "target_audience", "")),
+    }
+    if run is not None and "startup_overview" in request:
+        payload["startup"]["startup_overview"] = request["startup_overview"]
     payload["config_version"] = profile.reporting_config_version
     payload["source_providers"] = sorted(set((run.run_request or {}).get("input_sources", [])) | {item.get("source_provider") for item in metrics if item.get("source_provider")}) if run else sorted({item.get("source_provider") for item in metrics if item.get("source_provider")})
     from startup_updates.services import build_monthly_financial_snapshot
     chart_sources = None
     if run and (run.run_request or {}).get("input_sources"):
         chart_sources = ({"xero"} if "xero" in sources else set()) | ({"financial"} if "stripe" in sources else set())
-    payload["charts"] = copy.deepcopy(base_snapshot.payload.get("charts", {})) if base_snapshot else build_monthly_financial_snapshot(organization=organization, target_month=month, source_providers=chart_sources)
+    payload["charts"] = copy.deepcopy(base_snapshot.payload.get("charts", {})) if base_snapshot else build_monthly_financial_snapshot(organization=organization, target_month=month, source_providers=chart_sources, connection_pins=request.get("source_connection_pins"))
     # A manual change must affect charts as well as cards. Unparseable assertions produce gaps.
     from startup_updates.evidence_contract import decimal_value
     if not payload.get("charts") and manual_metrics and any(
@@ -160,9 +188,12 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     for event in payload["events"]:
         if event["event_date"]:
             event["event_date"] = event["event_date"].isoformat()
-    from startup_updates.source_evidence import frozen_manual_sources, EXTRACTION_VERSION
+    from startup_updates.source_evidence import frozen_manual_sources, hoist_startup_context, EXTRACTION_VERSION
     payload["extraction_version"] = EXTRACTION_VERSION
-    payload["source_evidence"] = copy.deepcopy((run.result or {}).get("source_evidence", {})) if run else {}
+    receipts = copy.deepcopy((run.result or {}).get("source_evidence", {})) if run else {}
+    payload["source_evidence"], payload["startup_context"] = hoist_startup_context(
+        receipts, fallback=(run.run_request or {}).get("startup_context") if run else None,
+    )
     payload["manual_sources"] = copy.deepcopy(base_snapshot.payload.get("manual_sources") or {}) if base_snapshot else (frozen_manual_sources(organization, run) if run else {"summary": "", "documents": []})
     external = (run.run_request or {}).get("external_context", {}) if run else {}
     payload["source_coverage"] = {key: {field: copy.deepcopy(value[field]) for field in ("warnings", "index_partial", "needs_review", "pages_indexed") if field in value}
@@ -209,7 +240,7 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     payload["metric_history"] = build_metric_history([*pairs, (month, current_memo)])
     if base_snapshot is not None:
         payload["amended_at"] = timezone.now().isoformat()
-        for field in ("events", "startup", "period", "definitions", "config_version", "source_providers", "manual_sources", "source_evidence", "source_coverage", "extraction_version", "editorial_event_ids", "narrative_period"):
+        for field in ("events", "startup", "period", "definitions", "config_version", "source_providers", "manual_sources", "source_evidence", "startup_context", "source_coverage", "extraction_version", "editorial_event_ids", "narrative_period"):
             payload[field] = copy.deepcopy(base_snapshot.payload.get(field))
     payload["hash"] = content_hash(payload)
     snapshot, _ = MonthlyEvidenceSnapshot.objects.get_or_create(
@@ -220,12 +251,34 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
 
 
 def revision_payload(revision, *, include_evidence=True):
+    evidence = copy.deepcopy(revision.snapshot.payload) if include_evidence else None
+    if evidence is not None and isinstance((revision.structured_memo or {}).get("financial_history"), dict):
+        from startup_updates.financial_history import history_review_evidence
+        # This server-resolved input is private review context. Missing legacy or
+        # invalid references stay explicit so workers cannot use newer evidence.
+        evidence["financial_history_evidence"] = history_review_evidence(revision)
     return {
         "revisionId": revision.pk, "revision": revision.number,
         "revisionHash": revision.content_hash, "snapshotId": revision.snapshot_id,
-        "evidenceSnapshot": revision.snapshot.payload if include_evidence else None,
+        "evidenceSnapshot": evidence,
         "audience": revision.audience,
     }
+
+
+def worker_revision_payload(revision, *, version=1):
+    """Return negotiated worker evidence without changing the immutable snapshot."""
+    if version == 1:
+        return revision_payload(revision)
+    if version != 2:
+        raise ValueError("Unsupported worker receipt version.")
+    legacy = revision_payload(revision)
+    proof = legacy["evidenceSnapshot"].get("financial_history_evidence")
+    return {**legacy, "receiptVersion": 2,
+        "organizationId": revision.snapshot.organization_id,
+        "updateId": revision.draft_id, "month": revision.snapshot.month.isoformat(),
+        "snapshotHash": revision.snapshot.content_hash,
+        "evidenceSnapshot": copy.deepcopy(revision.snapshot.payload),
+        "reviewContext": {"financialHistoryEvidence": proof}}
 
 
 def frozen_memo(draft, *, published=False):
@@ -234,12 +287,15 @@ def frozen_memo(draft, *, published=False):
 
 
 @transaction.atomic
-def save_revision(draft, memo, *, snapshot, audience="private", expected_revision=None, require_match=True, validation=None):
+def save_revision(draft, memo, *, snapshot, audience="private", expected_revision=None, require_match=True, validation=None, financial_history_snapshot=None):
     if audience not in {"private", "community", "public"}:
         raise ValidationError("Choose private, community, or public visibility.")
     draft = MonthlyUpdateDraft.objects.select_for_update().get(pk=draft.pk)
     if snapshot.organization_id != draft.organization_id or snapshot.month != draft.month:
         raise ValidationError("The evidence snapshot belongs to a different startup or period.")
+    if financial_history_snapshot is not None and (financial_history_snapshot.organization_id != draft.organization_id
+            or financial_history_snapshot.month != draft.month):
+        raise ValidationError("The financial chart evidence belongs to a different startup or period.")
     current = draft.current_revision
     if require_match and (str(expected_revision or "") != str(current.pk if current else "")):
         raise RevisionConflict()
@@ -267,7 +323,12 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
     # Identity metadata is owned by the server and survives manual/generation edits.
     memo = memo_with_month_identity(draft, copy.deepcopy(memo))
     from startup_updates.cover_images import retain_cover_image
-    memo = retain_cover_image(memo, current.structured_memo if current else draft.structured_memo or {})
+    previous_memo = current.structured_memo if current else draft.structured_memo or {}
+    memo = retain_cover_image(memo, previous_memo)
+    # Omission by an older client preserves reviewed text; explicit blank clears.
+    # Never replace a saved overview with the current company profile on reads.
+    if "startupOverview" not in memo and "startupOverview" in previous_memo:
+        memo["startupOverview"] = previous_memo["startupOverview"]
     from startup_updates.covers import inherit_cover
     try:
         memo = inherit_cover(copy.deepcopy(memo), current.structured_memo if current else (draft.structured_memo or {}), draft.organization_id)
@@ -277,6 +338,14 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
     progress_charts = charts_for_revision(draft, memo, current)
     if progress_charts is not None:
         memo["progress_charts"] = progress_charts
+    from startup_updates.financial_history import FinancialHistoryError, history_for_revision
+    try:
+        financial_history = history_for_revision(draft, memo, current, snapshot,
+            captured_at=timezone.now().isoformat(), financial_history_snapshot=financial_history_snapshot)
+    except FinancialHistoryError as exc:
+        raise ValidationError({"financialHistorySelection": str(exc)}) from exc
+    if financial_history is not None:
+        memo["financial_history"] = financial_history
     try:
         memo = render_metric_claims(memo, snapshot.payload["metrics"])
     except ValueError as exc:
@@ -347,14 +416,23 @@ def approve_and_publish(draft, *, actor, revision_id, revision_hash, audience_vi
         and (revision.structured_memo.get("_agent_provenance") or {}).get("kind") == "agent_supplied")
     if revision.validation.get("groundedness_status") not in {"passed", "founder_asserted"} and not agent_reviewed:
         raise ValidationError("Resolve the evidence review before publishing.")
+    if not has_narrative(revision.structured_memo):
+        # Approval publishes the update and unlocks Pulse points and the coworking discount.
+        raise EmptyUpdate()
     period = (revision.snapshot.payload or {}).get("period") or {}
     try:
         reporting_period(draft.month, period.get("timezone") or "UTC", as_of=timezone.now())
     except (ValueError, KeyError) as exc:
         raise ValidationError(str(exc)) from exc
+    # Carry the old benefit through the first revision-aware edit of a legacy
+    # publication. The immutable first-approval anchor still controls expiry.
+    legacy_benefit = bool(draft.published_at) and not MonthlyUpdateApproval.objects.filter(
+        revision__draft=draft,
+    ).exists()
     approval, created = MonthlyUpdateApproval.objects.get_or_create(
         revision=revision,
-        defaults={"actor": actor, "content_hash": revision_hash, "audience_visibility": audience_visibility},
+        defaults={"actor": actor, "content_hash": revision_hash,
+            "audience_visibility": audience_visibility, "requires_shared_update": not legacy_benefit},
     )
     if not created and (approval.content_hash != revision_hash or approval.audience_visibility != audience_visibility):
         raise RevisionConflict("Disclosure changed. Create and review a new revision.")

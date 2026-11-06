@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, DecimalException
 from zoneinfo import ZoneInfo
 
-VERSION = "mlai-volunteer-v4"
+VERSION = "mlai-volunteer-v5"
 MICROROO = 1_000_000
 MELBOURNE = ZoneInfo("Australia/Melbourne")
 LEVELS = (
@@ -169,7 +169,7 @@ def catalogue(monthly_reward=20):
         (
             "boost_startup",
             "Engage with a startup post",
-            "React to another member's post in #boost-my-startup. Earn once for each post you engage with.",
+            "React positively to another member's post in #boost-my-startup, or reply done after supporting it. Earn once per post.",
             2,
             2,
             False,
@@ -208,7 +208,11 @@ def catalogue(monthly_reward=20):
         (
             "monthly_startup_update",
             "Submit a monthly startup update",
-            "Publish a completed update using the existing startup workflow.",
+            "Private approvals earn 5 Roo points and do not unlock discounts. "
+            f"Your startup's first approved update each Melbourne month can earn {monthly_reward} Roo points "
+            "if shared publicly or with the MLAI community and its registration, name and website "
+            "are verified; otherwise 5. Shared approvals unlock eligible founder discounts for 30 days from "
+            "first approval; edits and reapproval do not extend them.",
             monthly_reward,
             monthly_reward,
             False,

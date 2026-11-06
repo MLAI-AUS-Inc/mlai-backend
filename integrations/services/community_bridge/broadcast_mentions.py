@@ -114,13 +114,14 @@ def _escape_inactive_mentions(text):
     return re.sub(r"<!(?:channel|here|everyone)(?:\|[^>]*)?>", lambda match: html.escape(match[0], quote=False), text)
 
 
-def prepare_slack_broadcasts(delivery, text):
+def prepare_slack_broadcasts(delivery, text, *, client=None):
     """Recheck a Chat sender's live account role before a bot broadcasts for them.
 
     Never accept an admin flag or channel facts from signed client metadata.
     The mapping is server-owned and conversations.info supplies Slack's actual
     general channel and member count. Custom workspace policies are not exposed
-    by this bot API; this mirrors Slack's documented default permissions.
+    by this API; this mirrors Slack's documented default permissions. The caller
+    supplies a currently fenced member reader; this helper cannot acquire a bot.
     """
     if delivery.get("source_platform") != "buzz":
         return text
@@ -132,12 +133,14 @@ def prepare_slack_broadcasts(delivery, text):
 
     from community_chat.permissions import device_chat_role
     from .identity import verified_identity_for_buzz
-    from .slack import SlackBridgeClient
+
+    if client is None:
+        raise RuntimeError("A current member reader is required for broadcast permissions")
 
     public_key = str((delivery.get("payload") or {}).get("source_author_id") or "")
     role = device_chat_role(public_key)
     channel_id = str(delivery.get("target_channel_id") or "")
-    response = SlackBridgeClient.get_client().conversations_info(
+    response = client.conversations_info(
         channel=channel_id, include_num_members=True,
     )
     channel = response.get("channel") or {}
@@ -151,7 +154,7 @@ def prepare_slack_broadcasts(delivery, text):
             buzz_pubkey=public_key,
         )
         if identity and identity.get("slack_user_id"):
-            response = SlackBridgeClient.get_client().users_info(user=identity["slack_user_id"])
+            response = client.users_info(user=identity["slack_user_id"])
             user = response.get("user") or {}
             if not response.get("ok") or user.get("id") != identity["slack_user_id"]:
                 raise RuntimeError("Slack member permissions unavailable")

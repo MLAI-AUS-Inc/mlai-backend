@@ -55,8 +55,17 @@ def bind_dispatch_token_run(*, client_request_id, remote_run_id):
             )
             if token_run is None or not run_is_dispatch_token_keyed(token_run):
                 return None
+            from .run_ownership import owner_receipt
+            if owner_receipt(token_run) is not None:
+                # The admitted router validates scope/version before binding.
+                # This legacy helper may neither clear nor delete its history.
+                return None
             existing_real = ContentFactoryRun.objects.select_for_update().filter(run_id=real).first()
             if existing_real is not None:
+                if owner_receipt(existing_real) is not None:
+                    # An old callback/lookup cannot turn its separate legacy
+                    # token into input for an already admitted canonical row.
+                    return None
                 real_org = getattr(existing_real, "organization_id", None)
                 token_org = getattr(token_run, "organization_id", None)
                 if ((real_org is not None and token_org is not None and real_org != token_org)
@@ -164,6 +173,9 @@ def _merge_provisional_into_real(token_run, real_run) -> None:
     """Copy what only the provisional record knows (the dispatch payload with
     its billing lineage) onto the callback-materialized run, without touching
     remote-authoritative fields."""
+    from .run_ownership import owner_receipt, RunOwnershipConflict
+    if owner_receipt(token_run) is not None or owner_receipt(real_run) is not None:
+        raise RunOwnershipConflict("Legacy dispatch merging cannot mutate admitted history.")
     update_fields = []
     token_request = token_run.run_request if isinstance(token_run.run_request, dict) else {}
     real_request = real_run.run_request if isinstance(real_run.run_request, dict) else {}
@@ -201,11 +213,14 @@ def _rebind_billing_job(token: str, real: str) -> None:
     the token id at dispatch time; move it to the real run id so the charge
     stays discoverable (revision flow reads it by run-id lineage)."""
     try:
+        from content_factory.job_mirror import mirror_jobs_to_runs
         from content_factory.models import ContentFactoryJob
 
-        if ContentFactoryJob.objects.filter(job_id=real).exists():
-            return
-        ContentFactoryJob.objects.filter(job_id=token).update(job_id=real)
+        if not ContentFactoryJob.objects.filter(job_id=real).exists():
+            ContentFactoryJob.objects.filter(job_id=token).update(job_id=real)
+        # The real id's Job now owns the bound run (an orphaned token Job never
+        # mirrors onto it); a full copy also clears the run's legacy_job_id.
+        mirror_jobs_to_runs(ContentFactoryJob.objects.filter(job_id=real))
     except Exception:  # pragma: no cover - best-effort billing continuity
         logger.warning(
             "content_factory_dispatch_token_job_rebind_failed token=%s run_id=%s",

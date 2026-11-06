@@ -3,6 +3,8 @@
 
 Offline validation is explicit about its limit. CI must use --remote; unavailable
 private-source access fails without printing tokens, response bodies or URLs.
+Receivers validate failure codes by membership, so a difference from the pinned
+Content Factory copy is reported as drift (codes and classes), not a failure.
 """
 from __future__ import annotations
 
@@ -22,7 +24,20 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTIFACTS = ("contracts/failure-codes.json", "contracts/failure-envelope-v1.schema.json", "contracts/setup-delivery-v1.schema.json")
 SOURCE_REPOSITORY = "drsamdonegan/content-factory"
 FIELDS = {"code", "error_code", "errorCode", "blocking_code", "blockingCode", "reasonCode", "reason_code", "failure_code", "model_adapter_blocking_code"}
-CONSTRUCTORS = {"WebsiteAuthorityError": 0}
+CONSTRUCTORS = {"WebsiteAuthorityError": 0, "RunCommandConflict": 0}
+# P2 (IF-P2-27): a package's own emitter-audit fragment may hold only these keys.
+FRAGMENT_DIRECTORY = "contracts/failure-emitter-scopes.d"
+FRAGMENT_KEYS = frozenset({"dynamic_adapters", "nonfailure_sites"})
+# P2 (IF-P2-01, IF-P2-03): registry v2 vocabulary and the pre-P2 overlay.
+LIMIT_KEYS = frozenset({"repairable_max_attempts", "strategy_max_attempts_per_rung_per_source",
+                        "strategy_max_attempts_per_org_per_day", "wall_hours", "pull_requests_per_org_per_day",
+                        "source_repins_per_run"})
+NO_CHARGE_ACTIONS = frozenset({"buy_points", "agree_terms"})
+OVERLAY_PATH = "content_factory/failure_registry_pre_p2.json"
+PRE_P2_FIXTURE_PATH = "content_factory/tests/fixtures/p2/failure-codes.pre-p2.json"
+OVERLAY_RESERVED_KEYS = frozenset({"actions", "source_revision"})
+OVERLAY_FIELDS = ("failure_class", "retry_policy", "action_id")
+UNREGISTERED = "UNREGISTERED_FAILURE_CODE"
 
 
 class ContractCheckError(ValueError):
@@ -177,17 +192,141 @@ def check_registry(root=ROOT):
             raise ContractCheckError("invalid_legacy_adapter")
     if sorted(entry["code"] for entry in registry["codes"]) != schema["properties"]["code"]["enum"]:
         raise ContractCheckError("registry_schema_code_mismatch")
+    errors = registry_v2_errors(registry)
+    if errors:
+        raise ContractCheckError("; ".join(errors))
+    check_overlay(root, registry)
     return registry, aliases
+
+
+def registry_v2_errors(registry):
+    """P2 (IF-P2-01) vocabulary checks over the raw registry; each defect is named."""
+    errors = []
+    actions = registry.get("actions") if isinstance(registry.get("actions"), dict) else {}
+    aliases = registry.get("action_aliases", {})
+    retired = registry.get("retired_actions", [])
+    copy_ids = registry.get("founder_copy_ids", [])
+    if not isinstance(aliases, dict) or any(alias in actions or target not in actions for alias, target in aliases.items()):
+        errors.append("invalid_action_aliases")
+        aliases = {}
+    if (not isinstance(retired, list) or retired != sorted(set(retired)) or
+            any(action_id in actions or action_id in aliases for action_id in retired)):
+        errors.append("invalid_retired_actions")
+        retired = []
+    if (not isinstance(copy_ids, list) or not copy_ids or copy_ids != sorted(set(copy_ids)) or
+            any(not isinstance(copy_id, str) for copy_id in copy_ids)):
+        errors.append("invalid_founder_copy_ids")
+        copy_ids = []
+    limits = registry.get("limits")
+    if (not isinstance(limits, dict) or set(limits) != LIMIT_KEYS or
+            any(type(value) is not int or value < 1 for value in limits.values())):
+        errors.append("invalid_registry_limits")
+    for entry in registry.get("codes", []):
+        code = entry.get("code")
+        if entry.get("founder_copy_id") not in copy_ids:
+            errors.append(f"{code}: missing_or_unknown_founder_copy_id")
+        elif entry["founder_copy_id"].startswith("ask_") is not (entry.get("failure_class") == "needs_user"):
+            errors.append(f"{code}: founder_copy_id_class_mismatch")
+        if type(entry.get("refund")) is not bool:
+            errors.append(f"{code}: missing_refund_flag")
+        elif entry["refund"] is (entry.get("failure_class") == "needs_user" and entry.get("action_id") in NO_CHARGE_ACTIONS):
+            errors.append(f"{code}: invalid_refund_flag")
+        if entry.get("failure_class") == "needs_user" and entry.get("action_id") not in actions:
+            errors.append(f"{code}: noncanonical_owner_action")
+    return errors
+
+
+def check_overlay(root, registry):
+    """The vendored pre-P2 overlay restores exactly today's view (IF-P2-03).
+
+    Every code whose class, policy or action changed against the vendored
+    pre-P2 fixture has an entry holding today's values. A new code has an entry
+    only when a pre-P2 path already emits it, and then it holds the unregistered
+    stop every reader saw before P2. Nothing else is overlaid.
+    """
+    try:
+        overlay = json.loads((root / OVERLAY_PATH).read_text())
+        pre = json.loads((root / PRE_P2_FIXTURE_PATH).read_text())
+    except (OSError, ValueError):
+        raise ContractCheckError("missing_or_unreadable_pre_p2_overlay") from None
+    if not isinstance(overlay, dict) or overlay.get("actions") != pre.get("actions"):
+        raise ContractCheckError("stale_pre_p2_overlay")
+    before = {entry["code"]: entry for entry in pre["codes"]}
+    current = {entry["code"]: entry for entry in registry["codes"]}
+    expected = {}
+    for name, entry in current.items():
+        old = before.get(name)
+        if old is None:
+            continue
+        if any(old.get(field) != entry.get(field) for field in OVERLAY_FIELDS):
+            expected[name] = old
+    for name, values in overlay.items():
+        if name in OVERLAY_RESERVED_KEYS:
+            continue
+        if name not in current or not isinstance(values, dict):
+            raise ContractCheckError("stale_pre_p2_overlay")
+        if name not in before:
+            expected[name] = before[UNREGISTERED]
+    for name, old in expected.items():
+        values = overlay.get(name)
+        if (not isinstance(values, dict) or
+                values != {"action_id": old.get("action_id"), "failure_class": old["failure_class"],
+                           "retry_policy": old["retry_policy"], "retryable": old["failure_class"] == "transient"}):
+            raise ContractCheckError("stale_pre_p2_overlay")
+    if set(overlay) - OVERLAY_RESERVED_KEYS != set(expected):
+        raise ContractCheckError("stale_pre_p2_overlay")
+
+
+def load_manifest(root=ROOT):
+    """The base emitter manifest merged with every package fragment (IF-P2-27).
+
+    Fragments load in sorted file-name order and may hold only `dynamic_adapters`
+    and `nonfailure_sites`. An unknown key, a non-list value, a site key another
+    file (or the same fragment) already declares, or an audit whose site key no
+    longer matches its own fields is an error.
+    """
+    errors = []
+    manifest = json.loads((root / "contracts/failure-emitter-scopes.json").read_text())
+    merged = {key: list(manifest.get(key, [])) for key in FRAGMENT_KEYS}
+    seen = {entry.get("site_sha256") for key in FRAGMENT_KEYS for entry in merged[key]}
+    directory = root / FRAGMENT_DIRECTORY
+    for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
+        name = f"{FRAGMENT_DIRECTORY}/{path.name}"
+        try:
+            fragment = json.loads(path.read_text())
+        except ValueError:
+            errors.append(f"{name}: invalid JSON"); continue
+        if not isinstance(fragment, dict):
+            errors.append(f"{name}: a fragment must be an object"); continue
+        for key in sorted(set(fragment) - FRAGMENT_KEYS):
+            errors.append(f"{name}: unknown fragment key {key}")
+        for key in sorted(FRAGMENT_KEYS & set(fragment)):
+            if not isinstance(fragment[key], list):
+                errors.append(f"{name}: {key} must be a list"); continue
+            for entry in fragment[key]:
+                if not isinstance(entry, dict) or any(not isinstance(entry.get(field), str)
+                                                      for field in ("path", "function", "field", "expression", "site_sha256")):
+                    errors.append(f"{name}: invalid {key} entry"); continue
+                if entry["site_sha256"] in seen:
+                    errors.append(f"{name}: duplicate site key {entry['site_sha256']} ({entry['path']} {entry['function']})")
+                    continue
+                if entry["site_sha256"] != site_key(entry):
+                    errors.append(f"{name}: stale audit {entry['path']} {entry['function']} (site key does not match its fields)")
+                    continue
+                seen.add(entry["site_sha256"])
+                merged[key].append(entry)
+    manifest.update(merged)
+    return manifest, errors
 
 
 def check_emitters(root=ROOT):
     registry, codes = check_registry(root)
-    manifest = json.loads((root / "contracts/failure-emitter-scopes.json").read_text())
+    manifest, errors = load_manifest(root)
     entries = manifest.get("dynamic_adapters", []) + manifest.get("nonfailure_sites", [])
     declarations = {entry["site_sha256"]: entry for entry in entries}
     if len(declarations) != len(entries):
         raise ContractCheckError("duplicate_emitter_audit")
-    errors, seen = [], set()
+    seen = set()
     rows = inventory(root)
     allowed_adapters = {"authority_registry_boundary", "validated_v1_projection", "audited_v0_observation", "closed_backend_code_union", "nonfailure_category"}
     for row in rows:
@@ -217,8 +356,30 @@ def check_emitters(root=ROOT):
     return errors, rows
 
 
+def describe_drift(path, local, peer):
+    """Report how the vendored copy differs from the pinned Content Factory copy."""
+    if path != ARTIFACTS[0]:
+        return [f"DRIFT {path}: bytes differ from the pinned Content Factory revision"]
+    try:
+        ours, theirs = ({entry["code"]: entry["failure_class"] for entry in json.loads(raw)["codes"]} for raw in (local, peer))
+    except (ValueError, KeyError, TypeError):
+        return [f"DRIFT {path}: the pinned Content Factory copy is not a readable registry"]
+    def safe(value):
+        return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", value) else "<invalid>"
+    lines = [f"DRIFT {path}: only in Content Factory: {safe(code)}" for code in sorted(theirs.keys() - ours.keys(), key=str)]
+    lines += [f"DRIFT {path}: only here: {code}" for code in sorted(ours.keys() - theirs.keys())]
+    lines += [f"DRIFT {path}: {code} is {ours[code]} here and {safe(theirs[code])} in Content Factory"
+              for code in sorted(ours.keys() & theirs.keys()) if ours[code] != theirs[code]]
+    return lines or [f"DRIFT {path}: bytes differ; codes and classes agree"]
+
+
 def verify_vendor(root=ROOT, *, remote=False, token=None, fetch=None):
-    """Verify exact local digests and optionally the pinned private source bytes."""
+    """Verify exact local digests; with remote, return drift from the pinned source.
+
+    Local digests, the immutable pin and private-source access still fail
+    closed. Byte differences from the pinned Content Factory copy are returned
+    as drift lines because receivers accept codes by membership.
+    """
     lock = json.loads((root / "contracts/failure-codes.lock.json").read_text())
     if type(lock.get("schema_version")) is not int or lock["schema_version"] != 1:
         raise ContractCheckError("invalid_vendor_lock_version")
@@ -229,6 +390,7 @@ def verify_vendor(root=ROOT, *, remote=False, token=None, fetch=None):
         raise ContractCheckError("invalid_vendor_file_set")
     if remote and not token:
         raise ContractCheckError("CONTENT_FACTORY_CONTRACT_READ_TOKEN_required_for_pinned_private_source")
+    drift = []
     for path in ARTIFACTS:
         raw = (root / path).read_bytes()
         if hashlib.sha256(raw).hexdigest() != lock["files"][path]:
@@ -236,8 +398,8 @@ def verify_vendor(root=ROOT, *, remote=False, token=None, fetch=None):
         if remote:
             peer = fetch(path, revision, token) if fetch else fetch_source(path, revision, token)
             if peer != raw:
-                raise ContractCheckError("pinned_source_byte_mismatch")
-    return lock
+                drift.extend(describe_drift(path, raw, peer))
+    return drift
 
 
 def fetch_source(path, revision, token):
@@ -267,13 +429,17 @@ def main():
         print(json.dumps(inventory(), sort_keys=True, indent=2)); return 0
     try:
         errors, rows = check_emitters()
-        verify_vendor(remote=args.remote, token=os.getenv("CONTENT_FACTORY_CONTRACT_READ_TOKEN"))
+        drift = verify_vendor(remote=args.remote, token=os.getenv("CONTENT_FACTORY_CONTRACT_READ_TOKEN"))
         if errors:
             print("\n".join(errors)); return 1
     except (ContractCheckError, OSError, ValueError) as exc:
         print(f"Failure contract check failed: {exc}"); return 1
     print(f"Failure contract: {len(rows)} production emissions audited; vendored digests valid.")
-    print("Pinned Content Factory provenance verified." if args.remote else "OFFLINE: remote pinned provenance was not rechecked.")
+    if drift:
+        print("\n".join(drift))
+        print("Pinned Content Factory copy differs (reported, not a gate); bump source_revision once both repos agree.")
+    else:
+        print("Pinned Content Factory provenance verified." if args.remote else "OFFLINE: remote pinned provenance was not rechecked.")
     return 0
 
 

@@ -79,7 +79,9 @@ def _schema_errors(value, schema, path="", document=None):
         return [path or "/"]
     kinds = {"object": dict, "array": list, "string": str, "boolean": bool, "integer": int, "null": type(None), "number": (int, float)}
     kind = schema.get("type")
-    if kind and (type(value) not in kinds[kind] if kind == "number" else type(value) is not kinds[kind]):
+    allowed_kinds=kind if isinstance(kind,list) else [kind]
+    if kind and not any(type(value) in kinds[name] if name=="number" else type(value) is kinds[name]
+        for name in allowed_kinds):
         return [path or "/"]
     if "enum" in schema and value not in schema["enum"] or "const" in schema and value != schema["const"]:
         return [path or "/"]

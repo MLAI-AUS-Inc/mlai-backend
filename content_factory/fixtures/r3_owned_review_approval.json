@@ -1,0 +1,2393 @@
+{
+  "fixture_version": 1,
+  "producer": "Actual CF worker plus authenticated HTTP endpoints, original PostgreSQL admission retained",
+  "fixture_boundary": "Only browser and model responses are deterministic fixtures; no paid provider or live browser claim.",
+  "original_backend_fixture": {
+    "fixture_version": 1,
+    "producer": "actual PostgreSQL reserve_entitlement + reserve_admitted_run + bind_admitted_run",
+    "run_id": "verified-worker",
+    "workflow": "article_generation",
+    "domain": "new-99e5852d.example.test",
+    "github_repo": "",
+    "run_request": {
+      "topic": "Retained article",
+      "domain": "new-99e5852d.example.test",
+      "free_domain": false,
+      "delivery_mode": "content_only",
+      "roo_points_cost": 0,
+      "client_request_id": "verified-original",
+      "roo_points_action": "article_generation",
+      "roo_points_required": 0,
+      "expected_cost_points": 0,
+      "roo_points_ledger_id": "623",
+      "roo_points_authorized": true,
+      "roo_points_entitlement": "first_article",
+      "delivery_mode_confirmed": true,
+      "backend_run_admission_v1": {
+        "scope": {
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "deletion_epoch": null,
+          "operation_attempt": null,
+          "expected_source_sha": null,
+          "connection_target_id": null,
+          "connection_generation": null,
+          "website_connection_id": null
+        },
+        "domain": "new-99e5852d.example.test",
+        "workflow": "article_generation",
+        "principal": {
+          "kind": "user",
+          "user_id": "1374",
+          "actor_id": "mlai_user:1374"
+        },
+        "github_repo": "",
+        "dispatch_key": "verified-original",
+        "event_protocol": 1,
+        "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+        "schema_version": 1,
+        "organization_id": "3228"
+      },
+      "backend_run_execution_v1": {
+        "scope": {
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "deletion_epoch": null,
+          "operation_attempt": null,
+          "expected_source_sha": null,
+          "connection_target_id": null,
+          "connection_generation": null,
+          "website_connection_id": null
+        },
+        "generation": 0,
+        "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+        "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+        "schema_version": 1,
+        "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+      },
+      "roo_points_billing_status": "entitled"
+    },
+    "admission": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "new-99e5852d.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "1374",
+        "actor_id": "mlai_user:1374"
+      },
+      "github_repo": "",
+      "dispatch_key": "verified-original",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "organization_id": "3228",
+      "event_protocol": 1
+    },
+    "execution": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+    },
+    "initial_status": "queued",
+    "canonical_body": "# Retained article\n\nThe independently readable saved body.",
+    "canonical_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "backend_review_gate": {
+      "module": "content_factory.article_publish_approval.article_review_identity_is_complete",
+      "live_preview_fields": [
+        "previewUrl",
+        "exactRender",
+        "resumeGeneration",
+        "proof.commitSha"
+      ],
+      "quality_fields": [
+        "status",
+        "preview_url",
+        "resume_generation",
+        "inputs_sha256"
+      ],
+      "accepted_quality_statuses": [
+        "passed",
+        "passed_no_baseline",
+        "advisory_findings"
+      ]
+    }
+  },
+  "source_request": {
+    "topic": "Retained article",
+    "domain": "new-99e5852d.example.test",
+    "free_domain": false,
+    "delivery_mode": "content_only",
+    "roo_points_cost": 0,
+    "client_request_id": "verified-original",
+    "roo_points_action": "article_generation",
+    "roo_points_required": 0,
+    "expected_cost_points": 0,
+    "roo_points_ledger_id": "623",
+    "roo_points_authorized": true,
+    "roo_points_entitlement": "first_article",
+    "delivery_mode_confirmed": true,
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "new-99e5852d.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "1374",
+        "actor_id": "mlai_user:1374"
+      },
+      "github_repo": "",
+      "dispatch_key": "verified-original",
+      "event_protocol": 1,
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "organization_id": "3228"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+    },
+    "roo_points_billing_status": "entitled",
+    "github_repo": ""
+  },
+  "request_normalization": "The actual CF initializer adds the absent github_repo as its original admission's empty string; all supplied wire fields remain unchanged.",
+  "source_status": {
+    "failure": {},
+    "generation": 0,
+    "state_version": 21,
+    "recovery": {},
+    "recovery_intents": {},
+    "run_id": "verified-worker",
+    "workflow": "direct_generate",
+    "status": "awaiting_approval",
+    "current_step": "load_context",
+    "artifact_root": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker",
+    "delivery_mode": null,
+    "resolved_delivery_mode": null,
+    "resolution_source": null,
+    "publish_resolution": null,
+    "publish_target_kind": null,
+    "publish_capability": null,
+    "fallback_reason": null,
+    "auto_bootstrap_applied": false,
+    "bootstrap_status": "not_needed",
+    "bootstrap_strategy": "",
+    "materialized_target_paths": [],
+    "draft_pr_url": null,
+    "draft_pr_number": null,
+    "hook_config_path": "",
+    "capability_snapshot": {},
+    "hook_bootstrap_suggestion": {},
+    "step_order": [
+      "load_context",
+      "collect_research_bundle",
+      "assemble_article",
+      "render_article",
+      "review_preview_quality"
+    ],
+    "started_at": "2026-11-02T19:41:52.359995+00:00",
+    "updated_at": "2026-11-02T19:41:52.610787+00:00",
+    "step_states": {
+      "load_context": {
+        "name": "load_context",
+        "required": true,
+        "status": "completed",
+        "attempts": 1,
+        "message": "Worker input retained",
+        "started_at": "2026-11-02T19:41:52.452433+00:00",
+        "completed_at": "2026-11-02T19:41:52.471251+00:00",
+        "artifacts": [
+          "steps/load_context/attempt-01/artifacts/run_context.json"
+        ],
+        "error": null,
+        "latest_attempt_path": "steps/load_context/attempt-01",
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Worker input retained",
+            "started_at": "2026-11-02T19:41:52.452433+00:00",
+            "completed_at": "2026-11-02T19:41:52.471251+00:00",
+            "artifacts": [
+              {
+                "integrity_version": 1,
+                "name": "run_context.json",
+                "relative_path": "steps/load_context/attempt-01/artifacts/run_context.json",
+                "media_type": "application/json",
+                "size": 6316,
+                "checksum": "1965c767bd679db30d55a1d6f3dd3dc511886715de6d4295d69d21c0e7a81477",
+                "created_at": "2026-11-02T19:41:52.460827+00:00"
+              }
+            ],
+            "error": null,
+            "input_path": "steps/load_context/attempt-01/inputs.json",
+            "output_path": "steps/load_context/attempt-01/outputs.json",
+            "notes_path": "steps/load_context/attempt-01/NOTES.md",
+            "status_path": "steps/load_context/attempt-01/STATUS.json",
+            "interrupted": false,
+            "refunded": false
+          }
+        ],
+        "budget_baseline": 0
+      },
+      "collect_research_bundle": {
+        "name": "collect_research_bundle",
+        "required": true,
+        "status": "completed",
+        "attempts": 1,
+        "message": "Worker input retained",
+        "started_at": "2026-11-02T19:41:52.419562+00:00",
+        "completed_at": "2026-11-02T19:41:52.435313+00:00",
+        "artifacts": [
+          "steps/collect_research_bundle/attempt-01/artifacts/research_bundle.json"
+        ],
+        "error": null,
+        "latest_attempt_path": "steps/collect_research_bundle/attempt-01",
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Worker input retained",
+            "started_at": "2026-11-02T19:41:52.419562+00:00",
+            "completed_at": "2026-11-02T19:41:52.435313+00:00",
+            "artifacts": [
+              {
+                "integrity_version": 1,
+                "name": "research_bundle.json",
+                "relative_path": "steps/collect_research_bundle/attempt-01/artifacts/research_bundle.json",
+                "media_type": "application/json",
+                "size": 846,
+                "checksum": "bad1a9f37410c81ff5c7b2ef14c890d0770a3fad513e9bca7a683730f1687fbb",
+                "created_at": "2026-11-02T19:41:52.426430+00:00"
+              }
+            ],
+            "error": null,
+            "input_path": "steps/collect_research_bundle/attempt-01/inputs.json",
+            "output_path": "steps/collect_research_bundle/attempt-01/outputs.json",
+            "notes_path": "steps/collect_research_bundle/attempt-01/NOTES.md",
+            "status_path": "steps/collect_research_bundle/attempt-01/STATUS.json",
+            "interrupted": false,
+            "refunded": false
+          }
+        ],
+        "budget_baseline": 0
+      },
+      "assemble_article": {
+        "name": "assemble_article",
+        "required": true,
+        "status": "completed",
+        "attempts": 1,
+        "message": "Worker input retained",
+        "started_at": "2026-11-02T19:41:52.368409+00:00",
+        "completed_at": "2026-11-02T19:41:52.380247+00:00",
+        "artifacts": [
+          "steps/assemble_article/attempt-01/artifacts/grounded_article_spec.json"
+        ],
+        "error": null,
+        "latest_attempt_path": "steps/assemble_article/attempt-01",
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Worker input retained",
+            "started_at": "2026-11-02T19:41:52.368409+00:00",
+            "completed_at": "2026-11-02T19:41:52.380247+00:00",
+            "artifacts": [
+              {
+                "integrity_version": 1,
+                "name": "grounded_article_spec.json",
+                "relative_path": "steps/assemble_article/attempt-01/artifacts/grounded_article_spec.json",
+                "media_type": "application/json",
+                "size": 1068,
+                "checksum": "4cfac590a242df6f11ba5d991cd49994e3a4ac4ecd10c8a68c09716600924e18",
+                "created_at": "2026-11-02T19:41:52.374235+00:00"
+              }
+            ],
+            "error": null,
+            "input_path": "steps/assemble_article/attempt-01/inputs.json",
+            "output_path": "steps/assemble_article/attempt-01/outputs.json",
+            "notes_path": "steps/assemble_article/attempt-01/NOTES.md",
+            "status_path": "steps/assemble_article/attempt-01/STATUS.json",
+            "interrupted": false,
+            "refunded": false
+          }
+        ],
+        "budget_baseline": 0
+      },
+      "render_article": {
+        "name": "render_article",
+        "required": true,
+        "status": "completed",
+        "attempts": 1,
+        "message": "Worker input retained",
+        "started_at": "2026-11-02T19:41:52.392306+00:00",
+        "completed_at": "2026-11-02T19:41:52.405429+00:00",
+        "artifacts": [
+          "steps/render_article/attempt-01/artifacts/rendered_article.json"
+        ],
+        "error": null,
+        "latest_attempt_path": "steps/render_article/attempt-01",
+        "attempt_history": [
+          {
+            "attempt": 1,
+            "status": "completed",
+            "message": "Worker input retained",
+            "started_at": "2026-11-02T19:41:52.392306+00:00",
+            "completed_at": "2026-11-02T19:41:52.405429+00:00",
+            "artifacts": [
+              {
+                "integrity_version": 1,
+                "name": "rendered_article.json",
+                "relative_path": "steps/render_article/attempt-01/artifacts/rendered_article.json",
+                "media_type": "application/json",
+                "size": 70,
+                "checksum": "198cd0e818405c2ec4f0b1a441db41465bfaa40b5a459b3e763070612755f203",
+                "created_at": "2026-11-02T19:41:52.398182+00:00"
+              }
+            ],
+            "error": null,
+            "input_path": "steps/render_article/attempt-01/inputs.json",
+            "output_path": "steps/render_article/attempt-01/outputs.json",
+            "notes_path": "steps/render_article/attempt-01/NOTES.md",
+            "status_path": "steps/render_article/attempt-01/STATUS.json",
+            "interrupted": false,
+            "refunded": false
+          }
+        ],
+        "budget_baseline": 0
+      },
+      "review_preview_quality": {
+        "name": "review_preview_quality",
+        "required": true,
+        "status": "pending",
+        "attempts": 0,
+        "message": null,
+        "started_at": null,
+        "completed_at": null,
+        "artifacts": [],
+        "error": null,
+        "latest_attempt_path": null,
+        "attempt_history": [],
+        "budget_baseline": 0
+      }
+    },
+    "acceptance_summary": {
+      "grounding_verified": false,
+      "static_verified": false,
+      "build_verified": false,
+      "browser_verified": false,
+      "style_review_verified": false,
+      "content_packaged": false,
+      "publish_bundle_packaged": false,
+      "browser_skipped": false,
+      "pr_ready": false,
+      "approval_recorded": false,
+      "warnings": [],
+      "evidence_summary": {
+        "pr_url": null,
+        "preview_url": null,
+        "preview_mode": null,
+        "preview_available": false,
+        "preview_evidence_path": null,
+        "review_summary_path": null,
+        "html_snapshot_path": null,
+        "accessibility_snapshot_path": null,
+        "grounding_report_path": null,
+        "claim_map_path": null,
+        "build_log_path": null,
+        "browser_report_path": null,
+        "style_review_report_path": null,
+        "image_manifest_path": null,
+        "image_manifest_status": null,
+        "resource_manifest_path": null,
+        "resource_pdf_status": null,
+        "resource_pdf_url": null,
+        "content_package_path": null,
+        "article_markdown_path": null,
+        "article_html_path": null,
+        "article_json_path": null,
+        "article_meta_path": null,
+        "article_component_manifest_path": null,
+        "content_package_title": null,
+        "content_package_slug": null,
+        "content_package_target_keyword": null,
+        "hero_image_url": null,
+        "generated_inline_image_count": 0,
+        "image_errors": [],
+        "screenshots": [],
+        "reference_screenshots": [],
+        "comparison_artifacts": []
+      }
+    },
+    "verification_summary": {
+      "checks": [],
+      "generated_at": "2026-11-02T19:41:52.360030+00:00",
+      "all_required_passed": false,
+      "blocked": false
+    },
+    "approval_state": "approval_required",
+    "resume_available": false,
+    "notified_progress_markers": [],
+    "error": null,
+    "result": {
+      "preview_url": "https://example.com/articles/pilot",
+      "review_surface_kind": "component_live_preview",
+      "live_preview": {
+        "previewUrl": "https://example.com/articles/pilot",
+        "exactRender": true,
+        "resumeGeneration": 0,
+        "resume_generation": 0,
+        "proof": {
+          "commitSha": "cccccccccccccccccccccccccccccccccccccccc"
+        }
+      },
+      "article_preview_quality": {
+        "status": "passed",
+        "advisory": true,
+        "preview_url": "https://example.com/articles/pilot",
+        "resume_generation": 0,
+        "queue_attempt": 1,
+        "queued_at": "2026-11-02T19:41:52.497727+00:00",
+        "evidence_step": "review_preview_quality",
+        "acceptance_version": "2026-10-21.2",
+        "inputs_sha256": "895b878169775d6ecc78f434b022f8f570445c73df82749cb33fc3a49feba028",
+        "review_token": "actual-fixture",
+        "task_id": "",
+        "started_at": "2026-11-02T19:41:52.512943+00:00",
+        "quality_attempt": 1,
+        "execution_token": "90b558c4-0976-4b0f-87d1-791084e1223f",
+        "preview_commit_binding_version": "2026-09-25.1",
+        "reviewed_preview_commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "reviewed_preview_commit_digest": "2ba77b3b1c76b596d38e30c33fa670c277a5fd4ff2b6223054664b9982623e65",
+        "content_acceptance": {
+          "version": "2026-10-21.2",
+          "capture_version": "2026-10-20.1",
+          "required": true,
+          "passed": true,
+          "errors": [],
+          "checked_core_items": 4
+        },
+        "visible_content_acceptance": {
+          "version": "2026-09-24.2",
+          "required": true,
+          "model": "gpt-6-astra",
+          "passed": true,
+          "errors": [],
+          "review": {
+            "version": "2026-10-23.1",
+            "passed": true,
+            "fingerprint": "c068f49a8c6975ca0d8105201b7f7fc369a6549808dd6ffee27d3c3feacf30cf",
+            "reviewed_at": "2026-11-02T19:41:52.603646+00:00",
+            "valid_until": null,
+            "errors": [],
+            "attempts": [
+              {
+                "review": {
+                  "criteria": [
+                    {
+                      "key": "coherence",
+                      "passed": true,
+                      "reason": "Synthetic plumbing decision."
+                    },
+                    {
+                      "key": "distinct_contribution",
+                      "passed": true,
+                      "reason": "Synthetic plumbing decision."
+                    },
+                    {
+                      "key": "editorial_integrity",
+                      "passed": true,
+                      "reason": "Synthetic plumbing decision."
+                    },
+                    {
+                      "key": "evidence_support",
+                      "passed": true,
+                      "reason": "Synthetic plumbing decision."
+                    },
+                    {
+                      "key": "reader_task",
+                      "passed": true,
+                      "reason": "Synthetic plumbing decision."
+                    },
+                    {
+                      "key": "search_metadata",
+                      "passed": true,
+                      "reason": "Synthetic plumbing decision."
+                    },
+                    {
+                      "key": "temporal_accuracy",
+                      "passed": true,
+                      "reason": "Synthetic plumbing decision."
+                    },
+                    {
+                      "key": "truthful_promises",
+                      "passed": true,
+                      "reason": "Synthetic plumbing decision."
+                    }
+                  ],
+                  "claims": [
+                    {
+                      "claim_id": "claim-001",
+                      "verdict": "supported",
+                      "source_id": "fixture",
+                      "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                      "reason": "Synthetic fixture decision, not source verification."
+                    },
+                    {
+                      "claim_id": "claim-002",
+                      "verdict": "supported",
+                      "source_id": "fixture",
+                      "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                      "reason": "Synthetic fixture decision, not source verification."
+                    },
+                    {
+                      "claim_id": "claim-004",
+                      "verdict": "supported",
+                      "source_id": "fixture",
+                      "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                      "reason": "Synthetic fixture decision, not source verification."
+                    },
+                    {
+                      "claim_id": "claim-007",
+                      "verdict": "supported",
+                      "source_id": "fixture",
+                      "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                      "reason": "Synthetic fixture decision, not source verification."
+                    },
+                    {
+                      "claim_id": "claim-008",
+                      "verdict": "supported",
+                      "source_id": "fixture",
+                      "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                      "reason": "Synthetic fixture decision, not source verification."
+                    }
+                  ],
+                  "section_patches": [],
+                  "article_patch": null,
+                  "layout_patches": [],
+                  "valid_until": null
+                },
+                "errors": []
+              }
+            ]
+          },
+          "inputs_sha256": "c068f49a8c6975ca0d8105201b7f7fc369a6549808dd6ffee27d3c3feacf30cf",
+          "code": "visible_review_passed"
+        },
+        "reviewed_at": "2026-11-02T19:41:52.606077+00:00",
+        "findings": [],
+        "browser": {
+          "success": true,
+          "failure_kind": null,
+          "transient_failure": false,
+          "h1_text": "",
+          "page_error_count": 0,
+          "failed_request_count": 0,
+          "screenshots": [
+            "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/evidence/fixture.png"
+          ],
+          "anatomy": {
+            "section_component_ids": [
+              "section:cost"
+            ],
+            "article_word_count": 200,
+            "article_h1_count": 1
+          },
+          "content_completeness": {}
+        },
+        "style": {
+          "reviewed": true,
+          "success": true,
+          "score": null,
+          "summary": "",
+          "mismatch_count": 0,
+          "mismatches": [],
+          "skip_reason": null
+        },
+        "editorial_score": null,
+        "editorial_summary": "",
+        "editorial_review": {},
+        "capture_findings": [],
+        "toc_check": {
+          "checked": false,
+          "source": "unavailable",
+          "findings": []
+        },
+        "component_style": {
+          "status": "not_captured",
+          "checked": 0,
+          "blocking": [],
+          "advisory": [],
+          "reference": {}
+        },
+        "repair_instructions": [],
+        "reviewed_deletion_word_floor_waived": false,
+        "artifacts": {
+          "article_preview_quality.json": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/article_preview_quality.json",
+          "browser_report.json": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/browser_report.json",
+          "style_review_report.json": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/style_review_report.json"
+        },
+        "evidence_sha256": "fae283555112b3f301fae3635616c33223820123d1d87f5a7974d7b261dd266f"
+      },
+      "draft_ready_v1": {
+        "version": 1,
+        "at": "2026-11-02T19:41:52.623189+00:00",
+        "revision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71"
+      }
+    },
+    "run_request_path": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/RUN_REQUEST.json"
+  },
+  "source_review": {
+    "schemaVersion": 1,
+    "articleId": "verified-worker",
+    "runId": "verified-worker",
+    "spec": {
+      "title": "Choose a pilot",
+      "meta_title": "Choose a pilot",
+      "meta_description": "Make a bounded decision",
+      "slug": "choose-pilot",
+      "category": "featured",
+      "target_keyword": "pilot",
+      "published_date": null,
+      "modified_date": null,
+      "summary_items": [],
+      "summary_question_candidates": [],
+      "faq_items": [],
+      "sections": [
+        {
+          "section_id": "cost",
+          "heading": "Cost the task",
+          "section_type": "prose",
+          "paragraphs": [
+            "Measure **rework** before choosing a pilot.",
+            "The fictional baseline is AUD 500, not USD 500."
+          ],
+          "bullets": [
+            "Keep human approval."
+          ],
+          "recommended_component_id": null,
+          "callout": null,
+          "scenario": null,
+          "image": null,
+          "internal_links": [],
+          "subsections": []
+        }
+      ],
+      "cta": {
+        "purpose": null,
+        "title": "Your next step",
+        "body": "Bring your workflow baseline.",
+        "button_text": "Start a brief",
+        "button_href": "/brief"
+      },
+      "notes": [],
+      "layout": null,
+      "claim_bindings": [],
+      "references": []
+    },
+    "rendered": {
+      "page_content": "",
+      "article_path": "article.html"
+    },
+    "fields": {},
+    "images": {},
+    "protected": {},
+    "operations": {},
+    "history": [],
+    "approved": false,
+    "revision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71"
+  },
+  "canonical_export": {
+    "version": 1,
+    "status": "ready",
+    "runId": "verified-worker",
+    "revision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71",
+    "format": "markdown",
+    "markdown": "# Choose a pilot\n\nMake a bounded decision\n\n<nav aria-label=\"Table of contents\" data-cf-component-id=\"toc\" data-cf-component-type=\"toc\" data-cf-component-label=\"Table of contents\"><p><strong>In this article</strong></p><ol><li><a href=\"#cost\" data-cf-toc-target=\"cost\">Cost the task</a></li></ol></nav>\n\n<a id=\"cost\"></a>\n## Cost the task\n\nMeasure **rework** before choosing a pilot.\n\nThe fictional baseline is AUD 500, not USD 500.\n\n- Keep human approval.\n\n## Next Step\n\n**Your next step**\n\nBring your workflow baseline.\n\n[Start a brief](/brief)\n",
+    "metadata": {
+      "title": "Choose a pilot",
+      "slug": "choose-pilot",
+      "description": "Make a bounded decision"
+    },
+    "media": []
+  },
+  "evidence_response": {
+    "schema_version": 1,
+    "run_id": "verified-worker",
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "new-99e5852d.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "1374",
+        "actor_id": "mlai_user:1374"
+      },
+      "github_repo": "",
+      "dispatch_key": "verified-original",
+      "event_protocol": 1,
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "organization_id": "3228"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+    },
+    "evidence": [
+      {
+        "backend_run_admission_v1": {
+          "dispatch_key": "verified-original",
+          "domain": "new-99e5852d.example.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "3228",
+          "principal": {
+            "actor_id": "mlai_user:1374",
+            "kind": "user",
+            "user_id": "1374"
+          },
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "article_generation"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "generation": 0,
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "evidence_sha256": "df9ef19a68b53a7380e052c487730526d3d67b5a38bdc20b109773a310c7c359",
+        "kind": "article_body_v1",
+        "observed_at": "2026-11-02T19:41:52.492226+00:00",
+        "payload": {
+          "article_sha256": "ed12c93ce2f0935d029fd5b51434478d655bd3aa1544281c52949ab0cf74ab48",
+          "body": "# Choose a pilot\n\nMake a bounded decision\n\n<nav aria-label=\"Table of contents\" data-cf-component-id=\"toc\" data-cf-component-type=\"toc\" data-cf-component-label=\"Table of contents\"><p><strong>In this article</strong></p><ol><li><a href=\"#cost\" data-cf-toc-target=\"cost\">Cost the task</a></li></ol></nav>\n\n<a id=\"cost\"></a>\n## Cost the task\n\nMeasure **rework** before choosing a pilot.\n\nThe fictional baseline is AUD 500, not USD 500.\n\n- Keep human approval.\n\n## Next Step\n\n**Your next step**\n\nBring your workflow baseline.\n\n[Start a brief](/brief)",
+          "format": "markdown",
+          "revision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71"
+        },
+        "payload_sha256": "54b247d67e4fb4ca6d8b5c158a7b89c9a0563d74f8c299a3d878492ff6584837",
+        "run_id": "verified-worker",
+        "schema_version": 1,
+        "source_sha256": "081c1d08c037368b5260297979adfc55a4c02103314defd64163992aa0ffb736"
+      },
+      {
+        "backend_run_admission_v1": {
+          "dispatch_key": "verified-original",
+          "domain": "new-99e5852d.example.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "3228",
+          "principal": {
+            "actor_id": "mlai_user:1374",
+            "kind": "user",
+            "user_id": "1374"
+          },
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "article_generation"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "generation": 0,
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "evidence_sha256": "38ccaf52ad51a9df11daef023bebc1bb199406e3e87c540821db4e39dafd96bc",
+        "kind": "article_preview_quality_v1",
+        "observed_at": "2026-11-02T19:41:52.625379+00:00",
+        "payload": {
+          "article_preview_quality": {
+            "acceptance_version": "2026-10-21.2",
+            "advisory": true,
+            "artifacts": {
+              "article_preview_quality.json": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/article_preview_quality.json",
+              "browser_report.json": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/browser_report.json",
+              "style_review_report.json": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/style_review_report.json"
+            },
+            "browser": {
+              "anatomy": {
+                "article_h1_count": 1,
+                "article_word_count": 200,
+                "section_component_ids": [
+                  "section:cost"
+                ]
+              },
+              "content_completeness": {},
+              "failed_request_count": 0,
+              "failure_kind": null,
+              "h1_text": "",
+              "page_error_count": 0,
+              "screenshots": [
+                "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/evidence/fixture.png"
+              ],
+              "success": true,
+              "transient_failure": false
+            },
+            "capture_findings": [],
+            "component_style": {
+              "advisory": [],
+              "blocking": [],
+              "checked": 0,
+              "reference": {},
+              "status": "not_captured"
+            },
+            "content_acceptance": {
+              "capture_version": "2026-10-20.1",
+              "checked_core_items": 4,
+              "errors": [],
+              "passed": true,
+              "required": true,
+              "version": "2026-10-21.2"
+            },
+            "editorial_review": {},
+            "editorial_score": null,
+            "editorial_summary": "",
+            "evidence_sha256": "fae283555112b3f301fae3635616c33223820123d1d87f5a7974d7b261dd266f",
+            "evidence_step": "review_preview_quality",
+            "execution_token": "90b558c4-0976-4b0f-87d1-791084e1223f",
+            "findings": [],
+            "inputs_sha256": "895b878169775d6ecc78f434b022f8f570445c73df82749cb33fc3a49feba028",
+            "preview_commit_binding_version": "2026-09-25.1",
+            "preview_url": "https://example.com/articles/pilot",
+            "quality_attempt": 1,
+            "queue_attempt": 1,
+            "queued_at": "2026-11-02T19:41:52.497727+00:00",
+            "repair_instructions": [],
+            "resume_generation": 0,
+            "review_token": "actual-fixture",
+            "reviewed_at": "2026-11-02T19:41:52.606077+00:00",
+            "reviewed_deletion_word_floor_waived": false,
+            "reviewed_preview_commit_digest": "2ba77b3b1c76b596d38e30c33fa670c277a5fd4ff2b6223054664b9982623e65",
+            "reviewed_preview_commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
+            "started_at": "2026-11-02T19:41:52.512943+00:00",
+            "status": "passed",
+            "style": {
+              "mismatch_count": 0,
+              "mismatches": [],
+              "reviewed": true,
+              "score": null,
+              "skip_reason": null,
+              "success": true,
+              "summary": ""
+            },
+            "task_id": "",
+            "toc_check": {
+              "checked": false,
+              "findings": [],
+              "source": "unavailable"
+            },
+            "visible_content_acceptance": {
+              "code": "visible_review_passed",
+              "errors": [],
+              "inputs_sha256": "c068f49a8c6975ca0d8105201b7f7fc369a6549808dd6ffee27d3c3feacf30cf",
+              "model": "gpt-6-astra",
+              "passed": true,
+              "required": true,
+              "review": {
+                "attempts": [
+                  {
+                    "errors": [],
+                    "review": {
+                      "article_patch": null,
+                      "claims": [
+                        {
+                          "claim_id": "claim-001",
+                          "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                          "reason": "Synthetic fixture decision, not source verification.",
+                          "source_id": "fixture",
+                          "verdict": "supported"
+                        },
+                        {
+                          "claim_id": "claim-002",
+                          "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                          "reason": "Synthetic fixture decision, not source verification.",
+                          "source_id": "fixture",
+                          "verdict": "supported"
+                        },
+                        {
+                          "claim_id": "claim-004",
+                          "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                          "reason": "Synthetic fixture decision, not source verification.",
+                          "source_id": "fixture",
+                          "verdict": "supported"
+                        },
+                        {
+                          "claim_id": "claim-007",
+                          "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                          "reason": "Synthetic fixture decision, not source verification.",
+                          "source_id": "fixture",
+                          "verdict": "supported"
+                        },
+                        {
+                          "claim_id": "claim-008",
+                          "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                          "reason": "Synthetic fixture decision, not source verification.",
+                          "source_id": "fixture",
+                          "verdict": "supported"
+                        }
+                      ],
+                      "criteria": [
+                        {
+                          "key": "coherence",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "distinct_contribution",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "editorial_integrity",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "evidence_support",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "reader_task",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "search_metadata",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "temporal_accuracy",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "truthful_promises",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        }
+                      ],
+                      "layout_patches": [],
+                      "section_patches": [],
+                      "valid_until": null
+                    }
+                  }
+                ],
+                "errors": [],
+                "fingerprint": "c068f49a8c6975ca0d8105201b7f7fc369a6549808dd6ffee27d3c3feacf30cf",
+                "passed": true,
+                "reviewed_at": "2026-11-02T19:41:52.603646+00:00",
+                "valid_until": null,
+                "version": "2026-10-23.1"
+              },
+              "version": "2026-09-24.2"
+            }
+          },
+          "article_sha256": "ed12c93ce2f0935d029fd5b51434478d655bd3aa1544281c52949ab0cf74ab48",
+          "generation": 0,
+          "live_preview": {
+            "exactRender": true,
+            "previewUrl": "https://example.com/articles/pilot",
+            "proof": {
+              "commitSha": "cccccccccccccccccccccccccccccccccccccccc"
+            },
+            "resumeGeneration": 0,
+            "resume_generation": 0
+          },
+          "revision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71",
+          "version": 1
+        },
+        "payload_sha256": "a557112581f7a56e21e02765d11c22fa5e65f8032aa555e7201c410f9f3cded6",
+        "run_id": "verified-worker",
+        "schema_version": 1,
+        "source_sha256": "8b2a47eef00d2708a4a3de5210e45c104f784f8ee7ef5180a1ac89db28736b8c"
+      },
+      {
+        "backend_run_admission_v1": {
+          "dispatch_key": "verified-original",
+          "domain": "new-99e5852d.example.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "3228",
+          "principal": {
+            "actor_id": "mlai_user:1374",
+            "kind": "user",
+            "user_id": "1374"
+          },
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "article_generation"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "generation": 0,
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "evidence_sha256": "bf0c100054f6e83b7c3b6249cb303eb2fe9cde1c41e1379790d3de6aefc7d679",
+        "kind": "draft_ready_v1",
+        "observed_at": "2026-11-02T19:41:52.623726+00:00",
+        "payload": {
+          "at": "2026-11-02T19:41:52.623189+00:00",
+          "revision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71",
+          "version": 1
+        },
+        "payload_sha256": "426fa614015bebb183dcd181192e046d172390d1da341b2b569d4c88e0cd00ec",
+        "run_id": "verified-worker",
+        "schema_version": 1,
+        "source_sha256": "426fa614015bebb183dcd181192e046d172390d1da341b2b569d4c88e0cd00ec"
+      }
+    ]
+  },
+  "review_metadata_response": {
+    "schema_version": 1,
+    "run_id": "verified-worker",
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "new-99e5852d.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "1374",
+        "actor_id": "mlai_user:1374"
+      },
+      "github_repo": "",
+      "dispatch_key": "verified-original",
+      "event_protocol": 1,
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "organization_id": "3228"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+    },
+    "generation": 0,
+    "revision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71",
+    "article_sha256": "ed12c93ce2f0935d029fd5b51434478d655bd3aa1544281c52949ab0cf74ab48",
+    "article_preview_quality": {
+      "status": "passed",
+      "advisory": true,
+      "preview_url": "https://example.com/articles/pilot",
+      "resume_generation": 0,
+      "queue_attempt": 1,
+      "queued_at": "2026-11-02T19:41:52.497727+00:00",
+      "evidence_step": "review_preview_quality",
+      "acceptance_version": "2026-10-21.2",
+      "inputs_sha256": "895b878169775d6ecc78f434b022f8f570445c73df82749cb33fc3a49feba028",
+      "review_token": "actual-fixture",
+      "task_id": "",
+      "started_at": "2026-11-02T19:41:52.512943+00:00",
+      "quality_attempt": 1,
+      "execution_token": "90b558c4-0976-4b0f-87d1-791084e1223f",
+      "preview_commit_binding_version": "2026-09-25.1",
+      "reviewed_preview_commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "reviewed_preview_commit_digest": "2ba77b3b1c76b596d38e30c33fa670c277a5fd4ff2b6223054664b9982623e65",
+      "content_acceptance": {
+        "version": "2026-10-21.2",
+        "capture_version": "2026-10-20.1",
+        "required": true,
+        "passed": true,
+        "errors": [],
+        "checked_core_items": 4
+      },
+      "visible_content_acceptance": {
+        "version": "2026-09-24.2",
+        "required": true,
+        "model": "gpt-6-astra",
+        "passed": true,
+        "errors": [],
+        "review": {
+          "version": "2026-10-23.1",
+          "passed": true,
+          "fingerprint": "c068f49a8c6975ca0d8105201b7f7fc369a6549808dd6ffee27d3c3feacf30cf",
+          "reviewed_at": "2026-11-02T19:41:52.603646+00:00",
+          "valid_until": null,
+          "errors": [],
+          "attempts": [
+            {
+              "review": {
+                "criteria": [
+                  {
+                    "key": "coherence",
+                    "passed": true,
+                    "reason": "Synthetic plumbing decision."
+                  },
+                  {
+                    "key": "distinct_contribution",
+                    "passed": true,
+                    "reason": "Synthetic plumbing decision."
+                  },
+                  {
+                    "key": "editorial_integrity",
+                    "passed": true,
+                    "reason": "Synthetic plumbing decision."
+                  },
+                  {
+                    "key": "evidence_support",
+                    "passed": true,
+                    "reason": "Synthetic plumbing decision."
+                  },
+                  {
+                    "key": "reader_task",
+                    "passed": true,
+                    "reason": "Synthetic plumbing decision."
+                  },
+                  {
+                    "key": "search_metadata",
+                    "passed": true,
+                    "reason": "Synthetic plumbing decision."
+                  },
+                  {
+                    "key": "temporal_accuracy",
+                    "passed": true,
+                    "reason": "Synthetic plumbing decision."
+                  },
+                  {
+                    "key": "truthful_promises",
+                    "passed": true,
+                    "reason": "Synthetic plumbing decision."
+                  }
+                ],
+                "claims": [
+                  {
+                    "claim_id": "claim-001",
+                    "verdict": "supported",
+                    "source_id": "fixture",
+                    "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                    "reason": "Synthetic fixture decision, not source verification."
+                  },
+                  {
+                    "claim_id": "claim-002",
+                    "verdict": "supported",
+                    "source_id": "fixture",
+                    "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                    "reason": "Synthetic fixture decision, not source verification."
+                  },
+                  {
+                    "claim_id": "claim-004",
+                    "verdict": "supported",
+                    "source_id": "fixture",
+                    "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                    "reason": "Synthetic fixture decision, not source verification."
+                  },
+                  {
+                    "claim_id": "claim-007",
+                    "verdict": "supported",
+                    "source_id": "fixture",
+                    "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                    "reason": "Synthetic fixture decision, not source verification."
+                  },
+                  {
+                    "claim_id": "claim-008",
+                    "verdict": "supported",
+                    "source_id": "fixture",
+                    "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                    "reason": "Synthetic fixture decision, not source verification."
+                  }
+                ],
+                "section_patches": [],
+                "article_patch": null,
+                "layout_patches": [],
+                "valid_until": null
+              },
+              "errors": []
+            }
+          ]
+        },
+        "inputs_sha256": "c068f49a8c6975ca0d8105201b7f7fc369a6549808dd6ffee27d3c3feacf30cf",
+        "code": "visible_review_passed"
+      },
+      "reviewed_at": "2026-11-02T19:41:52.606077+00:00",
+      "findings": [],
+      "browser": {
+        "success": true,
+        "failure_kind": null,
+        "transient_failure": false,
+        "h1_text": "",
+        "page_error_count": 0,
+        "failed_request_count": 0,
+        "screenshots": [
+          "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/evidence/fixture.png"
+        ],
+        "anatomy": {
+          "section_component_ids": [
+            "section:cost"
+          ],
+          "article_word_count": 200,
+          "article_h1_count": 1
+        },
+        "content_completeness": {}
+      },
+      "style": {
+        "reviewed": true,
+        "success": true,
+        "score": null,
+        "summary": "",
+        "mismatch_count": 0,
+        "mismatches": [],
+        "skip_reason": null
+      },
+      "editorial_score": null,
+      "editorial_summary": "",
+      "editorial_review": {},
+      "capture_findings": [],
+      "toc_check": {
+        "checked": false,
+        "source": "unavailable",
+        "findings": []
+      },
+      "component_style": {
+        "status": "not_captured",
+        "checked": 0,
+        "blocking": [],
+        "advisory": [],
+        "reference": {}
+      },
+      "repair_instructions": [],
+      "reviewed_deletion_word_floor_waived": false,
+      "artifacts": {
+        "article_preview_quality.json": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/article_preview_quality.json",
+        "browser_report.json": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/browser_report.json",
+        "style_review_report.json": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/style_review_report.json"
+      },
+      "evidence_sha256": "fae283555112b3f301fae3635616c33223820123d1d87f5a7974d7b261dd266f"
+    },
+    "livePreview": {
+      "previewUrl": "https://example.com/articles/pilot",
+      "exactRender": true,
+      "resumeGeneration": 0,
+      "resume_generation": 0,
+      "proof": {
+        "commitSha": "cccccccccccccccccccccccccccccccccccccccc"
+      }
+    }
+  },
+  "article_review_response": {
+    "articleId": "verified-worker",
+    "revision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71",
+    "fields": [],
+    "candidates": {},
+    "commentOutcomes": [],
+    "previewPending": false,
+    "previewCommit": "",
+    "latestRunId": null,
+    "revisionRunId": null,
+    "reviewKind": "article",
+    "pendingUpdate": false,
+    "refreshError": "",
+    "hasProtectedEdits": false,
+    "approved": false,
+    "articleExport": {
+      "version": 1,
+      "status": "ready",
+      "runId": "verified-worker",
+      "revision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71",
+      "format": "markdown",
+      "markdown": "# Choose a pilot\n\nMake a bounded decision\n\n<nav aria-label=\"Table of contents\" data-cf-component-id=\"toc\" data-cf-component-type=\"toc\" data-cf-component-label=\"Table of contents\"><p><strong>In this article</strong></p><ol><li><a href=\"#cost\" data-cf-toc-target=\"cost\">Cost the task</a></li></ol></nav>\n\n<a id=\"cost\"></a>\n## Cost the task\n\nMeasure **rework** before choosing a pilot.\n\nThe fictional baseline is AUD 500, not USD 500.\n\n- Keep human approval.\n\n## Next Step\n\n**Your next step**\n\nBring your workflow baseline.\n\n[Start a brief](/brief)\n",
+      "metadata": {
+        "title": "Choose a pilot",
+        "slug": "choose-pilot",
+        "description": "Make a bounded decision"
+      },
+      "media": []
+    },
+    "editorialNotes": [],
+    "previewedRevision": ""
+  },
+  "events_response": {
+    "schema_version": 1,
+    "run_id": "verified-worker",
+    "batches": [
+      {
+        "event": "run_events_v2",
+        "event_type": "run_events_v2",
+        "schema_version": 1,
+        "run_id": "verified-worker",
+        "backend_run_admission_v1": {
+          "dispatch_key": "verified-original",
+          "domain": "new-99e5852d.example.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "3228",
+          "principal": {
+            "actor_id": "mlai_user:1374",
+            "kind": "user",
+            "user_id": "1374"
+          },
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "article_generation"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "generation": 0,
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "events": [
+          {
+            "at": "2026-11-02T19:41:52.362558+00:00",
+            "digest": "6f353e0278e1108f8c9f257d7c11cda83b81da1b98d38b00afc8b3de233944ca",
+            "generation": 0,
+            "seq": 1,
+            "state_version": 1,
+            "status": "queued",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.370234+00:00",
+            "digest": "ef1db482edcbb6dcaa05c5566cfd41b4ca8d0c63bb4206853c153478c9bb58b0",
+            "generation": 0,
+            "seq": 2,
+            "state_version": 2,
+            "status": "running",
+            "step": "assemble_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.370234+00:00",
+            "attempt": 1,
+            "digest": "3c534d22c010b34d9aeefc3de9577de5a533c570b7190d9bd3c4143924733340",
+            "generation": 0,
+            "seq": 3,
+            "state_version": 2,
+            "step": "assemble_article",
+            "type": "step_started"
+          },
+          {
+            "at": "2026-11-02T19:41:52.375932+00:00",
+            "digest": "1d99884abebdbe8ab225ac42fae7a168db1d67af8f1fc7701b4a5538e1d98825",
+            "generation": 0,
+            "seq": 4,
+            "state_version": 3,
+            "status": "running",
+            "step": "assemble_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.379148+00:00",
+            "digest": "775ba9049a22749b2726d4adf7cc6a6ebff87862f6cdf26d83b0daff4d12cab4",
+            "generation": 0,
+            "kind": "json",
+            "seq": 5,
+            "state_version": 3,
+            "step": "assemble_article",
+            "type": "artifact"
+          },
+          {
+            "at": "2026-11-02T19:41:52.383266+00:00",
+            "digest": "6faa5836a76aaaa7322df0eef544040d982011ebbb0cc6dba5ed8f5b26d0c3c1",
+            "generation": 0,
+            "seq": 6,
+            "state_version": 4,
+            "status": "running",
+            "step": "assemble_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.383266+00:00",
+            "attempt": 1,
+            "digest": "9b1843ea96244e9426d179b2b3b42e8bd4d5c13823843bcf2fc0f4c017f82f6e",
+            "generation": 0,
+            "seq": 7,
+            "state_version": 4,
+            "status": "completed",
+            "step": "assemble_article",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T19:41:52.387938+00:00",
+            "digest": "2bd4c2f48f086abf2695c4433454860a9b83c464d9a760b16684de14a2d02181",
+            "generation": 0,
+            "seq": 8,
+            "state_version": 5,
+            "status": "running",
+            "step": "assemble_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.394648+00:00",
+            "digest": "e2f130e8b0ff30da4881c851fc1a9c37c939bf2c5b2d8600c0cf0929bfa9a557",
+            "generation": 0,
+            "seq": 9,
+            "state_version": 6,
+            "status": "running",
+            "step": "render_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.394648+00:00",
+            "attempt": 1,
+            "digest": "c841efbf03415b92bf6df6a541cbed992407e76694b57c0b39d313a82d05aac2",
+            "generation": 0,
+            "seq": 10,
+            "state_version": 6,
+            "step": "render_article",
+            "type": "step_started"
+          },
+          {
+            "at": "2026-11-02T19:41:52.400632+00:00",
+            "digest": "f02412ef67c862b11f0e0dac9e97398d2d516b47110bba4e6ae57faf52747ffa",
+            "generation": 0,
+            "seq": 11,
+            "state_version": 7,
+            "status": "running",
+            "step": "render_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.404387+00:00",
+            "digest": "180400124eabd23d08218dff2f2edf38517bcd1be483dd6e63e28f374a3988e4",
+            "generation": 0,
+            "kind": "json",
+            "seq": 12,
+            "state_version": 7,
+            "step": "render_article",
+            "type": "artifact"
+          },
+          {
+            "at": "2026-11-02T19:41:52.408990+00:00",
+            "digest": "5f8df3fd83eed5275556097f0bdd29b467566190e247220d67e610ee6db95442",
+            "generation": 0,
+            "seq": 13,
+            "state_version": 8,
+            "status": "running",
+            "step": "render_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.408990+00:00",
+            "attempt": 1,
+            "digest": "403930476134e3e4039df96a1a1bed1ddc7a3664190fde5158128a8f0e4453b9",
+            "generation": 0,
+            "seq": 14,
+            "state_version": 8,
+            "status": "completed",
+            "step": "render_article",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T19:41:52.414525+00:00",
+            "digest": "642da05d251f91ddecabea086e5829c49bd7497ed52631b9b3b78e3524a970d9",
+            "generation": 0,
+            "seq": 15,
+            "state_version": 9,
+            "status": "running",
+            "step": "render_article",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.422573+00:00",
+            "digest": "cdb0ab8a0310ee7aa0286ce37b85084d9dd38b60b4cb358c92a03d21072edb74",
+            "generation": 0,
+            "seq": 16,
+            "state_version": 10,
+            "status": "running",
+            "step": "collect_research_bundle",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.422573+00:00",
+            "attempt": 1,
+            "digest": "4ac0290361c85c34606454fc14839529548fa3476bd9afa37b193be5717e2fab",
+            "generation": 0,
+            "seq": 17,
+            "state_version": 10,
+            "step": "collect_research_bundle",
+            "type": "step_started"
+          },
+          {
+            "at": "2026-11-02T19:41:52.429626+00:00",
+            "digest": "6ed944ed85fdca58d6dc3e3b93e43e6702b52273266bd7152e842be049b475ee",
+            "generation": 0,
+            "seq": 18,
+            "state_version": 11,
+            "status": "running",
+            "step": "collect_research_bundle",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.434247+00:00",
+            "digest": "baa118205120b94f76efb840b4ece02b536568ad2e237e6095c9a8a6b0c4c8a1",
+            "generation": 0,
+            "kind": "json",
+            "seq": 19,
+            "state_version": 11,
+            "step": "collect_research_bundle",
+            "type": "artifact"
+          },
+          {
+            "at": "2026-11-02T19:41:52.439859+00:00",
+            "digest": "6c5b9a7863d40740ec30839491d27ce79d1ccf30234a8c774db269f6b622b1aa",
+            "generation": 0,
+            "seq": 20,
+            "state_version": 12,
+            "status": "running",
+            "step": "collect_research_bundle",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.439859+00:00",
+            "attempt": 1,
+            "digest": "b41344a97b6cdc9654989f3b2295b49b84126568f1425a8286fa9e9ff2e887b9",
+            "generation": 0,
+            "seq": 21,
+            "state_version": 12,
+            "status": "completed",
+            "step": "collect_research_bundle",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T19:41:52.446206+00:00",
+            "digest": "2d4408f604221481cb1a7be4a272bff506f296ed663b98d7d65c6fbe02f7591e",
+            "generation": 0,
+            "seq": 22,
+            "state_version": 13,
+            "status": "running",
+            "step": "collect_research_bundle",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.456344+00:00",
+            "digest": "a7d8a6dc542ed60a50388b5d35ac5aecb208861c61359cd8caa3fee356629498",
+            "generation": 0,
+            "seq": 23,
+            "state_version": 14,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.456344+00:00",
+            "attempt": 1,
+            "digest": "1a89f7951f8e3ba3b48b84cf96e9a9a877fc886c4dbd871dfd25add7725db182",
+            "generation": 0,
+            "seq": 24,
+            "state_version": 14,
+            "step": "load_context",
+            "type": "step_started"
+          },
+          {
+            "at": "2026-11-02T19:41:52.464868+00:00",
+            "digest": "ca0773fa6effe67b3dbc54608264a0e29cd10c38275e8686f476f692ccb515d3",
+            "generation": 0,
+            "seq": 25,
+            "state_version": 15,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.470206+00:00",
+            "digest": "c827041f81b25cc10e70faa8ecbe6cb4ee2b24beb3f1841033e61e31b3d6de8a",
+            "generation": 0,
+            "kind": "json",
+            "seq": 26,
+            "state_version": 15,
+            "step": "load_context",
+            "type": "artifact"
+          },
+          {
+            "at": "2026-11-02T19:41:52.476493+00:00",
+            "digest": "0455c4ecbb75c1878c6481cdbe52c21edee6ede574ecdb251979159afafd430e",
+            "generation": 0,
+            "seq": 27,
+            "state_version": 16,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.476493+00:00",
+            "attempt": 1,
+            "digest": "e72b85f18b8041407374e135aafae442cdfea25dca97928e8bdfc193f71fb2a1",
+            "generation": 0,
+            "seq": 28,
+            "state_version": 16,
+            "status": "completed",
+            "step": "load_context",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T19:41:52.483703+00:00",
+            "digest": "7bff2ae77ad1207cd79590fa16f3be55857a4d922264527a4ead485870c97a2b",
+            "generation": 0,
+            "seq": 29,
+            "state_version": 17,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.506493+00:00",
+            "digest": "056701e3065a767a271583f010f14c9ea06b2d175050656b23886439029edeab",
+            "generation": 0,
+            "seq": 30,
+            "state_version": 18,
+            "status": "awaiting_approval",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.525243+00:00",
+            "digest": "cb74d78c36d8244ec2542c90a68d9cddf340559a2f44da9aae0276576ccab546",
+            "generation": 0,
+            "seq": 31,
+            "state_version": 19,
+            "status": "awaiting_approval",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.535314+00:00",
+            "digest": "1cdda65c409d648f07372130edaee819f1c0d9af2c2180bc4375900768d0237f",
+            "generation": 0,
+            "seq": 32,
+            "state_version": 20,
+            "status": "awaiting_approval",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T19:41:52.625889+00:00",
+            "digest": "af8b49d8dc26f497e26259919852cda9f190e7950814a502b433d79a01aaa163",
+            "generation": 0,
+            "seq": 33,
+            "state_version": 21,
+            "status": "awaiting_approval",
+            "step": "load_context",
+            "type": "run_state"
+          }
+        ],
+        "event_id": "0697d100273c2e7d2a17a2ff1c01756e2e54a512412dc7a1fc97522820f34d80",
+        "emitted_at": "2026-11-02T19:41:52.625889+00:00"
+      }
+    ],
+    "next_cursor": 33,
+    "has_more": false
+  },
+  "approval_request": {
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "new-99e5852d.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "1374",
+        "actor_id": "mlai_user:1374"
+      },
+      "github_repo": "",
+      "dispatch_key": "verified-original",
+      "event_protocol": 1,
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "organization_id": "3228"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+    },
+    "reviewedRevision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71"
+  },
+  "approval_response": {
+    "status": "approved",
+    "job_id": "verified-worker",
+    "reviewedRevision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71",
+    "approval_state": "approved",
+    "message": "Article review consent recorded.",
+    "job_url": "/api/runs/verified-worker",
+    "action": "approve",
+    "accepted": true,
+    "run_id": "verified-worker",
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "new-99e5852d.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "1374",
+        "actor_id": "mlai_user:1374"
+      },
+      "github_repo": "",
+      "dispatch_key": "verified-original",
+      "event_protocol": 1,
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "organization_id": "3228"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+    }
+  },
+  "evidence_after_approval": {
+    "schema_version": 1,
+    "run_id": "verified-worker",
+    "backend_run_admission_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "domain": "new-99e5852d.example.test",
+      "workflow": "article_generation",
+      "principal": {
+        "kind": "user",
+        "user_id": "1374",
+        "actor_id": "mlai_user:1374"
+      },
+      "github_repo": "",
+      "dispatch_key": "verified-original",
+      "event_protocol": 1,
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "organization_id": "3228"
+    },
+    "backend_run_execution_v1": {
+      "scope": {
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "deletion_epoch": null,
+        "operation_attempt": null,
+        "expected_source_sha": null,
+        "connection_target_id": null,
+        "connection_generation": null,
+        "website_connection_id": null
+      },
+      "generation": 0,
+      "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+      "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+      "schema_version": 1,
+      "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c"
+    },
+    "evidence": [
+      {
+        "backend_run_admission_v1": {
+          "dispatch_key": "verified-original",
+          "domain": "new-99e5852d.example.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "3228",
+          "principal": {
+            "actor_id": "mlai_user:1374",
+            "kind": "user",
+            "user_id": "1374"
+          },
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "article_generation"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "generation": 0,
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "evidence_sha256": "80e51c864fb267e5307de8c2f2df3fb1f8cedcb300a1f9261056955b0e169a65",
+        "kind": "article_body_v1",
+        "observed_at": "2026-11-02T19:41:52.705622+00:00",
+        "payload": {
+          "article_sha256": "ed12c93ce2f0935d029fd5b51434478d655bd3aa1544281c52949ab0cf74ab48",
+          "body": "# Choose a pilot\n\nMake a bounded decision\n\n<nav aria-label=\"Table of contents\" data-cf-component-id=\"toc\" data-cf-component-type=\"toc\" data-cf-component-label=\"Table of contents\"><p><strong>In this article</strong></p><ol><li><a href=\"#cost\" data-cf-toc-target=\"cost\">Cost the task</a></li></ol></nav>\n\n<a id=\"cost\"></a>\n## Cost the task\n\nMeasure **rework** before choosing a pilot.\n\nThe fictional baseline is AUD 500, not USD 500.\n\n- Keep human approval.\n\n## Next Step\n\n**Your next step**\n\nBring your workflow baseline.\n\n[Start a brief](/brief)",
+          "format": "markdown",
+          "revision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71"
+        },
+        "payload_sha256": "54b247d67e4fb4ca6d8b5c158a7b89c9a0563d74f8c299a3d878492ff6584837",
+        "run_id": "verified-worker",
+        "schema_version": 1,
+        "source_sha256": "124c9c609b9b03a922ddd2314ca76938a45b09029588155769cf30039e9737e9"
+      },
+      {
+        "backend_run_admission_v1": {
+          "dispatch_key": "verified-original",
+          "domain": "new-99e5852d.example.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "3228",
+          "principal": {
+            "actor_id": "mlai_user:1374",
+            "kind": "user",
+            "user_id": "1374"
+          },
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "article_generation"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "generation": 0,
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "evidence_sha256": "38ccaf52ad51a9df11daef023bebc1bb199406e3e87c540821db4e39dafd96bc",
+        "kind": "article_preview_quality_v1",
+        "observed_at": "2026-11-02T19:41:52.625379+00:00",
+        "payload": {
+          "article_preview_quality": {
+            "acceptance_version": "2026-10-21.2",
+            "advisory": true,
+            "artifacts": {
+              "article_preview_quality.json": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/article_preview_quality.json",
+              "browser_report.json": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/browser_report.json",
+              "style_review_report.json": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/style_review_report.json"
+            },
+            "browser": {
+              "anatomy": {
+                "article_h1_count": 1,
+                "article_word_count": 200,
+                "section_component_ids": [
+                  "section:cost"
+                ]
+              },
+              "content_completeness": {},
+              "failed_request_count": 0,
+              "failure_kind": null,
+              "h1_text": "",
+              "page_error_count": 0,
+              "screenshots": [
+                "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker/steps/review_preview_quality/attempts/90b558c4-0976-4b0f-87d1-791084e1223f/evidence/fixture.png"
+              ],
+              "success": true,
+              "transient_failure": false
+            },
+            "capture_findings": [],
+            "component_style": {
+              "advisory": [],
+              "blocking": [],
+              "checked": 0,
+              "reference": {},
+              "status": "not_captured"
+            },
+            "content_acceptance": {
+              "capture_version": "2026-10-20.1",
+              "checked_core_items": 4,
+              "errors": [],
+              "passed": true,
+              "required": true,
+              "version": "2026-10-21.2"
+            },
+            "editorial_review": {},
+            "editorial_score": null,
+            "editorial_summary": "",
+            "evidence_sha256": "fae283555112b3f301fae3635616c33223820123d1d87f5a7974d7b261dd266f",
+            "evidence_step": "review_preview_quality",
+            "execution_token": "90b558c4-0976-4b0f-87d1-791084e1223f",
+            "findings": [],
+            "inputs_sha256": "895b878169775d6ecc78f434b022f8f570445c73df82749cb33fc3a49feba028",
+            "preview_commit_binding_version": "2026-09-25.1",
+            "preview_url": "https://example.com/articles/pilot",
+            "quality_attempt": 1,
+            "queue_attempt": 1,
+            "queued_at": "2026-11-02T19:41:52.497727+00:00",
+            "repair_instructions": [],
+            "resume_generation": 0,
+            "review_token": "actual-fixture",
+            "reviewed_at": "2026-11-02T19:41:52.606077+00:00",
+            "reviewed_deletion_word_floor_waived": false,
+            "reviewed_preview_commit_digest": "2ba77b3b1c76b596d38e30c33fa670c277a5fd4ff2b6223054664b9982623e65",
+            "reviewed_preview_commit_sha": "cccccccccccccccccccccccccccccccccccccccc",
+            "started_at": "2026-11-02T19:41:52.512943+00:00",
+            "status": "passed",
+            "style": {
+              "mismatch_count": 0,
+              "mismatches": [],
+              "reviewed": true,
+              "score": null,
+              "skip_reason": null,
+              "success": true,
+              "summary": ""
+            },
+            "task_id": "",
+            "toc_check": {
+              "checked": false,
+              "findings": [],
+              "source": "unavailable"
+            },
+            "visible_content_acceptance": {
+              "code": "visible_review_passed",
+              "errors": [],
+              "inputs_sha256": "c068f49a8c6975ca0d8105201b7f7fc369a6549808dd6ffee27d3c3feacf30cf",
+              "model": "gpt-6-astra",
+              "passed": true,
+              "required": true,
+              "review": {
+                "attempts": [
+                  {
+                    "errors": [],
+                    "review": {
+                      "article_patch": null,
+                      "claims": [
+                        {
+                          "claim_id": "claim-001",
+                          "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                          "reason": "Synthetic fixture decision, not source verification.",
+                          "source_id": "fixture",
+                          "verdict": "supported"
+                        },
+                        {
+                          "claim_id": "claim-002",
+                          "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                          "reason": "Synthetic fixture decision, not source verification.",
+                          "source_id": "fixture",
+                          "verdict": "supported"
+                        },
+                        {
+                          "claim_id": "claim-004",
+                          "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                          "reason": "Synthetic fixture decision, not source verification.",
+                          "source_id": "fixture",
+                          "verdict": "supported"
+                        },
+                        {
+                          "claim_id": "claim-007",
+                          "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                          "reason": "Synthetic fixture decision, not source verification.",
+                          "source_id": "fixture",
+                          "verdict": "supported"
+                        },
+                        {
+                          "claim_id": "claim-008",
+                          "quote": "Cost the task Measure rework before choosing a pilot. The fictional baseline is AUD 500, not USD 500. Keep human approval. Your next step Bring your workflow baseline. Start a brief",
+                          "reason": "Synthetic fixture decision, not source verification.",
+                          "source_id": "fixture",
+                          "verdict": "supported"
+                        }
+                      ],
+                      "criteria": [
+                        {
+                          "key": "coherence",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "distinct_contribution",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "editorial_integrity",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "evidence_support",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "reader_task",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "search_metadata",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "temporal_accuracy",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        },
+                        {
+                          "key": "truthful_promises",
+                          "passed": true,
+                          "reason": "Synthetic plumbing decision."
+                        }
+                      ],
+                      "layout_patches": [],
+                      "section_patches": [],
+                      "valid_until": null
+                    }
+                  }
+                ],
+                "errors": [],
+                "fingerprint": "c068f49a8c6975ca0d8105201b7f7fc369a6549808dd6ffee27d3c3feacf30cf",
+                "passed": true,
+                "reviewed_at": "2026-11-02T19:41:52.603646+00:00",
+                "valid_until": null,
+                "version": "2026-10-23.1"
+              },
+              "version": "2026-09-24.2"
+            }
+          },
+          "article_sha256": "ed12c93ce2f0935d029fd5b51434478d655bd3aa1544281c52949ab0cf74ab48",
+          "generation": 0,
+          "live_preview": {
+            "exactRender": true,
+            "previewUrl": "https://example.com/articles/pilot",
+            "proof": {
+              "commitSha": "cccccccccccccccccccccccccccccccccccccccc"
+            },
+            "resumeGeneration": 0,
+            "resume_generation": 0
+          },
+          "revision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71",
+          "version": 1
+        },
+        "payload_sha256": "a557112581f7a56e21e02765d11c22fa5e65f8032aa555e7201c410f9f3cded6",
+        "run_id": "verified-worker",
+        "schema_version": 1,
+        "source_sha256": "8b2a47eef00d2708a4a3de5210e45c104f784f8ee7ef5180a1ac89db28736b8c"
+      },
+      {
+        "backend_run_admission_v1": {
+          "dispatch_key": "verified-original",
+          "domain": "new-99e5852d.example.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "3228",
+          "principal": {
+            "actor_id": "mlai_user:1374",
+            "kind": "user",
+            "user_id": "1374"
+          },
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "article_generation"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "execution_id": "admit:94deae0b20ccd53e90f0c9a7cb41774366e69391be150d7b5d1ba20f0c6c474c",
+          "generation": 0,
+          "request_digest": "b43c9a3200f071b51bd804ad9d63a9ed33074f765c18c1ee7521a0416316db27",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "evidence_sha256": "bf0c100054f6e83b7c3b6249cb303eb2fe9cde1c41e1379790d3de6aefc7d679",
+        "kind": "draft_ready_v1",
+        "observed_at": "2026-11-02T19:41:52.623726+00:00",
+        "payload": {
+          "at": "2026-11-02T19:41:52.623189+00:00",
+          "revision": "429eae6f669eebae727eb259fad22e9378461a0e8a23dc0db769de6e8a55ee71",
+          "version": 1
+        },
+        "payload_sha256": "426fa614015bebb183dcd181192e046d172390d1da341b2b569d4c88e0cd00ec",
+        "run_id": "verified-worker",
+        "schema_version": 1,
+        "source_sha256": "426fa614015bebb183dcd181192e046d172390d1da341b2b569d4c88e0cd00ec"
+      }
+    ]
+  },
+  "artifact_root": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/actual-owned-review-orbmrqwf/verified-worker",
+  "checks": {
+    "request_unchanged": true,
+    "get_no_mutations": true,
+    "approval_no_lifecycle_mutation": true,
+    "quality_preserved_after_consent": true
+  }
+}
