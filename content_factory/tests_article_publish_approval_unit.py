@@ -96,6 +96,42 @@ class ArticlePublishApprovalReceiptTests(SimpleTestCase):
                     self.assertTrue(_article_publish_retry_authorized(run))
                     accept_feedback.assert_called_once()
 
+    def test_a_quality_rejection_replies_with_founder_copy_and_keeps_staff_diagnostics(self):
+        run = _review_run()
+        run.pk = 1
+        run.workflow = "article_generation"
+        run.save = MagicMock()
+        run.refresh_from_db = MagicMock()
+        blocker = {"code": "article_preview_editorial_review_blocked", "message": "content:visible_editorial:claim_7 unsupported",
+                   "founder_message": "Some statements or links still need an evidence check.", "findings": ["claim_7"]}
+        request = SimpleNamespace(data={}, headers={}, user=SimpleNamespace(pk=1))
+        with (
+            patch("content_factory.article_review_views.check_approval_comments", return_value=None),
+            patch("content_factory.article_review_views.record_review_approval"),
+            patch("content_factory.vibe_marketing_views._resolve_context_or_response", return_value=(SimpleNamespace(organization=object()), None)),
+            patch("content_factory.vibe_marketing_views._get_config", return_value=object()),
+            patch("content_factory.vibe_marketing_views._setup_blocked_response_for_generation", return_value=None),
+            patch("content_factory.incident_guards.publish_child_binding", return_value={}),
+            patch("content_factory.vibe_marketing_views.get_object_or_404", return_value=run),
+            patch("content_factory.vibe_marketing_views._run_belongs_to_context", return_value=True),
+            patch("content_factory.vibe_marketing_views._latest_review_ready_component_revision", return_value=None),
+            patch("content_factory.vibe_marketing_views.founder_actor_id_for_user", return_value="founder-1"),
+            patch("content_factory.vibe_marketing_views.transaction.atomic", return_value=nullcontext()),
+            patch("content_factory.vibe_marketing_views.ContentFactoryRun.objects.select_for_update") as lock,
+            patch("content_factory.vibe_marketing_views._call_content_factory_run_action", return_value={
+                "content_factory_status_code": 409, "error": blocker["message"], "approval_blocker": blocker}),
+        ):
+            lock.return_value.get.return_value = run
+            response = VibeMarketingRunControlView.post.__wrapped__(
+                VibeMarketingRunControlView(), request, run.run_id, "approve",
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["detail"], blocker["founder_message"])
+        self.assertEqual(response.data["error"], blocker["founder_message"])
+        self.assertNotIn("claim_7", str(response.data))
+        self.assertEqual(run.result["approval_blocker"]["message"], blocker["message"], "staff diagnostics are stored")
+        self.assertEqual(run.result["latest_control_response"]["error"], blocker["message"])
+
     def test_passing_preview_does_not_authorize_direct_promotion(self):
         run = _review_run()
         self.assertFalse(_article_publish_retry_authorized(run))
@@ -629,21 +665,17 @@ class HostedQualitySyncHookTests(SimpleTestCase):
 
 
 class FounderRunResponseProjectionTests(SimpleTestCase):
-    def test_every_run_response_mode_carries_only_founder_quality_copy(self):
-        import json
+    def _serialize(self, result):
         from datetime import datetime, timezone
         from types import SimpleNamespace
         from unittest.mock import patch
         from content_factory import vibe_marketing_views as views
         now = datetime.now(timezone.utc)
-        blocker, quality = FounderQualityProjectionTests.BLOCKER, FounderQualityProjectionTests.QUALITY
         run = SimpleNamespace(run_id="held-article", workflow="article_generation", domain="example.test",
             github_repo="fixture/repo", status="awaiting_approval", current_step="await_review",
             approval_state="approval_required", resume_available=False, created_at=now, updated_at=now,
             step_order=[], steps=SimpleNamespace(order_by=lambda *args: [], all=lambda: []),
-            result={"approval_blocker": blocker, "article_preview_quality": quality,
-                    "latest_control_response": {"approval_blocker": blocker}},
-            run_request={}, acceptance_summary={}, verification_summary={}, error="")
+            result=result, run_request={}, acceptance_summary={}, verification_summary={}, error="")
         with (
             patch.object(views, "_run_source_run_id", return_value=""),
             patch.object(views, "_article_restart_available", return_value=False),
@@ -654,8 +686,50 @@ class FounderRunResponseProjectionTests(SimpleTestCase):
             patch.object(views, "_component_manifest_from_run", return_value=None),
             patch.object(views, "_run_content_island_payload", return_value=None),
         ):
-            for mode in ("summary", "status", "full"):
-                with self.subTest(mode=mode):
-                    text = json.dumps(views._serialize_run(run, mode=mode)["result"], default=str)
-                    for raw in ("claim_7", "Call 000 now", "Rebind"):
-                        self.assertNotIn(raw, text)
+            return {mode: views._serialize_run(run, mode=mode)["result"] for mode in ("summary", "status", "full")}
+
+    def test_every_run_response_mode_carries_only_founder_quality_copy(self):
+        import json
+        blocker, quality = FounderQualityProjectionTests.BLOCKER, FounderQualityProjectionTests.QUALITY
+        for mode, result in self._serialize({"approval_blocker": blocker, "article_preview_quality": quality,
+                                             "latest_control_response": {"approval_blocker": blocker}}).items():
+            with self.subTest(mode=mode):
+                text = json.dumps(result, default=str)
+                for raw in ("claim_7", "Call 000 now", "Rebind"):
+                    self.assertNotIn(raw, text)
+
+    def test_malformed_findings_are_omitted_instead_of_failing_the_response(self):
+        quality = {"status": "blocking_findings", "founder_message": "Checking.",
+                   "findings": ["editorial:score_missing", {"code": "x"}, ["nested"], None, 7, "content:raw"]}
+        for mode, result in self._serialize({"article_preview_quality": quality}).items():
+            with self.subTest(mode=mode):
+                if mode == "full" or "article_preview_quality" in result:
+                    self.assertEqual(result["article_preview_quality"]["findings"], ["editorial:score_missing"])
+
+    def test_rejected_approval_control_response_carries_founder_copy_only(self):
+        import json
+        blocker = FounderQualityProjectionTests.BLOCKER
+        control = {"error": blocker["message"], "errors": [blocker["message"]], "approval_blocker": blocker,
+                   "content_factory_status_code": 409, "content_factory_response": {"detail": blocker}}
+        for mode, result in self._serialize({"approval_blocker": {**blocker, "detail": blocker["message"]},
+                                             "latest_control_response": control}).items():
+            with self.subTest(mode=mode):
+                text = json.dumps(result, default=str)
+                self.assertNotIn("claim_7", text)
+                if mode != "full" and "latest_control_response" not in result:
+                    continue
+                view = result["latest_control_response"]
+                self.assertEqual(view["error"], blocker["founder_message"])
+                self.assertEqual(view["errors"], [blocker["founder_message"]])
+                self.assertEqual(view["content_factory_response"]["detail"]["founder_message"], blocker["founder_message"])
+                self.assertEqual(view["content_factory_status_code"], 409)
+
+    def test_non_quality_blockers_and_control_errors_pass_through(self):
+        blocker = {"code": "publish_auto_merge_blocked", "message": "Repository rules block auto-merge.", "retryable": False}
+        control = {"error": "Repository rules block auto-merge.", "content_factory_response": {"detail": "x"}}
+        for mode, result in self._serialize({"approval_blocker": blocker, "latest_control_response": control}).items():
+            with self.subTest(mode=mode):
+                if mode != "full":
+                    continue
+                self.assertEqual(result["approval_blocker"], blocker)
+                self.assertEqual(result["latest_control_response"], control)

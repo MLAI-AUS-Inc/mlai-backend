@@ -32,9 +32,14 @@ def _founder_copy(message):
     return message
 
 
+def quality_blocker_code(blocker):
+    """True for Content Factory's hosted article quality blockers (``article_preview_*``)."""
+    return isinstance(blocker, dict) and str(blocker.get("code") or "").startswith("article_preview_")
+
+
 def founder_blocker(blocker):
-    """Project an approval blocker to its code and founder copy."""
-    if not isinstance(blocker, dict):
+    """Project an article quality blocker to its code and founder copy; other blockers pass through."""
+    if not quality_blocker_code(blocker):
         return blocker
     view = {key: blocker[key] for key in FOUNDER_BLOCKER_KEYS if key in blocker}
     # A blocker without founder copy must not fall back to the staff message.
@@ -51,7 +56,8 @@ def founder_quality(quality):
         view["founder_message"] = _founder_copy(view["founder_message"])
     findings = quality.get("findings")
     if isinstance(findings, list):
-        view["findings"] = [item for item in findings if item in FOUNDER_FINDING_MARKERS]
+        # Malformed (non-string) upstream findings are diagnostics, never a response error.
+        view["findings"] = [item for item in findings if isinstance(item, str) and item in FOUNDER_FINDING_MARKERS]
     return view
 
 
@@ -60,8 +66,22 @@ def founder_result(result):
     if not isinstance(result, dict):
         return result
     view = dict(result)
+    blocker = view.get("approval_blocker")
     if "approval_blocker" in view:
-        view["approval_blocker"] = founder_blocker(view["approval_blocker"])
+        view["approval_blocker"] = founder_blocker(blocker)
+    if quality_blocker_code(blocker):
+        # A rejected approval's control response repeats the staff message as
+        # error text and keeps Content Factory's raw body; founders get the copy.
+        copy = view["approval_blocker"]["founder_message"]
+        for key in ("error", "detail", "message"):
+            if key in view:
+                view[key] = copy
+        if "errors" in view:
+            view["errors"] = [copy]
+        for key in ("content_factory_response", "contentFactoryResponse"):
+            if key in view:
+                raw = view[key] if isinstance(view[key], dict) else {}
+                view[key] = {"detail": founder_blocker(raw["detail"])} if quality_blocker_code(raw.get("detail")) else {}
     for key in ("article_preview_quality", "articlePreviewQuality"):
         if key in view:
             view[key] = founder_quality(view[key])

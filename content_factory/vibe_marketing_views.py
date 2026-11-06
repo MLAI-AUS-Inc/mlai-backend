@@ -20852,6 +20852,10 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
             }
             run.result = result
             run.save(update_fields=["result", "updated_at"])
+            from .hosted_quality_state import founder_blocker, quality_blocker_code
+            if quality_blocker_code(remote_blocker):
+                # The stored blocker keeps the staff diagnostics; the founder sees its copy.
+                detail = founder_blocker(remote_blocker)["founder_message"]
             return Response(
                 {
                     "detail": detail,
