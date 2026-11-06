@@ -92,6 +92,7 @@ jobs:
       run: |
         python scripts/check_failure_contract.py --remote
         python scripts/check_site_fingerprint_contract.py --remote
+        python scripts/check_staff_safety_recheck_contract.py --remote
         python scripts/check_publishing_inputs_contract.py --remote
         python scripts/check_sealed_verifier_contract.py --remote
         python scripts/check_native_inventory_summary_contract.py --remote

@@ -347,3 +347,64 @@ class StatusMergeContractTests(SimpleTestCase):
                 self.assertEqual((quality["task_id"], quality["review_token"]), ("task-new", "task-new"))
                 run = SimpleNamespace(pk=7, run_id="run-1", status="awaiting_approval", organization_id=30, result=merged)
                 self.assertTrue(verification._ready_to_notify(run, merged[verification.RECEIPT_KEY]))
+
+
+class ProducedRecheckContractTests(SimpleTestCase):
+    """Plan step 8 end to end on Content Factory's own produced payloads.
+
+    contracts/staff-safety-recheck-v1.example.json is written by Content Factory's
+    test_staff_recheck_contract_queued_running_passed_is_the_backend_example from
+    its real staff recheck response, broker delivery and task, and is pinned here
+    by digest (scripts/check_staff_safety_recheck_contract.py). The queued
+    acknowledgement arms the notice, the running quality does not notify, and
+    only the final passed quality of that same task and token does, through both
+    production status merges.
+    """
+
+    def setUp(self):
+        import json
+        from pathlib import Path
+        from scripts.check_staff_safety_recheck_contract import verify
+        root = Path(__file__).resolve().parents[1]
+        verify(root)  # the local bytes are the pinned producer bytes
+        self.produced = json.loads((root / "contracts/staff-safety-recheck-v1.example.json").read_text())
+        held = self.produced["held"]
+        self.live = {"previewUrl": held["preview_url"], "resumeGeneration": held["resume_generation"]}
+        self.held = {**held, "self_heal_fingerprint": FP}
+
+    def armed_receipt(self):
+        request = {**REQUEST, "held": {**REQUEST["held"], "preview_url": self.held["preview_url"],
+                                       "resume_generation": self.held["resume_generation"]}}
+        run = stored(self.held, live=self.live)
+        outcome, _, manager = VerifyRequestTests.verify(
+            self, request, run=run, current=stored(self.held, live=self.live),
+            remote={"status": "recorded", "recheck": self.produced["recheck"]})
+        self.assertEqual((outcome["status"], outcome["notice_armed"]), ("verified", True))
+        written = VerifyRequestTests.written(self, manager)
+        receipt = written[verification.RECEIPT_KEY]
+        acknowledged = self.produced["recheck"]["article_preview_quality"]
+        self.assertEqual((receipt["recheck_task_id"], receipt["recheck_review_token"]),
+                         (acknowledged["task_id"], acknowledged["review_token"]))
+        return written
+
+    def test_the_produced_queued_running_and_passed_states_notify_only_on_the_acknowledged_pass(self):
+        from .service_views import _merge_django_owned_run_result
+        from .vibe_marketing_views import _merge_django_owned_article_result
+        local = self.armed_receipt()
+        for merge in (_merge_django_owned_run_result, _merge_django_owned_article_result):
+            for phase, ready in (("running", False), ("final", True)):
+                with self.subTest(merge=merge.__name__, phase=phase):
+                    merged = merge(local, {"article_preview_quality": self.produced[phase], "live_preview": self.live})
+                    receipt = merged[verification.RECEIPT_KEY]
+                    run = SimpleNamespace(pk=7, run_id="run-1", status="awaiting_approval", organization_id=30,
+                                          result=merged)
+                    self.assertEqual(verification._ready_to_notify(run, receipt), ready)
+
+    def test_the_held_task_finishing_as_passed_never_notifies(self):
+        from .service_views import _merge_django_owned_run_result
+        local = self.armed_receipt()
+        held = self.produced["held"]
+        older = {**self.produced["final"], "task_id": held["task_id"], "review_token": held["review_token"]}
+        merged = _merge_django_owned_run_result(local, {"article_preview_quality": older, "live_preview": self.live})
+        run = SimpleNamespace(pk=7, run_id="run-1", status="awaiting_approval", organization_id=30, result=merged)
+        self.assertFalse(verification._ready_to_notify(run, merged[verification.RECEIPT_KEY]))
