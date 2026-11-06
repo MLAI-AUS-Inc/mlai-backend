@@ -25,7 +25,7 @@ def restore_meeting_room_names(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('roo', '0041_apple_iap_digital_credits'),
+        ('roo', '0042_event_discount_redemptions'),
     ]
 
     operations = [

@@ -135,9 +135,9 @@ class MeetingRoomApiTests(APITestCase):
         account_before = PointsAccount.objects.values().get(user=self.user)
 
         state = MigrationLoader(connection).project_state([
-            ('roo', '0041_apple_iap_digital_credits'),
+            ('roo', '0042_event_discount_redemptions'),
         ])
-        migration = import_module('roo.migrations.0042_rename_meeting_rooms')
+        migration = import_module('roo.migrations.0043_rename_meeting_rooms')
         operation = migration.Migration.operations[0]
         editor = connection.schema_editor()
         # Exercise RunPython with the historical app registry and a real local DB.
@@ -166,9 +166,9 @@ class MeetingRoomApiTests(APITestCase):
 
         self.big_room.delete()
         state = MigrationLoader(connection).project_state([
-            ('roo', '0041_apple_iap_digital_credits'),
+            ('roo', '0042_event_discount_redemptions'),
         ])
-        migration = import_module('roo.migrations.0042_rename_meeting_rooms')
+        migration = import_module('roo.migrations.0043_rename_meeting_rooms')
         operation = migration.Migration.operations[0]
         editor = connection.schema_editor()
         operation.database_forwards('roo', editor, state, state)

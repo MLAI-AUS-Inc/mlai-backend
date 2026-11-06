@@ -101,7 +101,7 @@ authentication, conflicts, refunds, daily limits and signature/request binding.
 
 ## Lovelace and Turing rename
 
-Migration `roo.0042_rename_meeting_rooms` changes the existing Small Meeting
+Migration `roo.0043_rename_meeting_rooms` changes the existing Small Meeting
 Room name to **Lovelace**, and Big Meeting Room name to **Turing**. It updates
 only the name on each existing slug. Room IDs, active status, bookings, blocks,
 prices, and API request fields remain unchanged. Missing rooms are not created.
