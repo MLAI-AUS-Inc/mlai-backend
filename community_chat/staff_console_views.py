@@ -78,6 +78,13 @@ class StartupActionView(StaffConsoleView):
         return response
 
 
+class StartupSafetyStateView(StaffConsoleView):
+    """Show staff the held safety sentences and bindings they can verify."""
+    def get(self, request, organization_id, run_id):
+        from content_factory.staff_safety_verification import staff_safety_state
+        return Response(staff_safety_state(organization_id, run_id), headers={"Cache-Control": "private, no-store"})
+
+
 class AlertListView(StaffConsoleView):
     """List open or overdue startup and global alerts."""
     def get(self, request):

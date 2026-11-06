@@ -190,3 +190,55 @@ def notify_after_staff_safety_verification(run):
         latest[RECEIPT_KEY] = {**receipt, "notified_at": timezone.now().isoformat(), "notified": count}
         ContentFactoryRun.objects.filter(pk=current.pk).update(result=latest)
     return count
+
+
+def _text(value, limit):
+    return value if isinstance(value, str) and 0 < len(value) <= limit else None
+
+
+def staff_safety_state(organization_id, run_id):
+    """What staff verify against: the held binding and the current safety sentences.
+
+    Staff console only (the view requires active staff). The sentences come
+    from Content Factory's current draft; the binding must match the quality
+    state this backend holds, or staff are told to reload instead of being
+    shown a state they could not submit.
+    """
+    from organizations.models import Organization
+    from .article_publish_approval import article_review_identity
+    from .vibe_marketing_views import STAFF_ACTION_CAPABILITY, _call_content_factory_run_action
+    org = Organization.objects.get(pk=organization_id)
+    run = ContentFactoryRun.objects.get(organization=org, run_id=run_id)
+    quality = mapping(mapping(run.result).get("article_preview_quality"))
+    if not held_for_safety(quality):
+        return {"status": "not_held", "runId": run.run_id}
+    remote = _call_content_factory_run_action(run_id=run.run_id, action="staff-safety-state", payload={},
+                                              workflow=run.workflow, staff_capability=STAFF_ACTION_CAPABILITY)
+    remote = remote if isinstance(remote, dict) else {}
+    if remote.get("error"):
+        return {"status": "unavailable", "runId": run.run_id}
+    identity = article_review_identity(run)
+    held = {"previewUrl": remote.get("preview_url"), "resumeGeneration": remote.get("resume_generation"),
+            "selfHealFingerprint": remote.get("self_heal_fingerprint"), "safetyHash": remote.get("safety_hash")}
+    if (remote.get("held") is not True
+            or held["previewUrl"] != quality.get("preview_url") or held["previewUrl"] != identity["preview_url"]
+            or held["resumeGeneration"] != quality.get("resume_generation")
+            or held["resumeGeneration"] != identity["resume_generation"]
+            or held["selfHealFingerprint"] != quality.get("self_heal_fingerprint")
+            or not isinstance(held["safetyHash"], str) or not _SHA256.fullmatch(held["safetyHash"])):
+        return {"status": "observe", "runId": run.run_id}
+    sentences = []
+    for item in remote.get("sentences") if isinstance(remote.get("sentences"), list) else []:
+        item = mapping(item)
+        identity_hash, text = item.get("sentence_sha256"), _text(item.get("text"), 2000)
+        if not isinstance(identity_hash, str) or not _SHA256.fullmatch(identity_hash) or text is None:
+            return {"status": "observe", "runId": run.run_id}
+        sentences.append({"sentenceSha256": identity_hash, "text": text,
+                          "medicationOrDosing": item.get("medication_or_dosing") is True})
+    domains = [domain for domain in remote.get("allowed_source_domains") or [] if _text(domain, 253)][:50]
+    locale = remote.get("locale_supported") is True and bool(domains)
+    reason = ("locale_unsupported" if not locale else "no_safety_sentences" if not sentences
+              else "medication_or_dosing" if any(item["medicationOrDosing"] for item in sentences)
+              else "too_many_sentences" if len(sentences) > MAX_CLAIMS else None)
+    return {"status": "held", "runId": run.run_id, "held": held, "sentences": sentences,
+            "allowedSourceDomains": domains, "verifiable": reason is None, "reason": reason}

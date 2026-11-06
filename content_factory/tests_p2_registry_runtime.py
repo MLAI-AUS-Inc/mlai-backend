@@ -37,6 +37,8 @@ LAZY_ROUTES = (
     ("/api/v1/community-chat/admin/startups/", ("community_chat.staff_console_views", "StartupListView")),
     ("/api/v1/community-chat/admin/startups/12/", ("community_chat.staff_console_views", "StartupDetailView")),
     ("/api/v1/community-chat/admin/startups/12/actions/", ("community_chat.staff_console_views", "StartupActionView")),
+    ("/api/v1/community-chat/admin/startups/12/runs/run-1/safety/",
+     ("community_chat.staff_console_views", "StartupSafetyStateView")),
     ("/api/v1/community-chat/admin/alerts/", ("community_chat.staff_console_views", "AlertListView")),
     ("/api/v1/community-chat/admin/alerts/abc-1/ack/", ("community_chat.staff_console_views", "AlertAckView")),
 )

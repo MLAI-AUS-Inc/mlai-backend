@@ -15543,7 +15543,7 @@ def _autofill_start_response(run, *, reused_active_run=False, research_company_i
 # Content Factory actions that only the audited staff console may send. The
 # capability is a process-local object, so no founder or service route that
 # forwards an action name from a URL can supply it.
-STAFF_ONLY_REMOTE_ACTIONS = frozenset({"record-staff-safety-verification"})
+STAFF_ONLY_REMOTE_ACTIONS = frozenset({"record-staff-safety-verification", "staff-safety-state"})
 STAFF_ACTION_CAPABILITY = object()
 
 

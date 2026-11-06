@@ -281,6 +281,7 @@ urlpatterns[_admin_access + 1:_admin_access + 1] = [
         ("admin/startups/funnel/", "FounderFunnelView"),
         ("admin/startups/<int:organization_id>/", "StartupDetailView"),
         ("admin/startups/<int:organization_id>/actions/", "StartupActionView"),
+        ("admin/startups/<int:organization_id>/runs/<str:run_id>/safety/", "StartupSafetyStateView"),
         ("admin/alerts/", "AlertListView"),
         ("admin/alerts/<str:alert_id>/ack/", "AlertAckView"),
     )

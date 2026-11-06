@@ -241,3 +241,86 @@ class FounderNotificationTests(SimpleTestCase):
         self.assertEqual(count, 0)
         send.assert_not_called()
         manager.filter.return_value.update.assert_not_called()
+
+
+class StaffSafetyStateTests(SimpleTestCase):
+    REMOTE = {"held": True, "preview_url": URL, "resume_generation": GEN, "self_heal_fingerprint": FP,
+              "safety_hash": SAFETY_HASH, "locale_supported": True, "allowed_source_domains": ["healthdirect.gov.au"],
+              "sentences": [{"sentence_sha256": "b" * 64, "text": "If there is immediate danger, call 000.",
+                             "medication_or_dosing": False}]}
+
+    def read(self, remote=None, *, run=None):
+        run = run or stored()
+        remote = self.REMOTE if remote is None else remote
+        with patch("organizations.models.Organization.objects") as orgs, \
+                patch.object(verification.ContentFactoryRun, "objects") as runs, \
+                patch("content_factory.vibe_marketing_views._call_content_factory_run_action", return_value=remote) as call:
+            orgs.get.return_value = ORG
+            runs.get.return_value = run
+            state = verification.staff_safety_state(30, "run-1")
+        return state, call, runs
+
+    def test_staff_see_the_held_binding_and_current_sentences_to_submit(self):
+        state, call, runs = self.read()
+        runs.get.assert_called_once_with(organization=ORG, run_id="run-1")
+        from .vibe_marketing_views import STAFF_ACTION_CAPABILITY
+        self.assertEqual(call.call_args.kwargs["action"], "staff-safety-state")
+        self.assertIs(call.call_args.kwargs["staff_capability"], STAFF_ACTION_CAPABILITY)
+        self.assertEqual(state["status"], "held")
+        self.assertTrue(state["verifiable"])
+        self.assertEqual(state["held"], {"previewUrl": URL, "resumeGeneration": GEN,
+                                         "selfHealFingerprint": FP, "safetyHash": SAFETY_HASH})
+        self.assertEqual(state["sentences"], [{"sentenceSha256": "b" * 64, "text": "If there is immediate danger, call 000.",
+                                               "medicationOrDosing": False}])
+        self.assertEqual(state["allowedSourceDomains"], ["healthdirect.gov.au"])
+
+    def test_the_shown_binding_round_trips_into_a_verification_request(self):
+        state, _, _ = self.read()
+        held = state["held"]
+        data = {"held": {"preview_url": held["previewUrl"], "resume_generation": held["resumeGeneration"],
+                         "self_heal_fingerprint": held["selfHealFingerprint"], "safety_hash": held["safetyHash"]},
+                "claims": [{"sentence_sha256": item["sentenceSha256"], "source_url": "https://www.healthdirect.gov.au/x",
+                            "note": "Healthdirect lists 000 for immediate danger."} for item in state["sentences"]]}
+        outcome, call, _ = VerifyRequestTests().verify(data)
+        self.assertEqual(outcome["status"], "verified")
+        self.assertEqual(call.call_args.kwargs["payload"]["held"], data["held"])
+
+    def test_a_run_not_held_for_safety_is_not_read_from_content_factory(self):
+        state, call, _ = self.read(run=stored({**HELD, "escalation": "quality_review"}))
+        self.assertEqual(state, {"status": "not_held", "runId": "run-1"})
+        call.assert_not_called()
+
+    def test_a_binding_that_differs_from_the_held_state_is_observe(self):
+        for key, value in (("preview_url", "https://preview.test/b"), ("resume_generation", GEN + 1),
+                           ("self_heal_fingerprint", "fp-0"), ("safety_hash", "short"), ("held", False)):
+            with self.subTest(key=key):
+                state, _, _ = self.read({**self.REMOTE, key: value})
+                self.assertEqual(state["status"], "observe")
+                self.assertNotIn("sentences", state)
+        state, _, _ = self.read(run=stored(HELD, live={"previewUrl": "https://preview.test/b", "resumeGeneration": GEN}))
+        self.assertEqual(state["status"], "observe")
+        state, _, _ = self.read({**self.REMOTE, "sentences": [{"sentence_sha256": "nope", "text": "x"}]})
+        self.assertEqual(state["status"], "observe")
+
+    def test_real_holds_are_shown_but_not_verifiable(self):
+        cases = {
+            "medication_or_dosing": {**self.REMOTE, "sentences": [{**self.REMOTE["sentences"][0], "medication_or_dosing": True}]},
+            "locale_unsupported": {**self.REMOTE, "locale_supported": False, "allowed_source_domains": []},
+            "no_safety_sentences": {**self.REMOTE, "sentences": []},
+        }
+        for reason, remote in cases.items():
+            with self.subTest(reason):
+                state, _, _ = self.read(remote)
+                self.assertEqual((state["status"], state["verifiable"], state["reason"]), ("held", False, reason))
+
+    def test_content_factory_unavailable_is_reported_without_sentences(self):
+        state, _, _ = self.read({"error": "down"})
+        self.assertEqual(state, {"status": "unavailable", "runId": "run-1"})
+
+    def test_the_founder_run_response_never_carries_the_staff_safety_state(self):
+        from .hosted_quality_state import founder_result
+        view = founder_result({**stored().result, verification.RECEIPT_KEY: {"recheck_task_id": "task-new"},
+                               "staff_actions_v1": [{"claims": CLAIMS}]})
+        text = str(view)
+        for leaked in ("task-new", "healthdirect", "sentence_sha256", SAFETY_HASH):
+            self.assertNotIn(leaked, text)
