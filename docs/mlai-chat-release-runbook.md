@@ -115,6 +115,11 @@ workflows have been retired. Existing delivery receipts, immutable requests and
 poster ownership remain; do not delete or relabel queued work during cleanup.
 Current metadata enrichment uses member authority with scoped caches.
 
+When the shared Slack API budget only paces a `users.info` mention lookup
+(`BudgetDeferred`), the delivery is deferred and retried so the name resolves
+instead of being stored as `@user`. Other lookup failures still fall back to
+`@user`.
+
 Preview repair without Slack calls or database writes:
 
 ```sh
