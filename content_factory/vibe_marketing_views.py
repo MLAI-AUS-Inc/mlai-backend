@@ -11078,8 +11078,8 @@ def _workflow_progress(*, context=None, run=None, latest_runs=None, checks=None,
     article_result = _run_mapping(article_run.result) if article_run else {}
     preview_quality = _run_mapping(article_result.get("article_preview_quality"))
     preview_quality_status = str(preview_quality.get("status") or "").strip().lower()
-    from .hosted_quality_state import preview_quality_publish_notice
-    quality_publish_notice = preview_quality_publish_notice(preview_quality)
+    from .hosted_quality_state import current_preview_target, preview_quality_publish_notice
+    quality_publish_notice = preview_quality_publish_notice(preview_quality, target=current_preview_target(article_result))
     publish_handoff_pending = bool(article_result.get("publish_handoff_pending"))
     publish_handoff_stale = _publish_handoff_stale_for_run(article_run)
     publish_child_recoverable = _publish_child_run_recoverable(publish_child_run) or bool(article_result.get("publish_child_recoverable"))

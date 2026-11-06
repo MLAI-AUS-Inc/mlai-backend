@@ -19,6 +19,38 @@ FOUNDER_QUALITY_KEYS = (
 FOUNDER_FINDING_MARKERS = frozenset({"editorial:score_missing"})
 
 
+def current_preview_target(result):
+    preview = result.get("live_preview") if isinstance(result.get("live_preview"), dict) else result.get("livePreview")
+    if not isinstance(preview, dict):
+        return None
+    url = preview.get("previewUrl") or preview.get("preview_url")
+    generation = preview.get("resumeGeneration", preview.get("resume_generation"))
+    return (url, generation) if isinstance(url, str) and url else None
+
+
+def automatic_retry_pending(quality, now=None, *, target=None):
+    """True while Content Factory's bounded automatic retry of a failed enqueue is still due.
+
+    Content Factory stamps ``automatic_retry_until`` only while retry budget
+    remains. Past that time, or with no stamp, the failure is real.
+    """
+    from datetime import datetime, timezone
+    if not isinstance(quality, dict) or str(quality.get("status") or "").strip().lower() != "queue_failed":
+        return False
+    if target is not None and (quality.get("preview_url"), quality.get("resume_generation")) != target:
+        return False  # A retry for an older preview or generation says nothing about this one.
+    raw = quality.get("automatic_retry_until")
+    if not isinstance(raw, str):
+        return False
+    try:
+        until = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if until.tzinfo is None:
+        return False
+    return (now or datetime.now(timezone.utc)) < until
+
+
 def fallback_message():
     from django.conf import settings
     alerts = bool(getattr(settings, "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED", False))
@@ -47,11 +79,15 @@ def founder_blocker(blocker):
     return view
 
 
-def founder_quality(quality):
+def founder_quality(quality, *, target=None):
     """Project hosted quality state to the fields founder surfaces read."""
     if not isinstance(quality, dict):
         return quality
     view = {key: quality[key] for key in FOUNDER_QUALITY_KEYS if key in quality}
+    if automatic_retry_pending(quality, target=target):
+        # A recoverable enqueue failure reads as the check still running. The
+        # stored state keeps the real failure, and approval stays blocked.
+        view["status"] = "queued"
     if view.get("founder_message") is not None:
         view["founder_message"] = _founder_copy(view["founder_message"])
     findings = quality.get("findings")
@@ -82,19 +118,22 @@ def founder_result(result):
             if key in view:
                 raw = view[key] if isinstance(view[key], dict) else {}
                 view[key] = {"detail": founder_blocker(raw["detail"])} if quality_blocker_code(raw.get("detail")) else {}
+    target = current_preview_target(view)
     for key in ("article_preview_quality", "articlePreviewQuality"):
         if key in view:
-            view[key] = founder_quality(view[key])
+            view[key] = founder_quality(view[key], target=target)
     for key in ("result", "latest_control_response"):
         if isinstance(view.get(key), dict):
             view[key] = founder_result(view[key])
     return view
 
 
-def preview_quality_publish_notice(quality):
+def preview_quality_publish_notice(quality, *, target=None):
     """Return a locked/blocked publish state without projecting raw editorial findings."""
     quality = quality if isinstance(quality, dict) else {}
     status = str(quality.get("status") or "").strip().lower()
+    if automatic_retry_pending(quality, target=target):
+        status = "queued"
     if status == "self_healing":
         return "locked", "We're fixing a few things in the preview automatically."
     if status in {"queued", "running", "transient_findings"}:

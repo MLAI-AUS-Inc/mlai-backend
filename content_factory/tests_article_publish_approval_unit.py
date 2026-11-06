@@ -733,3 +733,57 @@ class FounderRunResponseProjectionTests(SimpleTestCase):
                     continue
                 self.assertEqual(result["approval_blocker"], blocker)
                 self.assertEqual(result["latest_control_response"], control)
+
+
+class FounderAutomaticRetryProjectionTests(SimpleTestCase):
+    """Step 7: a failed enqueue with retry budget left reads as checking, never as a failure."""
+    URL = "https://preview.example/articles/one"
+
+    def _quality(self, *, count=1, until_seconds=40, status="queue_failed", url=None, generation=2):
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        quality = {"status": status, "preview_url": url or self.URL, "resume_generation": generation,
+                   "queue_failed_count": count, "queue_failed_at": now.isoformat(), "error": "redis: connection refused"}
+        if until_seconds is not None:
+            quality["automatic_retry_until"] = (now + timedelta(seconds=until_seconds)).isoformat()
+        return quality
+
+    def _result(self, quality):
+        return {"article_preview_quality": quality,
+                "live_preview": {"previewUrl": self.URL, "resumeGeneration": 2, "available": True, "exactRender": True}}
+
+    def _views(self, quality):
+        projection = FounderRunResponseProjectionTests()
+        return projection._serialize(self._result(quality))["full"]["article_preview_quality"]
+
+    def test_initial_failure_and_each_backoff_read_as_checking_with_publishing_locked(self):
+        from content_factory.hosted_quality_state import preview_quality_publish_notice, current_preview_target
+        for count, until in ((1, 70), (1, 5), (2, 90)):
+            with self.subTest(count=count, until=until):
+                quality = self._quality(count=count, until_seconds=until)
+                view = self._views(quality)
+                self.assertEqual(view["status"], "queued")
+                self.assertNotIn("error", view)
+                self.assertNotIn("redis", str(view))
+                notice = preview_quality_publish_notice(quality, target=current_preview_target(self._result(quality)))
+                self.assertEqual(notice[0], "locked")
+                self.assertEqual(quality["status"], "queue_failed", "stored state keeps the real failure")
+
+    def test_exhausted_or_stalled_retry_shows_the_real_failure(self):
+        from content_factory.hosted_quality_state import FAILED_TO_RUN_MESSAGE, preview_quality_publish_notice
+        for label, quality in (("exhausted", self._quality(count=3, until_seconds=None)),
+                               ("stalled past its retry time", self._quality(count=1, until_seconds=-1)),
+                               ("malformed stamp", {**self._quality(), "automatic_retry_until": "soon"}),
+                               ("naive stamp", {**self._quality(), "automatic_retry_until": "2999-01-01T00:00:00"})):
+            with self.subTest(label):
+                self.assertEqual(self._views(quality)["status"], "queue_failed")
+                self.assertEqual(preview_quality_publish_notice(quality), ("blocked", FAILED_TO_RUN_MESSAGE))
+
+    def test_a_retry_for_an_older_preview_or_generation_does_not_read_as_checking(self):
+        for quality in (self._quality(url="https://preview.example/articles/old"), self._quality(generation=1)):
+            with self.subTest(quality=(quality["preview_url"], quality["resume_generation"])):
+                self.assertEqual(self._views(quality)["status"], "queue_failed")
+
+    def test_a_recovered_check_passes_through(self):
+        quality = {"status": "passed", "preview_url": self.URL, "resume_generation": 2, "queue_failed_count": 1}
+        self.assertEqual(self._views(quality)["status"], "passed")
