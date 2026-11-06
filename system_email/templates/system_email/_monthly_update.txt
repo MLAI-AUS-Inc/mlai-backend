@@ -1,0 +1,12 @@
+{{ heading }}{% if first_name %}, {{ first_name }}{% endif %}
+
+{{ intro }}
+{% for startup in startups %}
+{{ startup.name }}{% if startup.domain %} ({{ startup.domain }}){% endif %}
+Your current rate expires {{ startup.expires_at_display }}.
+Add a monthly update: {{ startup.update_url }}
+{% endfor %}
+{{ closing }}
+
+You are receiving this service reminder because an approved monthly update currently gives your registered company the Roo coworking rate.{% if unsubscribe_url %}
+Unsubscribe: {{ unsubscribe_url }}{% endif %}
