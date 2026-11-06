@@ -16,6 +16,7 @@ class DoctorTests(SimpleTestCase):
     def setUp(self):
         self.now = timezone.now()
         self.op = fixtures.GoalRunnerRegressions().operation()
+        self.op.connection.organization = SimpleNamespace(pk=7, domain="fixture.test")
         self.op.connection.verified_sha = "a" * 40
         self.op.receipt["goal"] = goals.refresh_goal(self.op.receipt["goal"], fixtures.proof_set(self.now), scope=fixtures.scope(), source_sha="a" * 40, now=self.now)
 

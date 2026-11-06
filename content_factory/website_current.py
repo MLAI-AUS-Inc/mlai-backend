@@ -77,7 +77,15 @@ def current_run_binding(*, run_id, domain, repository_id):
         run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id, organization_id=organization_id).first()
         if run is None:
             raise WebsiteAuthorityError("github_reconnect_required", "The original dispatch changed.", status=410)
-        saved = deepcopy(run.run_request or {})
+        from .run_ownership import owner_receipt, current_execution_ticket, WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, wire_identity
+        receipt = owner_receipt(run)
+        owned = (receipt or {}).get("authority", {}).get("event_protocol") == 1
+        if owned:
+            from .run_execution_control import current_execution_request, require_current_principal
+            require_current_principal(run)
+            saved = current_execution_request(run)
+        else:
+            saved = deepcopy(run.run_request or {})
         original_contract = connection_contract(saved)
         original = WebsiteConnection.objects.filter(pk=original_contract.get("website_connection_id")).first()
         config = OrganizationContentConfig.objects.filter(organization_id=run.organization_id).first()
@@ -109,6 +117,8 @@ def current_run_binding(*, run_id, domain, repository_id):
                     or str(expected_repository) != str(current.repository_id)):
                 raise WebsiteAuthorityError("github_reconnect_required", "The original installation and repository could not be verified.", status=410)
         except WebsiteAuthorityError:
+            if owned:
+                raise
             from .portable_drafts import PORTABLE_WORKFLOWS
             if run.workflow in PORTABLE_WORKFLOWS:
                 run.run_request = portable_recovery_request(saved)
@@ -132,11 +142,27 @@ def current_run_binding(*, run_id, domain, repository_id):
         if candidate != saved:
             history = list((run.result or {}).get("connection_rebinds") or [])
             history.append({"from": original_contract, "to": connection_contract(binding), "at": timezone.now().isoformat()})
-            run.run_request = candidate
-            run.result = {**(run.result or {}), "connection_rebinds": history[-20:]}
-            run.save(update_fields=["run_request", "result", "updated_at"])
-        return {"allowed": True, "domain": run.domain, "github_repo": current.github_repo,
-                "state": current.state, **binding}
+            if owned:
+                from .run_execution_control import append_execution_ticket
+                from .website_contract import evidence_digest
+                scope = {**current_execution_ticket(run)["scope"],
+                         **{key: binding[key] for key in current_execution_ticket(run)["scope"] if key in binding}}
+                context = {key: binding[key] for key in ("configuration_revision", "github_installation_id")}
+                key = evidence_digest({"reason": "connection_rebind", "run_pk": run.pk, "scope": scope, "context": context})
+                run.result = {**(run.result or {}), "connection_rebinds": history}
+                ContentFactoryRun.objects.filter(pk=run.pk).update(result=run.result)
+                append_execution_ticket(run, control_key=key, reason="connection_rebind", scope=scope,
+                                        context=context, increment_generation=False)
+            else:
+                run.run_request = candidate
+                run.result = {**(run.result or {}), "connection_rebinds": history[-20:]}
+                run.save(update_fields=["run_request", "result", "updated_at"])
+        result = {"allowed": True, "domain": run.domain, "github_repo": current.github_repo,
+                  "state": current.state, **binding}
+        if owned:
+            result.update(schema_version=1, **{WIRE_REQUEST_KEY: wire_identity(receipt),
+                                               WIRE_EXECUTION_KEY: current_execution_ticket(run)})
+        return result
 
 
 class WebsiteCurrentConnectionView(APIView):
@@ -151,3 +177,5 @@ class WebsiteCurrentConnectionView(APIView):
             return Response(result, status=result.get("http_status", 200))
         except WebsiteAuthorityError as exc:
             return Response(exc.as_dict(), status=exc.status)
+        except ValueError:
+            return Response({"allowed": False, "reason": "execution_control_refused"}, status=409)

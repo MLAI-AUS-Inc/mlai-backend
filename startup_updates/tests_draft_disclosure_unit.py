@@ -32,7 +32,7 @@ class DraftDisclosureContractTests(SimpleTestCase):
         )
         self.run = SimpleNamespace(
             run_id="synthetic-disclosure-run", save=MagicMock(),
-            run_request={"evidence_snapshots": {"2026-10-01": {"snapshot_id": 52, "expected_revision": None}}},
+            run_request={"draft_months": ["2026-10-01"], "evidence_snapshots": {"2026-10-01": {"snapshot_id": 52, "expected_revision": None}}},
         )
 
     def item(self, **overrides):
@@ -41,7 +41,7 @@ class DraftDisclosureContractTests(SimpleTestCase):
             "structured_memo": copy.deepcopy(self.memo), **overrides}
 
     def submit(self, item):
-        request = SimpleNamespace(data={"drafts": [item]})
+        request = SimpleNamespace(data={"drafts": [item]}, headers={})
         return StartupUpdateDraftResultsView.post.__wrapped__(
             StartupUpdateDraftResultsView(), request, self.run.run_id,
         )
@@ -122,6 +122,21 @@ class DraftDisclosureContractTests(SimpleTestCase):
         serializer = DraftResultsSerializer(data={"drafts": [self.item(audience="everyone")]})
         self.assertFalse(serializer.is_valid())
         self.assertIn("audience", serializer.errors["drafts"][0])
+
+    def test_generated_financial_sharing_uses_only_the_pinned_founder_choice(self):
+        self.run.run_request["financial_history_selection"] = {"enabled": True, "shareAmounts": False}
+        item = self.item(structured_memo={**self.memo,
+            "_financial_history_selection": {"enabled": True, "shareAmounts": True},
+            "financial_history": {"snapshot": {"revenue": 99999}},
+        })
+        with ExitStack() as stack:
+            self.seams(stack)
+            save = stack.enter_context(patch("startup_updates.revisions.save_revision", side_effect=self.save_revision))
+            generated = self.submit(item)
+        self.assertEqual(generated.status_code, 200)
+        memo = save.call_args.args[1]
+        self.assertEqual(memo["_financial_history_selection"], {"enabled": True, "shareAmounts": False, "refresh": False})
+        self.assertNotIn("financial_history", memo)
 
 
 class LegacyDraftAudienceSelectionTests(SimpleTestCase):

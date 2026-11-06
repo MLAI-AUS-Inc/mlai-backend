@@ -1166,6 +1166,9 @@ class MonthlyUpdateApproval(models.Model):
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
     content_hash = models.CharField(max_length=64)
     audience_visibility = models.JSONField(default=list)
+    # Existing approvals retain their original benefit window. New approvals
+    # require an exact, community/public disclosure receipt to earn a discount.
+    requires_shared_update = models.BooleanField(default=True)
     approved_at = models.DateTimeField(auto_now_add=True)
 
 

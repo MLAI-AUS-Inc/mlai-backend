@@ -54,7 +54,15 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
 
     def start(self,choices=None):
         return prepare.start_prepare(self.config,company_id=self.company.pk,user=self.requester,
-            target="first_article_live",consent=choices or answers())
+            target="first_article_live",consent=choices or answers(billing={"policy":"reserved","expected_points":12,"accepted":True}))
+
+    def test_stale_first_article_consent_cannot_reserve_a_payment(self):
+        with self.assertRaises(WebsiteAuthorityError) as error:
+            self.start(answers(billing={"policy":"reserved","expected_points":6,"accepted":True}))
+        self.assertEqual(error.exception.code,"website_prepare_blocked")
+        self.assertEqual(self.balance(self.payer),20_000_000)
+        self.assertFalse(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").exists())
+        self.assertFalse(ContentFactoryDispatchOutbox.objects.exists())
 
     def ready(self,op):
         """Seed the already verified Ready precondition; exercise article effects below."""
@@ -347,19 +355,32 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
         self.assertEqual(op.receipt["goal"]["completed_source_sha"],"e"*40)
         self.assertEqual(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").count(),1)
         self.assertFalse(Ledger.objects.filter(kind="REFUND",source="CONTENT_FACTORY").exists())
-        self.assertEqual(self.balance(self.payer),14_000_000)
+        self.assertEqual(self.balance(self.payer),8_000_000)
         self.assertEqual(remote["posts"],["https://synthetic-worker.test/api/runs/article",
             *(["https://synthetic-worker.test/api/runs/first-article/resume"] if repair else []),
             "https://synthetic-worker.test/api/runs/first-article/approve","https://synthetic-worker.test/api/runs/first-article/publish-pr"])
 
     def test_canonical_generation_reserves_once_and_lost_response_reuses_owned_records(self):
+        self.assert_canonical_generation_replay(expected_stamp={"version":1,"cohort":"legacy","failure_policy":"pre_p2"})
+
+    def test_p2_stamp_and_requester_merge_ownership_are_frozen_before_the_first_reservation(self):
+        with override_settings(ARTICLES_SELF_HEAL_LEGACY_ORGANIZATIONS=str(self.org.pk),
+                ARTICLES_FAILURE_POLICY_V2_ENABLED=True,ARTICLES_MERGE_WORKER_ENABLED=True):
+            self.assert_canonical_generation_replay(expected_stamp={"version":1,"cohort":"p2","failure_policy":"v2"},
+                expected_merge_policy="backend_worker")
+
+    def assert_canonical_generation_replay(self, *, expected_stamp, expected_merge_policy=None):
         op=self.start();self.ready(op)
         candidates=[{"id":"best","title":"Evidence of tested work","keyword":"tested work","opportunityScore":700},
             {"id":"covered","title":"Old work","keyword":"old work","opportunityScore":999,"alreadyWritten":True}]
         accepted=Mock(status_code=202,content=b"json");accepted.json.return_value={"run_id":"first-article","status":"queued"}
+        dispatched=[]
         def queue(*args,**kwargs):
             self.assertFalse(connection.in_atomic_block)
             self.assertEqual(kwargs["json"]["topic_candidate_id"],"best")
+            self.assertEqual(kwargs["json"]["self_heal_policy_v1"],expected_stamp)
+            self.assertEqual(kwargs["json"].get("merge_policy"),expected_merge_policy)
+            dispatched.append(deepcopy(kwargs["json"]))
             return accepted
         with patch.object(views,"_topic_selection_candidate_pool",return_value=candidates), \
             patch.object(views,"_article_capabilities_for_context",side_effect=self.capabilities), \
@@ -369,7 +390,8 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             article.advance(claimed,self.context,self.config,user=self.requester,now=timezone.now())
             self.assertIsNotNone(prepare._finish_prepare(claimed,now=timezone.now()))
             op.refresh_from_db()
-            self.assertEqual(op.receipt["first_article_run_id"],"first-article")
+            self.assertEqual(op.receipt["first_article_run_id"],"first-article",
+                list(ContentFactoryRun.objects.filter(organization=self.org).values("run_id","status","error","result")))
             # Lose the caller's response/reference: only durable records remain.
             op.receipt.pop("first_article_run_id");op.receipt.pop("child_run_id",None)
             op.next_attempt_at=timezone.now();op.save(update_fields=["receipt","next_attempt_at"])
@@ -378,29 +400,45 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             prepare._finish_prepare(claimed,now=timezone.now())
         post.assert_called_once()
         self.assertEqual(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").count(),1)
-        self.assertEqual(self.balance(self.payer),14_000_000)
+        self.assertEqual(self.balance(self.payer),8_000_000)
         run=ContentFactoryRun.objects.get(run_id="first-article")
         self.assertEqual(run.run_request["first_article_goal_operation_id"],str(op.pk))
         self.assertEqual(run.run_request["expected_source_sha"],"a"*40)
         dispatch=ContentFactoryDispatchOutbox.objects.get(client_request_id=op.receipt["first_article_billing"]["client_request_id"])
         self.assertEqual((dispatch.state,dispatch.run_id),("delivered","first-article"))
+        self.assertEqual(run.run_request["self_heal_policy_v1"],expected_stamp)
+        self.assertEqual(dispatch.payload["request"]["self_heal_policy_v1"],expected_stamp)
+        self.assertEqual(run.run_request.get("merge_policy"),expected_merge_policy)
+        for saved in (dispatched[0],run.run_request,dispatch.payload["request"]):
+            self.assertEqual(saved["roo_points_requested_by_user_id"],self.requester.pk)
+            self.assertEqual(saved["roo_points_billing_user_id"],self.payer.pk)
+        from .website_operations import reserve_workflow_operation
+        # An unchanged intent reuses the real reserved operation; changing only
+        # the frozen policy remains an identity conflict, including with flags off.
+        replay=reserve_workflow_operation(self.website,workflow="article_generation",payload=deepcopy(dispatched[0]))
+        self.assertEqual(str(replay.pk),run.run_request["operation_id"])
+        changed=deepcopy(dispatched[0])
+        changed["self_heal_policy_v1"]={**expected_stamp,"failure_policy":"pre_p2" if expected_stamp["failure_policy"]=="v2" else "v2"}
+        with self.assertRaises(WebsiteAuthorityError) as conflict:
+            reserve_workflow_operation(self.website,workflow="article_generation",payload=changed)
+        self.assertEqual(conflict.exception.code,"operation_key_conflict")
         self.assertFalse(goals.complete(op.receipt["goal"]))
 
     def test_replacement_credit_reholds_accepted_price_and_stale_claim_cannot_erase_it(self):
         first=self.start()
-        successor=self.start(answers(publish_mode="review"))
+        successor=self.start(answers(publish_mode="review",billing={"policy":"reserved","expected_points":12,"accepted":True}))
         first.refresh_from_db();self.assertEqual(first.state,"cancelled")
         self.assertNotIn("first_article_billing",successor.receipt)
         stale=prepare._claim_prepare(successor.pk,timezone.now())
         refund=WebsiteConnectionOperation.objects.get(action="goal-refund",payload__goal_operation_id=str(first.pk))
         self.assertEqual(advance_refund(refund.pk,now=timezone.now()),"completed")
         successor.refresh_from_db()
-        self.assertEqual(successor.receipt["first_article_billing"]["cost_points"],6)
+        self.assertEqual(successor.receipt["first_article_billing"]["cost_points"],12)
         stale.state="pending";stale.next_attempt_at=timezone.now()
         self.assertIsNone(prepare._persist_prepare(stale,now=timezone.now()))
         successor.refresh_from_db()
         self.assertIn("first_article_billing",successor.receipt)
-        self.assertEqual(self.balance(self.payer),14_000_000)
+        self.assertEqual(self.balance(self.payer),8_000_000)
         self.assertEqual(Ledger.objects.filter(kind="SPEND",source="CONTENT_FACTORY").count(),2)
         self.assertEqual(Ledger.objects.filter(kind="REFUND",source="CONTENT_FACTORY").count(),1)
 
@@ -439,7 +477,7 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
         self.assertEqual(op.receipt["first_article_billing"]["status"], "reserved")
         self.assertTrue(child.result["reconciliation_refund_pending"])
         self.assertFalse(Ledger.objects.filter(kind="REFUND", source="CONTENT_FACTORY").exists())
-        self.assertEqual(self.balance(self.payer), 14_000_000)
+        self.assertEqual(self.balance(self.payer), 8_000_000)
 
     def test_duplicate_parent_settlement_credits_one_original_allocation(self):
         op, child, row = self.terminal_parent_child(outcome="no_article_effect")
@@ -458,7 +496,7 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
             self.skipTest("Concurrent row-lock regression requires PostgreSQL")
         from concurrent.futures import ThreadPoolExecutor
         from threading import Barrier
-        from django.db import close_old_connections
+        from django.db import close_old_connections, connections
         op, child, row = self.terminal_parent_child(outcome="no_article_effect")
         barrier = Barrier(2)
         def settle():
@@ -467,7 +505,9 @@ class FirstArticleProviderChainTests(OneClickBillingFixture,TransactionTestCase)
                 barrier.wait(timeout=10)
                 return advance_refund(row.pk)
             finally:
-                close_old_connections()
+                # Healthy persistent sessions survive age-only cleanup and
+                # prevent the test runner from dropping its PostgreSQL database.
+                connections.close_all()
         with ThreadPoolExecutor(max_workers=2) as pool:
             outcomes = list(pool.map(lambda _: settle(), range(2)))
         self.assertCountEqual(outcomes, ["completed", None])

@@ -2,7 +2,7 @@
 
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
@@ -23,6 +23,7 @@ class SlackAllHistoryTests(SimpleTestCase):
     def grant(self, days=0, consent=ALL_HISTORY_CONSENT):
         return SimpleNamespace(
             pk=1,
+            user_id=11,
             history_days=days,
             consent_version=consent,
             connection=SimpleNamespace(scopes=list(PRIVATE_CHANNEL_SCOPES)),
@@ -395,7 +396,9 @@ class SlackAllHistoryTests(SimpleTestCase):
         grant.status = "active"
         grant.revoked_at = None
         grant.save = MagicMock()
-        with patch.object(mirror.SlackDmMirrorGrant, "objects") as grants, patch.object(
+        with patch.object(mirror, "get_user_model") as user_model, patch.object(
+            mirror.SlackDmMirrorGrant, "objects"
+        ) as grants, patch.object(
             mirror.SlackDmMirrorConversation, "objects"
         ) as conversations, patch.object(
             mirror, "_clear_history_scan_states"
@@ -405,11 +408,21 @@ class SlackAllHistoryTests(SimpleTestCase):
             mirror, "_mark_backfill_rows_for_recovery_locked"
         ):
             grants.select_for_update.return_value.get.return_value = grant
+            locks = MagicMock()
+            locks.attach_mock(
+                user_model.return_value.objects.select_for_update.return_value.get,
+                "owner",
+            )
+            locks.attach_mock(grants.select_for_update.return_value.get, "grant")
             conversations.select_for_update.return_value.filter.return_value.order_by.return_value = (
                 []
             )
             mirror.backfill_grant.__wrapped__(
                 grant, history_days=selected_days, full_history=legacy_alias
+            )
+            self.assertEqual(
+                locks.mock_calls,
+                [call.owner(pk=grant.user_id), call.grant(pk=grant.pk)],
             )
         return grant
 
@@ -533,7 +546,9 @@ class SlackAllHistoryTests(SimpleTestCase):
         grant.save = MagicMock()
         conversation = self.conversation(latest="9999999.000001")
         conversation.grant = grant
-        with patch.object(mirror.SlackDmMirrorGrant, "objects") as grants, patch.object(
+        with patch.object(mirror, "get_user_model") as user_model, patch.object(
+            mirror.SlackDmMirrorGrant, "objects"
+        ) as grants, patch.object(
             mirror.SlackDmMirrorConversation, "objects"
         ) as conversations, patch.object(
             mirror, "_clear_history_scan_states"
@@ -545,6 +560,12 @@ class SlackAllHistoryTests(SimpleTestCase):
             mirror, "_mark_history_reconciliation_candidates_locked"
         ):
             grants.select_for_update.return_value.get.return_value = grant
+            locks = MagicMock()
+            locks.attach_mock(
+                user_model.return_value.objects.select_for_update.return_value.get,
+                "owner",
+            )
+            locks.attach_mock(grants.select_for_update.return_value.get, "grant")
             conversations.select_for_update.return_value.filter.return_value.order_by.return_value = [
                 conversation
             ]
@@ -555,6 +576,10 @@ class SlackAllHistoryTests(SimpleTestCase):
 
             conversations.filter.return_value.update.side_effect = update
             mirror.backfill_grant.__wrapped__(grant, history_days=0)
+            self.assertEqual(
+                locks.mock_calls,
+                [call.owner(pk=grant.user_id), call.grant(pk=grant.pk)],
+            )
         invalidate.assert_called_once_with(conversation)
         self.assertEqual(conversation.latest_synced_ts, "9999999.000001")
         mirror._advance_latest_synced_ts(conversation, "123.000001")

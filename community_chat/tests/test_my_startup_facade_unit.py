@@ -79,6 +79,15 @@ class MyStartupFacadeTests(SimpleTestCase):
             self.assertEqual(self.call(views.CompaniesView, method="post", data={"name": "Changed"}).status_code, 404)
         save.assert_not_called()
 
+    def test_account_read_survives_a_foreign_selection_without_company_lookup(self):
+        self.get_object_or_404.side_effect = Http404
+        with patch.object(views.CurrentUserView, "get", return_value=Response({"id": 7})):
+            response = self.call(views.AccountView)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(self.call(views.AccountView, authenticated=False).status_code, 401)
+        self.get_object_or_404.assert_not_called()
+        self.user_may_use_organization.assert_not_called()
+
     def test_creation_has_no_selected_company_and_requires_draft_research(self):
         with patch.object(views.marketing.VibeMarketingAutofillView, "post", return_value=Response({"runId": "r"})) as research:
             response = self.call(views.ResearchView, method="post", data={"createNew": True, "draftOnly": True})

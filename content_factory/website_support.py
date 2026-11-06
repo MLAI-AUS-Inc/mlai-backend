@@ -58,7 +58,7 @@ def validate_custom_contract(contract):
     return {**defaults, **contract}
 
 
-def owner_support_operation(context, config, *, action, data):
+def owner_support_operation(context, config, *, action, data, user=None):
     """Preserve an existing run's authority through worker support transport."""
     from integrations import http_client
     from workflow_runs.models import ContentFactoryRun
@@ -104,6 +104,15 @@ def owner_support_operation(context, config, *, action, data):
                 safe_repository_path(path)
             payload["verification"] = verification
         if data.get("phase") == "verify":
+            from .run_ownership import admission_enabled, owner_receipt, RunOwnershipConflict
+            if admission_enabled():
+                verification = payload.get("verification") or {}
+                if any(type(verification.get(key)) is not str or not verification[key].strip()
+                       or len(verification[key]) > 1000 for key in ("seed_slug", "expected_h1")):
+                    raise WebsiteAuthorityError("verification_target_required",
+                        "Name the seeded article slug and expected heading before verification.", status=422)
+                if user is None or not getattr(user, "is_active", False):
+                    raise WebsiteAuthorityError("website_operation_changed", "Refresh this verification from your signed-in account.", status=403)
             from .website_contract import evidence_digest
             from .website_connections import contract_for
             from .website_operations import reserve_workflow_operation
@@ -114,6 +123,14 @@ def owner_support_operation(context, config, *, action, data):
             target_id = (payload.get("verification") or {}).get("target_id")
             if not isinstance(target_id, str) or not target_id or len(target_id) > 200:
                 raise WebsiteAuthorityError("verification_target_required", "Name the reviewed custom verification target.", status=422)
+            legacy_source = None
+            if admission_enabled() and owner_receipt(run) is None:
+                from .run_legacy_source import fetch_legacy_source
+                try:
+                    legacy_source = fetch_legacy_source(run)
+                except RunOwnershipConflict as exc:
+                    raise WebsiteAuthorityError("support_worker_unavailable",
+                        "The original verification source could not be confirmed. Refresh its current scan.", status=503, retryable=True) from exc
             reservation = {**contract_for(website), "expected_source_sha": source,
                 "source_run_id": run.run_id,
                 "target_id": target_id,
@@ -125,13 +142,44 @@ def owner_support_operation(context, config, *, action, data):
             child_run_id = str(child.pk)
             reservation["run_id"] = child_run_id
             payload["idempotency_key"] = child.idempotency_key
+            # The parent's full request may include its own admission, budget,
+            # payment and content recipe. None grants this new native execution.
+            native_fields = {"contract", "verification", "phase", "idempotency_key", "configuration_revision"}
+            native_request = {**{key: value for key, value in payload.items() if key in native_fields},
+                **reservation, "source_run_id": run.run_id,
+                "domain": context.organization.domain, "github_repo": config.github_repo}
+            if legacy_source is not None:
+                native_request["legacy_source_v1"] = legacy_source
             with authority_guard(reservation, action="custom_contract"):
                 child.payload = {**child.payload, "run_id": child_run_id, "source_run_id": run.run_id,
                     "binding": reservation, "contract": payload["contract"], "verification_input_digest": reservation["verification_input_digest"]}
                 child.save(update_fields=["payload", "updated_at"])
-                ContentFactoryRun.objects.get_or_create(run_id=child_run_id, defaults={"organization": context.organization,
-                    "domain": context.organization.domain, "github_repo": config.github_repo, "workflow": "article_system_setup", "status": "queued", "run_request": reservation})
-            payload = {**payload, **reservation, "source_run_id": run.run_id}
+                from .run_ownership import (admission_enabled, owner_receipt, seal_new_run_admission,
+                    reserve_admitted_run, user_principal, WIRE_REQUEST_KEY)
+                native_run, created = ContentFactoryRun.objects.get_or_create(run_id=child_run_id, defaults={"organization": context.organization,
+                    "domain": context.organization.domain, "github_repo": config.github_repo, "workflow": "article_system_setup", "status": "queued",
+                    "run_request": native_request if admission_enabled() else reservation})
+                if admission_enabled() or owner_receipt(native_run) is not None:
+                    if user is None or not getattr(user, "is_active", False):
+                        raise WebsiteAuthorityError("website_operation_changed", "Refresh this verification from your signed-in account.", status=403)
+                    principal = user_principal(user.pk, f"mlai_user:{user.pk}")
+                    try:
+                        if created:
+                            seal_new_run_admission(native_run, created=True, principal=principal)
+                        else:
+                            original_echo = (native_run.run_request or {}).get(WIRE_REQUEST_KEY)
+                            if original_echo is not None:
+                                native_request[WIRE_REQUEST_KEY] = original_echo
+                            reserve_admitted_run(organization=context.organization, principal=principal,
+                                workflow="article_system_setup", payload=native_request, reserved_run_id=child_run_id)
+                            native_run.refresh_from_db()
+                    except RunOwnershipConflict as exc:
+                        raise WebsiteAuthorityError("operation_key_conflict",
+                            "This verification identity already owns different inputs. Refresh its saved operation.") from exc
+                    child.payload = {**child.payload, "remote_request": native_run.run_request}
+                    child.save(update_fields=["payload"])
+                    native_request = dict(native_run.run_request)
+            payload = native_request if owner_receipt(native_run) is not None else {**payload, **reservation, "source_run_id": run.run_id}
             binding = reservation
     else:
         evidence = data.get("evidence")
@@ -320,6 +368,15 @@ def promote_custom_target(website, *, contract, proof):
     website.save(update_fields=["capabilities", "last_verified_at", "updated_at"])
 
 
+def _project_legacy_verification(run_id, *, status, outcome):
+    """Keep proof on its operation; only unmarked execution uses the old mirror."""
+    from workflow_runs.models import ContentFactoryRun
+    from .website_run_authority import event_owned
+    run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first()
+    if run is not None and not event_owned(run):
+        ContentFactoryRun.objects.filter(pk=run.pk).update(status=status, result=outcome)
+
+
 def reconcile_support_verifications(*, connection_id=None, limit=20):
     """Poll typed isolated proof and conditionally promote the reviewed contract."""
     from integrations import http_client
@@ -361,10 +418,10 @@ def reconcile_support_verifications(*, connection_id=None, limit=20):
                 if state == "verified":
                     promote_custom_target(website, contract=contract, proof=normalized)
                     op.state = "completed"
-                    ContentFactoryRun.objects.filter(run_id=op.payload["run_id"]).update(status="completed", result=outcome)
+                    _project_legacy_verification(op.payload["run_id"], status="completed", outcome=outcome)
                 elif state not in {"queued", "running"}:
                     op.state = "blocked" if state in {"requires_ci", "requires_configuration", "requires_github"} else "failed"
-                    ContentFactoryRun.objects.filter(run_id=op.payload["run_id"]).update(status="blocked", result=outcome)
+                    _project_legacy_verification(op.payload["run_id"], status="blocked", outcome=outcome)
                 op.save(update_fields=["state", "receipt", "updated_at"])
         except WebsiteAuthorityError:
             continue

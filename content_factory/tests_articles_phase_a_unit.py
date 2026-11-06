@@ -91,7 +91,8 @@ class RetryIdentityTests(SimpleTestCase):
         op.receipt = {"child_run_id": "stale-proof", "deployment_attempts": 7, "current_step": "setup"}
         with patch.object(prepare, "authority_guard", return_value=nullcontext(op.connection)), \
                 patch.object(prepare.WebsiteConnectionOperation.objects, "get_or_create", return_value=(op, False)), \
-                patch.object(prepare, "_cancel_prepare_child") as cancel:
+                patch.object(prepare, "_cancel_prepare_child") as cancel, \
+                patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=journey_fixtures.FrozenPrepareContextTests.rows(first=None)):
             prepare.start_prepare(fixture.config, expected={}, retry=True)
         cancel.assert_called_once()
         self.assertIsNone(op.receipt["child_run_id"])

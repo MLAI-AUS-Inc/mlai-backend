@@ -42,6 +42,8 @@ class DesktopAuthCorsMiddleware:
             return self.get_response(request)
 
         allowed_headers = self._ALLOWED_REQUEST_HEADERS
+        if request.path.startswith("/api/v1/community-chat/slack/"):
+            allowed_headers = allowed_headers | {"x-mlai-slack-catalog-kinds"}
         if request.path.startswith("/api/v1/my-startup/"):
             allowed_headers = allowed_headers | {"idempotency-key"}
 

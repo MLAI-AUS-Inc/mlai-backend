@@ -26,12 +26,18 @@ WAITING_STATUSES = {"awaiting_approval", "awaiting_confirmation", "awaiting_deli
 
 def enrolled_run(run):
     """Enrollment comes from the saved backend dispatch, never a GET response."""
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        return False
     return ((run.run_request or {}).get("setup_delivery_v1") == {"schema_version": 1}
             or article_stream(run.run_request or {})
             or _metadata(run).get("enrolled") is True)
 
 
 def _claim_pull(candidate, now):
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(candidate):
+        return None
     original = candidate.run_request or {}
     from .setup_delivery_enrollment import SCOPE_FIELDS
     scope = {key: original[key] for key in SCOPE_FIELDS if key in original}
@@ -68,6 +74,9 @@ def _release_pull(run_id, pin, *, outcome, now):
     try:
         with transaction.atomic():
             _, _, run = _locked_context(envelope)
+            from .run_reconciliation import authoritative_run
+            if authoritative_run(run):
+                return
             if run is None or _metadata(run).get("pull", {}).get("nonce") != pin["nonce"]:
                 return
             metadata = _metadata(run)

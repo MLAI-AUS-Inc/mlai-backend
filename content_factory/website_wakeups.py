@@ -219,3 +219,62 @@ def wake_from_event(event, payload):
         if matches(connection,op,signal,child) and queue_wake(connection.pk,signal=signal,expected_generation=connection.generation):
             count+=1
     return count
+
+
+def wake_installation_work(event, payload):
+    """Wake bound P2 work from verified installation hints without merging.
+
+    This independent gate never enables the older event/goal runner flags and
+    never clears caps, rejection counts, consent or terminal cancellation.
+    """
+    if not getattr(settings, "ARTICLES_GITHUB_INSTALLATION_WAKES_ENABLED", False):
+        return 0
+    action = payload.get("action") if isinstance(payload, dict) else None
+    if not (event == "installation" and action in {"created", "new_permissions_accepted"}
+            or event == "installation_repositories" and action == "added"):
+        return 0
+    installation = goals.mapping(payload.get("installation")).get("id")
+    if not positive(installation):
+        return 0
+    repositories = None
+    if event == "installation_repositories":
+        values = payload.get("repositories_added")
+        repositories = [row["id"] for row in values[:100] if isinstance(row, dict) and positive(row.get("id"))] if isinstance(values, list) else []
+        if not repositories:
+            return 0
+    from .p2_foundation import p2_applies
+    from .website_models import WebsiteConnection
+    from organizations.models import Organization
+    from workflow_runs.models import ContentFactoryRun
+    rows = WebsiteConnection.objects.filter(installation_id=str(installation), state="connected")
+    if repositories is not None:
+        rows = rows.filter(repository_id__in=repositories)
+    count, now = 0, timezone.now()
+    for candidate in rows.order_by("pk")[:100]:
+        with transaction.atomic():
+            organization = Organization.objects.select_for_update().get(pk=candidate.organization_id)
+            current = WebsiteConnection.objects.select_for_update().get(pk=candidate.pk)
+            if (not p2_applies(organization) or current.state != "connected"
+                    or current.generation != candidate.generation or current.installation_id != str(installation)):
+                continue
+            runs = ContentFactoryRun.objects.select_for_update().filter(organization=organization,
+                run_request__website_connection_id=str(current.pk), run_request__connection_generation=current.generation,
+                run_request__repository_id=current.repository_id).exclude(status__in=["cancelled", "denied"]).order_by("pk")[:20]
+            for run in runs:
+                result = goals.mapping(run.result)
+                state = goals.mapping(result.get("self_heal_v1"))
+                worker = goals.mapping(state.get("merge_worker"))
+                if state.get("capped") or worker.get("capped") or state.get("budget_stop_reason"):
+                    continue
+                state = {**state, "next_at": now.isoformat()}
+                if worker:
+                    state["merge_worker"] = {**worker, "next_at": now.isoformat()}
+                    if worker.get("watch_reason") == "waiting":
+                        state["merge_worker"]["watch_next_at"] = now.isoformat()
+                ContentFactoryRun.objects.filter(pk=run.pk).update(result={**result, "self_heal_v1": state})
+                count += 1
+                if count >= 100:
+                    break
+        if count >= 100:
+            break
+    return count

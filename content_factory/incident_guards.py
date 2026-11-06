@@ -1,5 +1,6 @@
 """Pure guards for immutable certified website and backend-owned run evidence."""
 from datetime import timedelta
+import re
 
 from django.db.models import Q
 from django.utils import timezone
@@ -11,7 +12,10 @@ from .website_contract import WebsiteAuthorityError, evidence_digest, template_v
 NO_DELIVERY_REFUND_CODES = frozenset({
     "INTERNAL_ERROR", "UNCLASSIFIED", "RUN_BUDGET_EXHAUSTED", "ONBOARDING_MODEL_BUDGET_EXHAUSTED",
     "EDITORIAL_REJECTED", "EXPORT_EDITORIAL_REJECTED", "DELIVERY_REVIEW_DRIFT", "SOURCE_CHANGED",
-    "ARTICLE_DIRECTORY_AGENT_PROVIDER_ERROR",
+    # Authority refusal codes arrive lowercase and are matched upper-cased.
+    "WEBSITE_SOURCE_CHANGED", "ARTICLE_DIRECTORY_AGENT_PROVIDER_ERROR",
+    # Content Factory's own code when this backend refuses without naming one.
+    "CONNECTION_AUTHORIZATION_FAILED",
 })
 
 
@@ -23,6 +27,16 @@ def proof_stamp(proof, *, now=None):
     if stamp is None or timezone.is_naive(stamp) or stamp > now + timedelta(minutes=5):
         return None
     return stamp
+
+
+DIGEST = re.compile(r"[a-f0-9]{64}")
+
+
+def sealed_contract(contract):
+    """A target whose contract digest and live marker a setup sealed into its verification kit."""
+    contract = contract if isinstance(contract, dict) else {}
+    marker = contract.get("live_marker") if isinstance(contract.get("live_marker"), dict) else {}
+    return bool(DIGEST.fullmatch(str(contract.get("contract_digest") or "")) and DIGEST.fullmatch(str(marker.get("value") or "")))
 
 
 def target_update_allowed(previous, incoming, *, generation, sha):
@@ -40,6 +54,13 @@ def target_update_allowed(previous, incoming, *, generation, sha):
     if has_candidate(previous.contract) and not has_candidate(incoming):
         # An unverified proposal still requires its stronger protocol. Dropping
         # the candidate must not let a scan restore a legacy ready flag.
+        return False
+    if sealed_contract(previous.contract) and not DIGEST.fullmatch(str((incoming or {}).get("contract_digest") or "")):
+        # Setup sealed this target's identity into the repository's own
+        # verification kit, whose CI proof names that digest. A rescan's
+        # re-detection of the same key, carrying no digest, cannot erase it:
+        # La Vie's post-merge rescan (25 Oct 2026) dropped digest f737dcf3, so
+        # the kit's proof at the merged commit matched nothing.
         return False
     if not previous.verified_at or previous.source_sha != sha:
         return True
@@ -84,7 +105,14 @@ def safe_template_seed(body):
 
 def delivered_content(run):
     """Conservatively detect persisted delivery before granting no-value refunds."""
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_verified_delivery import has_verified_delivery
+        return has_verified_delivery(run)
     result = getattr(run, "result", None) or {}
+    from django.conf import settings
+    if getattr(settings, "ARTICLES_REGISTRY_REFUNDS_ENABLED", False) and result.get("draft_ready_v1"):
+        return True
     acceptance = getattr(run, "acceptance_summary", None) or {}
     package = result.get("content_package") or result.get("contentPackage") or {}
     package = package if isinstance(package, dict) else {}
@@ -110,7 +138,10 @@ def publish_child_binding(config, source_run, payload, remote_data, *, reviewed_
         raise WebsiteAuthorityError("website_repository_changed", "This saved draft belongs to an older website repository. Start a newly reviewed publishing draft.")
     original_request = getattr(source_run, "run_request", None) or {}
     if original_request.get("expected_source_sha") and original_request["expected_source_sha"] != connection.verified_sha:
-        raise WebsiteAuthorityError("website_source_changed", "The verified website source changed since this draft. Review a new publishing revision.")
+        # A newly admitted publication may consume a separately reviewed ref.
+        # Its source remains pinned; only the fresh destination uses default.
+        from .run_review_source import publication_binding_source
+        publication_binding_source(source_run, connection)
     target = connection.targets.filter(generation=connection.generation,
         target_key=getattr(config, "default_publish_target_id", None), source_sha=connection.verified_sha,
         verified_at__isnull=False).first()

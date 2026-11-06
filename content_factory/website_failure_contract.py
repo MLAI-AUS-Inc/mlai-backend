@@ -9,6 +9,7 @@ from copy import deepcopy
 from functools import lru_cache, wraps
 import hashlib
 import json
+import logging
 from pathlib import Path, PurePosixPath
 import re
 from typing import Any
@@ -20,6 +21,22 @@ from .website_failure_redaction import redact_secret_text as redact_secrets
 SOURCE_CONTRACT_ROOT = Path(__file__).resolve().parents[1] / "contracts"
 PACKAGED_CONTRACT_ROOT = Path(__file__).resolve().parents[1] / "contracts"
 CONTRACT_ROOT = SOURCE_CONTRACT_ROOT if (SOURCE_CONTRACT_ROOT / "failure-codes.json").is_file() else PACKAGED_CONTRACT_ROOT
+# P2 (IF-P2-03): the registry file holds the P2 values. This overlay, vendored
+# byte for byte from Content Factory, restores today's class, policy and action
+# id for every reclassified code, so `by_code` (the view every existing reader
+# uses) keeps exactly the pre-P2 semantics. `by_code_v2` holds the raw entries.
+PRE_P2_OVERLAY_PATH = Path(__file__).resolve().parent / "failure_registry_pre_p2.json"
+PRE_P2_OVERLAY_RESERVED_KEYS = frozenset({"actions", "source_revision"})
+OVERLAY_FIELDS = frozenset({"failure_class", "retry_policy", "action_id", "retryable"})
+# Five codes P2 registers that a pre-P2 Content Factory path already emits. This
+# backend did not know them before P2, so its pre-P2 view leaves them out: every
+# existing reader keeps today's unregistered (drift) path for them. Their
+# overlay entry (the unregistered stop) is CF's own pre-P2 reading of the same
+# fact. `by_code_v2` holds their P2 entries.
+EMITTED_BEFORE_P2 = frozenset({
+    "HOSTED_PREVIEW_UNAVAILABLE", "INVALID_NEXT_APP_ROUTE_PATH", "NEXT_APP_ROOT_LAYOUT_MISSING",
+    "NEXT_ROUTE_ROOT_NOT_DETECTED", "render_dependency_contract_violation",
+})
 CLASSES = ("transient", "waiting", "repairable", "strategy", "needs_user", "unsupported")
 MAX_FINDINGS = 64
 IDENTIFIER_FIELDS = {"code", "slot", "adapter", "framework", "provider_operation", "route_role", "constraint"}
@@ -35,6 +52,8 @@ PROJECTION_FIELDS = ("failure", "failure_class", "failure_fingerprint", "failure
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _ASSET_HASH = re.compile(r"(?<=[.-])[0-9a-f]{8,64}(?=\.[A-Za-z0-9]+$)")
 _LABEL = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:-]{0,255}")
+_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}")
+logger = logging.getLogger(__name__)
 
 
 class FailureContractError(ValueError):
@@ -67,9 +86,97 @@ def load_registry() -> dict:
             if alias in codes:
                 raise FailureContractError("ambiguous_registry_alias")
             codes[alias] = entry
-    registry["by_code"] = codes
+    pre_actions, overlay = _load_pre_p2_overlay(registry, codes)
+    views: dict[str, dict] = {}
+    pre_view = {}
+    for name, entry in codes.items():
+        if entry["code"] in EMITTED_BEFORE_P2:
+            continue
+        values = overlay.get(entry["code"])
+        if values is None:
+            pre_view[name] = entry
+            continue
+        if entry["code"] not in views:
+            views[entry["code"]] = {**deepcopy(entry), "failure_class": values["failure_class"],
+                                    "retry_policy": values["retry_policy"], "action_id": values["action_id"]}
+        pre_view[name] = views[entry["code"]]
+    registry["by_code"] = pre_view
+    registry["by_code_v2"] = codes
+    registry["actions_pre_p2"] = pre_actions
+    registry["accepted_action_ids"] = _accepted_action_ids(registry, pre_view, codes)
     registry["sha256"] = hashlib.sha256(raw).hexdigest()
     return registry
+
+
+def _load_pre_p2_overlay(registry: dict, codes: dict) -> tuple[dict, dict]:
+    """Today's action labels and per-code view, validated against the raw registry.
+
+    A missing, unreadable or malformed overlay fails closed: without it every
+    reader would silently take the P2 view, which the pre-P2 guarantee forbids.
+    """
+    try:
+        overlay = json.loads(PRE_P2_OVERLAY_PATH.read_bytes())
+    except (OSError, ValueError):
+        raise FailureContractError("invalid_registry_overlay") from None
+    actions = overlay.get("actions") if isinstance(overlay, dict) else None
+    if not isinstance(actions, dict) or any(not isinstance(key, str) or not isinstance(label, str)
+                                            for key, label in actions.items()):
+        raise FailureContractError("invalid_registry_overlay")
+    views = {}
+    for name, values in overlay.items():
+        if name in PRE_P2_OVERLAY_RESERVED_KEYS:
+            continue
+        entry = codes.get(name)
+        if (entry is None or entry["code"] != name or not isinstance(values, dict) or set(values) != OVERLAY_FIELDS or
+                values["failure_class"] not in CLASSES or values["retry_policy"] not in registry["policies"] or
+                registry["policies"][values["retry_policy"]]["class"] != values["failure_class"] or
+                type(values["retryable"]) is not bool or values["retryable"] != (values["failure_class"] == "transient") or
+                (values["action_id"] is not None and values["action_id"] not in actions) or
+                (values["failure_class"] == "needs_user") != (values["action_id"] is not None)):
+            raise FailureContractError("invalid_registry_overlay")
+        views[name] = values
+    return dict(actions), views
+
+
+def canonical_action(registry: dict, action_id: Any) -> str | None:
+    """An alias resolves to its canonical ask; a canonical ask is itself; a retired or unknown id has none."""
+    if not isinstance(action_id, str):
+        return None
+    aliases = registry.get("action_aliases", {})
+    if action_id in aliases:
+        return aliases[action_id]
+    return action_id if action_id in registry["actions"] else None
+
+
+def _accepted_action_ids(registry: dict, pre_view: dict, by_code_v2: dict) -> dict[str, frozenset]:
+    """Per code, the action ids a receiver accepts: either view's, through aliases."""
+    known = set(registry["actions"]) | set(registry.get("action_aliases", {}))
+    accepted = {}
+    for name, entry in by_code_v2.items():
+        if entry["code"] != name:
+            continue
+        ids = set()
+        for index, view in enumerate((pre_view.get(name), entry)):
+            if view is None:
+                continue
+            action_id = view.get("action_id") if view["failure_class"] == "needs_user" else None
+            if not action_id:
+                continue
+            if index == 0:
+                ids.add(action_id)  # A retired id stays valid where the pre-P2 view names it.
+            target = canonical_action(registry, action_id)
+            if target:
+                ids |= {candidate for candidate in known if canonical_action(registry, candidate) == target}
+        accepted[name] = frozenset(ids)
+    return accepted
+
+
+def _action_label(action_id: Any) -> str | None:
+    """Today's label for a pre-P2 id; the registry's label for a new canonical ask."""
+    registry = load_registry()
+    if not isinstance(action_id, str):
+        return None
+    return registry["actions_pre_p2"].get(action_id) or registry["actions"].get(action_id)
 
 
 from .website_failure_scope import taxonomy_enabled
@@ -154,12 +261,29 @@ def gate_findings(findings: Any) -> list[dict]:
     return rows
 
 
-def _action(entry: dict, action: Any) -> dict | None:
-    if entry["failure_class"] != "needs_user":
+def _safe_code(code: Any) -> bool:
+    """A causal code is a bounded identifier with nothing secret-looking in it."""
+    return isinstance(code, str) and bool(_CODE.fullmatch(code)) and redact_secrets(code) == code
+
+
+def _action(entry: dict, action: Any, failure_class: str | None = None, *, receiving: bool = False) -> dict | None:
+    """The registered owner action; an envelope class outside this registry names its own.
+
+    Emission keeps today's exact rule and labels. A receiver (P2, IF-P2-03)
+    resolves the id through `action_aliases` and accepts the action of either
+    registry view; an id neither view names still raises (the R5 rule).
+    """
+    if (failure_class or entry["failure_class"]) != "needs_user":
         return None
     action = action if isinstance(action, dict) else {}
-    action_id = action.get("id") or entry.get("action_id")
-    if not isinstance(action_id, str) or action_id != entry.get("action_id") or action_id not in load_registry()["actions"]:
+    expected = entry.get("action_id") if entry["failure_class"] == "needs_user" else None
+    action_id = action.get("id") or expected
+    label = _action_label(action_id)
+    if receiving and expected:
+        allowed = action_id in load_registry()["accepted_action_ids"].get(entry["code"], frozenset())
+    else:
+        allowed = not expected or action_id == expected
+    if not isinstance(action_id, str) or not allowed or label is None:
         raise FailureContractError("invalid_failure_action")
     url = action.get("url") or action.get("href")
     if url:
@@ -170,7 +294,7 @@ def _action(entry: dict, action: Any) -> dict | None:
                 (parsed.scheme and (parsed.scheme != "https" or parsed.hostname not in {"github.com", "app.mlai.au", "mlai.au"})) or
                 (not parsed.scheme and (not url.startswith("/") or url.startswith("//")))):
             raise FailureContractError("invalid_failure_action_url")
-    return {"id": action_id, "label": load_registry()["actions"][action_id], "url": url or None}
+    return {"id": action_id, "label": label, "url": url or None}
 
 
 def classify_failure(code: str, stage: str, findings: Any = None, action: Any = None, evidence_refs: Any = None) -> dict:
@@ -206,39 +330,96 @@ def classify_failure(code: str, stage: str, findings: Any = None, action: Any = 
             "action": safe_action, "evidence_refs": sorted(set(refs))}
 
 
+def _same_action(expected: dict | None, actual: Any) -> bool:
+    """Actions agree by id and url; the label is display copy and only has to be safe."""
+    if expected is None or actual is None:
+        return expected is actual
+    if not isinstance(actual, dict) or set(actual) != {"id", "label", "url"}:
+        return False
+    label = actual["label"]
+    return (actual["id"] == expected["id"] and actual["url"] == expected["url"] and
+            isinstance(label, str) and 0 < len(label) <= 256 and redact_secrets(label) == label)
+
+
+def _registered(failure: dict) -> dict | None:
+    """The receiver's entry when it agrees with the envelope's code and the class of either view.
+
+    The pre-P2 view wins when both agree, so a pre-release envelope reads exactly as today.
+    """
+    registry = load_registry()
+    for view in (registry["by_code"], registry["by_code_v2"]):
+        entry = view.get(failure["code"])
+        if entry is not None and entry["code"] == failure["code"] and entry["failure_class"] == failure["failure_class"]:
+            return entry
+    return None
+
+
 def validate_failure(failure: Any) -> dict:
-    """Strictly validate supported B1 metadata; preserve the emitter's object unchanged."""
+    """Validate B1 metadata by meaning; return a copy of the emitter's object.
+
+    The code is checked by membership. A code this registry lacks, or classes
+    differently, is logged as drift and never refused: it keeps the envelope's
+    class when that class and its owner action are ones this registry knows,
+    otherwise it gets the safe default (a stop with no owner action and the
+    generic message). registry_sha256 is diagnostic only. Shape stays strict.
+    """
     registry = load_registry()
     if not isinstance(failure, dict) or set(failure) != FAILURE_FIELDS:
         raise FailureContractError("invalid_failure_shape")
-    entry = registry["by_code"].get(failure["code"]) if isinstance(failure["code"], str) else None
-    if (entry is None or entry["code"] != failure["code"] or
+    message = failure["user_message"]
+    if (not _safe_code(failure["code"]) or
             type(failure["schema_version"]) is not int or failure["schema_version"] != 1 or
             type(failure["registry_version"]) is not int or failure["registry_version"] != registry["registry_version"] or
-            failure["registry_sha256"] != registry["sha256"] or type(failure["fingerprint_version"]) is not int or failure["fingerprint_version"] != 1 or
-            failure["failure_class"] != entry["failure_class"] or type(failure["retryable"]) is not bool or
-            failure["retryable"] != (entry["failure_class"] == "transient") or
-            failure["user_message"] != entry["user_message"] or
+            not isinstance(failure["registry_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", failure["registry_sha256"]) or
+            type(failure["fingerprint_version"]) is not int or failure["fingerprint_version"] != 1 or
+            not isinstance(failure["failure_class"], str) or type(failure["retryable"]) is not bool or
+            (failure["failure_class"] in CLASSES and failure["retryable"] != (failure["failure_class"] == "transient")) or
+            not isinstance(message, str) or not 0 < len(message) <= 512 or redact_secrets(message) != message or
+            any(ord(c) < 32 or ord(c) == 127 for c in message) or
             not isinstance(failure["failure_fingerprint"], str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", failure["failure_fingerprint"])):
         raise FailureContractError("invalid_failure_identity")
     _identifier(failure["stage"])
     if not _LABEL.fullmatch(failure["stage"]):
         raise FailureContractError("invalid_failure_stage")
-    if _action(entry, failure["action"]) != failure["action"]:
+    entry = _registered(failure)
+    default = False
+    if entry is None:
+        known_class = failure["failure_class"] in CLASSES
+        logger.warning("failure_registry_drift code=%s failure_class=%s", failure["code"],
+                       failure["failure_class"] if known_class else "unrecognized")
+        entry = registry["by_code"]["UNREGISTERED_FAILURE_CODE"]
+        try:
+            default = not known_class or not _same_action(
+                _action(entry, failure["action"], failure["failure_class"], receiving=True), failure["action"])
+        except FailureContractError:
+            default = True
+    elif not _same_action(_action(entry, failure["action"], receiving=True), failure["action"]):
         raise FailureContractError("invalid_failure_action")
+    elif failure["user_message"] != entry["user_message"]:
+        # Founder copy for a registered code is this registry's, whatever the emitter's copy says.
+        logger.warning("failure_registry_drift code=%s user_message", failure["code"])
     if not isinstance(failure["evidence_refs"], list) or len(failure["evidence_refs"]) > MAX_FINDINGS:
         raise FailureContractError("invalid_evidence_references")
     for reference in failure["evidence_refs"]:
         _identifier(reference)
         if reference.startswith("/") or "://" in reference or ".." in PurePosixPath(reference).parts:
             raise FailureContractError("unsafe_evidence_reference")
-    return deepcopy(failure)
+    result = deepcopy(failure)
+    if default:
+        result.update(failure_class=entry["failure_class"], retryable=False, action=None, user_message=entry["user_message"])
+    elif _registered(failure) is entry:
+        result["user_message"] = entry["user_message"]
+    return result
 
 
 def legacy_view(failure: dict) -> dict:
     """The audited Phase A view for policy-off receivers; no retry inference."""
     failure = validate_failure(failure)
-    return deepcopy(load_registry()["by_code"][failure["code"]]["legacy"])
+    entry = _registered(failure)
+    if entry is None:
+        # Membership fallback: an unknown or reclassified code keeps its own view.
+        return {"code": failure["code"], "failure_class": failure["failure_class"], "retryable": failure["retryable"]}
+    return deepcopy(entry["legacy"])
 
 
 def attach_failure_projection(payload: dict, failure: dict, occurrence_id: str | None = None) -> dict:
@@ -286,8 +467,10 @@ def resolve_failure(code, result=None, *, retryable=False, status=None, stage="f
             for source in sources:
                 if "failure" in source and source["failure"] != incoming:
                     raise FailureContractError("inconsistent_failure_projection")
-                for alias, expected in (("error_code", failure["code"]), ("errorCode", failure["code"]), ("failure_class", failure["failure_class"]),
-                                        ("failure_fingerprint", failure["failure_fingerprint"]), ("retryable", failure["retryable"])):
+                # Projections must agree with what the emitter sent, even when
+                # validation substituted the safe default for an unknown class.
+                for alias, expected in (("error_code", incoming["code"]), ("errorCode", incoming["code"]), ("failure_class", incoming["failure_class"]),
+                                        ("failure_fingerprint", incoming["failure_fingerprint"]), ("retryable", incoming["retryable"])):
                     if alias in source and (type(source[alias]) is not type(expected) or source[alias] != expected):
                         raise FailureContractError("inconsistent_failure_projection")
                 occurrence = source.get("failure_occurrence_id")

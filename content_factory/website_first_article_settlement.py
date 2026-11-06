@@ -234,6 +234,9 @@ def stop_children(evidence, *, parent_id):
     from .website_models import WebsiteConnectionOperation
     from .website_first_article_billing import REFUND_TERMINAL, _reservation
     from .website_contract import WebsiteAuthorityError
+    from .run_cancellation import cancellation_request_fields
+    # The first-article goal ending is a system stop, never the owner's (IF-20).
+    reasons = cancellation_request_fields("system_stop", "system")
     parent = WebsiteConnectionOperation.objects.select_related("connection__organization").filter(pk=parent_id, action="prepare").first()
     if parent is None or parent.state not in REFUND_TERMINAL:
         return
@@ -251,11 +254,12 @@ def stop_children(evidence, *, parent_id):
             continue
         try:
             remote = _call_content_factory_run_action(run_id=run.run_id, action="cancel", workflow=run.workflow,
-                payload={"reason": "first_article_goal_ended",
+                payload={"reason": "first_article_goal_ended", **reasons,
                     "expected_cancellation_v1": expected_article_cancellation(run)}, transport_errors_are_pending=True)
             if cancellation_receipt(run, remote) is None:
                 continue
-            incoming = {**goals.mapping(remote.get("result")), **{key: remote[key]
+            # An older worker echoes no reason; ours still labels the stop.
+            incoming = {**reasons, **goals.mapping(remote.get("result")), **{key: remote[key]
                 for key in ("article_cancellation_v1", "publication_evidence_v1") if key in remote}}
             _apply_cancellation_receipt(run.run_id, {"domain": run.domain, "status": "cancelled", "result": incoming})
         except Exception:

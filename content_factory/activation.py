@@ -18,6 +18,9 @@ from content_factory.billing import (
 )
 
 VERIFICATION_MAX_AGE = timedelta(days=7)
+# An unchanged, connected source is re-attested this long after its accepted
+# verification, which leaves two days of retries before that proof lapses.
+VERIFICATION_REFRESH_AFTER = VERIFICATION_MAX_AGE - timedelta(days=2)
 
 
 def mapping(value):
@@ -150,8 +153,10 @@ def live_deployment_verified(connection, target, *, now=None):
     now = now or timezone.now()
     contract = mapping(target.contract)
     from .website_sealed_workflow import required
+    from .website_live_verification import accepted as live_url_accepted
     execution_proof = None
-    if required(connection, target):
+    # A new-journey site's live-URL receipt stands in for CI execution proof.
+    if required(connection, target) and not live_url_accepted(connection, target):
         from .website_verification import current_ci_attestation
         execution_proof = current_ci_attestation(connection, target)
         if execution_proof is None:
@@ -206,7 +211,8 @@ def durable_integration_evidence(config, connection, *, now=None):
             or target.verified_at > now + timedelta(minutes=5) or now - target.verified_at > VERIFICATION_MAX_AGE):
         return {**base, "reasonCode": "verification_stale"}
     from .website_sealed_workflow import required
-    if required(connection, target):
+    from .website_live_verification import accepted as live_url_accepted
+    if required(connection, target) and not live_url_accepted(connection, target):
         from .website_verification import current_ci_attestation
         if current_ci_attestation(connection, target) is None:
             return {**base, "reasonCode": "verification_required"}
@@ -215,8 +221,26 @@ def durable_integration_evidence(config, connection, *, now=None):
     return {**base, "verified": True, "publishingVerified": live_deployment_verified(connection, target, now=now), "routePath": "/" + route.strip("/"), "verifiedAt": verified_at.isoformat(), "reasonCode": ""}
 
 
-def article_capabilities(config, *, domain="", account=None, evidence=None, repository_access=None):
-    """Return the versioned, action-specific client projection, failing closed."""
+def first_article_capability(state):
+    """Project the first-article entitlement state as ``articleCapabilities.firstArticle``.
+
+    ``deliveryMode`` names the only start the 0 price covers: a confirmed
+    copy-ready (content_only) draft. Any other delivery mode is quoted the
+    normal article price.
+    """
+    return {"version": state["version"], "status": state["status"], "free": bool(state["free"]),
+        "attemptsUsed": state["attempts_used"], "attemptsAllowed": state["attempts_allowed"],
+        "topicBatchFree": bool(state["topic_batch_free"]), "runId": state["run_id"], "limit": state["limit"],
+        "deliveryMode": "content_only"}
+
+
+def article_capabilities(config, *, domain="", user=None, account=None, evidence=None, repository_access=None, first_article=None):
+    """Return the versioned, action-specific client projection, failing closed.
+
+    ``first_article`` is the entitlement state from first_article_entitlement;
+    when it is free, the article price (for a copy-ready start only) or the
+    first topic batch price is 0.
+    """
     account = account or github_account_state(config)
     evidence = evidence or integration_evidence(config)
     access = repository_access or {}
@@ -246,6 +270,14 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
     route = evidence.get("routePath") or "/articles"
     label = route.strip("/").split("/")[0].replace("-", " ").title() or "Articles"
     unit = get_content_factory_content_island_topic_cost_points(domain)
+    prices = {"article": get_content_factory_article_cost_points(domain, user=user), "researchTopic": unit, "research": unit * 4, "islandResearch": unit, "automationResearch": unit * 3}
+    extra = {}
+    if first_article is not None:
+        if first_article.get("free"):
+            prices["article"] = 0
+        if first_article.get("topic_batch_free"):
+            prices.update(researchTopic=0, research=0)
+        extra["firstArticle"] = first_article_capability(first_article)
     return {"version": 1, "canResearch": bool(domain), "canGenerateArticle": ready, "canGeneratePortableDraft": bool(domain), "canPublishArticle": publication_ready, "publishingReasonCode": publishing_code, "publishingReason": publishing_reason,
             "stage": "ready" if ready else "unavailable" if code == "github_unavailable" else "github" if not account.get("saved") or code == "github_access_required" else "repository" if not repo_selected else "verifying" if code in {"verification_required", "verification_stale", "github_verification_required", "github_unavailable"} else "integration",
             "reasonCode": code, "reason": "" if ready else reasons.get(code, "Complete articles setup to start writing."),
@@ -257,7 +289,7 @@ def article_capabilities(config, *, domain="", account=None, evidence=None, repo
             "integrationVerified": bool(evidence.get("verified")), "routePath": route, "surfaceLabel": label,
             "nextStep": "repository" if not repo_selected or not account.get("saved") or code.startswith("github_") else "articles",
             "verifiedAt": evidence.get("verifiedAt"),
-            "prices": {"article": get_content_factory_article_cost_points(domain), "researchTopic": unit, "research": unit * 4, "islandResearch": unit, "automationResearch": unit * 3}}
+            "prices": prices, **extra}
 
 
 def founder_context_for_domain(user, domain):

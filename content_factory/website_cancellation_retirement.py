@@ -2,7 +2,7 @@
 from datetime import timedelta
 
 from . import website_goal as goals
-from .article_publication_evidence import cancellation_receipt, original_scope, original_goal, publication_state, useful_delivery
+from .article_publication_evidence import cancellation_receipt, original_goal, publication_state, useful_delivery
 from .run_state import ARTICLE_WORKFLOWS
 
 KEY = "cancel_work_v1"
@@ -52,17 +52,22 @@ def run_for(op, run_id):
     """A local job must belong to this exact cancelled operation and website."""
     from workflow_runs.models import ContentFactoryRun
     run = ContentFactoryRun.objects.filter(run_id=run_id, organization_id=op.connection.organization_id).first()
-    request = goals.mapping(run.run_request) if run else {}
+    try:
+        request = _request(run) if run else {}
+    except (ValueError, TypeError, KeyError):
+        return None
     binding = run_binding(run) if run else None
     owners = {str(op.payload.get("cancelled_operation_id")), *map(str, op.payload.get("cancelled_child_operation_ids", []))}
+    action = getattr(op, "action", "cancel-operation")
     if (run is None or binding is None or goals.mapping(op.payload.get("cancel_run_bindings")).get(run_id) != binding
         or str(run.organization_id) != str(op.connection.organization_id)
         or request.get("website_connection_id") != str(op.connection_id)
-        or type(request.get("connection_generation")) is not int or request["connection_generation"] != op.generation
-        or not ({request.get("operation_id"), request.get("first_article_goal_operation_id")} & owners)):
+        or type(request.get("connection_generation")) is not int
+        or request["connection_generation"] != (op.generation if action == "cancel-operation" else op.payload.get("previous_generation"))
+        or action == "cancel-operation" and not ({request.get("operation_id"), request.get("first_article_goal_operation_id")} & owners)):
         return None
     if run.workflow in ARTICLE_WORKFLOWS and run.status == "completed" and (
-            publication_state(run) in {"article", "unknown"} or useful_delivery(run)):
+            publication_state(run) in {"article", "unknown"} or useful_delivery(run)) and not owned_stop_observed(run):
         return None
     return run
 
@@ -70,11 +75,14 @@ def run_for(op, run_id):
 def run_binding(run):
     """Freeze the original cancellation identity without copying credentials/body."""
     try:
-        return goals.digest({"run_id": run.run_id, "workflow": run.workflow,
+        request = _request(run)
+        value = {"run_id": run.run_id, "workflow": run.workflow,
             "organization_id": str(getattr(run, "organization_id", "")), "domain": getattr(run, "domain", ""),
-            "github_repo": getattr(run, "github_repo", ""), "scope": original_scope(run), "goal_id": original_goal(run),
-            "parent_operation_id": goals.mapping(run.run_request).get("first_article_goal_operation_id")})
-    except (ValueError, TypeError):
+            "github_repo": getattr(run, "github_repo", ""), "scope": _scope(request), "goal_id": original_goal(run),
+            "parent_operation_id": request.get("first_article_goal_operation_id")}
+        value.update(cancellation_echoes(run))
+        return goals.digest(value)
+    except (ValueError, TypeError, KeyError):
         return None
 
 
@@ -85,12 +93,57 @@ def bindings_for(runs):
 
 def expected_article_cancellation(run):
     """The worker compares this captured intent while holding its lifecycle lock."""
-    return {"version": 1, "run_id": run.run_id, "goal_id": original_goal(run), "scope": original_scope(run)}
+    scope = _scope(_request(run))
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_ownership import owner_receipt, RunOwnershipConflict
+        if run.github_repo != owner_receipt(run)["identity"].get("github_repo"):
+            raise RunOwnershipConflict("The cancellation repository differs from its original admission.")
+        # CF's typed RunRequest always carries its canonical empty repository
+        # for a portable run. Original inputs may legitimately omit that key.
+        scope.setdefault("github_repo", run.github_repo)
+    return {"version": 1, "run_id": run.run_id, "goal_id": original_goal(run), "scope": scope}
 
 
 def scoped_nonarticle_request(run):
     """Use the original execution contract rather than the current operation row."""
-    return {**original_scope(run), "run_id": run.run_id, "domain": run.domain, "github_repo": run.github_repo}
+    return {**_scope(_request(run)), "run_id": run.run_id, "domain": run.domain, "github_repo": run.github_repo,
+            **cancellation_echoes(run)}
+
+
+def _request(run):
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from .run_execution_control import current_execution_request
+        return current_execution_request(run)
+    return goals.mapping(run.run_request)
+
+
+def _scope(request):
+    from .article_publication_evidence import SCOPE_FIELDS
+    return {key: request[key] for key in SCOPE_FIELDS if key in request}
+
+
+def cancellation_echoes(run):
+    """Bind an owned stop to its exact backend admission and current ticket."""
+    from .run_reconciliation import authoritative_run
+    if not authoritative_run(run):
+        return {}
+    from .run_ownership import WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, current_execution_ticket, owner_receipt, wire_identity
+    return {WIRE_REQUEST_KEY: wire_identity(owner_receipt(run)), WIRE_EXECUTION_KEY: current_execution_ticket(run)}
+
+
+def owned_stop_observed(run):
+    """A cancel HTTP reply cannot replace the current owned journal projection."""
+    from .run_reconciliation import authoritative_run
+    from .run_ownership import EVENT_RESULT_KEY, current_execution_ticket
+    from .run_status_contract import TERMINAL
+    if not authoritative_run(run):
+        return False
+    projection = goals.mapping(goals.mapping(run.result).get(EVENT_RESULT_KEY)).get("projection")
+    return (isinstance(projection, dict) and projection.get("execution_id") == current_execution_ticket(run)["execution_id"]
+        and projection.get("order") is not None and projection.get("status") in TERMINAL
+        and projection["status"] == run.status)
 
 
 def _remember(op, key, run_id):
@@ -103,6 +156,13 @@ def acknowledge(op, run, run_id, status, body):
     """Typed stop proof retires cancellation, including uncertain article effects."""
     if run is None or not isinstance(body, dict):
         return False
+    from .run_reconciliation import authoritative_run
+    if authoritative_run(run):
+        from workflow_runs.models import ContentFactoryRun
+        fresh = ContentFactoryRun.objects.filter(pk=run.pk).first()
+        return bool(fresh is not None and run_binding(fresh) == run_binding(run)
+            and status in {200, 202, 204} and owned_stop_observed(fresh)
+            and body.get("cleanup_pending") is not True and body.get("cleanupPending") is not True)
     if run.workflow in ARTICLE_WORKFLOWS:
         try:
             proof = cancellation_receipt(run, body)
@@ -111,7 +171,11 @@ def acknowledge(op, run, run_id, status, body):
         if status not in {200, 202} or proof is None:
             return False
         from .service_views import _apply_cancellation_receipt
-        incoming = {**goals.mapping(body.get("result")), **{key: body[key]
+        from .run_cancellation import cancellation_request_fields
+        # Only website connection changes retire cancellations here: an older
+        # worker that echoes no reason still records the stop as superseded.
+        incoming = {**cancellation_request_fields("superseded", "system"),
+            **goals.mapping(body.get("result")), **{key: body[key]
             for key in ("article_cancellation_v1", "publication_evidence_v1") if key in body}}
         response = _apply_cancellation_receipt(run_id, {"domain": run.domain, "status": "cancelled", "result": incoming})
         if response.status_code != 200:

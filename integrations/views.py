@@ -136,8 +136,8 @@ def _known_frontend_origins() -> Set[str]:
 
 
 def _normalize_google_next(next_url: Optional[str]) -> Optional[str]:
-    from integrations.services.chat_oauth_return import native_chat_connection_return_url
-    native_return = native_chat_connection_return_url(next_url)
+    from integrations.services.chat_oauth_return import native_chat_connection_return_url, native_chat_startup_return_url
+    native_return = native_chat_connection_return_url(next_url) or native_chat_startup_return_url(next_url)
     if native_return:
         return native_return
     if not next_url:
@@ -358,10 +358,6 @@ def google_callback(request):
     if not code:
         return HttpResponseBadRequest("Missing code")
 
-    existing_connection = GoogleConnection.objects.filter(
-        user=user, organization=organization
-    ).first()
-
     # 3) Exchange code for tokens
     try:
         token_resp = requests.post(
@@ -385,14 +381,6 @@ def google_callback(request):
     if not access_token:
         return HttpResponseBadRequest("Missing access token in Google OAuth response.")
 
-    refresh_token = token_data.get("refresh_token") or (existing_connection.refresh_token if existing_connection else None)
-    scope = token_data.get("scope") or (existing_connection.scope if existing_connection else "")
-
-    if not refresh_token:
-        return HttpResponseBadRequest(
-            "Google did not return a refresh token. Revoke Gmail access in Google and reconnect with consent."
-        )
-
     # 4) Fetch the user's Google email
     try:
         ui_resp = requests.get(
@@ -401,23 +389,18 @@ def google_callback(request):
             timeout=(3, 20),
         )
         ui_resp.raise_for_status()
-        google_email = ui_resp.json().get("email")
-    except requests.RequestException:
+        userinfo = ui_resp.json()
+    except (requests.RequestException, ValueError):
         logger.exception("Failed to fetch Google userinfo for user %s", user.id)
         return HttpResponseBadRequest("Failed to fetch Google account details.")
 
-    # Update or create the connection
-    defaults = {
-        "google_email": google_email or (existing_connection.google_email if existing_connection else ""),
-        "scope": scope,
-        "refresh_token": refresh_token,
-    }
-
-    GoogleConnection.objects.update_or_create(
-        user=user,
-        organization=organization,
-        defaults=defaults,
-    )
+    from integrations.services.source_accounts import store_google_account
+    try:
+        if not isinstance(userinfo, dict):
+            raise ValueError("Google did not return account details.")
+        store_google_account(user=user, organization=organization, userinfo=userinfo, token_data=token_data)
+    except ValueError as exc:
+        return HttpResponseBadRequest(str(exc))
 
     # Redirect to frontend
     return oauth_return_redirect(success_url or _default_google_success_url())
@@ -530,27 +513,45 @@ def github_callback(request):
     installation_id = request.GET.get("installation_id")
     setup_action = request.GET.get("setup_action") or "install"
 
+    # P1.14: a new-journey Chat connection never ends on a text error page.
+    # `flow` is None for everything else (flag off, Slack, user-level, a
+    # missing or non-chat state, a valid legacy Chat state), which keeps
+    # today's responses below byte for byte.
+    from integrations.services import github_callback_reasons
+    from content_factory.staff_alert_rules import begin_github_callback
+    flow = begin_github_callback(github_callback_reasons, request)
+    if flow is not None and flow.response is not None:
+        return flow.response
+
+    def refuse(reason, response):
+        return response if flow is None else flow.refuse(reason, response)
+
     if not code:
         return HttpResponseBadRequest("Missing code")
 
     if not raw_state:
         return HttpResponseBadRequest("Missing state")
 
-    if not installation_id:
+    if not installation_id and flow is None:
         return HttpResponseBadRequest("Missing installation_id - this endpoint requires GitHub App installation")
 
-    try:
-        oauth_state = validate_github_oauth_state(raw_state, request=request)
-    except ValueError as exc:
-        logger.warning("Rejected GitHub callback state: %s", exc)
-        return HttpResponseBadRequest("Invalid or expired state")
+    if flow is not None:
+        oauth_state = flow.oauth_state
+    else:
+        try:
+            oauth_state = validate_github_oauth_state(raw_state, request=request)
+        except ValueError as exc:
+            logger.warning("Rejected GitHub callback state: %s", exc)
+            return HttpResponseBadRequest("Invalid or expired state")
 
     is_org_oauth = oauth_state.is_org_oauth
     slack_user_id = oauth_state.slack_user_id
     job_id = oauth_state.job_id
     normalized_domain = oauth_state.domain
     chat_company = None
-    if oauth_state.chat_context:
+    if flow is not None:
+        chat_company = flow.company
+    elif oauth_state.chat_context:
         from founder_tools.models import VibeRaisingCompany
         chat_company = VibeRaisingCompany.objects.select_related("organization").filter(
             pk=oauth_state.chat_context["chat_company_id"],
@@ -571,15 +572,20 @@ def github_callback(request):
         )
         token_resp.raise_for_status()
         token_data = token_resp.json()
-    except requests.RequestException:
-        return HttpResponseBadRequest("GitHub could not complete authorization. Please connect again.")
+    except requests.RequestException as exc:
+        return refuse(github_callback_reasons.transport_reason(exc),
+                      HttpResponseBadRequest("GitHub could not complete authorization. Please connect again."))
 
     if "error" in token_data:
+        if flow is not None:
+            # Never echo GitHub's error_description back to the founder.
+            return flow.redirect(github_callback_reasons.AUTHORIZATION_FAILED)
         return HttpResponseBadRequest(f"GitHub Error: {token_data.get('error_description')}")
 
     access_token = token_data.get("access_token")
     if not access_token:
-        return HttpResponseBadRequest("GitHub did not return an access token. Please connect again.")
+        return refuse(github_callback_reasons.AUTHORIZATION_FAILED,
+                      HttpResponseBadRequest("GitHub did not return an access token. Please connect again."))
     refresh_token = token_data.get("refresh_token")
     expires_in = token_data.get("expires_in")  # seconds until expiry (8 hours = 28800)
 
@@ -597,9 +603,18 @@ def github_callback(request):
         )
         user_resp.raise_for_status()
         github_user = user_resp.json()
-    except requests.RequestException:
-        return HttpResponseBadRequest("GitHub account details could not be verified. Please connect again.")
+    except requests.RequestException as exc:
+        return refuse(github_callback_reasons.transport_reason(exc),
+                      HttpResponseBadRequest("GitHub account details could not be verified. Please connect again."))
     github_login = github_user.get("login")
+
+    if flow is not None and not installation_id:
+        # GitHub sometimes returns without the installation (an update, or an
+        # install that finished elsewhere). Find it from the founder's own
+        # installations; GitHub confirms access through the listing below.
+        installation_id = github_callback_reasons.resolve_installation_id(access_token, normalized_domain)
+        if not installation_id:
+            return flow.redirect(github_callback_reasons.NO_REPO)
 
     # Fetch repositories accessible via this installation
     # This returns only the repos the user selected during installation
@@ -616,11 +631,13 @@ def github_callback(request):
         repos_data = repos_resp.json()
         repos = repos_data.get("repositories", [])
         if not isinstance(repos, list):
-            return HttpResponseBadRequest("GitHub repository access could not be verified. Please connect again.")
+            return refuse(github_callback_reasons.REPOSITORY_ACCESS,
+                          HttpResponseBadRequest("GitHub repository access could not be verified. Please connect again."))
     except Exception:
         # The installation ID comes from the callback URL, not signed state.
         # Never persist it unless GitHub confirms this user's access.
-        return HttpResponseBadRequest("GitHub repository access could not be verified. Please connect again.")
+        return refuse(github_callback_reasons.REPOSITORY_ACCESS,
+                      HttpResponseBadRequest("GitHub repository access could not be verified. Please connect again."))
 
     repo_names = [str(repo.get("full_name") or "").strip() for repo in repos if repo.get("full_name")]
     selected_repo = repo_names[0] if len(repo_names) == 1 else None
@@ -665,7 +682,7 @@ def github_callback(request):
         from content_factory.models import OrganizationContentConfig
 
         if not normalized_domain:
-            return HttpResponseBadRequest("Missing domain in state")
+            return refuse(github_callback_reasons.NO_WEBSITE, HttpResponseBadRequest("Missing domain in state"))
 
         # Get or create organization
         if chat_company:
@@ -693,10 +710,11 @@ def github_callback(request):
                 "github_callback_ownership_denied domain=%s existing_owner=%s incoming_actor=%s",
                 normalized_domain, existing_owner, incoming_actor,
             )
-            return HttpResponse(
+            # Never reveal the other owner to the founder.
+            return refuse(github_callback_reasons.OWNED_ELSEWHERE, HttpResponse(
                 "This organization's GitHub connection is owned by another account.",
                 status=403,
-            )
+            ))
 
         previous_repo = str(config.github_repo or "").strip()
         if not selected_repo and len(repo_names) > 1 and previous_repo:
@@ -716,7 +734,9 @@ def github_callback(request):
         config.connected_slack_user_id = slack_user_id or config.connected_slack_user_id
         # OAuth refresh cannot select a repository or revive website consent.
         if not config.website_connection_id:
-            config.github_repo = repo_to_store if repo_to_store else None
+            # A new-journey Chat flow saves a repository only through its bind
+            # below (push access, the domain match, the ownership check).
+            config.github_repo = repo_to_store if repo_to_store and flow is None else None
             config.github_installation_id = installation_id
         config.github_scopes = []
         config.save()
@@ -819,6 +839,15 @@ def github_callback(request):
                     logger.warning(f"Could not retry job {job_id}: No request_meta found")
             except Exception as e:
                 logger.error(f"Failed to auto-retry job {job_id}: {e}")
+
+    if flow is not None:
+        # New-journey Chat flows bind the domain's repository and start setup.
+        reason = github_callback_reasons.NO_WEBSITE
+        if is_org_oauth and chat_company is not None:
+            reason = github_callback_reasons.bind_new_journey_repository(
+                config=config, user=chat_company.profile.user, company=chat_company,
+                repositories=repos, installation_id=installation_id)
+        return flow.redirect(reason)
 
     # Send the user back to the mlai.au page they started from. The origin URL
     # rides along in the signed `state` (GitHub returns it untouched) and is

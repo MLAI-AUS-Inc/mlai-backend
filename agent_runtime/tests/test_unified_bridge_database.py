@@ -174,8 +174,9 @@ class UnifiedBridgeDatabaseTests(unittest.TestCase):
         self.assertEqual(row.status, "cancelled")
         self.assertEqual(first.grant["scopes"], first_scopes)
         self.assertFalse(AgentCredential.objects.filter(grant=first_native, revoked_at__isnull=True).exists())
-        with self.assertRaises((PermissionDenied, AgentPermissionDenied)):
+        with self.assertRaises(self.adapter.NativeAgentError) as denied:
             self.adapter.principal_for(first)
+        self.assertEqual(denied.exception.get_codes(), "owner_action_required")
         self.adapter.on_authenticated(second)
         self.assertEqual(self.adapter.call_tool(second, "get_agent_account", {})["id"], str(self.installation.pk))
 

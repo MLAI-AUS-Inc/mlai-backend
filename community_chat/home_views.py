@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 from core.authentication import CustomJWTAuthentication
 from roo.models import RewardsCatalog, Task, TaskAssignment
 from roo.services import PointsService
+from roo.event_discounts import account_perks_enabled as event_discounts_enabled
 from integrations.services.community_bridge.coworking import coworking_booking_available
 from integrations.services.slack_roo import public_roo_target
 
@@ -65,7 +66,7 @@ class CommunityHomeView(APIView):
             .order_by("due_date", "id")[:HOME_ITEM_LIMIT]
         )
         rewards = (
-            RewardsCatalog.objects.filter(is_active=True)
+            RewardsCatalog.objects.filter(is_active=True, event_discount_offer__isnull=True)
             .filter(Q(stock_remaining__isnull=True) | Q(stock_remaining__gt=0))
             .order_by("cost_points", "name")[:100]
         )
@@ -85,10 +86,14 @@ class CommunityHomeView(APIView):
             earn_actions.append(
                 {
                     "id": "monthly_update",
-                    "name": "Complete your monthly startup update",
+                    "name": "Approve and share your monthly startup update",
                     "description": (
-                        "Complete and save a ready monthly update for your "
-                        "verified company."
+                        "Private approvals earn 5 Roo points and do not unlock discounts. "
+                        "Your startup's first approved update each Melbourne month can earn "
+                        f"{monthly_update_points} Roo points if shared publicly or with the MLAI community and its "
+                        "registration, name and website are verified; otherwise 5. "
+                        "Shared approvals unlock eligible founder discounts for 30 days "
+                        "from first approval; edits and reapproval do not extend them."
                     ),
                     "points": monthly_update_points,
                 }
@@ -147,8 +152,10 @@ class CommunityHomeView(APIView):
                     for reward in rewards
                 ],
                 "feature_flags": {
+                    "event_discounts": event_discounts_enabled(),
                     "coworking_booking": coworking_booking_available(request.user),
                     "link_love": False,
+                    "mentor_booking": bool(getattr(settings, "MENTOR_BOOKING_ENABLED", False)),
                     "meeting_rooms": bool(
                         getattr(settings, "MEETING_ROOM_BOOKING_ENABLED", False)
                     ),

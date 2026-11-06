@@ -12,11 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
-    help = "Run discovery or memory scheduling without rebooting Django each tick."
+    help = "Run a supported scheduler or event reconciliation without rebooting Django each tick."
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "command_name", choices=("run_scheduled_discovery", "schedule_memory_work")
+            "command_name", choices=("run_scheduled_discovery", "schedule_memory_work", "reconcile_event_discounts")
         )
         parser.add_argument("--poll-seconds", type=int, default=60)
         parser.add_argument("--health-file")

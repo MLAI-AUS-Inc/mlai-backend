@@ -38,7 +38,8 @@ def reserve_image_charge(*, user, context, run, payload):
     if Ledger.objects.filter(user=user, idempotency_key=f"{key}:refund").exists():
         return None, Response({"code": "roo_points_billing_refunded", "detail": "That image request was refunded. Start a new image request."}, status=409)
     from workflow_runs.models import ContentFactoryRun
-    with transaction.atomic():
+    from .founder_review_commands import image_debit_guard
+    with transaction.atomic(), image_debit_guard(run):
         saved = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
         result = dict(saved.result or {})
         receipts = dict(result.get("article_image_billing") or {})
@@ -68,7 +69,8 @@ def reserve_image_charge(*, user, context, run, payload):
             "fieldId": payload.get("fieldId"), "userId": user.pk, "recordedAt": timezone.now().isoformat()}
         receipts[identity] = receipt
         saved.result = {**result, "article_image_billing": receipts}
-        saved.save(update_fields=["result", "updated_at"])
+        from .website_run_authority import event_owned
+        saved.save(update_fields=["result"] if event_owned(saved) else ["result", "updated_at"])
         run.result = saved.result
     return receipt, None
 
@@ -96,7 +98,8 @@ def settle_image_charge(*, user, run, receipt, rejected=False, pending=False):
                 reference_type="CONTENT_FACTORY_IMAGE", reference_id=receipt["identity"])
         receipts[receipt["identity"]] = {**receipt, "status": "refunded" if rejected else "pending" if pending else "accepted"}
         saved.result = {**(saved.result or {}), "article_image_billing": receipts}
-        saved.save(update_fields=["result", "updated_at"])
+        from .website_run_authority import event_owned
+        saved.save(update_fields=["result"] if event_owned(saved) else ["result", "updated_at"])
         run.result = saved.result
 
 

@@ -1,4 +1,5 @@
 from django.urls import path, include
+from .event_discount_views import EventDiscountQuoteView, EventDiscountRedeemView, EventDiscountRedemptionsView
 from rest_framework.routers import DefaultRouter
 from .views import (
     PointsAdminViewSet, MinterViewSet, TaskViewSet, UserBalanceViewSet,
@@ -38,6 +39,10 @@ router.register(r'requests', PointsRequestViewSet, basename='points-request')
 router.register(r'purchases', PointsPurchaseViewSet, basename='points-purchase')
 
 urlpatterns = [
+    path('event-discounts/quote/', EventDiscountQuoteView.as_view(), name='event-discount-quote'),
+    path('event-discounts/redeem/', EventDiscountRedeemView.as_view(), name='event-discount-redeem'),
+    path('event-discounts/redemptions/', EventDiscountRedemptionsView.as_view(), name='event-discount-redemptions'),
+    path('event-discounts/redemptions/<uuid:redemption_id>/', EventDiscountRedemptionsView.as_view(), name='event-discount-redemption'),
     path('kimi/calls/admit/', CodingCallAdmitView.as_view(), name='kimi-call-admit'),
     path('kimi/calls/dispatch/', CodingCallDispatchView.as_view(), name='kimi-call-dispatch'),
     path('kimi/calls/settle/', CodingCallSettleView.as_view(), name='kimi-call-settle'),

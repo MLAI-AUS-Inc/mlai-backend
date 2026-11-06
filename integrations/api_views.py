@@ -851,6 +851,11 @@ class GithubScaffoldView(APIView):
                 "preview_url": config.articles_scaffold_preview_url,
             }, status=status.HTTP_200_OK)
 
+        from content_factory.run_ownership import admission_enabled
+        if admission_enabled():
+            from integrations.services.github import standalone_reviewed_setup_required
+            return Response(standalone_reviewed_setup_required(), status=status.HTTP_409_CONFLICT)
+
         # Resolve GitHub credentials
         try:
             creds = get_github_credentials_for_domain(normalized_domain, slack_user_id)

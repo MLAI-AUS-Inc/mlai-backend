@@ -21,7 +21,7 @@ class ParentDependencyBackoffTests(SimpleTestCase):
         self.row = SimpleNamespace(
             id=1, pk=1, dependency_first_seen_at=None, dependency_attempts=0,
             attempts=1, lease_token=None, lease_expires_at=None, save=Mock(),
-            source_platform="slack", source_channel_id="source", target_platform="buzz",
+            source_platform="slack", source_channel_id="source", target_platform="buzz", delivery_type="create",
         )
         parent_lookup = patch.object(store, "resolve_mapped_message", return_value=None)
         self.parent_lookup = parent_lookup.start()
@@ -144,10 +144,12 @@ class ParentDependencyBackoffTests(SimpleTestCase):
             patch.object(store.transaction, "on_commit") as on_commit,
             patch.object(store.CommunityBridgeDelivery.objects, "select_for_update") as query,
             patch.object(store.CommunityBridgeMessageLink.objects, "update_or_create"),
+            patch.object(store.CommunityBridgeMessageLink.objects, "select_for_update") as link_query,
             patch.object(store.CommunityBridgeDelivery.objects, "filter") as children,
             patch.object(store.timezone, "now", return_value=self.now),
         ):
             query.return_value.select_related.return_value.get.return_value = parent
+            link_query.return_value.filter.return_value.first.return_value = None
             candidates = children.return_value.filter.return_value
             candidates.select_for_update.return_value.order_by.return_value.values_list.return_value = [3]
             store.complete_create_delivery(

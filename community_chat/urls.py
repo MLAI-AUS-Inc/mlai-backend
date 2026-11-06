@@ -1,9 +1,12 @@
+from .slack_emoji_views import SlackEmojiDirectoryView
 from django.urls import include, path
 from .apple_iap_views import AppleIapView, AppleIapTransactionView, AppleIapNotificationView
 from .privacy_views import AccountDeletionView, AiConsentView
 from .device_management_views import AccountDevicesView, AccountDeviceView
-from .onboarding_views import MemberOnboardingView
+from .onboarding_views import InviteResolveView, MemberOnboardingView
 from .account_ban_views import AccountBanView
+from .client_events import ClientEventsView
+from .admin_views import AdminAccessView
 from .permission_views import ChatPermissionsView, RelayChatRoleView, ChatModeratorView, ChatMemberRolesView, ChatAdminView
 
 from .views import (
@@ -14,6 +17,7 @@ from .views import (
     ConfirmView,
     DeviceAuthAuthorizeView,
     DeviceAuthExchangeView,
+    DeviceAuthRenewView,
     DeviceAuthStartView,
     EmailCodeRequestView,
     EmailCodeVerifyView,
@@ -34,7 +38,51 @@ from .coding_views import (
     CodingTurnFinalizeView,
     CodingTurnTicketRefreshView,
 )
+from .mentoring_views import (
+    MentorApplicationCheckView,
+    MentorApplicationView,
+    MentorAvailabilityView,
+    MentorListView,
+    MentorSessionAcceptView,
+    MentorSessionCancelView,
+    MentorSessionCompleteView,
+    MentorSessionDeclineView,
+    MentorSessionMeetingRetryView,
+    MentorSessionsView,
+    MyMentorProfileView,
+    MentoringAdminAccessView,
+    MentoringAdminApplicationApproveView,
+    MentoringAdminApplicationRejectView,
+    MentoringAdminApplicationView,
+    MentoringAdminApplicationsView,
+    MentoringAdminInviteRevokeView,
+    MentoringAdminInvitesView,
+    MentoringAdminMembersView,
+    MentoringAdminMentorPauseView,
+    MentoringAdminMentorUnpauseView,
+    MentoringAdminMentorsView,
+    MentoringAdminSessionsView,
+)
+from .mentoring_booking_views import (
+    MentorBookingQuoteView,
+    MentorInstantBookingView,
+    MentorBookingAttemptView,
+    MentorBookingAttemptListView,
+    MentorBookingAttemptCancelView,
+)
+from .mentoring_calendar_views import (
+    MentorCalendarConnectionsView,
+    MentorCalendarAuthorizeView,
+    MentorCalendarCallbackView,
+    MentorCalendarListView,
+    MentorCalendarSelectionsView,
+    MentorCalendarDisconnectView,
+    MentorReadinessView,
+    MentorSettingsView,
+)
 from .home_views import CommunityHomeView
+from .event_discount_views import MyEventDiscountsView
+from .member_perks_views import MemberPerksView
 from .insight_views import TokenInsightsView
 from .coworking_views import CoworkingTodayView
 from .meeting_room_views import (
@@ -55,6 +103,44 @@ from .usage_views import (
 
 
 urlpatterns = [
+    path("mentor/calendar-connections/", MentorCalendarConnectionsView.as_view(), name="community_chat_mentor_calendar_connections"),
+    path("mentor/calendar-connections/google/authorize/", MentorCalendarAuthorizeView.as_view(), name="community_chat_mentor_calendar_authorize"),
+    path("mentor/calendar-connections/google/callback/", MentorCalendarCallbackView.as_view(), name="community_chat_mentor_calendar_callback"),
+    path("mentor/calendar-connections/<int:connection_id>/calendars/", MentorCalendarListView.as_view(), name="community_chat_mentor_calendars"),
+    path("mentor/calendar-connections/<int:connection_id>/disconnect/", MentorCalendarDisconnectView.as_view(), name="community_chat_mentor_calendar_disconnect"),
+    path("mentor/calendar-selections/", MentorCalendarSelectionsView.as_view(), name="community_chat_mentor_calendar_selections"),
+    path("mentor/readiness/", MentorReadinessView.as_view(), name="community_chat_mentor_readiness"),
+    path("mentor/settings/", MentorSettingsView.as_view(), name="community_chat_mentor_settings"),
+    path("mentor/bookings/quote/", MentorBookingQuoteView.as_view(), name="community_chat_mentor_booking_quote"),
+    path("mentor/bookings/", MentorInstantBookingView.as_view(), name="community_chat_mentor_instant_booking"),
+    path("mentor/booking-attempts/", MentorBookingAttemptListView.as_view(), name="community_chat_mentor_booking_attempts"),
+    path("mentor/booking-attempts/<uuid:attempt_id>/", MentorBookingAttemptView.as_view(), name="community_chat_mentor_booking_attempt"),
+    path("mentor/booking-attempts/<uuid:attempt_id>/cancel/", MentorBookingAttemptCancelView.as_view(), name="community_chat_mentor_booking_attempt_cancel"),
+    path("mentors/", MentorListView.as_view(), name="community_chat_mentors"),
+    path("mentors/<int:mentor_id>/availability/", MentorAvailabilityView.as_view(), name="community_chat_mentor_availability"),
+    path("mentor/profile/", MyMentorProfileView.as_view(), name="community_chat_mentor_profile"),
+    path("mentor/application/check/", MentorApplicationCheckView.as_view(), name="community_chat_mentor_application_check"),
+    path("mentor/application/", MentorApplicationView.as_view(), name="community_chat_mentor_application"),
+    path("mentor/sessions/", MentorSessionsView.as_view(), name="community_chat_mentor_sessions"),
+    path("mentor/sessions/<uuid:session_id>/accept/", MentorSessionAcceptView.as_view(), name="community_chat_mentor_session_accept"),
+    path("mentor/sessions/<uuid:session_id>/decline/", MentorSessionDeclineView.as_view(), name="community_chat_mentor_session_decline"),
+    path("mentor/sessions/<uuid:session_id>/cancel/", MentorSessionCancelView.as_view(), name="community_chat_mentor_session_cancel"),
+    path("mentor/sessions/<uuid:session_id>/meeting/retry/", MentorSessionMeetingRetryView.as_view(), name="community_chat_mentor_session_meeting_retry"),
+    path("mentor/sessions/<uuid:session_id>/complete/", MentorSessionCompleteView.as_view(), name="community_chat_mentor_session_complete"),
+    path("mentor/admin/access/", MentoringAdminAccessView.as_view(), name="community_chat_mentor_admin_access"),
+    path("mentor/admin/members/", MentoringAdminMembersView.as_view(), name="community_chat_mentor_admin_members"),
+    path("mentor/admin/invites/", MentoringAdminInvitesView.as_view(), name="community_chat_mentor_admin_invites"),
+    path("mentor/admin/invites/<int:invite_id>/revoke/", MentoringAdminInviteRevokeView.as_view(), name="community_chat_mentor_admin_invite_revoke"),
+    path("mentor/admin/applications/", MentoringAdminApplicationsView.as_view(), name="community_chat_mentor_admin_applications"),
+    path("mentor/admin/applications/<int:profile_id>/", MentoringAdminApplicationView.as_view(), name="community_chat_mentor_admin_application"),
+    path("mentor/admin/applications/<int:profile_id>/approve/", MentoringAdminApplicationApproveView.as_view(), name="community_chat_mentor_admin_application_approve"),
+    path("mentor/admin/applications/<int:profile_id>/reject/", MentoringAdminApplicationRejectView.as_view(), name="community_chat_mentor_admin_application_reject"),
+    path("mentor/admin/mentors/", MentoringAdminMentorsView.as_view(), name="community_chat_mentor_admin_mentors"),
+    path("mentor/admin/mentors/<int:profile_id>/pause/", MentoringAdminMentorPauseView.as_view(), name="community_chat_mentor_admin_mentor_pause"),
+    path("mentor/admin/mentors/<int:profile_id>/unpause/", MentoringAdminMentorUnpauseView.as_view(), name="community_chat_mentor_admin_mentor_unpause"),
+    path("mentor/admin/sessions/", MentoringAdminSessionsView.as_view(), name="community_chat_mentor_admin_sessions"),
+    path("event-discounts/events/<str:event_id>/", MemberPerksView.as_view(), name="community_chat_member_perks"),
+    path("event-discounts/", MyEventDiscountsView.as_view(), name="community_chat_event_discounts"),
     path("usage/insights/", TokenInsightsView.as_view(), name="community_chat_token_insights"),
     path("account-bans/", AccountBanView.as_view(), name="community_chat_account_bans"),
     path("account-bans/<int:ban_id>/", AccountBanView.as_view(), name="community_chat_account_ban"),
@@ -63,6 +149,7 @@ urlpatterns = [
     path("apple-iap/notifications/production/", AppleIapNotificationView.as_view(), {"environment": "production"}),
     path("apple-iap/notifications/sandbox/", AppleIapNotificationView.as_view(), {"environment": "sandbox"}),
     path("account/onboarding/", MemberOnboardingView.as_view(), name="community_chat_onboarding"),
+    path("account/invite/resolve/", InviteResolveView.as_view(), name="community_chat_invite_resolve"),
     path("account/deletion/", AccountDeletionView.as_view(), name="community_chat_account_deletion"),
     path("account/ai-consent/", AiConsentView.as_view(), name="community_chat_ai_consent"),
     path("startups/", include("community_chat.startups.urls")),
@@ -72,6 +159,9 @@ urlpatterns = [
     path("moderators/<str:public_key>/", ChatModeratorView.as_view(), name="community_chat_moderator"),
     path("relay-roles/<str:public_key>/", RelayChatRoleView.as_view(), name="community_chat_relay_role"),
     path("volunteer/", include("community_chat.volunteer.urls")),
+    path("crm/", include("community_chat.crm.urls")),
+    # MLAI Chat's Admin area; not Django's /admin/ site or the relay's /api/admin/v1.
+    path("admin/access/", AdminAccessView.as_view(), name="community_chat_admin_access"),
     path("home/", CommunityHomeView.as_view(), name="community_chat_home"),
     path("coworking/today/", CoworkingTodayView.as_view(), name="community_chat_coworking_today"),
     path("meeting-rooms/rooms/", MeetingRoomListView.as_view(), name="community_chat_meeting_room_list"),
@@ -79,6 +169,7 @@ urlpatterns = [
     path("meeting-rooms/book/", MeetingRoomBookView.as_view(), name="community_chat_meeting_room_book"),
     path("meeting-rooms/my-bookings/", MyMeetingRoomBookingsView.as_view(), name="community_chat_meeting_room_my_bookings"),
     path("meeting-rooms/cancel/", MeetingRoomCancelView.as_view(), name="community_chat_meeting_room_cancel"),
+    path("slack/emoji/", SlackEmojiDirectoryView.as_view(), name="community_chat_slack_emoji"),
     path("slack/message/", SlackMessageActionView.as_view(), name="community_chat_slack_message"),
     path("slack/", SlackDmMirrorView.as_view(), name="community_chat_slack"),
     path("slack/conversations/", SlackOwnerConversationView.as_view(), name="community_chat_slack_conversations"),
@@ -149,7 +240,13 @@ urlpatterns = [
         DeviceAuthExchangeView.as_view(),
         name="community_chat_auth_exchange",
     ),
+    path(
+        "auth/device/renew/",
+        DeviceAuthRenewView.as_view(),
+        name="community_chat_auth_renew",
+    ),
     path("session/", SessionView.as_view(), name="community_chat_session"),
+    path("client-events/", ClientEventsView.as_view(), name="community_chat_client_events"),
     path(
         "messages/delete-slack-origin/",
         SlackOriginMessageDeleteView.as_view(),
@@ -171,4 +268,20 @@ urlpatterns = [
         TokenUsageLeaderboardView.as_view(),
         name="token_usage_leaderboard",
     ),
+]
+
+# P2 (IF-P2-25): the staff console routes, next to admin/access/. Each answers
+# 404 until the staff console package ships its views.
+from content_factory.lazy_views import lazy_view  # noqa: E402
+
+_admin_access = next(index for index, pattern in enumerate(urlpatterns) if str(pattern.pattern) == "admin/access/")
+urlpatterns[_admin_access + 1:_admin_access + 1] = [
+    path(route, lazy_view("community_chat.staff_console_views", view)) for route, view in (
+        ("admin/startups/", "StartupListView"),
+        ("admin/startups/funnel/", "FounderFunnelView"),
+        ("admin/startups/<int:organization_id>/", "StartupDetailView"),
+        ("admin/startups/<int:organization_id>/actions/", "StartupActionView"),
+        ("admin/alerts/", "AlertListView"),
+        ("admin/alerts/<str:alert_id>/ack/", "AlertAckView"),
+    )
 ]

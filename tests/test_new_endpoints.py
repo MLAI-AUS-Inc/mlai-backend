@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.core import signing
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
@@ -660,6 +660,8 @@ class ContentGenerateAutoWriteTests(TestCase):
             "user_avatar_url": "https://avatar.test/auto.png",
         }
         data.update(overrides)
+        if data.get("topic") and "expectedCostPoints" not in data:
+            data.setdefault("expected_cost_points", 12)
         return data
 
     def _mock_response(self, status_code, body):
@@ -672,6 +674,7 @@ class ContentGenerateAutoWriteTests(TestCase):
     def test_generate_auto_write_uses_discovery_endpoint_after_scan(self):
         url = reverse('content_generate')
         data = self._generate_request_data(topic=None)
+        self.assertNotIn("expected_cost_points", data)
 
         with patch('integrations.services.article_generation.http_requests.post') as mock_post:
             mock_post.side_effect = [
@@ -732,11 +735,15 @@ class ContentGenerateAutoWriteTests(TestCase):
             mock_post.return_value = self._mock_response(202, {"job_id": "job-article-repo-less-456"})
             response = self.client.post(url, data, format='json')
 
-        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED, response.data)
         payload = mock_post.call_args.kwargs.get('json') or {}
         self.assertEqual(payload.get('delivery_mode'), 'content_only')
         self.assertTrue(payload.get('delivery_mode_confirmed'))
         self.assertEqual(payload.get('github_repo'), '')
+        self.assertEqual(payload.get('roo_points_cost'), 12)
+        mock_post.assert_called_once()
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 8)
 
     @patch('content_factory.content_views.trigger_article_generation')
     def test_generate_passes_slack_thread_context_to_service(self, mock_trigger):
@@ -771,6 +778,7 @@ class ContentGenerateAutoWriteTests(TestCase):
                 "user_first_name": "Auto",
                 "user_last_name": "Writer",
                 "user_avatar_url": "https://avatar.test/auto.png",
+                "expected_cost_points": 12,
             },
         )
 
@@ -4128,6 +4136,39 @@ class ContentFactoryCallbackTests(ContentFactoryTestDataMixin, TestCase):
             slack_thread_ts="123.456",
             slack_root_message_ts="123.456",
         )
+
+    @override_settings(ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED=True)
+    @patch('integrations.services.slack.SlackService.update_message')
+    @patch('integrations.services.slack.SlackService.send_message')
+    def test_ignored_progress_preserves_job_and_mirrored_run(self, send, update):
+        for event in ("article_progress", "discovery_progress", "scan_progress"):
+            for reason in ("duplicate_progress_id", "stale_milestone"):
+                with self.subTest(event=event, reason=reason):
+                    job_id = f"ignored-{event}-{reason}"
+                    run = ContentFactoryRun.objects.create(
+                        run_id=job_id, workflow="direct_generate", domain="mlai.au", status="running",
+                    )
+                    job = ContentFactoryJob.objects.create(
+                        job_id=job_id, domain="mlai.au", slack_user_id="U123", status="cancelled",
+                        slack_channel_id="C123", slack_thread_ts="123.456",
+                        posted_progress_ids=["already-posted"], last_progress_milestone_index=2,
+                        last_progress_milestone_key="cancelled", last_progress_updated_at=timezone.now(),
+                    )
+                    payload = self.client._bound_payload({
+                        "event_type": event, "job_id": job_id, "domain": "mlai.au",
+                        "slack_user_id": "U-LATE-CALLBACK", "requested_by_slack_user_id": "U-LATE-CALLBACK",
+                        "progress_id": "already-posted" if reason == "duplicate_progress_id" else "older-milestone",
+                        "milestone_key": "research_started", "milestone_index": 1,
+                    })
+                    before_job = ContentFactoryJob.objects.filter(pk=job.pk).values().get()
+                    before_run = ContentFactoryRun.objects.filter(pk=run.pk).values().get()
+                    response = self.client.post(reverse('content_factory_callback'), payload, format="json")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.data["reason"], reason)
+                    self.assertEqual(ContentFactoryJob.objects.filter(pk=job.pk).values().get(), before_job)
+                    self.assertEqual(ContentFactoryRun.objects.filter(pk=run.pk).values().get(), before_run)
+        send.assert_not_called()
+        update.assert_not_called()
 
     @patch('integrations.services.slack.SlackService.send_message')
     def test_article_progress_callback_posts_thread_reply_and_records_progress(self, mock_send_message):

@@ -20,12 +20,13 @@ def source_is_invalidated(receipt):
     source_id = receipt.source.get("source_id")
     if not source_id:
         return False
-    author_id = receipt.target_id if receipt.kind == "reaction" else receipt.actor_id
+    engagement = receipt.kind == "reaction" or receipt.metadata.get("engagement_confirmed") is True
+    author_id = receipt.target_id if engagement else receipt.actor_id
     authors = Q(
         source__source_id=source_id, actor_id=author_id, metadata__deletion_kind=5
     )
     target_ids = [source_id]
-    if receipt.kind == "reaction" and receipt.source.get("message_id"):
+    if engagement and receipt.source.get("message_id"):
         reaction_id = receipt.source["message_id"]
         target_ids.append(reaction_id)
         authors |= Q(

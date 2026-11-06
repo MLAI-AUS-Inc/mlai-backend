@@ -33,8 +33,9 @@ class ConsentTests(SimpleTestCase):
         for rung in ("adopt","native_collection","deterministic","model_adapter","agent"):
             self.assertEqual(consent.required_grants(ci_mode="hosted",strategy=rung),{"contents":"write","pull_requests":"write"},rung)
             self.assertEqual(consent.required_grants(ci_mode="repository",strategy=rung),{"contents":"write","pull_requests":"write","workflows":"write","checks":"read","statuses":"read"},rung)
-        self.assertEqual(consent.required_grants(ci_mode="repository",strategy="hosted"),{})
-        for channel in ("hosted","wordpress","ghost"):
+        with self.assertRaises(ValueError):consent.required_grants(ci_mode="repository",strategy="hosted")
+        with self.assertRaises(ValueError):consent.required_grants(channel="hosted")
+        for channel in ("wordpress","ghost"):
             self.assertEqual(consent.required_grants(channel=channel),{})
 
     def operation(self):
@@ -73,7 +74,7 @@ class ConsentTests(SimpleTestCase):
         self.assertTrue(consent.valid(changed));self.assertEqual(changed["consent"]["answers"],answers())
 
     def test_plan_is_scoped_and_price_and_optional_permissions_are_shown_once(self):
-        op=self.operation();context=SimpleNamespace(company=SimpleNamespace(pk=9),organization=op.connection.organization)
+        op=self.operation();context=SimpleNamespace(company=SimpleNamespace(pk=9),organization=op.connection.organization,profile=SimpleNamespace(user=SimpleNamespace(pk=4)))
         with patch("content_factory.billing.get_content_factory_article_cost_points",return_value=6):
             plan=consent.setup_plan(context,SimpleNamespace(website_connection=op.connection),{"githubPermissions":{"contents":True,"pull_requests":False,"workflows":True,"checks":True,"statuses":True,"settingsUrl":"https://github.com/settings/installations/4"}})
         self.assertEqual((plan["companyId"],plan["connectionId"],plan["connectionGeneration"]),("9","website",3))

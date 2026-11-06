@@ -99,7 +99,7 @@ class ActivationAdmissionTests(SimpleTestCase):
         self.user = SimpleNamespace(pk=1, id=1, email="synthetic@example.test")
         self.context = SimpleNamespace(organization=SimpleNamespace(id=1, pk=1, domain="example.test"),
                                       profile=SimpleNamespace(user=self.user), company=SimpleNamespace(pk="company-1"))
-        self.request = SimpleNamespace(data={}, user=self.user)
+        self.request = SimpleNamespace(headers={}, data={}, user=self.user)
 
     def test_article_is_rejected_before_billing_or_dispatch(self):
         blocked = Response({"reasonCode": "integration_required"}, status=409)
@@ -116,7 +116,7 @@ class ActivationAdmissionTests(SimpleTestCase):
         queue.assert_not_called()
 
     def test_all_article_control_mutations_reject_before_remote_work(self):
-        run = SimpleNamespace(workflow="article_generation", github_repo="founder/site")
+        run = SimpleNamespace(workflow="article_generation", github_repo="founder/site", result={})
         for action in ("restart", "resume", "revise", "regenerate-image", "regenerate-images", "publish-pr", "promote-bundle", "approve", "merge-publish-pr", "retry-preview-quality"):
             with self.subTest(action=action), \
                  patch.object(views, "_resolve_context_or_response", return_value=(self.context, None)), \
@@ -143,7 +143,7 @@ class ActivationAdmissionTests(SimpleTestCase):
     def test_all_research_entry_points_charge_and_queue_before_setup(self):
         cfg = config(github_repo="", publish_targets=[], scan_summary={})
         for data in ({}, {"customTopicTitle": "Culture"}, {"contentIslandSlug": "culture"}):
-            request = SimpleNamespace(data=data, user=self.user)
+            request = SimpleNamespace(headers={}, data=data, user=self.user)
             run = SimpleNamespace(run_id="research-1", status="queued")
             with self.subTest(data=data), \
                  patch("integrations.services.daily_research_policy.record_engagement"), \
@@ -163,7 +163,7 @@ class ActivationAdmissionTests(SimpleTestCase):
                 self.assertIsNotNone(queue.call_args.kwargs["billing_refund_context"])
 
     def test_changed_quote_is_rejected_before_charge(self):
-        request = SimpleNamespace(data={"expectedCostPoints": 1}, user=self.user)
+        request = SimpleNamespace(headers={}, data={"expectedCostPoints": 1}, user=self.user)
         with patch.object(views, "charge_content_factory_topic_generation_for_user") as spend:
             response = views._charge_roo_points_for_content_island_topic_generation(request, context=self.context, payload={"requested_topic_count": 4})[-1]
         self.assertEqual(response.status_code, 409)
@@ -171,7 +171,7 @@ class ActivationAdmissionTests(SimpleTestCase):
         spend.assert_not_called()
 
     def test_research_retry_uses_same_scoped_ledger_and_dispatch_key(self):
-        request = SimpleNamespace(data={"clientRequestId": "retry-1", "expectedCostPoints": 4}, user=self.user)
+        request = SimpleNamespace(headers={}, data={"clientRequestId": "retry-1", "expectedCostPoints": 4}, user=self.user)
         charged = Mock(return_value=(self.user, SimpleNamespace(id=12), 4))
         payloads = [{"requested_topic_count": 4}, {"requested_topic_count": 4}]
         with patch.object(views, "charge_content_factory_topic_generation_for_user", charged), \
@@ -364,26 +364,27 @@ class PulseSourceAdmissionTests(SimpleTestCase):
         self.view.company = SimpleNamespace(organization=SimpleNamespace(pk=2))
         self.user = SimpleNamespace(pk=1)
 
-    def test_selected_disconnected_or_unconfigured_source_blocks_before_shared_generation(self):
+    def test_stale_cached_status_cannot_replace_the_durable_all_source_barrier(self):
         from vibe_raising.views import VibeRaisingEmailDraftStartView
         for row in ({"key": "gmail", "status": "reauth_required", "selected": False},
                     {"key": "google_analytics", "status": "connected", "selected": False, "usableForUpdates": False},
                     {"key": "gmail", "status": "syncing", "selected": True},
                     {"key": "gmail", "status": "connected", "selected": True, "available": False},
                     {"key": "gmail", "status": "connected", "selected": True, "usableForUpdates": False}):
-            request = SimpleNamespace(user=self.user, data={"inputSources": [row["key"]], "manualSummary": "Founder notes"})
-            with self.subTest(row=row), patch("integrations.services.external_connectors.serialize_source_status", return_value={"sources": [row]}), \
-                 patch.object(VibeRaisingEmailDraftStartView, "post") as generate:
+            request = SimpleNamespace(headers={}, user=self.user, data={"inputSources": [row["key"]], "manualSummary": "Founder notes"})
+            with self.subTest(row=row), patch("integrations.services.external_connectors.serialize_source_status", return_value={"sources": [row]}) as cached, \
+                 patch.object(VibeRaisingEmailDraftStartView, "post", return_value=Response({}, status=201)) as generate:
                 response = self.view.post(request)
-                self.assertEqual(response.status_code, 409)
-                self.assertEqual(response.data["unavailableSources"], [row["key"]])
-                generate.assert_not_called()
+                self.assertEqual(response.status_code, 201)
+                generate.assert_called_once_with(request)
+                cached.assert_not_called()
+                self.assertEqual(request.data["inputSources"], [row["key"]])
 
     def test_explicit_source_exclusion_preserves_notes_only_and_usable_sources(self):
         from vibe_raising.views import VibeRaisingEmailDraftStartView
         for data in ({"inputSources": [], "manualSummary": "Founder notes"},
                      {"inputSources": ["gmail"], "manualSummary": "Founder notes"}):
-            request = SimpleNamespace(user=self.user, data=data)
+            request = SimpleNamespace(headers={}, user=self.user, data=data)
             with self.subTest(data=data), patch("integrations.services.external_connectors.serialize_source_status", return_value={"sources": [
                     {"key": "gmail", "status": "connected", "selected": True, "enabled": False}]}), \
                  patch.object(VibeRaisingEmailDraftStartView, "post", return_value=Response({}, status=202)) as generate:

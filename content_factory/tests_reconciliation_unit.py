@@ -120,7 +120,7 @@ class SplitRunRecoveryTests(SimpleTestCase):
             self.assertFalse(reconciliation.worker_recovery_supported(base_url="https://fixture.test", headers={}))
 
     def fake_run(self):
-        return SimpleNamespace(run_id="fixture-run", result={}, run_request={}, status="running",
+        return SimpleNamespace(run_id="fixture-run", workflow="repo_scan", result={}, run_request={}, status="running",
             updated_at=timezone.now() - timedelta(minutes=12), organization_id=7, save=Mock())
 
     def test_fresh_worker_heartbeat_never_recovers(self):

@@ -362,7 +362,7 @@ class ArticleGenerationGateEndpointTests(TestCase):
 
         response = self.client.post(
             self.ARTICLE_URL,
-            {"topic": "How coworking boosts focus", "targetKeyword": "coworking focus"},
+            {"expectedCostPoints": 12, "topic": "How coworking boosts focus", "targetKeyword": "coworking focus"},
             format="json",
         )
 

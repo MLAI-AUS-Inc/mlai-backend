@@ -120,13 +120,21 @@ class PointsPurchaseService:
     def frontend_checkout_page_url(purchase: PointsPurchase) -> str:
         if (purchase.purchase_from or {}).get("surface") == "my-startup":
             frontend_base_url = getattr(settings, "COMMUNITY_CHAT_FRONTEND_URL", "https://chat.mlai.au").rstrip("/")
-            return f"{frontend_base_url}/my-startup/credits/{purchase.id}"
+            from urllib.parse import urlencode
+            from .startup_checkout_return import purchase_return_fields
+            query = purchase_return_fields(purchase)
+            suffix = "?" + urlencode(query) if query else ""
+            return f"{frontend_base_url}/my-startup/credits/{purchase.id}{suffix}"
         frontend_base_url = getattr(settings, 'DEFAULT_FRONTEND_URL', 'https://mlai.au').rstrip('/')
         return f"{frontend_base_url}/roo/topup/{purchase.id}"
 
     @staticmethod
     def stripe_return_url(purchase: PointsPurchase, outcome: str) -> str:
-        return f"{PointsPurchaseService.frontend_checkout_page_url(purchase)}?checkout={outcome}"
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+        parsed = urlsplit(PointsPurchaseService.frontend_checkout_page_url(purchase))
+        query = dict(parse_qsl(parsed.query))
+        query["checkout"] = outcome
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
 
     @staticmethod
     @transaction.atomic
@@ -521,10 +529,20 @@ class PointsService:
         account.expired_or_reversed_points = PointsService.microroo_to_legacy_whole(account.expired_or_reversed_microroo)
 
     @staticmethod
-    def _reserved_microroo(user: User, *, exclude_turn_id=None) -> int:
+    def _reserved_microroo(
+        user: User, *, exclude_turn_id=None, exclude_event_redemption_id=None,
+        include_digital=False,
+    ) -> int:
+        """Return outstanding holds in the caller's eligible points bucket.
+
+        Coding reserves digital credits as well as general points. General-only
+        spends must protect only the part that cannot be covered by remaining
+        digital credits. Digital-service spends protect the whole coding hold.
+        Event discounts always reserve general points.
+        """
         # Imported lazily so the foundational points service remains usable
         # while migrations are being applied.
-        from .models import CodingTurn
+        from .models import CodingTurn, EventDiscountRedemption
 
         query = CodingTurn.objects.filter(
             user=user,
@@ -532,12 +550,21 @@ class PointsService:
         )
         if exclude_turn_id is not None:
             query = query.exclude(id=exclude_turn_id)
-        return sum(
+        coding_reserved = sum(
             max(turn.reserved_microroo - turn.settled_microroo - turn.released_microroo, 0)
             for turn in query.only(
                 "reserved_microroo", "settled_microroo", "released_microroo"
             )
         )
+        if not include_digital and coding_reserved:
+            digital = PointsAccount.objects.filter(user=user).values_list(
+                "digital_balance_microroo", flat=True,
+            ).first() or 0
+            coding_reserved = max(coding_reserved - digital, 0)
+        events = EventDiscountRedemption.objects.filter(user=user, status="processing")
+        if exclude_event_redemption_id is not None:
+            events = events.exclude(pk=exclude_event_redemption_id)
+        return coding_reserved + sum(events.values_list("reserved_microroo", flat=True))
 
     @staticmethod
     def get_available_microroo(user: User, *, exclude_turn_id=None) -> int:
@@ -1054,6 +1081,7 @@ class PointsService:
         reference_type: Optional[str] = None,
         reference_id: Optional[str] = None,
         purchased_delta_microroo: Optional[int] = None,
+        allow_event_redemption_id=None,
     ) -> Tuple[Ledger, bool]:
         """
         Spend points (deduct from balance) with balance check and idempotency.
@@ -1077,6 +1105,11 @@ class PointsService:
         """
         if delta <= 0:
             raise ValueError("Spend delta must be positive")
+        if allow_event_redemption_id is not None and (
+            source != "EVENT" or reference_type != "EVENT_DISCOUNT"
+            or str(reference_id) != str(allow_event_redemption_id)
+        ):
+            raise ValueError("An event hold can only settle its matching event redemption")
         from .digital_points import DIGITAL_SOURCES, spend as spend_digital
         if source in DIGITAL_SOURCES:
             if purchased_delta_microroo is not None:
@@ -1124,7 +1157,9 @@ class PointsService:
         
         # Check balance
         available_microroo = max(
-            account.balance_microroo - PointsService._reserved_microroo(user),
+            account.balance_microroo - PointsService._reserved_microroo(
+                user, exclude_event_redemption_id=allow_event_redemption_id,
+            ),
             0,
         )
         if available_microroo < delta_microroo:
@@ -1139,6 +1174,10 @@ class PointsService:
                     user=user,
                     delta=-delta,
                     delta_microroo=-delta_microroo,
+                    purchased_delta_microroo=-(
+                        purchased_delta_microroo if purchased_delta_microroo is not None
+                        else min(account.purchased_topup_balance_microroo, delta_microroo)
+                    ),
                     kind='SPEND',
                     source=source,
                     reference_type=reference_type,
@@ -1457,7 +1496,9 @@ class CoworkingService:
         Return whether a bound founder has an approved update's 30-day benefit.
 
         Require authoritative ABR verification, including eligible nonprofits
-        without an ACN. The benefit survives edits to the working draft and
+        without an ACN, and an approved community/public revision for new
+        benefits. Pre-policy approvals retain their earned windows. The benefit
+        survives edits to the working draft and
         expires exactly 30 days after first approval. Advance bookings must also
         fall inside the benefit window, using Melbourne booking dates.
         """
@@ -1472,7 +1513,7 @@ class CoworkingService:
             UserStartupBinding,
         )
         from vibe_raising.registration import company_is_verified
-        from startup_updates.benefits import approved_update_at
+        from startup_updates.benefits import discount_approved_update_at
 
         eligibility_user_ids = coworking_eligibility_user_ids(user)
         org_ids = list(
@@ -1521,7 +1562,7 @@ class CoworkingService:
         )
         return any(
             anchor is not None and window_start < anchor <= now
-            for anchor in (approved_update_at(draft) for draft in candidates)
+            for anchor in (discount_approved_update_at(draft) for draft in candidates)
         )
 
     @staticmethod
@@ -1534,7 +1575,7 @@ class CoworkingService:
 
         Defaults to the standard cost (from catalog/settings). When both
         ``user`` and ``booking_date`` are supplied and the user's ABR-verified
-        startup has a monthly update first approved within the last 30
+        startup has a shared monthly update first approved within the last 30
         days, the discounted cost applies instead — rewarding founders who keep
         their monthly update current.
         """
@@ -2943,7 +2984,7 @@ class RewardsService:
         
         If user is provided, includes information about their eligibility.
         """
-        rewards = RewardsCatalog.objects.filter(is_active=True)
+        rewards = RewardsCatalog.objects.filter(is_active=True, event_discount_offer__isnull=True)
         
         result = []
         for reward in rewards:
@@ -3004,6 +3045,8 @@ class RewardsService:
             reward = RewardsCatalog.objects.select_for_update().get(code=reward_code, is_active=True)
         except RewardsCatalog.DoesNotExist:
             raise ValueError(f"Reward {reward_code} not found or not available")
+        if reward.code == "EVENT_TICKET" or hasattr(reward, "event_discount_offer"):
+            raise ValueError("Event discounts must be redeemed through a confirmed event quote")
         
         total_cost = reward.cost_points * quantity
         
@@ -3094,6 +3137,8 @@ class RewardsService:
             )
         
         reward = redemption.reward
+        if reward.code == "EVENT_TICKET" or hasattr(reward, "event_discount_offer"):
+            raise ValueError("Event discounts must be redeemed through a confirmed event quote")
         total_cost = reward.cost_points * redemption.quantity
         
         idempotency_key = f"reward_spend:{redemption.id}"

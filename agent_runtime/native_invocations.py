@@ -9,10 +9,11 @@ from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
-from . import native_crypto, native_sources, runtime
+from . import native_crypto, native_sources, personal_context, runtime
 from .models import AgentAuditEvent, AgentCredential, AgentGrant, AgentInstallation, AgentInvocation, AgentInvocationReply, AgentOAuthBinding, AgentSubscription
 from .policy import AgentPermissionDenied, authorize, canonical_hash, idempotency_key as validate_idempotency_key, validate_grant_base
 from .authentication import validate_credential
@@ -79,9 +80,12 @@ def validate_invocation(invocation, grant, *, now=None, allow_replied=False, all
     now = now or timezone.now()
     validate_grant_base(grant, expected_generation=invocation.generation, now=now)
     installation = grant.installation
+    personal = personal_context.is_resource(invocation.resource)
+    if personal:
+        personal_context.validate_mode(grant, invocation.resource)
     if (invocation.grant_id != grant.pk or invocation.installation_id != installation.pk
-            or installation.app_id != "openai-dot" or invocation.resource not in grant.resources
-            or str(installation.community_id) != native_sources.parse_resource(invocation.resource)[0]
+            or installation.app_id != "openai-dot" or (not personal and invocation.resource not in grant.resources)
+            or str(installation.community_id) != native_sources.parse_resource(personal_context.actual_resource(invocation.resource))[0]
             or not HEX_ID.fullmatch(invocation.owner_public_key)):
         raise AgentPermissionDenied("invocation_inactive")
     allowed = {"pending"} | ({"replied"} if allow_replied else set()) | ({"expired"} if allow_expired else set())
@@ -120,18 +124,26 @@ def _authorized_invocation(principal, invocation_id, scope, *, allow_replied=Fal
     if bound.pk != principal.grant.installation.owner_device_id:
         raise AgentPermissionDenied("owner_device_changed")
     native_sources.current_device(principal.owner, public_key=invocation.owner_public_key)
-    checker = lambda owner, action, resource: native_sources.live_access(owner, action, resource, owner_public_key=invocation.owner_public_key)
-    authorize(principal.grant, scope, invocation.resource, expected_generation=principal.credential.generation,
-              access_checker=checker, now=now)
+    authorize_source(principal.grant, invocation, scope, expected_generation=principal.credential.generation, now=now)
     return principal, invocation
+
+
+def authorize_source(grant, invocation, scope, *, expected_generation=None, now=None):
+    """Keep personal per-request proof separate from ordinary exact-resource grants."""
+    if personal_context.is_resource(invocation.resource):
+        return personal_context.authorize_invocation(grant, invocation, scope,
+            expected_generation=expected_generation, now=now)
+    checker = lambda owner, action, resource: native_sources.live_access(owner, action, resource, owner_public_key=invocation.owner_public_key)
+    return authorize(grant, scope, invocation.resource, expected_generation=expected_generation, access_checker=checker, now=now)
 
 
 def payload(invocation, *, now=None):
     now = now or timezone.now()
     return {"invocation_id": str(invocation.pk), "installation_id": str(invocation.installation_id),
-        "resource": invocation.resource, "source_event_id": invocation.source_event_id,
+        "resource": personal_context.actual_resource(invocation.resource), "source_event_id": invocation.source_event_id,
         "thread_id": invocation.thread_id, "status": invocation.status, "expires_at": invocation.expires_at.isoformat(),
-        "context_policy": "triggering_public_thread_only", "caller_public_key": invocation.owner_public_key,
+        "context_policy": personal_context.CONTEXT_POLICY if personal_context.is_resource(invocation.resource) else "triggering_public_thread_only",
+        "caller_public_key": invocation.owner_public_key,
         "created_at": invocation.created_at.isoformat(),
         "age_seconds": max(0, int((now - invocation.created_at).total_seconds())), "caller_is_owner": True}
 
@@ -147,9 +159,12 @@ def _pending_invocations(principal):
     bound = native_sources.current_device(principal.owner, public_key=grant.installation.owner_device.public_key)
     if bound.pk != grant.installation.owner_device_id:
         raise AgentPermissionDenied("owner_device_changed")
-    rows = runtime.locked(AgentInvocation.objects.all()).filter(
+    filters = {} if personal_context.enabled() else {"resource__in": grant.resources}
+    destinations = ((Q(resource__in=grant.resources) | Q(resource__startswith=
+        f"community:{grant.installation.community_id}:personal-channel:")),) if personal_context.enabled() else ()
+    rows = runtime.locked(AgentInvocation.objects.all()).filter(*destinations,
         grant=grant, installation=grant.installation, generation=principal.credential.generation,
-        resource__in=grant.resources, status="pending", expires_at__gt=now, reply__isnull=True,
+        status="pending", expires_at__gt=now, reply__isnull=True, **filters,
     ).order_by("created_at", "pk")
     allowed, access = [], {}
     for invocation in rows:
@@ -157,6 +172,10 @@ def _pending_invocations(principal):
         try:
             validate_invocation(invocation, grant, now=now)
             native_sources.current_device(principal.owner, public_key=invocation.owner_public_key)
+            if personal_context.is_resource(invocation.resource):
+                authorize_source(grant, invocation, "messages:read", expected_generation=principal.credential.generation, now=now)
+                allowed.append(invocation)
+                continue
             key = (invocation.owner_public_key, invocation.resource)
             if key not in access:
                 checker = lambda owner, action, resource: native_sources.live_access(
@@ -170,7 +189,11 @@ def _pending_invocations(principal):
                     access[key] = True
             if access[key]:
                 allowed.append(invocation)
-        except (AgentPermissionDenied, PermissionDenied, ValidationError):
+        except AgentPermissionDenied as exc:
+            if personal_context.is_resource(invocation.resource) and exc.code == "resource_unavailable":
+                raise
+            continue
+        except (PermissionDenied, ValidationError):
             continue
     return principal, allowed
 
@@ -217,7 +240,7 @@ def reply_event(invocation, text, *, created_at, now=None):
     now = now or datetime.fromtimestamp(created_at, tz=datetime_timezone.utc)
     installation = invocation.installation
     context = native_sources.invocation_context(invocation, operation="reply", now=now)
-    _, channel = native_sources.parse_resource(invocation.resource)
+    _, channel = native_sources.parse_resource(personal_context.actual_resource(invocation.resource))
     tags = [["h", channel], ["e", invocation.thread_id, "", "root"],
         ["e", invocation.source_event_id, "", "reply"],
         ["native_invocation", native_crypto.canonical_json(context)],
@@ -271,15 +294,21 @@ def invocation_deliverable(grant, invocation_id, *, expected_resource=None, now=
     try:
         native_sources.require_native()
         invocation = AgentInvocation.objects.get(pk=invocation_id, grant=grant, installation=grant.installation)
-        if expected_resource is not None and invocation.resource != expected_resource:
+        if expected_resource is not None and personal_context.notification_resource(invocation) != expected_resource:
             return False
         validate_invocation(invocation, grant, now=now)
         if grant.installation.owner_device is None:
             return False
         bound = native_sources.current_device(grant.installation.owner, public_key=grant.installation.owner_device.public_key)
         native_sources.current_device(grant.installation.owner, public_key=invocation.owner_public_key)
+        if personal_context.is_resource(invocation.resource):
+            authorize_source(grant, invocation, "events:read", expected_generation=invocation.generation, now=now)
         return bound.pk == grant.installation.owner_device_id
-    except (AgentInvocation.DoesNotExist, AgentPermissionDenied, PermissionDenied, ValidationError, ValueError):
+    except AgentPermissionDenied as exc:
+        if exc.code == "resource_unavailable":
+            raise
+        return False
+    except (AgentInvocation.DoesNotExist, PermissionDenied, ValidationError, ValueError):
         return False
 
 
@@ -563,9 +592,7 @@ def dispatch_native_replies(*, limit=50, now=None):
                 if bound.pk != grant.installation.owner_device_id:
                     raise AgentPermissionDenied("owner_device_changed")
                 native_sources.current_device(grant.installation.owner, public_key=invocation.owner_public_key)
-                checker = lambda owner, action, resource: native_sources.live_access(owner, action, resource, owner_public_key=invocation.owner_public_key)
-                authorize(grant, "messages:reply", invocation.resource, expected_generation=invocation.generation,
-                          access_checker=checker, now=now)
+                authorize_source(grant, invocation, "messages:reply", expected_generation=invocation.generation, now=now)
                 # Source ACL checks can take time; use the actual send boundary.
                 now = supplied_now or timezone.now()
                 if _reply_window_elapsed(row, now):

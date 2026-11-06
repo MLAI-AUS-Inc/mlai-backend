@@ -37,8 +37,11 @@ from .views import VibeRaisingBusinessHealthView
 
 from .cover_views import UpdateCoverUploadView, UpdateCoverGenerateView, UpdateCoverStatusView
 from .progress_views import ProgressView, ProgressCustomMetricView, ProgressGoogleAnalyticsView
+from .financial_refresh_views import FinancialRefreshView, FinancialRefreshStatusView
 
 urlpatterns = [
+    path("financial-refresh/", FinancialRefreshView.as_view(), name="pulse-financial-refresh"),
+    path("financial-refresh/<str:refresh_id>/", FinancialRefreshStatusView.as_view(), name="pulse-financial-refresh-status"),
     path("progress/", ProgressView.as_view(), name="startup-progress"),
     path("progress/custom-metrics/", ProgressCustomMetricView.as_view(), name="startup-progress-custom"),
     path("progress/google-analytics/", ProgressGoogleAnalyticsView.as_view(), name="startup-progress-ga"),

@@ -44,6 +44,9 @@ class SealedAdmissionBillingTests(SimpleTestCase):
             source="CONTENT_FACTORY", reference_type="CONTENT_FACTORY", reference_id=billing.request_key(goal),
             idempotency_key="content_factory:charge:" + billing.request_key(goal), delta_microroo=-6_000_000)
         with self.boundaries(), value.ExitStack() as stack:
+            # Preserve real stamping while isolating its database-backed
+            # membership policy from these sealed-admission I/O fixtures.
+            stack.enter_context(patch("content_factory.p2_foundation.merge_policy_for", return_value=None))
             stack.enter_context(patch.object(generation, "_validate_authenticated_content_factory_actor"))
             stack.enter_context(patch("content_factory.activation.founder_context_for_domain", return_value=value.context))
             stack.enter_context(patch.object(views, "_latest_runs_for_org", return_value=[]))

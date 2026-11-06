@@ -77,8 +77,13 @@ class SealedWorkflowTests(SimpleTestCase):
             stack.enter_context(patch.object(WebsiteConnection, "operations", operations))
             operations.filter.side_effect = rows
             stack.enter_context(patch.object(WebsiteConnection.objects, "get", return_value=value.website))
-            stack.enter_context(patch.object(ContentFactoryRun.objects, "filter", side_effect=lambda **query:
-                value.rows(first=self.source_run if query.get("run_id") == "setup-parent" else self.child_run)))
+            def run_rows(**query):
+                # These legacy rows have no sealed backend admission. Match
+                # that new canonical lookup instead of returning any child.
+                if any(key.startswith("result__run_owner_v1") for key in query):
+                    return value.rows(first=None)
+                return value.rows(first=self.source_run if query.get("run_id") == "setup-parent" else self.child_run)
+            stack.enter_context(patch.object(ContentFactoryRun.objects, "filter", side_effect=run_rows))
             yield
 
     def pending(self):

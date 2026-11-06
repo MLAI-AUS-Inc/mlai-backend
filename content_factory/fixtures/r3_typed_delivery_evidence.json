@@ -1,0 +1,232 @@
+{
+  "backend_run_admission_v1": {
+    "dispatch_key": "dispatch-1",
+    "domain": "example.test",
+    "event_protocol": 1,
+    "github_repo": "",
+    "organization_id": "42",
+    "principal": {
+      "actor_id": "U_FIXTURE",
+      "kind": "user",
+      "user_id": "7"
+    },
+    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "schema_version": 1,
+    "scope": {
+      "connection_generation": null,
+      "connection_target_id": null,
+      "deletion_epoch": null,
+      "expected_source_sha": null,
+      "operation_attempt": null,
+      "operation_id": null,
+      "repository_id": null,
+      "source_run_id": null,
+      "website_connection_id": null
+    },
+    "workflow": "article_generation"
+  },
+  "backend_run_execution_v1": {
+    "admission_digest": "ece8e1471e2e83e6ad3ec60bbdaa8e2eb222a674f4c599e6ca2eff169d531dd1",
+    "execution_id": "admit:ece8e1471e2e83e6ad3ec60bbdaa8e2eb222a674f4c599e6ca2eff169d531dd1",
+    "generation": 0,
+    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "schema_version": 1,
+    "scope": {
+      "connection_generation": null,
+      "connection_target_id": null,
+      "deletion_epoch": null,
+      "expected_source_sha": null,
+      "operation_attempt": null,
+      "operation_id": null,
+      "repository_id": null,
+      "source_run_id": null,
+      "website_connection_id": null
+    }
+  },
+  "evidence": [
+    {
+      "backend_run_admission_v1": {
+        "dispatch_key": "dispatch-1",
+        "domain": "example.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "42",
+        "principal": {
+          "actor_id": "U_FIXTURE",
+          "kind": "user",
+          "user_id": "7"
+        },
+        "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "article_generation"
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "ece8e1471e2e83e6ad3ec60bbdaa8e2eb222a674f4c599e6ca2eff169d531dd1",
+        "execution_id": "admit:ece8e1471e2e83e6ad3ec60bbdaa8e2eb222a674f4c599e6ca2eff169d531dd1",
+        "generation": 0,
+        "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "evidence_sha256": "63c846f86d7ce1b608c2f4ea30be236b757da74de78fa91de3265dffd192c498",
+      "kind": "article_body_v1",
+      "observed_at": "2026-11-02T16:58:40.384118+00:00",
+      "payload": {
+        "article_sha256": "9db2cf82ac69dfaeb774b150e20e372ad049b69bbb4f3a7bcc22b0a9bfc340c6",
+        "body": "# Marketing AI for Small Business\n\nPractical steps for small business owners using AI.\n\n## Key facts\n\n### Focus\n\nStart with one repeatable workflow.\n\n### Measure\n\nTrack saved time and revenue impact.\n\n### Refine\n\nTighten the process before scaling.\n\n<nav aria-label=\"Table of contents\" data-cf-component-id=\"toc\" data-cf-component-type=\"toc\" data-cf-component-label=\"Table of contents\"><p><strong>In this article</strong></p><ol><li><a href=\"#intro\" data-cf-toc-target=\"intro\">Why this matters</a></li><li><a href=\"#workflow\" data-cf-toc-target=\"workflow\">Choose one workflow first</a></li></ol></nav>\n\n<a id=\"intro\"></a>\n## Why this matters\n\nAI can help small teams move faster without adding headcount.\n\nRelated reading:\n- [/resources](/resources)\n- [/events](/events)\n\n<a id=\"workflow\"></a>\n## Choose one workflow first\n\nPick one repetitive marketing task and document the baseline.\n\nRelated reading:\n- [/community](/community)\n\n## FAQ\n\n### Where should I start?\n\nStart with one low-risk workflow.\n\n## Next Step\n\n**Need help with AI workflows?**\n\nTalk to the MLAI team about practical next steps.\n\n[Learn more](/contact)",
+        "format": "markdown",
+        "revision": "ffef5f8d156ea410aa927c1045b183c8a41ae5c3af32a67aca3e2ffbfd8e92cd"
+      },
+      "payload_sha256": "6908e9842931cfc6b2bc62f6e3a06105a065d427fc49d84ed98eb43c28662709",
+      "run_id": "owned-run",
+      "schema_version": 1,
+      "source_sha256": "287f76bc545646198af7df7c589a90c03edba5ea961b8428bad54307afe30c0e"
+    },
+    {
+      "backend_run_admission_v1": {
+        "dispatch_key": "dispatch-1",
+        "domain": "example.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "42",
+        "principal": {
+          "actor_id": "U_FIXTURE",
+          "kind": "user",
+          "user_id": "7"
+        },
+        "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "article_generation"
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "ece8e1471e2e83e6ad3ec60bbdaa8e2eb222a674f4c599e6ca2eff169d531dd1",
+        "execution_id": "admit:ece8e1471e2e83e6ad3ec60bbdaa8e2eb222a674f4c599e6ca2eff169d531dd1",
+        "generation": 0,
+        "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "evidence_sha256": "82a5c5e3a5ca6a0936402dd70d5b501816c4f10eaff43acf4f1c3fb602e8dde6",
+      "kind": "draft_ready_v1",
+      "observed_at": "2026-11-02T16:58:40.392683+00:00",
+      "payload": {
+        "at": "2026-11-03T00:00:00+00:00",
+        "revision": "ffef5f8d156ea410aa927c1045b183c8a41ae5c3af32a67aca3e2ffbfd8e92cd",
+        "version": 1
+      },
+      "payload_sha256": "a4a0743efa9eecdd3e355855d90388567d1bfff0d50e6c146830b2914217aee0",
+      "run_id": "owned-run",
+      "schema_version": 1,
+      "source_sha256": "a4a0743efa9eecdd3e355855d90388567d1bfff0d50e6c146830b2914217aee0"
+    },
+    {
+      "backend_run_admission_v1": {
+        "dispatch_key": "dispatch-1",
+        "domain": "example.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "42",
+        "principal": {
+          "actor_id": "U_FIXTURE",
+          "kind": "user",
+          "user_id": "7"
+        },
+        "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "article_generation"
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "ece8e1471e2e83e6ad3ec60bbdaa8e2eb222a674f4c599e6ca2eff169d531dd1",
+        "execution_id": "admit:ece8e1471e2e83e6ad3ec60bbdaa8e2eb222a674f4c599e6ca2eff169d531dd1",
+        "generation": 0,
+        "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "evidence_sha256": "5eaa3982fecf5034569ff68a40b4b32ff7082c59d79c301a07740bcbd89f952c",
+      "kind": "publish_pr_v1",
+      "observed_at": "2026-11-02T16:58:40.385548+00:00",
+      "payload": {
+        "article_sha256": "9db2cf82ac69dfaeb774b150e20e372ad049b69bbb4f3a7bcc22b0a9bfc340c6",
+        "base": "main",
+        "branch": "mlai/article",
+        "head_repository_id": 7,
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "kind": "article",
+        "number": 12,
+        "pr_url": "https://github.com/example/site/pull/12",
+        "repository_id": 7,
+        "review_quality_inputs_sha256": null
+      },
+      "payload_sha256": "75d59be8553f781f000f765b84a55991cb9e97cb87ba026dd79263be66c4acdf",
+      "run_id": "owned-run",
+      "schema_version": 1,
+      "source_sha256": "d1368e2a873e1c95ab76c18558562905382775f316cc9064132bf7f1a4c28cd5"
+    }
+  ],
+  "run_id": "owned-run",
+  "schema_version": 1
+}

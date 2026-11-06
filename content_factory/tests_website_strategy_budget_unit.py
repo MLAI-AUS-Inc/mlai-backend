@@ -24,7 +24,7 @@ class StrategyTests(SimpleTestCase):
             self.assertEqual(goal["strategy_pin"]["rung"], rung)
             self.assertEqual(strategy.ensure_pin(goal, {}, source=self.source, now=self.now), goal)
             goal = strategy.advance(goal, source=self.source, now=self.now, reason="strategy_exhausted")
-        self.assertEqual(len(goal["strategy_history"]), 6)
+        self.assertEqual(len(goal["strategy_history"]), len(strategy.RUNGS))
 
     def test_exhaustion_cannot_cross_goal_source_or_pin_revision(self):
         goal = strategy.ensure_pin(self.goal, {}, source=self.source, now=self.now)
@@ -124,6 +124,11 @@ class BudgetTests(SimpleTestCase):
 
 @override_settings(ARTICLES_WEBSITE_STRATEGY_ENABLED=True, ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED=True)
 class RunnerPolicyTests(SimpleTestCase):
+    def setUp(self):
+        from unittest.mock import patch
+        from workflow_runs.models import ContentFactoryRun
+        self.enterContext(patch.object(ContentFactoryRun.objects, "filter", return_value=[]))
+
     def test_failure_replay_does_not_advance_pin_twice_and_repair_keeps_its_rung(self):
         from . import website_goal_runner as runner
         op = fixtures.GoalRunnerRegressions().operation()

@@ -138,6 +138,26 @@ class IslandResearchTests(unittest.TestCase):
         self.assertEqual(points.refund.call_args.kwargs["original_spend_key"], ledger.idempotency_key)
         self.assertTrue(run.result["island_research_refunded"])
 
+    def test_worker_refusal_refunds_actual_payer_once(self):
+        payer = SimpleNamespace(pk="original-payer")
+        ledger = SimpleNamespace(idempotency_key="content_factory:topic_generation:charge:key", user=payer, delta=-1, source="CONTENT_FACTORY", created_by_slack_id="web:payer", reference_id="key")
+        ledgers, points = Mock(), Mock()
+        ledgers.select_related.return_value.filter.return_value.first.return_value = ledger
+        run = SimpleNamespace(status="denied", domain="example.test", save=Mock(),
+            run_request={"island_research_brief": BRIEF, "client_request_id": "key"},
+            result={"status": "denied", "error_code": "website_connection_required", "retryable": False})
+        modules = {"roo.models": module("roo.models", Ledger=SimpleNamespace(objects=ledgers)),
+                   "roo.services": module("roo.services", PointsService=points)}
+        with patch.dict(sys.modules, modules):
+            refund_empty_or_failed_research(run)
+            refund_empty_or_failed_research(run)
+        points.refund.assert_called_once()
+        self.assertIs(points.refund.call_args.kwargs["user"], payer)
+        self.assertEqual(points.refund.call_args.kwargs["delta"], 1)
+        self.assertEqual(points.refund.call_args.kwargs["idempotency_key"], "content_factory:topic_generation:refund:key")
+        self.assertTrue(run.result["island_research_refunded"])
+        self.assertEqual(run.result["error_code"], "website_connection_required")
+
     def test_ambiguous_dispatch_and_successful_research_are_never_refunded(self):
         points = Mock()
         with patch.dict(sys.modules, {"roo.models": module("roo.models", Ledger=Mock()),

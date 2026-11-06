@@ -34,15 +34,80 @@ All paths are under `/api/v1/community-chat/startups/`. Except the signed browse
 | `generate/` | POST | Explicit company, targetMonth, selected inputSources, optional notes/document IDs |
 | `runs/active/`, `runs/<id>/`, `runs/<id>/results/` | GET | Existing persisted run contract, restricted to this company's domain |
 | `runs/<id>/cancel/` | POST | Existing scoped cancellation and cleanup |
+| `runs/<id>/retry/` | POST | Recheck the same owned run and safely resume its pinned evidence/revisions |
 
 The facade delegates domain behavior to the existing services rather than duplicating startup state. Generation uses the existing active-run deduplication; clients disable duplicate submission. It does not introduce a new durable idempotency-key protocol. Polling backs off from 2.5 to 15 seconds, stops on terminal status, and pauses in background. Completed drafts refresh the archive. Failed status reads offer retry.
+
+Owner archive/detail responses include the selected revision's private
+`evidenceSnapshot`, including when `version=published` selects an older approved
+revision. Dashboard financial reporting uses that frozen snapshot independently
+of the metrics selected for sharing. Community and public projections never
+include the snapshot. Refreshing historical reporting evidence creates a separate
+private approved update, preserving shared revisions and approval receipts.
+
+## Plain-language context and own-AI drafts — 25 October 2026
+
+`startupOverview` is optional text of at most 2,000 characters in founder saves,
+generated results, and the MCP `save_narrative_draft.narrative` object. It describes
+what the startup does, who it helps, and the problem it solves in one or two short
+sentences. An omitted field retains a saved overview; an explicit empty string
+clears it. An overview alone does not qualify an empty monthly update for approval.
+Read responses omit this field when a historical revision never had it, while
+preserving a saved empty string. Reopening an old draft therefore does not turn
+missing context into a founder's instruction to suppress the generated overview.
+Historical publications remain unchanged and never acquire live profile text.
+The overview uses the existing financial redaction rules in shared views and
+financial-history exports; opting into chart amounts does not disclose amounts
+embedded in the introduction.
+
+Generation accepts the same optional field separately from monthly notes. The
+run freezes it as `startup_overview`, including deliberate blank text. The compact
+snapshot `startup` includes the frozen profile's `short_description`,
+`problem_solved`, and `target_audience`, plus an explicit override when supplied.
+Full source context still uses the existing deduplicated `startup_context` field.
+A repeated request for the same active run and overview reuses that run; changed
+background conflicts until the founder finishes or cancels it. This does not
+change the monthly activity window or create a monthly event from company context.
+
+The own-AI brief supplies these safe profile fields and asks for conversational,
+self-contained bullets: one or two summary bullets and up to four in other
+sections. Each bullet states what happened and why it matters, preserves material
+limitations, and explains necessary terminology. Source-retrieval and coverage
+notes remain in the private `coverageNotes` field. Asks identify a supported action
+without inventing deadlines, contacts or needs.
+
+The overview belongs to the saved revision and approval hash. Owner preview,
+community/public projections, public HTML, email draft results and Markdown export
+all use the selected revision. Reads never fill historical omissions from a live
+company profile. Shared projections apply the same monetary redaction as all other
+narrative sections. Own-AI writes remain private and require explicit founder
+review; overview edits cannot bypass stale-revision or failed-evidence checks.
+
+The real HTTP/ORM regression is
+`community_chat.tests.test_startup_readability_database`. For an isolated local
+run, use `scripts/test_pulse_readability_database.py` only after explicit approval
+of the exact 373-file inventory in
+`pulse-readability-test-migrations-2026-10-25.json` (SHA-256
+`8495cdb1a849bbca019ea54ac59fcd2b14d6e2de3b3b98555fcfad70555f1810`).
+The user approved this exact inventory for disposable local and CI test databases
+on 25 October 2026. That approval does not authorise production migrations.
+The runner disables dotenv, external credentials and network access, verifies all
+migration hashes, and creates and deletes a fresh disposable SQLite database.
+`--include-regressions` also runs the existing startup identity, review, financial
+and progress tests within the same verified migration scope.
+`--sample-output /absolute/path.json` exports only the fictional RouteNest test
+trace after all tests pass. The deterministic API fixture is identified as such;
+`--generated-sample /absolute/model-sample.json` instead replays the narrative
+from an approved synthetic Valley preflight and records its file hash and model
+names. It makes no model call or backend request outside the local test client. This feature
+adds no model changes or migrations.
 
 ## Connection tiles and lifecycle additions — 26 September 2026
 
 The source catalog contains `gmail`, `stripe`, `humanitix`, `xero`, `bank_feed`, `notion`, `google_drive`, `slack`, `linear`, `google_analytics`, and `luma`. Existing fields are preserved; each source adds `connectMode` (`oauth` or `api_key`), `canConnect`, `canDisconnect`, and `usableForUpdates`. Chat discovers accessible Analytics properties automatically when a draft starts. The separate `connect/google/` handoff requests website/Search Console consent; it is not a Valley input. GitHub remains a separate publishing connection.
 
 - `POST connect/<provider>/` returns `authorizationUrl` for OAuth. The browser redeems the one-use ticket and creates its own OAuth session, avoiding native API-cookie/browser-cookie mismatches. Luma/Humanitix instead accept `apiKey` through their existing scoped validators. The server chooses the return URL: `/my-startup/connections?company_id=<owned-id>&connected=<provider>` on the configured Chat origin. Native clients refresh when the founder returns to the app.
-- `DELETE sources/<provider>/` requires the explicit company and disconnects only that company's accounts.
+- `DELETE sources/<provider>/` requires the explicit company and disconnects only the owned `connectionId`. Omitting the ID is supported only when exactly one account is connected.
 - `DELETE updates/<id>/` takes `companyId`, `revisionId`, and `revisionHash`. A changed revision or active generation returns 409. Deletion removes its community publication, revisions, approval receipts, and unreferenced snapshots. Shared evidence and connected accounts remain.
 - `generate/` requires explicit `inputSources`. An empty selection with notes/documents becomes manual-only; an empty selection without evidence returns 400 instead of silently enabling Gmail. Existing independent-update identity and persisted step-progress contracts are unchanged.
 - Draft saves accept `inputSources`, including an explicit empty list. Private memo selection metadata is separate from frozen evidence; changing toggles does not claim new data was fetched or rewrite past provenance.
@@ -51,24 +116,26 @@ Bootstrap advertises `capabilities.draftReadyPush: false`. Completed runs record
 
 These additions create no schema changes. The local checks cover every signed OAuth provider, API-key delegation, cross-company disconnect isolation, exact-revision deletion, source selection and completion deduplication. They do not prove live provider consent, successful real-device OAuth, or push delivery. Live acceptance requires the founder's provider accounts and an approved environment.
 
-## Linear authentication failures
+## Connection preflight and Linear authentication failures
 
-Pulse refreshes an expired Linear access token before its draft-creation
-transaction. A rejected or missing refresh credential marks that exact connection
+Pulse now saves the generation request and checks every selected source before
+collection or model work. See [Pulse generation reliability](pulse-generation-reliability.md)
+for the durable barrier, recovery and worker receipt contract.
+An expired Linear access token is refreshed during source preparation.
+A rejected or missing refresh credential marks that exact connection
 version as `error`, with a safe reconnect warning; `sources/` exposes it as
 `needs_reauth`. The warning is recorded again after a failed draft transaction
 rolls back, without overwriting a newer OAuth reconnection. Saved credentials
 and imported evidence are retained. Successful refresh or reconnection clears
 the warning.
 
-`generate/` returns HTTP 409 with `code: startup_update_sources_unavailable`,
-`unavailableSources: ["linear"]`, and a message offering reconnection or removal
-of Linear from this update. It does not return a Chat-session authentication
-error. Removing Linear from `inputSources` permits generation with the remaining
-selected sources; the backend never silently removes a selected source or
-substitutes cached Linear evidence. Network failures and provider outages return
-HTTP 503 without marking the credentials as revoked; rate limits include
-`Retry-After`. These changes require no schema migration.
+Run status exposes `sourceChecks` for every selection, including a safe reconnect
+message for Linear rather than a Chat-session authentication error. Failed checks
+remain visible after reopening Pulse. A changed source selection starts a new
+request; retrying the saved run retains its original sources. The backend never
+silently removes a selected source or substitutes another account's evidence.
+Transient checks wait and retry without treating credentials as revoked.
+These changes require no schema migration.
 
 ## Valley queue availability
 
@@ -92,7 +159,7 @@ cannot restore a worker whose queue subscription was cancelled.
 - Notes and extracted document excerpts are included in the versioned snapshot with content hashes; writer and verifier both receive that snapshot. Missing metrics remain unknown. Numeric zero is retained. Explicitly clearing an editable operating metric removes its frozen value. Imported financial, Analytics and Luma figures remain read-only under the existing founder-edit policy; their connectors own changes.
 - A manual write or substantive human correction creates `validation.groundedness_status = founder_asserted`. It requires explicit human review. An audience-only or unchanged save preserves prior validation; it cannot erase failed/pending checks. Missing validation cannot publish.
 - Approval verifies the exact current revision ID, content hash and audience. Later edits leave the prior approved version available until another revision is approved. Conflicts return 409. Draft saves through Chat do not award completion rewards.
-- Community responses allow only narrative, selected metrics with display label/unit/quality, startup name, period and revision/publication identifiers. They exclude raw evidence, attachment metadata, storage paths, provider identifiers, financial charts and private analysis.
+- Community responses strip exact financial metrics and amount-bearing prose, retaining the existing relative single-period comparison. They exclude raw evidence, attachment metadata, storage paths, provider identifiers and private analysis. New revisions can explicitly include the [six-month financial history](startup-progress.md#pulse-financial-history--25-october-2026); sharing dollar amounts requires the founder's separate opt-in, saved and approved with that revision. Existing posts receive no new chart automatically.
 - Uploaded source documents remain private inputs. Their selection is editable. Full startup offboarding removes snapshots through the existing deletion service. Deleting an individual source attachment does not rewrite historical snapshots; frozen evidence is retained with the saved update.
 
 ## Rollout
@@ -305,14 +372,15 @@ The editor sends `displayConfig.coverImage`: watercolor artwork IDs, minimal mon
 
 Approval credits the approving founder's Roo wallet once per update. Eligible
 Australian startups earn 20 points for their first completed update in each
-Australia/Melbourne calendar month; subsequent updates and startups that cannot
-be verified earn 5 points. Reporting-month selection, later edits and reapproval
+Australia/Melbourne calendar month when approved for public or community sharing;
+private approvals, subsequent updates and startups that cannot be verified earn 5 points. Reporting-month selection, later edits and reapproval
 do not reset the allowance. Existing ledger records prevent duplicate credits,
 including older awards made under company/month keys. Deleted updates retain
 their ledger history and cannot reopen the monthly bonus.
 
-A private or shared approved update qualifies. Saving or generating a draft does
-not. Approval and the wallet credit share one transaction: a wallet failure
+Only an approved public or community revision qualifies for new discounts and
+the 20-point tier. Private approvals earn 5 points and no new discount. Saving or
+generating a draft earns no completion points. Approval and the wallet credit share one transaction: a wallet failure
 returns 503 and leaves approval unsaved so retry is safe. Missing or inconclusive
 registration/website evidence uses the five-point tier without blocking approval.
 
@@ -326,7 +394,8 @@ ledger key even when eligibility checks or the wallet credit cross midnight. `ti
 `verified_monthly` or `standard`. `creditedToCurrentUser` avoids claiming that a
 previous approval credited a different founder's current wallet. Owner archive
 and detail reads include `update.reward`; community/public reads omit it. Reads
-never create awards or contact ABR. No schema or data migration is required.
+never create awards or contact ABR. The sharing-policy change requires the migration described in
+[Shared update benefits](shared-update-benefits.md).
 
 
 The bonus checker performs an authoritative active ABR lookup using ABN or ACN,
@@ -348,3 +417,37 @@ calendar-boundary, retry and Volunteer-cap regressions. Database-backed wallet
 and concurrency tests have been updated but not run: `AGENTS.md` requires separate
 approval before a runner constructs a database from migration state. No migration
 was created or applied, and this document does not claim deployment.
+
+## Multiple accounts (November 2026)
+
+`GET sources/` retains its selected-account summary and adds `accounts[]`
+(`connectionId`, `accountLabel`, `status`, `lastSyncedAt`,
+`selectedForReports`, `crmEnabled`), `reportAccountId` and
+`reportAccountMissing`. Tokens and provider metadata are never returned.
+
+- `POST sources/<provider>/` with `{reportAccountId: <integer>}` chooses an
+  account owned by the caller in this company for future reports. Adding an
+  account pins the previous default first. Refresh/sync timestamps cannot change
+  the choice. A disconnected explicit choice is unavailable, never silently
+  replaced by another account. Existing run pins are retained.
+- `DELETE sources/<provider>/` accepts `connectionId`. Omitting it is allowed
+  only when exactly one account exists; multi-account requests must name one.
+  The company/user/provider boundaries are checked before disconnecting.
+- For MLAI admins on verified installations, Luma sources additionally expose
+  `canSelectCrmAccounts`. `POST` with `{connectionId, crmEnabled: true|false}`
+  selects an owned calendar for the community CRM independently of reports.
+  Connecting any founder account by itself never adds it to the CRM.
+
+Luma identities come from its authenticated calendar endpoint. Calendar keys
+are not complete personal host-account feeds. Humanitix has no account identity
+endpoint; separate validated keys are separate connections and reconnecting the
+identical key retains its row. A rotated Humanitix key creates a new connection;
+choose it for reports and disconnect the old one explicitly. GitHub retains its
+existing installation/repository selector; Search Console retains website
+selection. Google Drive remains unavailable as a Pulse input.
+
+The exact approved schema change is `integrations.0051_google_connection_accounts`.
+It adds a nullable verified Google subject and replaces the one-mailbox constraint
+with per-account uniqueness. Existing IDs/tokens remain intact; no data backfill
+or external calls occur in the migration. The local approval and exact test
+inventory are in `plans/multiple-source-accounts/`.

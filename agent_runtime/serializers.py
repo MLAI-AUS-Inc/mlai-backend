@@ -89,6 +89,13 @@ class InstallationStateSerializer(StrictSerializer):
     state = serializers.ChoiceField(choices=("paused", "active"))
 
 
+class PersonalMentionSerializer(StrictSerializer):
+    community_id = serializers.UUIDField()
+    channel_id = serializers.UUIDField()
+    event_id = serializers.RegexField(r"^[0-9a-f]{64}$")
+    owner_public_key = serializers.RegexField(r"^[0-9a-f]{64}$")
+
+
 class EventsSerializer(ResourceSerializer):
     cursor = serializers.CharField(max_length=2048, allow_blank=True, default="")
     limit = serializers.IntegerField(min_value=1, max_value=100, default=50)

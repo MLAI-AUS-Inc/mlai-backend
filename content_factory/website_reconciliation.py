@@ -527,6 +527,7 @@ def disable_pending_native_auto_merge(connection, urls):
 
 def _process_worker_followup(identifier, now):
     """Claim a durable follow-up, release all DB locks, then contact the worker."""
+    from content_factory.run_backend_facts import save_job_facts
     from .website_connections import authority_guard, owner_write_guard
     from .website_contract import WebsiteAuthorityError
     from integrations.services import article_generation
@@ -566,7 +567,7 @@ def _process_worker_followup(identifier, now):
                         markers.append(payload["callback_dedupe_key"])
                     actions["preview_ready_auto_approve"] = markers
                     job.request_meta = {**metadata, "publish_stage": "auto_approved", "callback_actions": actions}
-                    job.save(update_fields=["status", "request_meta", "updated_at"])
+                    save_job_facts(job, update_fields=["status", "request_meta", "updated_at"])
     except WebsiteAuthorityError as exc:
         state, receipt = "cancelled", {"status": "authority_revoked", "code": exc.code, "repository_modified": False}
         if isinstance(remote, dict) and (remote.get("run_id") or remote.get("job_id")):
@@ -758,6 +759,13 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     if not getattr(settings, "ARTICLES_OPERATIONAL_ALERTS_ENABLED", False):
         excluded.append(alert_action)
     unconfigured_alerts = Q(action=alert_action, state="needs_attention", receipt__status="unconfigured") if alert_channel() else Q(pk__in=[])
+    refreshes = []
+    try:
+        # Queue first, so a due refresh is checked in this same pass.
+        refreshes = queue_verification_refreshes(limit=limit, now=now, connection_id=connection_id)
+    except Exception as exc:
+        # Freshness upkeep must never stop cancellation, cleanup or preparation.
+        logger.warning("website_verification_refresh_sweep_failed error_type=%s", type(exc).__name__)
     due = WebsiteConnectionOperation.objects.filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now),
         Q(state="pending") | Q(action="prepare", state="running") | Q(action=notice_action,state="running") | Q(action=refund_action,state="running") |
         Q(action=usage_action, state="running") |
@@ -767,7 +775,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     if connection_id:
         due = due.filter(connection_id=connection_id)
     ids = list(due.order_by("next_attempt_at").values_list("id", flat=True)[:limit])
-    result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0, "operations": []}
+    result = {"status": "completed", "processed": 0, "completed": 0, "pending": 0, "operations": [],
+        "verification_refreshes_queued": len(refreshes)}
     from .website_support import reconcile_support_verifications
     reconcile_support_verifications(limit=limit, connection_id=connection_id)
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
@@ -914,6 +923,17 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                 for run_id in cancel_ids[:20]:
                     bounded_cancel = cancel_work.applicable(op)
                     run = cancel_work.run_for(op, run_id) if bounded_cancel else None
+                    from .run_reconciliation import authoritative_run
+                    owned_cancel = authoritative_run(run)
+                    if not bounded_cancel:
+                        from workflow_runs.models import ContentFactoryRun
+                        candidate = ContentFactoryRun.objects.filter(run_id=run_id, organization_id=op.connection.organization_id).first()
+                        if authoritative_run(candidate):
+                            owned_cancel = True
+                            run = cancel_work.run_for(op, run_id)
+                            if run is None:
+                                pending.append(run_id)
+                                continue
                     if bounded_cancel and (not cancel_work.can_call(op, now=now) or run is None
                             or run_id not in op.receipt[cancel_work.KEY]["run_ids"]):
                         pending.append(run_id)
@@ -926,9 +946,14 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                         response = http_client.post(f"{remote['base_url']}/api/connections/{op.connection_id}/cancel-operation",
                             headers=_content_factory_headers(), json=cancel_work.scoped_nonarticle_request(run), timeout=(3, 15))
                     else:
-                        payload = {"reason": "website_connection_changed"}
-                        if bounded_cancel:
-                            payload["expected_cancellation_v1"] = cancel_work.expected_article_cancellation(run)
+                        from .run_cancellation import cancellation_request_fields
+                        # A website connection change supersedes the run (IF-20).
+                        payload = {"reason": "website_connection_changed",
+                            **cancellation_request_fields("superseded", "system")}
+                        if bounded_cancel or owned_cancel:
+                            if run.workflow in ARTICLE_WORKFLOWS:
+                                payload["expected_cancellation_v1"] = cancel_work.expected_article_cancellation(run)
+                            payload.update(cancel_work.cancellation_echoes(run))
                         response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/cancel",
                             headers=_content_factory_headers(), json=payload, timeout=(3, 15))
                     try:
@@ -936,7 +961,7 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                     except (ValueError, AttributeError):
                         body = {}
                     cleanup_pending = isinstance(body, dict) and (body.get("cleanup_pending") is True or body.get("cleanupPending") is True)
-                    if bounded_cancel:
+                    if bounded_cancel or owned_cancel:
                         if not cancel_work.acknowledge(op, run, run_id, response.status_code, body):
                             pending.append(run_id)
                     elif response.status_code not in {200, 204, 404} or cleanup_pending:
@@ -947,8 +972,18 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
                     if not remote["enabled"]:
                         preview_pending.append(run_id)
                         continue
+                    preview_payload = {"reason": "website_connection_changed"}
+                    from workflow_runs.models import ContentFactoryRun
+                    from .run_reconciliation import authoritative_run
+                    candidate = ContentFactoryRun.objects.filter(run_id=run_id, organization_id=op.connection.organization_id).first()
+                    if authoritative_run(candidate):
+                        current = cancel_work.run_for(op, run_id)
+                        if current is None:
+                            preview_pending.append(run_id)
+                            continue
+                        preview_payload.update(cancel_work.cancellation_echoes(current))
                     response = http_client.post(f"{remote['base_url']}/api/runs/{run_id}/preview/stop",
-                        headers=_content_factory_headers(), json={"reason": "website_connection_changed"}, timeout=(3, 15))
+                        headers=_content_factory_headers(), json=preview_payload, timeout=(3, 15))
                     try:
                         body = response.json()
                     except (ValueError, AttributeError):
@@ -1240,11 +1275,202 @@ def _source_rescan_request(op, website, attempt):
     return f"source-rescan:{op.pk}:{count + 1}", None
 
 
+VERIFICATION_REFRESH_PURPOSE = "verification_refresh"
+# A refresh that has not settled within this window stops retrying. The proof
+# then ages out as before, and the owner's "Check website again" (prepare)
+# reports the specific action it needs.
+VERIFICATION_REFRESH_RETRY_WINDOW = timedelta(hours=24)
+# How many due websites one sweep examines, most recently verified first, so
+# that ineligible long-stale rows cannot crowd out ones about to lapse.
+VERIFICATION_REFRESH_SCAN_LIMIT = 200
+VERIFICATION_REFRESH_BLOCKERS = frozenset({"repository_source_changed", "APPLICATION_ROOT_VERIFICATION_REQUIRED",
+    "SETUP_BRANCH_VERIFICATION_REQUIRED"})
+
+
+def _refresh_target(connection, config):
+    """The selected target whose accepted in-repository CI proof can be read again, or None.
+
+    Only a connected source with no newer observed head, no source blocker and
+    an exact selected target that authenticated in-repository CI accepted
+    qualifies. Hosted, sealed (version 3) and custom proofs re-attest through
+    their own flows, and a pushed source is owned by its push check.
+    """
+    from .activation import mapping
+    from .website_connections import observed_source_sha
+    from .website_contract import SHA_PATTERN
+    from .website_sealed_workflow import required
+    if (connection.state != "connected" or not connection.branch or connection.app_root
+            or not SHA_PATTERN.fullmatch(connection.verified_sha or "")
+            or not mapping(connection.capabilities).get("publishingReady")
+            or any(isinstance(item, dict) and item.get("code") in VERIFICATION_REFRESH_BLOCKERS for item in connection.blockers or [])
+            or observed_source_sha(connection) not in ("", connection.verified_sha)):
+        return None
+    key = str(config.default_publish_target_id or "")
+    target = connection.targets.filter(generation=connection.generation, target_key=key).first() if key else None
+    from .website_live_verification import accepted as live_url_accepted
+    live = target is not None and live_url_accepted(connection, target)
+    if (target is None or target.source_sha != connection.verified_sha or not target.verified_at
+            or not mapping(target.capabilities).get("publishingReady") or target.adapter == "custom_contract_v1"
+            or (required(connection, target) and not live)):
+        return None
+    if live:
+        # A new-journey website's live-URL proof is renewed by observing its
+        # live blog page again (website_live_verification.verify_live_url).
+        return target
+    accepted = connection.operations.filter(generation=connection.generation, action="ci-verify", state="completed",
+        payload__source_sha=connection.verified_sha, payload__target_id=target.target_key).order_by("-updated_at").first()
+    if accepted is None or mapping(accepted.receipt).get("attestation_origin") != "authenticated_ci":
+        return None
+    return target
+
+
+def queue_verification_refreshes(*, limit=20, now=None, connection_id=None):
+    """Re-attest unchanged sources before their accepted proof reaches VERIFICATION_MAX_AGE.
+
+    ``integration_evidence`` stops trusting a website's verification seven days
+    after it was accepted, although nothing about the website changed. The
+    ``source-reverify`` check re-reads GitHub's own sealed native check at the
+    exact commit, confirms the selected branch still points there and observes
+    the live listing, detail and unknown-slug routes before recording new
+    receipts (``record_ci_attestation``, ``verify_live_deployment``). Nothing
+    copies an older stamp. A same-source check needs no rescan and no new CI
+    run; the GitHub App holds no Actions permission to dispatch one.
+
+    At most one check is queued per accepted verification. A push's own check
+    supersedes it, and preparation adopts it when it reopens.
+    """
+    from django.db.models import Exists, OuterRef
+    from .activation import VERIFICATION_REFRESH_AFTER
+    now = now or timezone.now()
+    checked = WebsiteConnectionOperation.objects.filter(connection_id=OuterRef("website_connection_id"),
+        generation=OuterRef("website_connection__generation"), action="source-reverify",
+        created_at__gte=OuterRef("website_connection__last_verified_at"))
+    configs = (OrganizationContentConfig.objects.select_related("website_connection__organization")
+        .filter(website_connection__state="connected", website_connection__last_verified_at__lte=now - VERIFICATION_REFRESH_AFTER)
+        .exclude(default_publish_target_id="").filter(~Exists(checked)))
+    if connection_id:
+        configs = configs.filter(website_connection_id=connection_id)
+    queued = []
+    for config in configs.order_by("-website_connection__last_verified_at")[:VERIFICATION_REFRESH_SCAN_LIMIT]:
+        if len(queued) >= limit:
+            break
+        connection = config.website_connection
+        target = _refresh_target(connection, config)
+        if target is None:
+            continue
+        operation = _reserve_verification_refresh(connection, target, min(connection.last_verified_at, target.verified_at))
+        if operation is not None:
+            queued.append(str(operation.pk))
+    if len(queued) < limit:
+        queued += _queue_live_check_refreshes(limit=limit - len(queued), threshold=now - VERIFICATION_REFRESH_AFTER,
+            connection_id=connection_id)
+    return queued
+
+
+def _queue_live_check_refreshes(*, limit, threshold, connection_id=None):
+    """Renew a passed live check that ages out while its CI proof is still current.
+
+    Vyavos (25 Oct 2026): its CI check was read again that morning, but its
+    live-route check had passed on 17 Oct, so it could draft articles and not
+    publish them. The CI-age sweep above never saw it. Such a refresh observes
+    the live routes again with the current CI receipt (``renew=deployment``).
+    A source that never passed a live check is left to setup.
+    """
+    from django.db.models import Exists, OuterRef
+    live_checks = WebsiteConnectionOperation.objects.filter(connection_id=OuterRef("website_connection_id"),
+        generation=OuterRef("website_connection__generation"), action="deployment-verify", state="completed")
+    in_flight = WebsiteConnectionOperation.objects.filter(connection_id=OuterRef("website_connection_id"),
+        generation=OuterRef("website_connection__generation"), action="source-reverify", state="pending")
+    # An older CI proof belongs to the sweep above, which renews both checks.
+    configs = (OrganizationContentConfig.objects.select_related("website_connection__organization")
+        .filter(website_connection__state="connected", website_connection__last_verified_at__gt=threshold)
+        .exclude(default_publish_target_id="")
+        .filter(Exists(live_checks), ~Exists(live_checks.filter(updated_at__gt=threshold)), ~Exists(in_flight)))
+    if connection_id:
+        configs = configs.filter(website_connection_id=connection_id)
+    queued = []
+    for config in configs.order_by("-website_connection__last_verified_at")[:VERIFICATION_REFRESH_SCAN_LIMIT]:
+        if len(queued) >= limit:
+            break
+        connection = config.website_connection
+        target = _refresh_target(connection, config)
+        stamp = _aged_live_check(connection, target, threshold) if target is not None else None
+        operation = _reserve_verification_refresh(connection, target, stamp, renew="deployment") if stamp else None
+        if operation is not None:
+            queued.append(str(operation.pk))
+    return queued
+
+
+def _aged_live_check(connection, target, threshold):
+    """When the passed live check publication reads for this source and target ran, if that is due for renewal."""
+    from .activation import mapping
+    from .incident_guards import proof_stamp
+    latest = connection.operations.filter(generation=connection.generation, action="deployment-verify", state="completed",
+        payload__source_sha=connection.verified_sha, payload__target_id=target.target_key).order_by("-created_at").first()
+    receipt = mapping(latest.receipt) if latest else {}
+    stamp = proof_stamp(receipt) if receipt.get("status") == "passed" else None
+    return stamp if stamp and stamp <= threshold else None
+
+
+def _reserve_verification_refresh(connection, target, stamp, *, renew=None):
+    """Queue the one refresh for this proof stamp; None when it was queued before."""
+    payload = {"source_sha": connection.verified_sha, "target_id": target.target_key, "scan_required": False,
+        "owned_merge_run_id": "", "purpose": VERIFICATION_REFRESH_PURPOSE, "verified_at": stamp.isoformat(),
+        "configuration_revision": connection.configuration_version}
+    key = f"{connection.pk}:verification-refresh:{connection.generation}:{connection.verified_sha}:{stamp.isoformat()}"
+    if renew:
+        payload["renew"] = renew
+        key = f"{connection.pk}:verification-refresh:{connection.generation}:{connection.verified_sha}:{renew}:{stamp.isoformat()}"
+    operation, created = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=key,
+        defaults={"connection": connection, "generation": connection.generation, "action": "source-reverify",
+            "payload": payload, "receipt": {"status": "verification_queued", "repository_modified": False}})
+    if not created:
+        return None
+    logger.info("website_verification_refresh_queued connection=%s operation=%s generation=%s source_sha=%s verified_at=%s renew=%s",
+        connection.pk, operation.pk, connection.generation, connection.verified_sha, stamp.isoformat(), renew or "all")
+    return operation
+
+
+# Opening Articles runs a site's due refresh at most this often.
+VERIFICATION_PAGE_REFRESH_SECONDS = 10 * 60
+
+
+def refresh_verification_for_page(organization, *, now=None):
+    """Run this website's due verification refresh while its owner opens Articles.
+
+    The scheduler queues and runs refreshes every minute. This covers a page
+    opened before it gets there, or while it is down, so the page projects the
+    renewed proof instead of "Check website again". It runs only a refresh
+    that is already due, under the worker's own claim and retry backoff, and
+    at most once per website every ten minutes.
+    """
+    from django.conf import settings
+    from django.core.cache import cache
+    if not getattr(settings, "WEBSITE_VERIFICATION_PAGE_REFRESH_ENABLED", True):
+        return None
+    connection_id = (OrganizationContentConfig.objects.filter(organization=organization)
+        .values_list("website_connection_id", flat=True).first())
+    if not connection_id or not cache.add(f"website-verification-refresh:page:{connection_id}", "1", VERIFICATION_PAGE_REFRESH_SECONDS):
+        return None
+    now = now or timezone.now()
+    queue_verification_refreshes(limit=1, now=now, connection_id=connection_id)
+    due = (WebsiteConnectionOperation.objects.filter(connection_id=connection_id, action="source-reverify", state="pending",
+            payload__purpose=VERIFICATION_REFRESH_PURPOSE).filter(Q(next_attempt_at__isnull=True) | Q(next_attempt_at__lte=now))
+        .order_by("created_at").values_list("pk", flat=True).first())
+    return _process_source_reverification(due, now) if due else None
+
+
+def _renews_by_live_url(website, target):
+    """Whether this website's source check re-verifies by live URL instead of CI proof."""
+    from .website_live_verification import applicable, selected
+    return selected(website.organization) and applicable(target)
+
+
 def _process_source_reverification(identifier, now):
     """Re-scan external changes and then authenticate current CI/live proof."""
     from .website_connections import authority_guard, require_unlocked_remote_call
     from .website_contract import WebsiteAuthorityError
-    from .website_verification import discover_source_attestation, record_ci_attestation, verify_live_deployment
+    from .website_verification import current_ci_attestation, discover_source_attestation, record_ci_attestation, verify_live_deployment
     from .vibe_marketing_views import (_content_factory_remote_config, _content_factory_headers, _create_local_run,
         _require_roo_points_for_ai_agent, _mark_roo_points_gate_authorized, founder_actor_id_for_user)
     from .contract import CONTENT_FACTORY_REQUEST_SOURCE
@@ -1320,7 +1546,10 @@ def _process_source_reverification(identifier, now):
                     raise WebsiteAuthorityError("source_reverification_unavailable",
                         "Waiting for the earlier repository scan to settle.", retryable=True) from exc
                 raise
-            response = http_client.post(f"{remote['base_url']}/api/runs/scan", json=scan_payload,
+            from .dispatch_admission import post_dispatch, reserve_user_dispatch
+            admitted = reserve_user_dispatch(payload=scan_payload, workflow="repo_scan", domain=website.organization.domain,
+                actor_id=founder_actor_id_for_user(owner), user=owner)
+            response = post_dispatch(admitted, http_client.post, f"{remote['base_url']}/api/runs/scan", json=scan_payload,
                 headers=_content_factory_headers(), timeout=(3, 30))
             response.raise_for_status()
             remote_run = response.json()
@@ -1340,14 +1569,33 @@ def _process_source_reverification(identifier, now):
                 message="No publishing target exists at this source. Setting up articles verifies it.")
         elif target is None:
             raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
-        else:
-            proof = discover_source_attestation(website, target, op.payload["source_sha"])
-            ci = record_ci_attestation(proof)
+        elif _renews_by_live_url(website, target):
+            # New-journey websites have no CI workflow: their proof is the scan's
+            # build proof plus the live blog page, observed again here.
+            from .website_live_verification import verify_live_url
+            if target.source_sha != op.payload["source_sha"]:
+                # The rescan has not recorded this source's build proof yet.
+                raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
             config = OrganizationContentConfig.objects.get(website_connection=website)
-            deployment = verify_live_deployment(config, data=ci.receipt)
+            verified = verify_live_url(config, target, setup_run_id=op.payload.get("owned_merge_run_id") or "")
             state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
-                "target_id": target.target_key, "ci_operation_id": str(ci.pk), "deployment_operation_id": str(deployment.pk),
-                "repository_modified": False}
+                "target_id": target.target_key, "ci_operation_id": "", "ci_reused": False, "method": "live_url",
+                "deployment_operation_id": verified["operation_id"], "repository_modified": False}
+        else:
+            ci, attested = None, None
+            if op.payload.get("renew") == "deployment":
+                # Only the live check aged out, and the current CI receipt still
+                # proves this commit. Read the check again only if it no longer does.
+                attested = current_ci_attestation(website, target)
+            if attested is None:
+                proof = discover_source_attestation(website, target, op.payload["source_sha"])
+                ci = record_ci_attestation(proof)
+                attested = ci.receipt
+            config = OrganizationContentConfig.objects.get(website_connection=website)
+            deployment = verify_live_deployment(config, data=attested)
+            state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
+                "target_id": target.target_key, "ci_operation_id": str(ci.pk) if ci else "", "ci_reused": ci is None,
+                "deployment_operation_id": str(deployment.pk), "repository_modified": False}
     except WebsiteAuthorityError as exc:
         receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
         if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:
@@ -1366,6 +1614,13 @@ def _process_source_reverification(identifier, now):
                 message="The repository scan for this change could not be restarted. Scan the repository again.")
     except Exception:
         receipt.update(status="verification_pending", code="source_reverification_unavailable", retryable=True)
+    if state == "pending" and op.payload.get("purpose") == VERIFICATION_REFRESH_PURPOSE and (
+            receipt.get("retryable") is False or now - op.created_at >= VERIFICATION_REFRESH_RETRY_WINDOW):
+        # A same-source refresh never revoked anything, so stopping it changes
+        # nothing: the accepted proof ages out as before and the owner's own
+        # re-check reports the cause instead of an hourly retry forever.
+        state = "needs_attention"
+        receipt.update(status="needs_attention", retryable=False)
     WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
         state=state, receipt=receipt, next_attempt_at=now + timedelta(seconds=min(3600, 15 * 2 ** min(attempt, 8))), updated_at=timezone.now())
     return state

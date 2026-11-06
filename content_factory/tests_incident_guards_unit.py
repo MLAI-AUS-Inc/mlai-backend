@@ -20,6 +20,15 @@ from .article_preview_lease import ArticlePreviewLeaseProxyView, SALT
 from .website_contract import evidence_digest
 
 
+def sealed_setup_target():
+    """La Vie (25 Oct 2026): a merged setup's target whose digest its kit sealed."""
+    marker = {"kind": "artifact_digest", "value": "9" * 64, "meta_name": "mlai-artifact-digest", "schema_version": 1}
+    sealed = {"target_id": "registry", "delivery_adapter": "registry_entry", "source": "adopted",
+        "contract_digest": "f" * 64, "live_marker": marker, "contract": {"contract_digest": "f" * 64, "live_marker": marker}}
+    return SimpleNamespace(generation=3, source_sha="b" * 40, verified_at=None, adapter="registry_entry",
+        contract=sealed, target_key="registry", capabilities={"publishingReady": False})
+
+
 class DispatchKeyRecoveryReplays(SimpleTestCase):
     def setUp(self):
         self.run = SimpleNamespace(
@@ -237,6 +246,98 @@ class IncidentAuthorityReplays(SimpleTestCase):
                 operations.validate_operation(website, payload)
             self.assertEqual(error.exception.code, "website_operation_cancelled")
 
+    def test_completed_setup_without_pull_request_accepts_its_success_callback(self):
+        # La Vie, 22 Oct: an adopted-registry setup finalizes its run, then sends
+        # scaffold_complete with status "success"; it was refused as terminal.
+        from . import website_operations as operations
+        from workflow_runs.models import ContentFactoryRun
+        identifier = uuid.uuid4()
+        binding = {"operation_id": str(identifier), "operation_attempt": 26, "deletion_epoch": 0}
+        run = SimpleNamespace(run_id="adopted-setup", workflow="article_system_setup", organization_id=30,
+            status="completed", run_request=binding, result={})
+        op = SimpleNamespace(pk=identifier, state="completed", payload={"attempt": 26}, generation=3)
+        manager = Mock(); manager.filter.return_value.first.return_value = op
+        website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
+        with patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.return_value = run
+            for event_key, status in [("event_type", "success"), ("event", "success"), ("event", "completed")]:
+                with self.subTest(event_key=event_key, status=status):
+                    self.assertIs(operations.validate_operation(website, {
+                        **binding, "run_id": run.run_id, event_key: "scaffold_complete", "status": status,
+                    }), op)
+                    self.assertEqual((op.state, run.status), ("completed", "completed"))
+
+    def test_a_failed_attempt_accepts_its_own_failure_report(self):
+        # Talathrive and PawShare, 27 Oct: the run update closed the operation as
+        # failed or blocked, then generation_failed (status "error") was refused.
+        from . import website_operations as operations
+        from workflow_runs.models import ContentFactoryRun
+        identifier = uuid.uuid4()
+        binding = {"operation_id": str(identifier), "operation_attempt": 1, "deletion_epoch": 0}
+        run = SimpleNamespace(run_id="rejected-article", workflow="confirmed_topic", organization_id=30,
+            status="blocked", run_request=binding, result={})
+        op = SimpleNamespace(pk=identifier, state="failed", payload={"attempt": 1}, generation=3)
+        manager = Mock(); manager.filter.return_value.first.return_value = op
+        website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
+        payload = {**binding, "run_id": run.run_id}
+        accepted = [
+            ("failed", {"event": "generation_failed", "status": "error"}),
+            ("blocked", {"event": "generation_failed", "status": "error"}),
+            ("blocked", {"event": "error", "status": "failed"}),
+            ("failed", {"event_type": "error"}),
+            ("blocked", {"event": "article_system_setup_preview_failed", "status": "failed"}),
+        ]
+        refused = [
+            ("completed", {"event": "generation_failed", "status": "error"}, "website_operation_terminal"),
+            ("failed", {"event": "generation_failed", "status": "running"}, "website_operation_terminal"),
+            ("failed", {"event": "article_complete", "status": "completed"}, "website_operation_terminal"),
+            ("failed", {"event": "generation_blocked", "status": "blocked"}, "website_operation_terminal"),
+            ("cancelled", {"event": "generation_failed", "status": "error"}, "website_operation_cancelled"),
+            ("failed", {"event": "generation_failed", "status": "error", "operation_attempt": 2}, "website_operation_changed"),
+        ]
+        with patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.return_value = run
+            for state, changes in accepted:
+                with self.subTest(state=state, changes=changes):
+                    op.state = state
+                    self.assertIs(operations.validate_operation(website, {**payload, **changes}), op)
+                    self.assertEqual(op.state, state)
+            for state, changes, expected in refused:
+                with self.subTest(state=state, changes=changes):
+                    op.state = state
+                    with self.assertRaises(WebsiteAuthorityError) as error:
+                        operations.validate_operation(website, {**payload, **changes})
+                    self.assertEqual(error.exception.code, expected)
+
+    def test_setup_success_alias_cannot_revive_a_failed_or_fenced_setup(self):
+        from . import website_operations as operations
+        from workflow_runs.models import ContentFactoryRun
+        identifier = uuid.uuid4()
+        binding = {"operation_id": str(identifier), "operation_attempt": 26, "deletion_epoch": 0}
+        run = SimpleNamespace(run_id="adopted-setup", workflow="article_system_setup", organization_id=30,
+            status="completed", run_request=binding, result={})
+        op = SimpleNamespace(pk=identifier, state="completed", payload={"attempt": 26}, generation=3)
+        manager = Mock(); manager.filter.return_value.first.return_value = op
+        website = SimpleNamespace(organization_id=30, operations=manager, blockers=[], generation=3)
+        payload = {**binding, "run_id": run.run_id, "event": "scaffold_complete", "status": "success"}
+        cases = [
+            ("failed", {}, "website_operation_terminal"),
+            ("blocked", {}, "website_operation_terminal"),
+            ("cancelled", {}, "website_operation_cancelled"),
+            ("completed", {"operation_attempt": 25}, "website_operation_changed"),
+            ("completed", {"event": "article_system_setup_progress"}, "website_operation_terminal"),
+            ("completed", {"status": "running"}, "website_operation_terminal"),
+            ("completed", {"status": "failed"}, "website_operation_terminal"),
+        ]
+        with patch.object(ContentFactoryRun.objects, "filter") as runs:
+            runs.return_value.first.return_value = run
+            for state, changes, expected in cases:
+                with self.subTest(state=state, changes=changes):
+                    op.state = state
+                    with self.assertRaises(WebsiteAuthorityError) as error:
+                        operations.validate_operation(website, {**payload, **changes})
+                    self.assertEqual(error.exception.code, expected)
+
     def test_verified_target_survives_empty_scan_and_weaker_same_key(self):
         for candidate in ({"target_id": "featured"}, {**self.target, "verification": {}},
                 {**self.target, "delivery_adapter": "bundle_only"}):
@@ -256,6 +357,20 @@ class IncidentAuthorityReplays(SimpleTestCase):
         candidate = deepcopy(self.target)
         candidate["verification"]["checked_at"] = (self.now + timedelta(seconds=1)).isoformat()
         self.assertFalse(target_update_allowed(self.previous, candidate, generation=3, sha=self.sha))
+
+    def test_unsealed_rescan_cannot_erase_a_setup_sealed_target(self):
+        previous = sealed_setup_target()
+        rescan = {"target_id": "registry", "delivery_adapter": "registry_entry", "source": "scan"}
+        for candidate in (rescan, {**rescan, "contract_digest": "", "live_marker": {}}):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(target_update_allowed(previous, candidate, generation=3, sha=self.sha))
+        # A new setup or verified custom proof brings its own digest, and an
+        # unsealed row stays a plain proposal.
+        resealed = {**rescan, "contract_digest": "e" * 64, "live_marker": {**previous.contract["live_marker"], "value": "8" * 64}}
+        self.assertTrue(target_update_allowed(previous, resealed, generation=3, sha=self.sha))
+        self.assertTrue(target_update_allowed(previous, {**rescan, "contract_digest": "e" * 64}, generation=3, sha=self.sha))
+        unsealed = SimpleNamespace(**{**vars(previous), "contract": rescan})
+        self.assertTrue(target_update_allowed(unsealed, rescan, generation=3, sha=self.sha))
 
     def test_changed_source_remains_an_unverified_proposal_until_reverified(self):
         candidate = {**self.target, "route_path": "/other", "verification": {}}
@@ -369,9 +484,9 @@ class IncidentFacadeReplays(SimpleTestCase):
         from . import vibe_marketing_views as views
         connection = SimpleNamespace(pk=uuid.uuid4(), generation=3, github_repo="current/site", repository_id=42)
         config = SimpleNamespace(website_connection=connection)
-        run = SimpleNamespace(run_id="old-draft", workflow="article_generation", run_request={"website_connection_id": str(connection.pk), "connection_generation": 2}, github_repo="older/site")
+        run = SimpleNamespace(run_id="old-draft", workflow="article_generation", result={}, run_request={"website_connection_id": str(connection.pk), "connection_generation": 2}, github_repo="older/site")
         context = SimpleNamespace(organization=object())
-        request = SimpleNamespace(user=SimpleNamespace(pk=8), data={})
+        request = SimpleNamespace(user=SimpleNamespace(pk=8), headers={}, data={})
         with patch.object(views, "_resolve_context_or_response", return_value=(context, None)), \
                 patch.object(views, "get_object_or_404", return_value=run), \
                 patch.object(views, "_run_belongs_to_context", return_value=True), \
@@ -390,11 +505,16 @@ class IncidentFacadeReplays(SimpleTestCase):
         run = SimpleNamespace(workflow="article_generation", run_id="draft-1")
         payload = {"action": "editTextBatch", "expectedRevision": "saved", "operationId": "op-1", "edits": [{"fieldId": "paragraph.0", "value": "Exact copy"}]}
         view = review.VibeMarketingArticleReviewView()
-        view._resolve_run = Mock(return_value=(object(), run, None))
-        with patch.object(review.views, "_run_has_external_publish_evidence", return_value=False), \
+        from organizations.models import Organization
+        from .models import OrganizationContentConfig
+        context = SimpleNamespace(organization=Organization(pk=9, domain="fixture.test"))
+        view._resolve_run = Mock(return_value=(context, run, None))
+        empty_commands = SimpleNamespace(values_list=lambda *args, **kwargs: SimpleNamespace(first=lambda: None))
+        with patch.object(OrganizationContentConfig.objects, "filter", return_value=empty_commands), \
+                patch.object(review.views, "_run_has_external_publish_evidence", return_value=False), \
                 patch.object(review.views, "_latest_review_ready_component_revision", return_value=None), \
                 patch.object(review, "remote_review", return_value={"revision": "next"}) as remote:
-            result = view.post(SimpleNamespace(data=payload), run.run_id)
+            result = view.post(SimpleNamespace(data=payload, headers={}, user=SimpleNamespace(pk=9)), run.run_id)
         self.assertEqual(result.status_code, 200)
         self.assertEqual(remote.call_args.kwargs["payload"], payload)
 
@@ -411,7 +531,7 @@ class IncidentFacadeReplays(SimpleTestCase):
 
     def test_portable_preview_grant_never_enters_repository_guard(self):
         request = {"delivery_mode": "content_only", "delivery_mode_confirmed": True}
-        run = SimpleNamespace(run_id="draft-1", run_request=request, domain="synthetic.test", organization_id=4)
+        run = SimpleNamespace(run_id="draft-1", run_request=request, domain="synthetic.test", organization_id=4, result={})
         intent = evidence_digest({key: request.get(key) for key in ("delivery_mode", "delivery_mode_confirmed", "source_run_id")})
         token = signing.dumps({"run": run.run_id, "organization": 4, "domain": run.domain, "portable": True, "intent_digest": intent}, salt=SALT)
         view = ArticlePreviewLeaseProxyView(); view.kwargs = {"token": token}
@@ -584,6 +704,26 @@ class IncidentIntegratedReplays(SimpleTestCase):
         self.assertTrue(connection.capabilities["templatesValid"])
         self.assertEqual(connection.last_verified_at, accepted_at)
         self.assertEqual(connection.verified_sha, sha)
+
+    def test_post_merge_rescan_keeps_the_sealed_target_row_for_its_kit_proof(self):
+        from . import website_connections as authority
+        sha = "c" * 40
+        previous = sealed_setup_target()
+        targets = Mock()
+        targets.filter.side_effect = lambda **kwargs: SimpleNamespace(first=lambda: previous) if "target_key" in kwargs else []
+        connection = SimpleNamespace(pk=uuid.uuid4(), generation=3, verified_sha="", last_verified_at=None,
+            targets=targets, capabilities={"publishingReady": False}, blockers=[], state="connected", save=Mock())
+        config = SimpleNamespace(article_template="<article>Template</article>", design_guide="Native classes")
+        rescan = {"target_id": "registry", "delivery_adapter": "registry_entry", "source": "scan", "publish_capability": "direct"}
+        with patch.object(authority, "_authority_depth") as depth, \
+                patch.object(authority.WebsiteScanSnapshot.objects, "get_or_create"), \
+                patch.object(authority.WebsiteConnectionTarget.objects, "update_or_create") as upsert, \
+                patch.object(authority.OrganizationContentConfig.objects, "get", return_value=config):
+            depth.get.return_value = 1
+            authority.record_scan_evidence(connection, {"source_sha": sha, "publish_targets": [rescan]})
+        upsert.assert_not_called()
+        self.assertEqual(previous.contract["contract_digest"], "f" * 64)
+        self.assertFalse(connection.capabilities["publishingReady"])
 
     def test_ci_preview_capability_survives_a_same_source_scan_without_preview_flag(self):
         from . import website_connections as authority
@@ -1050,6 +1190,9 @@ class IncidentBillingReplays(SimpleTestCase):
         from roo.services import PointsService
         from .models import ContentFactoryJob
         from workflow_runs.models import ContentFactoryRun
+        class LegacyRows(list):
+            def iterator(self):
+                return iter(self)
         user = SimpleNamespace(pk=8)
         run = SimpleNamespace(run_id="paid-draft", run_request={"client_request_id": "draft-identity"}, save=Mock())
         original = SimpleNamespace(id=9, delta_microroo=-12_000_000)
@@ -1058,7 +1201,7 @@ class IncidentBillingReplays(SimpleTestCase):
                 patch.object(ContentFactoryJob.objects, "filter") as jobs, \
                 patch.object(ContentFactoryRun.objects, "filter") as runs:
             ledgers.return_value.first.return_value = original
-            runs.return_value.filter.return_value = [run]
+            runs.return_value.filter.return_value = LegacyRows([run])
             generation._refund_content_factory_request(user=user, slack_user_id="founder", article_request={"client_request_id": "draft-identity"}, resolved_domain="paid.example", reason="No saved delivery")
             self.assertEqual(run.run_request["roo_points_billing_status"], "refunded")
             self.assertFalse(run.run_request["roo_points_authorized"])

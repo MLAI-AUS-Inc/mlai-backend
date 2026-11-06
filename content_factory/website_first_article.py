@@ -7,7 +7,7 @@ from django.conf import settings
 from django.db import transaction
 
 from . import website_goal as goals
-from .article_publish_approval import (RECEIPT_KEY,article_review_identity,
+from .article_publish_approval import (article_publish_approval_receipt,article_review_identity,
     article_review_identity_is_complete,article_publish_approval_receipt_matches)
 from .website_contract import WebsiteAuthorityError
 from .website_setup_consent import valid as valid_consent
@@ -61,7 +61,8 @@ def article_run(op, config):
         if identifier:
             raise WebsiteAuthorityError("website_prepare_dependency_transient","Waiting for the original first-article dispatch record.",retryable=True)
         return None
-    saved=goals.mapping(run.run_request)
+    from .website_run_authority import execution_request
+    saved=goals.mapping(execution_request(run))
     if (saved.get("first_article_goal_id")!=op.receipt["goal"]["goal_id"]
         or saved.get("website_connection_id")!=str(connection.pk) or saved.get("connection_generation")!=connection.generation
         or saved.get("repository_id")!=connection.repository_id or saved.get("deletion_epoch")!=deletion_epoch(connection)
@@ -85,15 +86,27 @@ def approval_matches(op, run):
     binding=goals.mapping(op.receipt.get("first_article_approval"))
     return bool(article_publish_approval_receipt_matches(run) and binding.get("goal")==_immutable_binding(op.receipt["goal"])
         and binding.get("review")==article_review_identity(run)
-        and binding.get("source_sha")==goals.mapping(run.run_request).get("expected_source_sha")
-        and binding.get("approval_digest")==goals.digest(goals.mapping(run.run_request).get(RECEIPT_KEY)))
+        and binding.get("source_sha")==_current_source(run)
+        and binding.get("approval_digest")==goals.digest(article_publish_approval_receipt(run)))
+
+
+def _current_source(run):
+    from .website_run_authority import execution_request
+    return goals.mapping(execution_request(run)).get("expected_source_sha")
+
+
+def _draft_verified(run):
+    from .website_run_authority import event_owned
+    from .run_verified_delivery import verified_draft_ready
+    return not event_owned(run) or verified_draft_ready(run)
 
 
 def goal_auto_merge(runs):
     """Return None for ordinary runs; a goal run cannot fall through to legacy opt-ins."""
     from .website_models import WebsiteConnectionOperation
     for run in runs:
-        request=goals.mapping(getattr(run,"run_request",None))
+        from .website_run_authority import execution_request
+        request=goals.mapping(execution_request(run))
         parent_id=request.get("first_article_goal_operation_id")
         if not parent_id:continue
         op=WebsiteConnectionOperation.objects.select_related("connection__organization").filter(pk=parent_id,action="prepare").first()
@@ -124,7 +137,7 @@ def merged_source(op, run, context):
         or not isinstance(sha,str) or not goals.SHA.fullmatch(sha)
         or intent.get("run_id")!=child.run_id or intent.get("website_connection_id")!=str(connection.pk)
         or intent.get("connection_generation")!=connection.generation or intent.get("repository_id")!=connection.repository_id
-        or intent.get("base_branch")!=connection.branch or intent.get("source_sha")!=goals.mapping(run.run_request).get("expected_source_sha")
+        or intent.get("base_branch")!=connection.branch or intent.get("source_sha")!=_current_source(run)
         or not isinstance(intent.get("head_sha"),str) or not goals.SHA.fullmatch(intent["head_sha"])):
         return None
     return {"source_sha":sha,"run_id":child.run_id,"intent":intent,"response":response}
@@ -163,7 +176,11 @@ def observe_manual_merge(op, child, *, now):
             if goals.mapping(saved.result).get("publish_merge_intent")!=intent:return False
             saved.result={**saved.result,"merge_status":"merged","merge_response":{"merged":True,"sha":sha},
                 "merge_sha":sha,"merged_at":now.isoformat()}
-            saved.status="completed";saved.save(update_fields=["result","status","updated_at"])
+            from .website_run_authority import event_owned
+            if event_owned(saved):
+                saved.save(update_fields=["result"])
+            else:
+                saved.status="completed";saved.save(update_fields=["result","status","updated_at"])
             child.result,child.status=saved.result,saved.status
         return True
     finally:
@@ -176,8 +193,8 @@ def proofs(op, context, config, *, source, now):
     """Collect real draft and live-body evidence without dispatching or granting approval."""
     if goals.mapping(op.receipt.get("goal")).get("target")!="first_article_live":return {}
     run=article_run(op,config)
-    if run is None or run.status in {"failed","blocked","cancelled","denied"} or not article_review_identity_is_complete(run):return {}
-    original=goals.mapping(run.run_request).get("expected_source_sha")
+    if run is None or run.status in {"failed","blocked","cancelled","denied"} or not _draft_verified(run) or not article_review_identity_is_complete(run):return {}
+    original=_current_source(run)
     merge=merged_source(op,run,context) if source!=original else None
     if source!=original and (merge is None or merge["source_sha"]!=source):return {}
     identity=article_review_identity(run)
@@ -263,6 +280,10 @@ def advance(op, context, config, *, user, now):
     if op.receipt.get("first_article_run_id")!=run.run_id:
         _save_fields(op,{"first_article_run_id":run.run_id,"child_run_id":run.run_id})
     if run.status in {"failed","blocked","cancelled","denied"}:
+        from .website_run_authority import event_owned, wait_for_execution
+        if event_owned(run):
+            wait_for_execution(op, run, now=now)
+            return op
         from .website_article_recovery import observe,resume
         if run.status in {"failed","blocked"}:
             if resume(op,run,context,user=user,now=now):return op
@@ -271,7 +292,7 @@ def advance(op, context, config, *, user, now):
             "The first article is repairing its failed checks.",retryable=goals.mapping(run.result).get("retryable") is True)
         error.result=goals.mapping(run.result)
         raise error
-    if not article_review_identity_is_complete(run):return _wait(op,now,"Checking the first article's exact preview and quality gates.")
+    if not _draft_verified(run) or not article_review_identity_is_complete(run):return _wait(op,now,"Checking the first article's exact preview and quality gates.")
     if not article_publish_approval_receipt_matches(run):
         if config.requires_review or op.receipt["goal"]["consent"]["answers"]["publish_mode"]!="auto":
             op.state,op.next_attempt_at="needs_user",now+timedelta(minutes=5)
@@ -283,8 +304,8 @@ def advance(op, context, config, *, user, now):
         if not article_publish_approval_receipt_matches(run):return _wait(op,now,"Waiting for the first article approval receipt.")
     if not approval_matches(op,run):
         _save_fields(op,{"first_article_approval":{"goal":_immutable_binding(op.receipt["goal"]),"review":article_review_identity(run),
-            "source_sha":goals.mapping(run.run_request).get("expected_source_sha"),
-            "approval_digest":goals.digest(goals.mapping(run.run_request).get(RECEIPT_KEY))}})
+            "source_sha":_current_source(run),
+            "approval_digest":goals.digest(article_publish_approval_receipt(run))}})
     child=views._publish_child_for_run_state(run,context=context)
     if child is None:
         response=views.control_article_run(user=user,context=context,run=run,action="publish-pr",data={"auto_merge":True})
@@ -293,6 +314,10 @@ def advance(op, context, config, *, user, now):
     if op.receipt.get("first_article_publish_run_id")!=child.run_id:
         _save_fields(op,{"first_article_publish_run_id":child.run_id,"child_run_id":child.run_id})
     if child.status in {"failed","blocked"}:
+        from .website_run_authority import event_owned, wait_for_execution
+        if event_owned(child):
+            wait_for_execution(op, child, now=now)
+            return op
         from .website_article_recovery import observe,resume
         if resume(op,child,context,user=user,now=now):return op
         observe(op,child)

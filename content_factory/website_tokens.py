@@ -222,6 +222,12 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
     with authority_guard(data, action=action) as connection:
         if not connection.repository_id or not connection.installation_id:
             raise WebsiteAuthorityError("github_verification_required", "Reconnect GitHub to verify repository identity.")
+        if profile == "workflow_files" and action in {"setup", "restoration"}:
+            from .website_live_verification import selected as live_url_selected
+            if live_url_selected(connection.organization):
+                # Live-URL verified sites never get a workflow file (IF-P1-16).
+                # Removing one an opted-in site already has stays allowed.
+                raise WebsiteAuthorityError("invalid_permission_profile", "This website is verified by its live pages and needs no workflow files.", status=400)
         if profile == "workflow_files":
             _workflow_operation(connection, data, action)
         elif profile == "ci_evidence":

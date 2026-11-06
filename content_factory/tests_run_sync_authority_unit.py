@@ -68,6 +68,14 @@ class RunObservationTests(SimpleTestCase):
 
 
 class ObservationGuardTests(SimpleTestCase):
+    def setUp(self):
+        # These legacy observational fixtures have no backend-admitted Run.
+        # Execute the actual ownership predicate over an empty model read.
+        from unittest.mock import patch
+        reader = patch("workflow_runs.models.ContentFactoryRun.objects.filter")
+        self.addCleanup(reader.stop)
+        reader.start().return_value.first.return_value = None
+
     def test_identical_authorized_callback_does_not_rewrite_the_run(self):
         from contextlib import nullcontext
         from unittest.mock import patch
@@ -103,6 +111,19 @@ class ObservationGuardTests(SimpleTestCase):
         for key in original:
             with self.subTest(key=key), self.assertRaises(EditorialRunConflict):
                 _merge_django_owned_run_request(original, {key: None})
+
+    def test_content_only_snapshot_reporting_null_repository_matches_saved_blank(self):
+        from .service_views import _merge_django_owned_run_request
+        from .editorial_run_state import EditorialRunConflict
+        # Django saves a content-only draft with github_repo "" and the worker
+        # snapshot reports it as null (PawShare run 1433c2cf, 29 Oct 2026).
+        original = {'github_repo': '', 'delivery_mode': 'content_only', 'delivery_mode_confirmed': True,
+            'client_request_id': 'vibe-article-job:1'}
+        merged = _merge_django_owned_run_request(original, {**original, 'github_repo': None})
+        self.assertEqual(merged, original)
+        for saved, reported in (('', 'owner/site'), ('owner/site', None), ('owner/site', '')):
+            with self.subTest(saved=saved, reported=reported), self.assertRaises(EditorialRunConflict):
+                _merge_django_owned_run_request({**original, 'github_repo': saved}, {'github_repo': reported})
 
     def test_explicit_cancelled_operation_never_enters_observation_fallback(self):
         from contextlib import contextmanager

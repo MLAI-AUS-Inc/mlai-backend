@@ -28,7 +28,7 @@ def start_goal(current, *, company_id, user, retry, target, now, force_successor
     selected = None
     if setup_consent.enabled(current.organization_id) and consent is not None:
         from .billing import get_content_factory_article_cost_points
-        selected = setup_consent.answers(consent, expected_points=get_content_factory_article_cost_points(current.organization.domain))
+        selected = setup_consent.answers(consent, expected_points=get_content_factory_article_cost_points(current.organization.domain, user=user))
     if target == "first_article_live" and not selected and not (isinstance(goal,dict) and setup_consent.valid(goal)):
         raise WebsiteAuthorityError("website_prepare_blocked", "Review the first-article choices before starting.", status=422)
     compatible = goals.valid_goal(goal, scope) and goal.get("target") == target
@@ -113,6 +113,11 @@ def goal_journey(op, context, config, journey, *, now):
     from .website_setup_consent import valid as valid_consent
     if goal.get("consent") is not None and not valid_consent(goal) or goal.get("target") == "first_article_live" and not valid_consent(goal):
         raise WebsiteAuthorityError("website_prepare_blocked", "The saved setup consent has changed. Review the current goal choices.")
+    from .website_run_authority import owned_goal_child, execution_request, wait_for_execution
+    owned_child = owned_goal_child(op, include_completed=False)
+    if owned_child is not None and owned_child.status in {"failed", "blocked", "cancelled", "denied"}:
+        wait_for_execution(op, owned_child, now=now)
+        return {**journey, "nextAction": None}
     try:
         proofs, source = collect_proofs(op, context, config, journey, now=now)
     except (ValueError, TypeError, OverflowError) as exc:
@@ -120,7 +125,7 @@ def goal_journey(op, context, config, journey, *, now):
     if goal.get("strategy_requires_candidate"):
         from .website_goal_evidence import _child
         child = _child(op, config.website_connection)
-        original = goals.mapping(getattr(child, "run_request", None))
+        original = goals.mapping(execution_request(child)) if child else {}
         pin = goals.mapping(goal.get("strategy_pin"))
         fresh_candidate = (goals.mapping(proofs.get("integrated")).get("kind") == "setup_candidate"
             and original.get("strategy_goal_id") == goal["goal_id"]
@@ -144,6 +149,10 @@ def goal_journey(op, context, config, journey, *, now):
     op.receipt = {**op.receipt, "goal": goal}
     milestone = goals.next_milestone(goal)
     op._goal_milestone = milestone
+    if owned_child is not None and (milestone in {"access", "understood"}
+            or execution_request(owned_child).get("expected_source_sha") != source):
+        wait_for_execution(op, owned_child, now=now, source_changed=True)
+        return {**journey, "nextAction": None}
     action = goals.ACTION_FOR.get(milestone)
     if milestone and budget.enabled():
         reason = budget.exhaustion(goal, now=now, action=None if getattr(op, "_goal_has_active_child", False) else action)
@@ -154,10 +163,6 @@ def goal_journey(op, context, config, journey, *, now):
             stop_goal(op, goal, reason=reason, now=now)
             op._goal_wait = True
             return {**journey, "capabilities": {**goals.mapping(journey.get("capabilities")), "canPublishArticle": False}, "nextAction": None}
-    if milestone and goals.mapping(goal.get("strategy_pin")).get("rung") == "hosted":
-        wait_for_channel(op, goal)
-        op._goal_wait = True
-        return {**journey, "capabilities": {**goals.mapping(journey.get("capabilities")), "canPublishArticle": False}, "nextAction": None}
     if milestone and not action:
         raise WebsiteAuthorityError("website_prepare_blocked", "This goal's article publication handler is not available yet.", status=422)
     if milestone in {"approved", "merged"}:
@@ -220,6 +225,12 @@ def finish_goal(op, *, now=None):
             fresh = occurrence not in goal.get("failure_occurrences", [])
             goal = goals.record_failure(goal, failure_class=classification,
                 fingerprint=failure.get("failure_fingerprint"), occurrence=occurrence)
+            from .website_run_authority import owned_goal_child, wait_for_execution
+            owned_child = owned_goal_child(op)
+            if owned_child is not None and op.state != "completed" and not goals.complete(goal):
+                op.receipt["goal"] = goal
+                wait_for_execution(op, owned_child, now=now)
+                return
             from . import website_goal_budget as budget, website_strategy as strategy
             effective = classification
             if budget.enabled():
@@ -230,6 +241,13 @@ def finish_goal(op, *, now=None):
             if reason:
                 stop_goal(op, goal, reason=reason, now=now)
                 return
+            from .failure_policy_engine import policy_mode, decide, apply
+            if policy_mode(getattr(op.connection, 'organization', None)) == 'policy':
+                op.receipt = {**op.receipt, 'goal': goal}
+                subject = {**op.receipt, '_organization': op.connection.organization,
+                           '_operation': op, '_controller': True, 'run_request': op.payload}
+                apply(subject, decide(subject, now=now), now=now)
+                return
             from .website_article_recovery import schedule as schedule_article_recovery
             if schedule_article_recovery(op,goal,classification=effective,fresh=fresh,occurrence=occurrence,now=now):
                 return
@@ -238,11 +256,8 @@ def finish_goal(op, *, now=None):
             elif fresh and strategy.enabled() and effective == "strategy" and goal.get("strategy_pin"):
                 goal = strategy.advance(goal, source=goal.get("current_source_sha"), now=now, reason="strategy_exhausted")
                 goal["strategy_requires_candidate"] = True
-                if goal["strategy_pin"]["rung"] == "hosted":
-                    wait_for_channel(op, goal)
-                else:
-                    goal = retry_goal_action(op, goal, now=now, occurrence=occurrence, step="setup")
-                    op.receipt["message"] = "Trying the next articles integration strategy."
+                goal = retry_goal_action(op, goal, now=now, occurrence=occurrence, step="setup")
+                op.receipt["message"] = "Trying the next articles integration strategy."
             elif fresh and strategy.enabled() and effective == "unsupported" and classification in {"transient", "repairable", "strategy"} and strategy.valid_pin(goal.get("strategy_pin")):
                 goal = strategy.set_pin(goal, len(strategy.RUNGS) - 1, source=goal.get("current_source_sha"),
                     fingerprint=goal["strategy_pin"]["fingerprint_digest"], now=now, reason="fingerprint_guard")
@@ -273,6 +288,11 @@ def wake_goal_for_source(config, *, company_id, user, now):
             return None
         if goal.get("current_source_sha") == connection.verified_sha:
             return latest
+        from .website_run_authority import owned_goal_child
+        if owned_goal_child(latest, include_completed=False) is not None:
+            # Source refresh and repair belong to the current ticket controller.
+            # Keep the original goal/child/consent rather than minting a new key.
+            return latest
         if latest.state in TERMINAL:
             return start_prepare(config, company_id=company_id, user=user, force_successor=True, target=goal.get("target", "ready"))
         if not goals.valid_goal(goal, goals.scope_for(connection, company_id)):
@@ -298,9 +318,26 @@ def wake_goal_for_source(config, *, company_id, user, now):
 
 
 def wait_for_channel(op, goal):
-    """Keep unavailable hosted fallback explicit until E5 supplies its handler."""
+    """Offer copy-ready delivery when repository setup is exhausted."""
+    from .channel_switch import _enabled, ladder_exhausted, switch_to_copy_ready
+    if _enabled(getattr(op.connection, 'organization', None)):
+        from django.db import transaction
+        from workflow_runs.models import ContentFactoryRun
+        candidates = [op.receipt.get(key) for key in ('first_article_run_id', 'first_article_publish_run_id', 'child_run_id')]
+        run = ContentFactoryRun.objects.filter(organization_id=op.connection.organization_id,
+            run_id__in=[value for value in candidates if value], workflow__in=['article_generation', 'confirmed_topic', 'direct_generate', 'article_revision']).order_by('-created_at').first()
+        op.state, op.next_attempt_at = 'needs_attention', None
+        op.receipt = {**op.receipt, 'goal': goal, 'status': 'working', 'user_action': None,
+            'channel_v1': {'version': 1, 'channel': 'copy_ready', 'waiting_to_publish': True},
+            'message': 'Your article can be saved as a draft while we check website publishing.'}
+        op.receipt.pop('channel_options', None)
+        organization, connection = op.connection.organization, op.connection
+        transaction.on_commit(lambda: ladder_exhausted(organization=organization, connection=connection))
+        if run:
+            transaction.on_commit(lambda: switch_to_copy_ready(run=run, reason='ladder_exhausted'))
+        return
     op.state, op.next_attempt_at = "needs_user", None
-    op.receipt = {**op.receipt, "goal": goal, "status": "needs_you", "channel_options": ["hosted", "portable"],
+    op.receipt = {**op.receipt, "goal": goal, "status": "needs_you", "channel_options": ["portable"],
         "message": "The repository strategies are exhausted. Choose an articles channel.",
         "user_action": {"id": "choose_article_channel", "label": "Choose articles channel"}}
 
@@ -327,7 +364,8 @@ def account_child_usage(op, goal):
         if isinstance(value := goals.mapping(op.receipt).get(key), str) and value}
     for identifier in sorted(identifiers):
         child = ContentFactoryRun.objects.filter(run_id=identifier, organization_id=op.connection.organization_id).first()
-        saved = goals.mapping(getattr(child, "run_request", None))
+        from .website_run_authority import execution_request
+        saved = goals.mapping(execution_request(child)) if child else {}
         if not child or (saved.get("website_connection_id") != str(op.connection_id)
                 or saved.get("connection_generation") != op.generation or saved.get("repository_id") != op.connection.repository_id
                 or saved.get("deletion_epoch") != deletion_epoch(op.connection)):
@@ -359,6 +397,11 @@ def account_child_usage(op, goal):
 
 def retry_goal_action(op, goal, *, now, occurrence, step=None):
     """Retry a repairable action on its rung with a distinct, durable attempt key."""
+    from .website_run_authority import owned_goal_child, wait_for_execution
+    owned_child = owned_goal_child(op)
+    if owned_child is not None:
+        wait_for_execution(op, owned_child, now=now)
+        return goal
     goal = retain_child_references(goal, op.receipt)
     step = step or op.receipt.get("current_step") or "setup"
     op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + 1,

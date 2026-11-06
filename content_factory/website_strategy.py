@@ -3,7 +3,7 @@ from copy import deepcopy
 from django.conf import settings
 from . import website_goal as goals
 
-RUNGS = ("adopt", "native_collection", "deterministic", "model_adapter", "agent", "hosted")
+RUNGS = ("adopt", "native_collection", "deterministic", "model_adapter", "agent")
 KNOWN_FRAMEWORKS = {"nextjs", "next", "astro", "gatsby", "vite", "react_router", "react-router", "hugo", "jekyll", "eleventy"}
 
 
@@ -75,15 +75,16 @@ def ensure_pin(goal, journey, *, source, now):
     return set_pin(goal, index, source=source, fingerprint=fingerprint, now=now, reason="source_changed" if previous else "inventory_selected")
 
 
-def advance(goal, *, source, now, reason):
-    """One fresh causal strategy outcome moves one rung, up to hosted fallback."""
+def advance(goal, *, source, now, reason, organization=None):
+    """One fresh causal strategy outcome moves one rung, through repository setup strategies."""
     pin = goal.get("strategy_pin")
     if not valid_pin(pin) or pin["binding"] != binding(goal, source):
         raise ValueError("Strategy failure does not match the current source pin")
     index = RUNGS.index(pin["rung"])
     if index == len(RUNGS) - 1:
         return goal
-    return set_pin(goal, index + 1, source=source, fingerprint=pin["fingerprint_digest"], now=now, reason=reason)
+    next_index = index + 1
+    return set_pin(goal, next_index, source=source, fingerprint=pin["fingerprint_digest"], now=now, reason=reason)
 
 
 def request_pin(goal):
@@ -91,7 +92,7 @@ def request_pin(goal):
     pin = goals.mapping(goal).get("strategy_pin")
     if not pin:
         return {}
-    if not valid_pin(pin) or pin["rung"] == "hosted":
+    if not valid_pin(pin):
         raise ValueError("This strategy is not a repository setup rung")
     return {"strategy_pin": pin["rung"], "strategy_goal_id": goal["goal_id"], "strategy_revision": pin["revision"], "strategy_binding": pin["binding"]}
 

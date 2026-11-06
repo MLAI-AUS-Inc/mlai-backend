@@ -24,11 +24,20 @@ from .website_views import WebsiteConnectionOperationView
 
 class Query:
     def __init__(self, values, model=None):
-        self.values, self.model, self.filters = values, model, []
+        self.values, self.model, self.filters, self.projections = values, model, [], []
 
     def filter(self, *args, **kwargs):
         self.filters.append((args, kwargs))
         return self
+
+    def values_list(self, *fields, flat=False):
+        self.projections.append((fields, flat))
+        def read(item, field):
+            for name in field.split('__'):
+                item = item.get(name) if isinstance(item, dict) else getattr(item, name)
+            return item
+        values = [tuple(read(item, field) for field in fields) for item in self.values]
+        return Query([value[0] for value in values] if flat else values, self.model)
 
     def first(self): return self.values[0] if self.values else None
     def get(self, **kwargs): return self.first()
@@ -259,9 +268,15 @@ class ReviewActionAuditTests(SimpleTestCase):
         self.assertEqual(self.public()['observed_owner_actions'], 0)
 
     def test_disabled_audit_adds_no_observation_lookup(self):
+        records = Query([self.config])
         with self.settings(ARTICLES_WEBSITE_DOCTOR_ENABLED=False), patch.object(
-                OrganizationContentConfig.objects, 'filter', side_effect=AssertionError('Audit lookup forbidden')):
+                OrganizationContentConfig.objects, 'filter', return_value=records) as command_lookup, patch(
+                'content_factory.website_review_action_audit.original_goal',
+                side_effect=AssertionError('Audit lookup forbidden')) as observation_lookup:
             self.assertEqual(self.post().status_code, 200)
+            observation_lookup.assert_not_called()
+            command_lookup.assert_called_once_with(organization=self.organization)
+            self.assertEqual(records.projections, [(('pillar_strategy',), True)])
         self.assertEqual(self.public()['observed_owner_actions'], 0)
 
     def test_private_intent_actor_and_text_never_appear_in_the_public_receipt(self):

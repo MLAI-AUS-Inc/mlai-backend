@@ -13,10 +13,9 @@ def enabled(organization_id):
 
 def required_grants(*, channel="repository", ci_mode="hosted", strategy=None):
     """Compute the complete selected-channel grant set before dispatching writes."""
-    if strategy is not None and (not isinstance(strategy,str) or strategy not in {"adopt","native_collection","deterministic","model_adapter","agent","hosted"}):
+    if strategy is not None and (not isinstance(strategy,str) or strategy not in {"adopt","native_collection","deterministic","model_adapter","agent"}):
         raise ValueError("Unknown articles strategy")
-    if strategy == "hosted":channel = "hosted"
-    if not isinstance(channel,str) or not isinstance(ci_mode,str) or channel not in {"repository","hosted","wordpress","ghost"} or ci_mode not in {"hosted","repository"}:
+    if not isinstance(channel,str) or not isinstance(ci_mode,str) or channel not in {"repository","wordpress","ghost"} or ci_mode not in {"hosted","repository"}:
         raise ValueError("Unknown articles channel or verification mode")
     if channel!="repository":return {}
     result={"contents":"write","pull_requests":"write"}
@@ -79,6 +78,11 @@ def setup_plan(context, config, journey):
     selection=choose_page(goals.mapping(journey).get("discovery"))
     grants=goals.mapping(goals.mapping(journey).get("githubPermissions"))
     ci_mode="hosted" if getattr(settings,"ARTICLES_HOSTED_ATTESTATION_ENABLED",False) and getattr(settings,"ARTICLES_HOSTED_VERIFICATION_ENABLED",False) else "repository"
+    from .website_live_verification import selected as live_url_selected
+    if live_url_selected(context.organization):
+        # New-journey sites are verified by MLAI's build and their live pages,
+        # so GitHub is never asked for Workflows, Checks or Statuses (IF-P1-16).
+        ci_mode="hosted"
     required=required_grants(ci_mode=ci_mode)
     url=grants.get("settingsUrl")
     from urllib.parse import urlsplit
@@ -88,6 +92,6 @@ def setup_plan(context, config, journey):
     except ValueError:url=None
     return {"version":1,"companyId":str(context.company.pk),"connectionId":str(connection.pk),"connectionGeneration":connection.generation,
         "configurationRevision":connection.configuration_version,"goalTarget":"first_article_live" if getattr(settings,"ARTICLES_FIRST_ARTICLE_GOAL_ENABLED",False) else "ready",
-        "articlePoints":get_content_factory_article_cost_points(context.organization.domain),"page":selection,
+        "articlePoints":get_content_factory_article_cost_points(context.organization.domain, user=getattr(getattr(context,"profile",None),"user",None)),"page":selection,
         "github":{"approvalUrl":url,"required":required,"missing":[name for name in required if grants.get(name) is not True],"lookupUnavailable":grants.get("retryable") is True},
         "ciMode":ci_mode,"requiresReview":getattr(config,"requires_review",False) is True}

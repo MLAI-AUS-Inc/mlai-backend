@@ -265,10 +265,13 @@ INSTALLED_APPS = [
     'victor_ai',
     'jobs',
     'org_memory',
+    'mentoring',
     "rest_framework",
     "roo",
 
     "integrations",
+    "crm",
+    "system_email",
 ]
 
 MIDDLEWARE = [
@@ -340,8 +343,18 @@ for _operations_origin in ('https://ops.mlai.au',):
     if _operations_origin not in CSRF_TRUSTED_ORIGINS:
         CSRF_TRUSTED_ORIGINS.append(_operations_origin)
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_HEADERS = (*default_headers, "x-request-id", "idempotency-key")
-CORS_EXPOSE_HEADERS = ["X-Request-ID", "Retry-After"]
+CORS_ALLOW_HEADERS = (
+    *default_headers,
+    "x-request-id",
+    "x-mlai-public-key",
+    "idempotency-key",
+    "x-mlai-slack-catalog-kinds",
+    # P1 founder journey poll (GET /api/v1/my-startup/journey/) revalidates
+    # with If-None-Match and reads the ETag cross-origin.
+    "if-none-match",
+    "if-match",
+)
+CORS_EXPOSE_HEADERS = ["X-Request-ID", "Retry-After", "ETag"]
 
 # Bound request buffering before application-specific parsers run. Larger
 # uploads use the dedicated streaming/media paths rather than unbounded Django
@@ -481,6 +494,26 @@ GMAIL_METADATA_PAGE_DEADLINE_SECONDS = float(os.getenv('GMAIL_METADATA_PAGE_DEAD
 
 AUTH_USER_MODEL = 'core.User'
 
+# Client IP for rate limits (core.client_ip.trusted_client_ip): the number of
+# proxies in front of Django that write X-Forwarded-For. Production nginx sets
+# X-Forwarded-For to $remote_addr (the CF-Connecting-IP real IP), so the
+# rightmost entry is the trusted one. 0 ignores the header and uses REMOTE_ADDR.
+TRUSTED_PROXY_HOPS = int(os.getenv('TRUSTED_PROXY_HOPS', '1'))
+# Per-IP ceilings for sign-in (core.auth_throttles). They sit well above a
+# workshop room on one venue network; per-email, per-installation and
+# per-challenge limits still bound each account and device.
+AUTH_THROTTLE_IP_CODE_REQUESTS_PER_HOUR = int(os.getenv('AUTH_THROTTLE_IP_CODE_REQUESTS_PER_HOUR', '600'))
+AUTH_THROTTLE_IP_VERIFY_PER_10M = int(os.getenv('AUTH_THROTTLE_IP_VERIFY_PER_10M', '300'))
+AUTH_THROTTLE_IP_PASSWORD_PER_10M = int(os.getenv('AUTH_THROTTLE_IP_PASSWORD_PER_10M', '200'))
+# Minimum per-IP ceiling for signed-in device enrolment (challenge, invite,
+# confirm) in community_chat.throttles.enforce_bootstrap_limits.
+AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M = int(
+    os.getenv('AUTH_THROTTLE_IP_BOOTSTRAP_AUTHENTICATED_PER_10M', '300')
+)
+# Minimum per-IP ceiling for the anonymous desktop sign-in handoff
+# (auth/device/start and auth/device/exchange), still bounded per device key.
+AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M = int(os.getenv('AUTH_THROTTLE_IP_DEVICE_AUTH_PER_10M', '300'))
+
 REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -512,6 +545,10 @@ REST_FRAMEWORK = {
         'community_chat_slack_read_receipt': os.getenv('COMMUNITY_CHAT_SLACK_READ_RECEIPT_RATE', '60/minute'),
         'community_chat_slack_directory': os.getenv('COMMUNITY_CHAT_SLACK_DIRECTORY_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_crm': os.getenv('COMMUNITY_CHAT_CRM_RATE', '240/minute'),
+        'community_chat_mentoring': os.getenv('COMMUNITY_CHAT_MENTORING_RATE', '60/minute'),
+        'community_chat_mentoring_write': os.getenv('COMMUNITY_CHAT_MENTORING_WRITE_RATE', '20/minute'),
+        'community_chat_admin': os.getenv('COMMUNITY_CHAT_ADMIN_RATE', '120/minute'),
         'my_startup_bootstrap': os.getenv('MY_STARTUP_BOOTSTRAP_RATE', '120/minute'),
         'my_startup_read': os.getenv('MY_STARTUP_READ_RATE', '120/minute'),
         'my_startup_poll': os.getenv('MY_STARTUP_POLL_RATE', '120/minute'),
@@ -527,9 +564,16 @@ REST_FRAMEWORK = {
         'token_usage_leaderboard': os.getenv('TOKEN_USAGE_LEADERBOARD_RATE', '60/minute'),
         'token_usage_insights': os.getenv('TOKEN_USAGE_INSIGHTS_RATE', '120/minute'),
         'community_chat_home': os.getenv('COMMUNITY_CHAT_HOME_RATE', '60/minute'),
+        'community_chat_crm': os.getenv('COMMUNITY_CHAT_CRM_RATE', '240/minute'),
+        'community_chat_admin': os.getenv('COMMUNITY_CHAT_ADMIN_RATE', '120/minute'),
         'community_chat_slack_delete': os.getenv(
             'COMMUNITY_CHAT_SLACK_DELETE_RATE', '20/minute'
         ),
+        # Founder copy fallback telemetry (community_chat.client_events):
+        # per signed-in account, or per trusted client IP when anonymous, plus
+        # a per-IP ceiling that applies to every caller.
+        'community_chat_client_events': os.getenv('COMMUNITY_CHAT_CLIENT_EVENTS_RATE', '60/minute'),
+        'community_chat_client_events_ip': os.getenv('COMMUNITY_CHAT_CLIENT_EVENTS_IP_RATE', '600/minute'),
     }
 }
 
@@ -542,6 +586,10 @@ COMMUNITY_CHAT_VOLUNTEER_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ENABLE
 COMMUNITY_CHAT_VOLUNTEER_RECOGNITION_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_RECOGNITION_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED', False)
+COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED', False)
+COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM = os.getenv('COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM', '')
+COMMUNITY_CHAT_VOLUNTEER_BOOST_REWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_BOOST_REWARDS_ENABLED', False)
+COMMUNITY_CHAT_VOLUNTEER_BOOST_ACTIVE_FROM = os.getenv('COMMUNITY_CHAT_VOLUNTEER_BOOST_ACTIVE_FROM', '')
 COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_ATTENDANCE_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ATTENDANCE_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_COMMUNITY = os.getenv('COMMUNITY_CHAT_VOLUNTEER_COMMUNITY', '')
@@ -676,6 +724,27 @@ MEETING_ROOM_BOOKING_ENABLED = _env_is_true(
     'MEETING_ROOM_BOOKING_ENABLED',
     False,
 )
+# Vibe Mentoring pilot. Off by default; see docs/mentoring.md.
+MENTOR_BOOKING_ENABLED = _env_is_true('MENTOR_BOOKING_ENABLED', False)
+# Independent admission flag: existing request clients never charge implicitly.
+MENTOR_INSTANT_BOOKING_ENABLED = _env_is_true('MENTOR_INSTANT_BOOKING_ENABLED', False)
+MENTOR_REQUEST_TTL_HOURS = int(os.getenv('MENTOR_REQUEST_TTL_HOURS', '48'))
+MENTOR_AUTO_COMPLETE_HOURS = int(os.getenv('MENTOR_AUTO_COMPLETE_HOURS', '24'))
+# Google Meet links and free/busy for mentoring, through one MLAI-owned free
+# Google account. Off by default; secrets come only from the environment.
+MENTORING_GOOGLE_ENABLED = _env_is_true('MENTORING_GOOGLE_ENABLED', False)
+MENTORING_GOOGLE_CLIENT_ID = os.getenv('MENTORING_GOOGLE_CLIENT_ID', '')
+MENTORING_GOOGLE_CLIENT_SECRET = os.getenv('MENTORING_GOOGLE_CLIENT_SECRET', '')
+MENTORING_GOOGLE_REFRESH_TOKEN = os.getenv('MENTORING_GOOGLE_REFRESH_TOKEN', '')
+
+# Personal, mentor-owned Google Calendar OAuth. This does not borrow Gmail or
+# the legacy global organiser's refresh token.
+MENTOR_CALENDAR_GOOGLE_ENABLED = _env_is_true('MENTOR_CALENDAR_GOOGLE_ENABLED', False)
+MENTOR_CALENDAR_GOOGLE_CLIENT_ID = os.getenv('MENTOR_CALENDAR_GOOGLE_CLIENT_ID', '')
+MENTOR_CALENDAR_GOOGLE_CLIENT_SECRET = os.getenv('MENTOR_CALENDAR_GOOGLE_CLIENT_SECRET', '')
+MENTOR_CALENDAR_GOOGLE_REDIRECT_URI = os.getenv('MENTOR_CALENDAR_GOOGLE_REDIRECT_URI', '')
+MENTOR_CALENDAR_CHAT_ORIGIN = os.getenv('MENTOR_CALENDAR_CHAT_ORIGIN', 'https://chat.mlai.au')
+
 PASSWORD_RESET_TTL_SECONDS = int(os.getenv('PASSWORD_RESET_TTL_SECONDS', '3600'))
 PASSWORD_RESET_MIN_RESPONSE_SECONDS = float(
     os.getenv('PASSWORD_RESET_MIN_RESPONSE_SECONDS', '0.12')
@@ -964,6 +1033,18 @@ ESAFETY_URL = os.getenv('ESAFETY_URL') or DEFAULT_FRONTEND_URL
 WATT_THE_HACK_URL = os.getenv('WATT_THE_HACK_URL') or DEFAULT_FRONTEND_URL
 VIBE_RAISING_URL = os.getenv('VIBE_RAISING_URL') or DEFAULT_FRONTEND_URL
 FOUNDER_TOOLS_URL = os.getenv('FOUNDER_TOOLS_URL') or VIBE_RAISING_URL
+# A hidden research workspace holds its domain only this long; after that a real
+# startup save on the same domain releases it (founder_tools.services).
+try:
+    FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS = int(
+        os.getenv('FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS', '24') or 24
+    )
+except ValueError as exc:
+    raise ImproperlyConfigured(
+        'FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS must be a whole number of hours'
+    ) from exc
+if FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS < 1:
+    raise ImproperlyConfigured('FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS must be at least 1')
 CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION = os.getenv(
     'CORE_ACTOR_MIGRATION_HISTORY_ATTESTATION',
     '',
@@ -1019,6 +1100,12 @@ ROO_INTERNAL_MENTION_API_KEY = os.getenv('ROO_INTERNAL_MENTION_API_KEY', '').str
 ROO_SIM_PATIENT_KEY = os.getenv('ROO_SIM_PATIENT_KEY', '').strip()
 HEALTH_HACK_API_KEY = os.getenv('HEALTH_HACK_API_KEY', '').strip()
 ROO_API_KEY = os.getenv('ROO_API_KEY', '').strip()
+STUDIO_REPORT_SOURCE_ENABLED = os.getenv('STUDIO_REPORT_SOURCE_ENABLED', 'false').lower() == 'true'
+STUDIO_REPORT_SOURCE_KEY = os.getenv('STUDIO_REPORT_SOURCE_KEY', '').strip()
+STUDIO_REPORT_SOURCE_CONFIG = os.getenv('STUDIO_REPORT_SOURCE_CONFIG', '')
+ROO_EVENT_DISCOUNTS_ENABLED = _env_is_true('ROO_EVENT_DISCOUNTS_ENABLED', False)
+ROO_EVENT_DISCOUNT_WORKER_ENABLED = _env_is_true('ROO_EVENT_DISCOUNT_WORKER_ENABLED', False)
+ROO_EVENT_DISCOUNTS_SLACK_TEAM_ID = os.getenv('ROO_EVENT_DISCOUNTS_SLACK_TEAM_ID', '').strip()
 # Additional report-only access for verified Roo requests in one shared chat.
 COWORKING_REPORT_SLACK_TEAM_ID = os.getenv('COWORKING_REPORT_SLACK_TEAM_ID', '').strip()
 COWORKING_REPORT_SLACK_CHANNEL_ID = os.getenv('COWORKING_REPORT_SLACK_CHANNEL_ID', '').strip()
@@ -1075,6 +1162,10 @@ CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS = int(
 CONTENT_FACTORY_LIVE_PREVIEW_START_READ_TIMEOUT_SECONDS = int(
     os.getenv('CONTENT_FACTORY_LIVE_PREVIEW_START_READ_TIMEOUT_SECONDS', '20')
 )
+# Completed portable drafts ask Content Factory's preview ladder again after a
+# refusal, failure or expiry. Content Factory owns retry timing; enable only
+# after its ladder is deployed.
+CONTENT_FACTORY_PORTABLE_PREVIEW_REARM = os.getenv('CONTENT_FACTORY_PORTABLE_PREVIEW_REARM', 'false').lower() == 'true'
 CONTENT_FACTORY_API_KEY = os.getenv('CONTENT_FACTORY_API_KEY')
 # Articles B1/B5 receivers ship disabled; release approval and qualifying zoo
 # evidence are required before enrolling customer operations.
@@ -1088,11 +1179,25 @@ ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS = tuple(
 CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED = os.getenv('CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED', 'false').lower() == 'true'
 CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED = os.getenv('CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED', 'false').lower() == 'true'
 CONTENT_FACTORY_SETUP_DELIVERY_RECONCILIATION_ENABLED = os.getenv('CONTENT_FACTORY_SETUP_DELIVERY_RECONCILIATION_ENABLED', 'false').lower() == 'true'
+# Explicit discovery admission boundary. Empty/invalid/naive stays disabled;
+# use the approved activation timestamp so historical stalled runs stay out.
+CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE = os.getenv('CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE', '').strip()
+# Nightly refresh additionally requires the original versioned scheduler request.
+CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE = os.getenv('CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE', '').strip()
 CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS = tuple(
     identifier.strip() for identifier in os.getenv('CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS', '').split(',')
     if identifier.strip()
 )
 CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID = os.getenv('CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID', '').strip()
+# Founder-journey ops alerts (content_factory/founder_journey_alerts.py): one
+# alert per stuck founder run or startup, for every org (no goal enrolment or
+# website connection needed). Posts to CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID and
+# always logs a 'founder_journey_alert' line, Slack configured or not. SINCE
+# bounds run/company created_at. The default replays every stuck run and startup
+# since 29 Sep at MAX_PER_TICK a minute; set SINCE to the flip date to start clean.
+ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED', 'false').lower() == 'true'
+ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE', '2026-09-29').strip()
+ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK = int(os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK', '20'))
 ARTICLES_WEBSITE_STATUS_V1_ENABLED = os.getenv('ARTICLES_WEBSITE_STATUS_V1_ENABLED', 'false').lower() == 'true'
 ARTICLES_WEBSITE_CONSISTENCY_ENABLED = os.getenv('ARTICLES_WEBSITE_CONSISTENCY_ENABLED', 'false').lower() == 'true'
 ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED = os.getenv('ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED', 'false').lower() == 'true'
@@ -1114,6 +1219,24 @@ CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS = int(
 )
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
 RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', 'Roo <notifications@mlai.au>')
+# Transactional email sent by our own code through Resend (system_email app).
+# Separate key, domain and webhook from CRM sending; never uses CRM mailboxes or
+# warm-up caps. Each message key listed in SYSTEM_EMAIL_RESEND_MESSAGES (or
+# "all") is sent this way; unlisted keys stay on their legacy provider.
+SYSTEM_EMAIL_RESEND_API_KEY = os.getenv('SYSTEM_EMAIL_RESEND_API_KEY', '').strip()
+MLAI_SYSTEM_FROM_EMAIL = os.getenv(
+    'MLAI_SYSTEM_FROM_EMAIL', 'MLAI <notifications@notify.mlai.au>'
+).strip()
+SYSTEM_EMAIL_REPLY_TO = os.getenv('SYSTEM_EMAIL_REPLY_TO', 'team@mlai.au').strip()
+SYSTEM_EMAIL_UNSUBSCRIBE_MAILTO = os.getenv('SYSTEM_EMAIL_UNSUBSCRIBE_MAILTO', '').strip()
+SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET = os.getenv('SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET', '').strip()
+SYSTEM_EMAIL_RESEND_MESSAGES = tuple(
+    value.strip() for value in os.getenv('SYSTEM_EMAIL_RESEND_MESSAGES', '').split(',') if value.strip()
+)
+SYSTEM_EMAIL_TEST_RECIPIENTS = tuple(
+    value.strip().lower() for value in os.getenv('SYSTEM_EMAIL_TEST_RECIPIENTS', '').split(',') if value.strip()
+)
+SYSTEM_EMAIL_ALERT_SLACK_CHANNEL_ID = os.getenv('SYSTEM_EMAIL_ALERT_SLACK_CHANNEL_ID', '').strip()
 # Customer.io App API key (already used for magic-link emails). When set, it is
 # the preferred transport for notification-channel emails; Resend is fallback.
 CUSTOMERIO_API_KEY = os.getenv('CUSTOMERIO_API_KEY', '')
@@ -1171,6 +1294,30 @@ TWILIO_WHATSAPP_TOPIC_ANALYTICS_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_TOPIC_A
 # {{1}} title, {{2}} domain, {{3}} expanded founder-tools review URL). The fixed
 # template copy must include "Reply STOP to opt out.".
 TWILIO_WHATSAPP_REVIEW_CONTENT_SID = os.getenv('TWILIO_WHATSAPP_REVIEW_CONTENT_SID', '')
+# Contacts blasts by SMS and WhatsApp (crm app); both channels stay off until
+# enabled. SMS goes through a Messaging Service (MG..., Advanced Opt-Out on)
+# that holds MLAI's Twilio number. WhatsApp reuses TWILIO_WHATSAPP_FROM and
+# sends approved Content templates only.
+TWILIO_MESSAGING_SERVICE_SID = os.getenv('TWILIO_MESSAGING_SERVICE_SID', '').strip()
+CRM_SMS_ENABLED = _env_is_true('CRM_SMS_ENABLED', False)
+CRM_WHATSAPP_ENABLED = _env_is_true('CRM_WHATSAPP_ENABLED', False)
+# Comma-separated E.164 prefixes SMS may go to; +614 is Australian mobiles.
+CRM_SMS_ALLOWED_PREFIXES = [
+    prefix.strip()
+    for prefix in os.getenv('CRM_SMS_ALLOWED_PREFIXES', '+614').split(',')
+    if prefix.strip()
+]
+# Composer cost estimates in AUD, as decimal strings. Check current Twilio
+# and Meta pricing; it changes.
+CRM_SMS_COST_PER_SEGMENT_AUD = os.getenv('CRM_SMS_COST_PER_SEGMENT_AUD', '0').strip() or '0'
+CRM_WHATSAPP_COST_PER_MESSAGE_AUD = (
+    os.getenv('CRM_WHATSAPP_COST_PER_MESSAGE_AUD', '0').strip() or '0'
+)
+# Safety caps per channel over a rolling 24 hours, and Twilio sends per
+# blast dispatch tick.
+CRM_SMS_DAILY_LIMIT = max(0, int(os.getenv('CRM_SMS_DAILY_LIMIT', '500')))
+CRM_WHATSAPP_DAILY_LIMIT = max(0, int(os.getenv('CRM_WHATSAPP_DAILY_LIMIT', '500')))
+CRM_TWILIO_SENDS_PER_TICK = max(1, int(os.getenv('CRM_TWILIO_SENDS_PER_TICK', '200')))
 NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS = int(
     os.getenv('NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS', str(3 * 24 * 60 * 60))
 )
@@ -1236,6 +1383,10 @@ MESSAGE_SYNC_OPEN_PRIORITY_ENABLED = _env_is_true('MESSAGE_SYNC_OPEN_PRIORITY_EN
 MESSAGE_SYNC_DEVICE_FANOUT_BATCH = int(os.getenv('MESSAGE_SYNC_DEVICE_FANOUT_BATCH', '0'))
 MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED = _env_is_true('MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED', False)
 MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR = int(os.getenv('MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR', '6'))
+# Re-check parked group-DM/private-channel sources at the start of each owner's
+# discovery turn instead of waiting for the paced directory page. Requires
+# MESSAGE_SYNC_ENABLED for the durable lease and shared provider budgets.
+MESSAGE_SYNC_TARGETED_STAGED_ROUTING = _env_is_true('MESSAGE_SYNC_TARGETED_STAGED_ROUTING', False)
 MESSAGE_SYNC_INBOX_READ_EXPORT = _env_is_true('MESSAGE_SYNC_INBOX_READ_EXPORT', False)
 MESSAGE_SYNC_INBOX_CURSOR_PUSH = _env_is_true('MESSAGE_SYNC_INBOX_CURSOR_PUSH', False)
 MESSAGE_SYNC_INBOX_MENTIONS = _env_is_true('MESSAGE_SYNC_INBOX_MENTIONS', False)
@@ -1274,6 +1425,11 @@ COMMUNITY_BRIDGE_WORKER_POLL_SECONDS = float(
     os.getenv('COMMUNITY_BRIDGE_WORKER_POLL_SECONDS', '1')
 )
 COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED = _env_is_true('COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED', False)
+# Inactive foundations: enable only after the member-channel implementation,
+# compatible clients and exact approved schema are deployed and canary checked.
+# Optional channel cohort for the first Members canary; empty permits the
+# normal rollout only when the separate member-channel switch is enabled.
+SLACK_MEMBER_CHANNEL_ALLOWED_IDS = os.getenv('SLACK_MEMBER_CHANNEL_ALLOWED_IDS', '')
 COMMUNITY_BRIDGE_DEPENDENCY_VERDICT_MIN_AGE_SECONDS = int(os.getenv('COMMUNITY_BRIDGE_DEPENDENCY_VERDICT_MIN_AGE_SECONDS', '3600'))
 COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS = int(
     os.getenv('COMMUNITY_BRIDGE_PARENT_DEPENDENCY_MAX_AGE_SECONDS', '3600')
@@ -1418,6 +1574,16 @@ CONTENT_ISLANDS_REFRESH_LOCAL_HOUR = int(
 CONTENT_ISLANDS_REFRESH_MAX_PER_TICK = int(
     os.environ.get("CONTENT_ISLANDS_REFRESH_MAX_PER_TICK", "3") or 3
 )
+# Scheduled founder workshops: a JSON list of {"start": ISO8601, "end": ISO8601}.
+# Nightly island refreshes dispatch nothing while now is inside a window, so
+# workshop research and first articles do not queue behind batch work. Parsed
+# by the island refresh scheduler, which logs and ignores malformed entries.
+ARTICLES_WORKSHOP_WINDOWS = os.environ.get("ARTICLES_WORKSHOP_WINDOWS", "[]").strip() or "[]"
+# Runs content-factory's interactive queue serves at once, used only for the
+# founder-facing queue ETA. 0 (the default) shows the place in line without an
+# ETA; set it once the interactive worker pool is deployed and sized.
+_interactive_queue_slots = os.getenv('CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS', '0').strip()
+CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS = int(_interactive_queue_slots) if _interactive_queue_slots.isdigit() else 0
 # An emerging island becomes visible only once it carries this much demand.
 CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS = int(
     os.environ.get("CONTENT_ISLANDS_PROMOTION_MIN_KEYWORDS", "5") or 5
@@ -1621,6 +1787,7 @@ SLACK_OAUTH_SCOPES = _env_list(
         "users:read",
         "reactions:read",
         "reactions:write",
+        "emoji:read",
         "files:read",
     ],
 )
@@ -2167,6 +2334,83 @@ LUMA_UPCOMING_EVENTS_CACHE_SECONDS = max(
     0,
     int(os.environ.get('LUMA_UPCOMING_EVENTS_CACHE_SECONDS', '300')),
 )
+
+# Contacts store (crm app). The scheduled Luma guest sync stays off until an
+# operator enables it; the backfill and import commands work regardless.
+CRM_LUMA_SYNC_ENABLED = _env_is_true('CRM_LUMA_SYNC_ENABLED', False)
+CRM_ENGAGEMENT_REFRESH_ENABLED = _env_is_true('CRM_ENGAGEMENT_REFRESH_ENABLED', False)
+CRM_SUBSTACK_ACTIVITY_ENABLED = _env_is_true('CRM_SUBSTACK_ACTIVITY_ENABLED', False)
+CRM_ENGAGEMENT_REFRESH_HOUR = max(0, min(23, int(os.environ.get('CRM_ENGAGEMENT_REFRESH_HOUR', '6'))))
+CRM_LUMA_SYNC_INTERVAL_SECONDS = max(
+    300,
+    int(os.environ.get('CRM_LUMA_SYNC_INTERVAL_SECONDS', '1800')),
+)
+CRM_LUMA_SYNC_RECENT_DAYS = max(0, int(os.environ.get('CRM_LUMA_SYNC_RECENT_DAYS', '14')))
+CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN = max(
+    1,
+    int(os.environ.get('CRM_LUMA_SYNC_MAX_EVENTS_PER_RUN', '25')),
+)
+# Chat Home, Volunteer and Roo share the calendar key's 200/minute budget.
+CRM_LUMA_REQUESTS_PER_MINUTE = max(
+    1,
+    min(200, int(os.environ.get('CRM_LUMA_REQUESTS_PER_MINUTE', '100'))),
+)
+# Pipe-separated Luma registration question labels whose "yes" grants
+# marketing consent, e.g. "Keep me updated about MLAI events".
+CRM_LUMA_CONSENT_QUESTION_LABELS = [
+    label.strip()
+    for label in os.environ.get('CRM_LUMA_CONSENT_QUESTION_LABELS', '').split('|')
+    if label.strip()
+]
+# Same format: labels whose "yes" answer is WhatsApp opt-in. A phone number
+# on its own never is.
+CRM_LUMA_WHATSAPP_QUESTION_LABELS = [
+    label.strip()
+    for label in os.environ.get('CRM_LUMA_WHATSAPP_QUESTION_LABELS', '').split('|')
+    if label.strip()
+]
+# Contacts API for Chat owners and admins (/api/v1/community-chat/crm/).
+# Off by default; the API answers 404 crm_disabled until an operator enables it.
+COMMUNITY_CHAT_CRM_ENABLED = _env_is_true('COMMUNITY_CHAT_CRM_ENABLED', False)
+CRM_SEGMENT_BUILDER_V2_ENABLED = _env_is_true('CRM_SEGMENT_BUILDER_V2_ENABLED', True)
+# Email blasts go through a self-hosted listmonk (v6.2) reached on the
+# mlai-shared network, e.g. LISTMONK_BASE_URL=http://listmonk:9000, as a
+# listmonk API user. CRM_SENDING_ENABLED is the email kill switch; SMTP
+# credentials live only in listmonk. See docs/crm.md.
+CRM_SENDING_ENABLED = _env_is_true('CRM_SENDING_ENABLED', False)
+CRM_RESEND_WEBHOOK_SECRET = os.environ.get('CRM_RESEND_WEBHOOK_SECRET', '').strip()
+CRM_RESEND_MONITORED_SENDERS = tuple(
+    value.strip().lower() for value in os.environ.get('CRM_RESEND_MONITORED_SENDERS', '').split(',')
+    if value.strip()
+)
+CRM_WARMUP_ENABLED = _env_is_true('CRM_WARMUP_ENABLED', False)
+CRM_WARMUP_RUN_ID = os.environ.get('CRM_WARMUP_RUN_ID', '').strip()
+LISTMONK_BASE_URL = os.environ.get('LISTMONK_BASE_URL', '').strip().rstrip('/')
+LISTMONK_API_USER = os.environ.get('LISTMONK_API_USER', '').strip()
+LISTMONK_API_TOKEN = os.environ.get('LISTMONK_API_TOKEN', '').strip()
+# The MLAI campaign template's numeric id in listmonk; blank uses listmonk's default.
+_LISTMONK_TEMPLATE_ID = os.environ.get('LISTMONK_TEMPLATE_ID', '').strip()
+LISTMONK_TEMPLATE_ID = int(_LISTMONK_TEMPLATE_ID) if _LISTMONK_TEMPLATE_ID.isdigit() else None
+# Comma-separated domain:route pairs CRM email may be sent from (route is
+# resend or google_relay). Admins add sender addresses on these domains in
+# Admin → Sending; a sender can only be enabled while the domain's DNS checks pass.
+CRM_SENDING_DOMAINS = [
+    entry.strip()
+    for entry in os.environ.get(
+        'CRM_SENDING_DOMAINS', 'mlai.au:resend,mlai-aus.com:resend,mlai.org.au:resend'
+    ).split(',')
+    if entry.strip()
+]
+# The blast dispatcher and the listmonk feedback sync are scheduler runners,
+# each cache-throttled to one pass per interval.
+CRM_BLAST_DISPATCH_INTERVAL_SECONDS = max(
+    10,
+    int(os.environ.get('CRM_BLAST_DISPATCH_INTERVAL_SECONDS', '60')),
+)
+CRM_LISTMONK_SYNC_INTERVAL_SECONDS = max(
+    60,
+    int(os.environ.get('CRM_LISTMONK_SYNC_INTERVAL_SECONDS', '300')),
+)
 HUMANITIX_API_BASE_URL = os.environ.get(
     'HUMANITIX_API_BASE_URL',
     'https://api.humanitix.com/v1',
@@ -2184,6 +2428,7 @@ COMMUNITY_CHAT_DELETION_CONTACT = os.getenv("COMMUNITY_CHAT_DELETION_CONTACT", "
 # Public Roo's identity verified in the MLAI Slack workspace. Empty values pause
 # the first-party DM connection; no other bot is enabled by this setting.
 COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
+ROO_LINK_LOVE_SLACK_CHANNEL_ID = os.getenv("ROO_LINK_LOVE_SLACK_CHANNEL_ID", "C09BQAWJ66R")
 COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID", "U090FV0GTT4")
 
 # Optional startup-update editorial covers; all generation runs server-side.
@@ -2260,7 +2505,6 @@ if AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY not in {"24h", "grant"}:
 AGENT_RUNTIME_NATIVE_DURABLE_WATCH = _env_is_true("AGENT_RUNTIME_NATIVE_DURABLE_WATCH", False)
 AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS = _native_bounded_int("AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS", 600, 60, 86400)
 AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS = _native_bounded_int("AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS", 86400, 600, 604800)
-AGENT_RUNTIME_NATIVE_LAPSE_ALERTS = _env_is_true("AGENT_RUNTIME_NATIVE_LAPSE_ALERTS", False)
 AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED = _env_is_true("AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED", False)
 MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED = _env_is_true("MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED", False)
 MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS = _native_bounded_int("MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS", 0, 0, 300)
@@ -2281,6 +2525,7 @@ AGENT_RUNTIME_MODEL_API_KEY = os.getenv("AGENT_RUNTIME_MODEL_API_KEY", "")
 AGENT_RUNTIME_MODEL_NAME = os.getenv("AGENT_RUNTIME_MODEL_NAME", "")
 # Separate, opt-in public-thread assistant. Never shares a Dot's OAuth binding.
 AGENT_RUNTIME_COMMUNITY_ENABLED = _env_is_true("AGENT_RUNTIME_COMMUNITY_ENABLED", False)
+AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED = _env_is_true("AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED", False)
 AGENT_RUNTIME_MODEL_TIMEOUT_SECONDS = int(os.getenv("AGENT_RUNTIME_MODEL_TIMEOUT_SECONDS", "90"))
 AGENT_RUNTIME_MODEL_MAX_REQUEST_BYTES = int(os.getenv("AGENT_RUNTIME_MODEL_MAX_REQUEST_BYTES", "262144"))
 AGENT_RUNTIME_MODEL_MAX_RESPONSE_BYTES = int(os.getenv("AGENT_RUNTIME_MODEL_MAX_RESPONSE_BYTES", "2097152"))
@@ -2302,11 +2547,26 @@ ARTICLES_WEBSITE_EVENT_WAKES_ENABLED = os.getenv("ARTICLES_WEBSITE_EVENT_WAKES_E
 
 ARTICLES_WEBSITE_DOCTOR_ENABLED = os.getenv("ARTICLES_WEBSITE_DOCTOR_ENABLED", "false").lower() == "true"
 
+# Opening Articles runs a website's due same-source verification refresh first.
+WEBSITE_VERIFICATION_PAGE_REFRESH_ENABLED = _env_is_true("WEBSITE_VERIFICATION_PAGE_REFRESH_ENABLED", True)
+
 # C1/C2: owner consent and automatic route choice (default off).
 ARTICLES_SETUP_CONSENT_ENABLED = _env_is_true("ARTICLES_SETUP_CONSENT_ENABLED", False)
 ARTICLES_AUTO_PAGE_ENABLED = _env_is_true("ARTICLES_AUTO_PAGE_ENABLED", False)
 ARTICLES_PAGE_CONFIDENCE_MARGIN = float(os.getenv("ARTICLES_PAGE_CONFIDENCE_MARGIN", "0.15"))
 ARTICLES_FIRST_ARTICLE_GOAL_ENABLED = _env_is_true("ARTICLES_FIRST_ARTICLE_GOAL_ENABLED", False)
+# P0.2: free setup research and one free first article per startup (default
+# off). Content Factory must accept 'free' setup and 'entitled' authorizations
+# before either flag is turned on, or it refuses the work with 402.
+ARTICLES_FREE_SETUP_RESEARCH_ENABLED = _env_is_true("ARTICLES_FREE_SETUP_RESEARCH_ENABLED", False)
+# Free autofill and baseline uses per account email in a rolling 24 hours (0 = no cap).
+ARTICLES_FREE_SETUP_AUTOFILL_DAILY_CAP = int(os.getenv("ARTICLES_FREE_SETUP_AUTOFILL_DAILY_CAP", "5"))
+ARTICLES_FREE_SETUP_BASELINE_DAILY_CAP = int(os.getenv("ARTICLES_FREE_SETUP_BASELINE_DAILY_CAP", "2"))
+ARTICLES_FREE_FIRST_ARTICLE_ENABLED = _env_is_true("ARTICLES_FREE_FIRST_ARTICLE_ENABLED", False)
+# Global safety cap on free first-article reservations per rolling 24 hours (0 = off).
+ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP = int(os.getenv("ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP", "0"))
+# Reservations in one hour that raise a free_cap_spike ops alert (0 = off).
+ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD = int(os.getenv("ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD", "25"))
 ARTICLES_ARTICLE_RECOVERY_ENABLED = _env_is_true("ARTICLES_ARTICLE_RECOVERY_ENABLED", False)
 CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED = _env_is_true("CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED", False)
 
@@ -2324,3 +2584,102 @@ ARTICLES_EXISTING_INVENTORY_DISPLAY_ENABLED = _env_is_true("ARTICLES_EXISTING_IN
 ARTICLES_GOAL_NOTIFICATIONS_ENABLED = _env_is_true("ARTICLES_GOAL_NOTIFICATIONS_ENABLED", False)
 # Registered first-party notifier identity; never a customer or Slack bridge key.
 ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY = os.getenv("ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY", "")
+
+# Robustness R7 (default off). Merge worker run snapshots by meaning: rails
+# still refuse a real mismatch, other fields record drift instead of refusing.
+ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED = _env_is_true("ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED", False)
+# Accept Content Factory's append-only run events into a bounded log on the run.
+ARTICLES_RUN_EVENTS_ENABLED = _env_is_true("ARTICLES_RUN_EVENTS_ENABLED", False)
+# Robustness Phase 3: fold ContentFactoryJob into ContentFactoryRun. Copy every
+# Job write onto the run's backend columns; then compare run reads with Job
+# reads (logging field names only); then serve those reads from the run.
+ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED = _env_is_true("ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED", False)
+ARTICLES_RUN_JOB_SHADOW_READ_ENABLED = _env_is_true("ARTICLES_RUN_JOB_SHADOW_READ_ENABLED", False)
+ARTICLES_RUN_JOB_READ_ENABLED = _env_is_true("ARTICLES_RUN_JOB_READ_ENABLED", False)
+# R3 admission, backend facts and event authority are distinct rollout stages.
+# Existing observational events/mirrors and historical readers retain their flags.
+ARTICLES_RUN_OWNERSHIP_ENABLED = _env_is_true("ARTICLES_RUN_OWNERSHIP_ENABLED", False)
+ARTICLES_RUN_FACT_AUTHORITY_ENABLED = _env_is_true("ARTICLES_RUN_FACT_AUTHORITY_ENABLED", False)
+ARTICLES_RUN_EVENT_AUTHORITY_ENABLED = _env_is_true("ARTICLES_RUN_EVENT_AUTHORITY_ENABLED", False)
+# New admissions retain these backend caps; changing configuration never
+# reprices an existing Run or enrolls an unbudgeted historical execution.
+ARTICLES_RUN_CONTROL_MODEL_USD = os.getenv("ARTICLES_RUN_CONTROL_MODEL_USD", "0")
+ARTICLES_RUN_CONTROL_MODEL_TOKENS = int(os.getenv("ARTICLES_RUN_CONTROL_MODEL_TOKENS", "0"))
+ARTICLES_RUN_SDK_CONTROL_ENABLED = _env_is_true("ARTICLES_RUN_SDK_CONTROL_ENABLED", False)
+# P1 founder journey ("one simple path"). Every switch defaults off, so a
+# deploy alone changes nothing. New behaviour applies only to the new-journey
+# cohort (content_factory.founder_journey_cohort.is_new_journey); the legacy
+# cohort keeps today's path even with every switch on. Turn-on order is in
+# the P1 contract section 6: report, join, cohort-gated features, then launch.
+MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED = _env_is_true("MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED", False)
+# ISO 8601 with an offset; startups created at or after it join the new journey.
+MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT = os.getenv("MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT", "").strip()
+# Per-organisation kill switch: comma-separated organisation ids or domains.
+MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS = os.getenv("MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS", "").strip()
+MY_STARTUP_FOUNDER_JOURNEY_API_ENABLED = _env_is_true("MY_STARTUP_FOUNDER_JOURNEY_API_ENABLED", False)
+MY_STARTUP_FOUNDER_JOURNEY_OPT_IN_ENABLED = _env_is_true("MY_STARTUP_FOUNDER_JOURNEY_OPT_IN_ENABLED", False)
+COMMUNITY_CHAT_ONE_STEP_JOIN_ENABLED = _env_is_true("COMMUNITY_CHAT_ONE_STEP_JOIN_ENABLED", False)
+COMMUNITY_CHAT_INVITE_TOKENS_ENABLED = _env_is_true("COMMUNITY_CHAT_INVITE_TOKENS_ENABLED", False)
+MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED = _env_is_true("MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED", False)
+COMMUNITY_CHAT_REVIEW_CLEARED_EMAIL_ENABLED = _env_is_true("COMMUNITY_CHAT_REVIEW_CLEARED_EMAIL_ENABLED", False)
+COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED = _env_is_true("COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED", False)
+MY_STARTUP_ONE_FIELD_START_ENABLED = _env_is_true("MY_STARTUP_ONE_FIELD_START_ENABLED", False)
+MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED = _env_is_true("MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False)
+ARTICLES_FIRST_ARTICLE_CARD_ENABLED = _env_is_true("ARTICLES_FIRST_ARTICLE_CARD_ENABLED", False)
+ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED = _env_is_true("ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED", False)
+ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED = _env_is_true("ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED", False)
+ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED = _env_is_true("ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED", False)
+ARTICLES_DRAFT_TOOLS_ENABLED = _env_is_true("ARTICLES_DRAFT_TOOLS_ENABLED", False)
+ARTICLES_LIVE_URL_VERIFICATION_ENABLED = _env_is_true("ARTICLES_LIVE_URL_VERIFICATION_ENABLED", False)
+MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED = _env_is_true("MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED", False)
+COMMUNITY_CHAT_INVITE_TOKEN_DEFAULT_TTL_HOURS = int(os.getenv("COMMUNITY_CHAT_INVITE_TOKEN_DEFAULT_TTL_HOURS", "72"))
+COMMUNITY_CHAT_INVITE_TOKEN_MAX_TTL_HOURS = int(os.getenv("COMMUNITY_CHAT_INVITE_TOKEN_MAX_TTL_HOURS", "336"))
+COMMUNITY_CHAT_INVITE_RESOLVE_RATE = os.getenv("COMMUNITY_CHAT_INVITE_RESOLVE_RATE", "30/minute")
+COMMUNITY_CHAT_DEVICE_AUTH_MAX_LIFETIME_SECONDS = int(os.getenv("COMMUNITY_CHAT_DEVICE_AUTH_MAX_LIFETIME_SECONDS", "3600"))
+REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["community_chat_invite_resolve"] = COMMUNITY_CHAT_INVITE_RESOLVE_RATE
+
+# P3 founder journey (optional improvements). These switches are separate from
+# the P2 rollout and never participate in drafting or publication admission.
+MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED = _env_is_true("MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED", False)
+MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED", False)
+
+# P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
+# alone changes nothing. New behaviour applies only to the P2 cohort
+# (content_factory.p2_foundation.p2_applies) unless the P2 contract names an
+# item as for everyone. Turn-on order is in the P2 contract section 5.3.
+# The P2 registry view in backend decisions, for the P2 cohort only.
+ARTICLES_FAILURE_POLICY_V2_ENABLED = _env_is_true("ARTICLES_FAILURE_POLICY_V2_ENABLED", False)
+# Canonical ask ids on legacy wire shapes. Only once the desktop release that reads them is the oldest supported.
+MY_STARTUP_CANONICAL_ACTION_IDS_ENABLED = _env_is_true("MY_STARTUP_CANONICAL_ACTION_IDS_ENABLED", False)
+# Comma-separated organisation ids of legacy startups opted in to the P2 cohort, one at a time.
+ARTICLES_SELF_HEAL_LEGACY_ORGANIZATIONS = os.getenv("ARTICLES_SELF_HEAL_LEGACY_ORGANIZATIONS", "").strip()
+ARTICLES_SELF_HEAL_POLICY_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_POLICY_ENABLED", False)
+ARTICLES_SELF_HEAL_REPORT_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_REPORT_ENABLED", False)
+ARTICLES_SELF_HEAL_SWEEP_LIMIT = int(os.getenv("ARTICLES_SELF_HEAL_SWEEP_LIMIT", "50"))
+ARTICLES_CHANNEL_SWITCH_ENABLED = _env_is_true("ARTICLES_CHANNEL_SWITCH_ENABLED", False)
+ARTICLES_SOURCE_REPIN_ENABLED = _env_is_true("ARTICLES_SOURCE_REPIN_ENABLED", False)
+ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED = _env_is_true("ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
+ARTICLES_DISPATCH_RELIABILITY_ENABLED = _env_is_true("ARTICLES_DISPATCH_RELIABILITY_ENABLED", False)
+ARTICLES_NO_CODELESS_TERMINAL_ENABLED = _env_is_true("ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False)
+ARTICLES_REGISTRY_REFUNDS_ENABLED = _env_is_true("ARTICLES_REGISTRY_REFUNDS_ENABLED", False)
+MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED = _env_is_true("MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED", False)
+MY_STARTUP_STAFF_CONSOLE_ENABLED = _env_is_true("MY_STARTUP_STAFF_CONSOLE_ENABLED", False)
+ARTICLES_STAFF_ALERT_RULES_ENABLED = _env_is_true("ARTICLES_STAFF_ALERT_RULES_ENABLED", False)
+ARTICLES_MERGE_WORKER_ENABLED = _env_is_true("ARTICLES_MERGE_WORKER_ENABLED", False)
+ARTICLES_MERGE_WORKER_LIMIT = int(os.getenv("ARTICLES_MERGE_WORKER_LIMIT", "20"))
+ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED = _env_is_true("ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED", False)
+ARTICLES_GITHUB_INSTALLATION_WAKES_ENABLED = _env_is_true("ARTICLES_GITHUB_INSTALLATION_WAKES_ENABLED", False)
+ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED", False)
+MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
+MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)
+ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED = _env_is_true("ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED", False)
+# Startup team (held until its security sign-off; declared here so the block is complete).
+MY_STARTUP_TEAM_ENABLED = _env_is_true("MY_STARTUP_TEAM_ENABLED", False)
+MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED = _env_is_true("MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED", False)
+# Extra denied registrable domains for team domain auto-join, comma-separated.
+MY_STARTUP_TEAM_DOMAIN_DENYLIST = os.getenv("MY_STARTUP_TEAM_DOMAIN_DENYLIST", "").strip()
+# Counts founder 429s and sign-in refresh failures in 10-minute cache buckets
+# for the staff alert rules; it does nothing while those rules are off.
+MIDDLEWARE.append("content_factory.staff_signals.ThrottleSignalMiddleware")
+if "idempotency-key" not in CORS_ALLOW_HEADERS:
+    CORS_ALLOW_HEADERS = (*CORS_ALLOW_HEADERS, "idempotency-key")

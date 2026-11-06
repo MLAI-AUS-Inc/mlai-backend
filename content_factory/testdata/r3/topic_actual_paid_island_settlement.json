@@ -1,0 +1,928 @@
+{
+  "schema_version": 1,
+  "producer": "actual guarded island task and run_research, real synthesis/proposals/durable events/canonical bytes and authenticated read/cancel; actual configured authorize_connection, only config, research and synthesis provider transports substituted",
+  "run_id": "r3-actual-island-paid-worker",
+  "original_backend_admission": {
+    "original_ledger": {
+      "delta_microroo": -1000000,
+      "id": 1107,
+      "idempotency_key": "content_factory:topic_generation:charge:island-research:f596af47df4c1903f529ced07bccf882fd0162610214080f8b6ff9ebfb819abf",
+      "kind": "SPEND",
+      "source": "CONTENT_FACTORY",
+      "user_id": 1010
+    },
+    "producer": "actual authenticated ContentIslandResearchView, only HTTP worker POST mocked",
+    "run_id": "r3-actual-island-paid-worker",
+    "run_request": {
+      "backend_run_admission_v1": {
+        "dispatch_key": "island-research:f596af47df4c1903f529ced07bccf882fd0162610214080f8b6ff9ebfb819abf",
+        "domain": "actual-island-paid.fixture.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "2374",
+        "principal": {
+          "actor_id": "mlai_user:1010",
+          "kind": "user",
+          "user_id": "1010"
+        },
+        "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "island_refresh"
+      },
+      "backend_run_budget_v1": {
+        "max_model_tokens": 100000,
+        "max_model_usd": "5",
+        "runtime": "article",
+        "schema_version": 1
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+        "execution_id": "admit:a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+        "generation": 0,
+        "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "client_request_id": "island-research:f596af47df4c1903f529ced07bccf882fd0162610214080f8b6ff9ebfb819abf",
+      "domain": "actual-island-paid.fixture.test",
+      "free_domain": false,
+      "island_research_brief": {
+        "audience": "Local gardeners",
+        "description": "Measured practical garden ideas",
+        "focus": "",
+        "intent": "any",
+        "subject": "Balcony gardens"
+      },
+      "request_source": "roo_slackbot",
+      "requested_topic_count": 1,
+      "roo_points_action": "content_island_topic_generation",
+      "roo_points_authorized": true,
+      "roo_points_balance": 99,
+      "roo_points_billing_status": "charged",
+      "roo_points_cost": 1,
+      "roo_points_ledger_id": "1107",
+      "roo_points_required": 1,
+      "self_heal_policy_v1": {
+        "cohort": "p2",
+        "failure_policy": "pre_p2",
+        "version": 1
+      },
+      "slack_user_id": "mlai_user:1010"
+    },
+    "schema_version": 1
+  },
+  "admission_response": {
+    "job_id": "r3-actual-island-paid-worker",
+    "job_url": "/api/runs/r3-actual-island-paid-worker",
+    "run_id": "r3-actual-island-paid-worker",
+    "status": "queued",
+    "workflow": "island_refresh"
+  },
+  "callbacks": [],
+  "status_before_cancel": {
+    "acceptance_summary": {
+      "approval_recorded": false,
+      "browser_skipped": false,
+      "browser_verified": false,
+      "build_verified": false,
+      "content_packaged": false,
+      "evidence_summary": {
+        "accessibility_snapshot_path": null,
+        "article_component_manifest_path": null,
+        "article_html_path": null,
+        "article_json_path": null,
+        "article_markdown_path": null,
+        "article_meta_path": null,
+        "browser_report_path": null,
+        "build_log_path": null,
+        "claim_map_path": null,
+        "comparison_artifacts": [],
+        "content_package_path": null,
+        "content_package_slug": null,
+        "content_package_target_keyword": null,
+        "content_package_title": null,
+        "generated_inline_image_count": 0,
+        "grounding_report_path": null,
+        "hero_image_url": null,
+        "html_snapshot_path": null,
+        "image_errors": [],
+        "image_manifest_path": null,
+        "image_manifest_status": null,
+        "pr_url": null,
+        "preview_available": false,
+        "preview_evidence_path": null,
+        "preview_mode": null,
+        "preview_url": null,
+        "reference_screenshots": [],
+        "resource_manifest_path": null,
+        "resource_pdf_status": null,
+        "resource_pdf_url": null,
+        "review_summary_path": null,
+        "screenshots": [],
+        "style_review_report_path": null
+      },
+      "grounding_verified": false,
+      "pr_ready": false,
+      "publish_bundle_packaged": false,
+      "static_verified": false,
+      "style_review_verified": false,
+      "warnings": []
+    },
+    "approval_state": "not_required",
+    "artifact_root": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/cf-island-paired-dt5u4rht/r3-actual-island-paid-worker",
+    "auto_bootstrap_applied": false,
+    "bootstrap_status": "not_needed",
+    "bootstrap_strategy": "",
+    "capability_snapshot": {},
+    "current_step": "load_context",
+    "delivery_mode": null,
+    "draft_pr_number": null,
+    "draft_pr_url": null,
+    "error": "Island research is temporarily unavailable. Please try again later.",
+    "failure": {},
+    "fallback_reason": null,
+    "generation": 0,
+    "hook_bootstrap_suggestion": {},
+    "hook_config_path": "",
+    "materialized_target_paths": [],
+    "notified_progress_markers": [],
+    "publish_capability": null,
+    "publish_resolution": null,
+    "publish_target_kind": null,
+    "recovery": {},
+    "recovery_intents": {},
+    "resolution_source": null,
+    "resolved_delivery_mode": null,
+    "result": {
+      "error_code": "ISLAND_RESEARCH_FAILED",
+      "island_research": true,
+      "message": "We couldn\u2019t complete island research. Your brief is saved; please try again.",
+      "refundable": true,
+      "run_id": "r3-actual-island-paid-worker",
+      "status": "failed",
+      "step_durations": {
+        "phases": {
+          "context": 0.006
+        },
+        "run_wall_seconds": 0.021,
+        "schema_version": 1,
+        "steps": {
+          "load_context": {
+            "attempts": 1,
+            "phase": "context",
+            "seconds": 0.006,
+            "status": "failed"
+          }
+        },
+        "sum_seconds": 0.006
+      },
+      "suggested_islands": []
+    },
+    "resume_available": true,
+    "run_id": "r3-actual-island-paid-worker",
+    "run_request_path": "/private/var/folders/mz/k3k8dgx569j9yvz3yvg0k3sr0000gn/T/cf-island-paired-dt5u4rht/r3-actual-island-paid-worker/RUN_REQUEST.json",
+    "started_at": "2026-11-02T21:56:36.844377+00:00",
+    "state_version": 5,
+    "status": "failed",
+    "step_order": [
+      "load_context",
+      "research_sources",
+      "synthesize",
+      "finalize"
+    ],
+    "step_states": {
+      "finalize": {
+        "artifacts": [],
+        "attempt_history": [],
+        "attempts": 0,
+        "budget_baseline": 0,
+        "completed_at": null,
+        "error": null,
+        "latest_attempt_path": null,
+        "message": null,
+        "name": "finalize",
+        "required": true,
+        "started_at": null,
+        "status": "pending"
+      },
+      "load_context": {
+        "artifacts": [],
+        "attempt_history": [
+          {
+            "artifacts": [],
+            "attempt": 1,
+            "completed_at": "2026-11-02T21:56:36.865635+00:00",
+            "error": "Island research is temporarily unavailable. Please try again later.",
+            "input_path": "steps/load_context/attempt-01/inputs.json",
+            "interrupted": false,
+            "message": "Island research is temporarily unavailable. Please try again later.",
+            "notes_path": "steps/load_context/attempt-01/NOTES.md",
+            "output_path": "steps/load_context/attempt-01/outputs.json",
+            "refunded": false,
+            "started_at": "2026-11-02T21:56:36.859642+00:00",
+            "status": "failed",
+            "status_path": "steps/load_context/attempt-01/STATUS.json"
+          }
+        ],
+        "attempts": 1,
+        "budget_baseline": 0,
+        "completed_at": "2026-11-02T21:56:36.865635+00:00",
+        "error": "Island research is temporarily unavailable. Please try again later.",
+        "latest_attempt_path": "steps/load_context/attempt-01",
+        "message": "Island research is temporarily unavailable. Please try again later.",
+        "name": "load_context",
+        "required": true,
+        "started_at": "2026-11-02T21:56:36.859642+00:00",
+        "status": "failed"
+      },
+      "research_sources": {
+        "artifacts": [],
+        "attempt_history": [],
+        "attempts": 0,
+        "budget_baseline": 0,
+        "completed_at": null,
+        "error": null,
+        "latest_attempt_path": null,
+        "message": null,
+        "name": "research_sources",
+        "required": true,
+        "started_at": null,
+        "status": "pending"
+      },
+      "synthesize": {
+        "artifacts": [],
+        "attempt_history": [],
+        "attempts": 0,
+        "budget_baseline": 0,
+        "completed_at": null,
+        "error": null,
+        "latest_attempt_path": null,
+        "message": null,
+        "name": "synthesize",
+        "required": true,
+        "started_at": null,
+        "status": "pending"
+      }
+    },
+    "updated_at": "2026-11-02T21:56:36.878737+00:00",
+    "verification_summary": {
+      "all_required_passed": false,
+      "blocked": false,
+      "checks": [],
+      "generated_at": "2026-11-02T21:56:36.844389+00:00"
+    },
+    "workflow": "island_refresh"
+  },
+  "cancel_request": {
+    "backend_run_admission_v1": {
+      "dispatch_key": "island-research:f596af47df4c1903f529ced07bccf882fd0162610214080f8b6ff9ebfb819abf",
+      "domain": "actual-island-paid.fixture.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "2374",
+      "principal": {
+        "actor_id": "mlai_user:1010",
+        "kind": "user",
+        "user_id": "1010"
+      },
+      "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "island_refresh"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+      "execution_id": "admit:a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+      "generation": 0,
+      "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "cancellation_reason": "system_stop",
+    "cancelled_by": "system"
+  },
+  "cancel_response": {
+    "accepted": true,
+    "action": "cancel",
+    "backend_run_admission_v1": {
+      "dispatch_key": "island-research:f596af47df4c1903f529ced07bccf882fd0162610214080f8b6ff9ebfb819abf",
+      "domain": "actual-island-paid.fixture.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "2374",
+      "principal": {
+        "actor_id": "mlai_user:1010",
+        "kind": "user",
+        "user_id": "1010"
+      },
+      "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "island_refresh"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+      "execution_id": "admit:a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+      "generation": 0,
+      "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "job_id": "r3-actual-island-paid-worker",
+    "reconciliation_required": false,
+    "run_id": "r3-actual-island-paid-worker",
+    "status": "cancelled",
+    "terminal_topic_settlement_v1": {
+      "backend_run_admission_v1": {
+        "dispatch_key": "island-research:f596af47df4c1903f529ced07bccf882fd0162610214080f8b6ff9ebfb819abf",
+        "domain": "actual-island-paid.fixture.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "2374",
+        "principal": {
+          "actor_id": "mlai_user:1010",
+          "kind": "user",
+          "user_id": "1010"
+        },
+        "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "island_refresh"
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+        "execution_id": "admit:a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+        "generation": 0,
+        "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "closed_at": "2026-11-02T21:56:36.907751+00:00",
+      "event_cursor": 12,
+      "kind": "topic_selection_v1",
+      "receipt_sha256": "463b6009567a000b0b484be4f98494233b1c49e60a1e06958b61633505263e45",
+      "run_id": "r3-actual-island-paid-worker",
+      "schema_version": 1,
+      "status": "closed_no_effects"
+    }
+  },
+  "cancel_replay": {
+    "accepted": true,
+    "action": "cancel",
+    "article_cancellation_v1": null,
+    "backend_run_admission_v1": {
+      "dispatch_key": "island-research:f596af47df4c1903f529ced07bccf882fd0162610214080f8b6ff9ebfb819abf",
+      "domain": "actual-island-paid.fixture.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "2374",
+      "principal": {
+        "actor_id": "mlai_user:1010",
+        "kind": "user",
+        "user_id": "1010"
+      },
+      "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "island_refresh"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+      "execution_id": "admit:a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+      "generation": 0,
+      "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "cleanup": {},
+    "job_id": "r3-actual-island-paid-worker",
+    "job_url": "/api/runs/r3-actual-island-paid-worker",
+    "reconciliation_required": false,
+    "run_id": "r3-actual-island-paid-worker",
+    "status": "cancelled",
+    "terminal_topic_settlement_v1": {
+      "backend_run_admission_v1": {
+        "dispatch_key": "island-research:f596af47df4c1903f529ced07bccf882fd0162610214080f8b6ff9ebfb819abf",
+        "domain": "actual-island-paid.fixture.test",
+        "event_protocol": 1,
+        "github_repo": "",
+        "organization_id": "2374",
+        "principal": {
+          "actor_id": "mlai_user:1010",
+          "kind": "user",
+          "user_id": "1010"
+        },
+        "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        },
+        "workflow": "island_refresh"
+      },
+      "backend_run_execution_v1": {
+        "admission_digest": "a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+        "execution_id": "admit:a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+        "generation": 0,
+        "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+        "schema_version": 1,
+        "scope": {
+          "connection_generation": null,
+          "connection_target_id": null,
+          "deletion_epoch": null,
+          "expected_source_sha": null,
+          "operation_attempt": null,
+          "operation_id": null,
+          "repository_id": null,
+          "source_run_id": null,
+          "website_connection_id": null
+        }
+      },
+      "closed_at": "2026-11-02T21:56:36.907751+00:00",
+      "event_cursor": 12,
+      "kind": "topic_selection_v1",
+      "receipt_sha256": "463b6009567a000b0b484be4f98494233b1c49e60a1e06958b61633505263e45",
+      "run_id": "r3-actual-island-paid-worker",
+      "schema_version": 1,
+      "status": "closed_no_effects"
+    }
+  },
+  "canonical_topic_response": null,
+  "delivery_evidence": {
+    "backend_run_admission_v1": {
+      "dispatch_key": "island-research:f596af47df4c1903f529ced07bccf882fd0162610214080f8b6ff9ebfb819abf",
+      "domain": "actual-island-paid.fixture.test",
+      "event_protocol": 1,
+      "github_repo": "",
+      "organization_id": "2374",
+      "principal": {
+        "actor_id": "mlai_user:1010",
+        "kind": "user",
+        "user_id": "1010"
+      },
+      "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      },
+      "workflow": "island_refresh"
+    },
+    "backend_run_execution_v1": {
+      "admission_digest": "a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+      "execution_id": "admit:a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+      "generation": 0,
+      "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+      "schema_version": 1,
+      "scope": {
+        "connection_generation": null,
+        "connection_target_id": null,
+        "deletion_epoch": null,
+        "expected_source_sha": null,
+        "operation_attempt": null,
+        "operation_id": null,
+        "repository_id": null,
+        "source_run_id": null,
+        "website_connection_id": null
+      }
+    },
+    "evidence": [],
+    "run_id": "r3-actual-island-paid-worker",
+    "schema_version": 1
+  },
+  "history": {
+    "batches": [
+      {
+        "backend_run_admission_v1": {
+          "dispatch_key": "island-research:f596af47df4c1903f529ced07bccf882fd0162610214080f8b6ff9ebfb819abf",
+          "domain": "actual-island-paid.fixture.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "2374",
+          "principal": {
+            "actor_id": "mlai_user:1010",
+            "kind": "user",
+            "user_id": "1010"
+          },
+          "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+          "execution_id": "admit:a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+          "generation": 0,
+          "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "emitted_at": "2026-11-02T21:56:36.900138+00:00",
+        "event": "run_events_v2",
+        "event_id": "e30ff17b4fdfaa7312384c6b5830ba32e730c85f560a825459731dfae8a50c66",
+        "event_type": "run_events_v2",
+        "events": [
+          {
+            "at": "2026-11-02T21:56:36.847520+00:00",
+            "digest": "05d7a7d589383dd117404a6916b315adeb8b8c364efac0eed98e0b394f199e79",
+            "generation": 0,
+            "seq": 1,
+            "state_version": 1,
+            "status": "queued",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:36.861728+00:00",
+            "digest": "38e8cc5e8dca838f55071fa02ea763f041d8ff165391f9d2feeb4eaa13ed2204",
+            "generation": 0,
+            "seq": 2,
+            "state_version": 2,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:36.861728+00:00",
+            "attempt": 1,
+            "digest": "885adb8819a40d47f7a189a415541bb98b89a4d4569fba0ceabb9f5ea45eb0f6",
+            "generation": 0,
+            "seq": 3,
+            "state_version": 2,
+            "step": "load_context",
+            "type": "step_started"
+          },
+          {
+            "at": "2026-11-02T21:56:36.868676+00:00",
+            "digest": "dc1f9f5ecc257d93a09add535f783f73c5787c436f3635a7e1761dc34b1cf36d",
+            "generation": 0,
+            "seq": 4,
+            "state_version": 3,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:36.868676+00:00",
+            "attempt": 1,
+            "digest": "c06ce133cda876c739c04f3e52d1f89aed4aaa26958912922fad8bf0f2e97f90",
+            "generation": 0,
+            "seq": 5,
+            "state_version": 3,
+            "status": "failed",
+            "step": "load_context",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T21:56:36.874057+00:00",
+            "digest": "ad2bda399af856e433c1a7bfafe45b298aaafa495a6b6d860d2dac80cda82970",
+            "generation": 0,
+            "seq": 6,
+            "state_version": 4,
+            "status": "failed",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:36.880332+00:00",
+            "digest": "dea33cce80dde5b84a4639c4bf448f7a2640bcd32b2a9863e298a323d4c0a10c",
+            "generation": 0,
+            "seq": 7,
+            "state_version": 5,
+            "status": "failed",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:36.900138+00:00",
+            "digest": "1779926583ff8c083b8d76abff785330e0fc0207f6baddf308b95c2f59a7244b",
+            "generation": 0,
+            "seq": 8,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "cancelled",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:36.900138+00:00",
+            "attempt": 1,
+            "digest": "79d520613be43f766bc508d0d3c8bf1716d0e85be9308aacd7b91c6d0dff2467",
+            "generation": 0,
+            "seq": 9,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "load_context",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T21:56:36.900138+00:00",
+            "attempt": 0,
+            "digest": "c25d36a06aae5d9adc2c5fdeb59af28ae575515fb79e40ffc428e0aa6f45152e",
+            "generation": 0,
+            "seq": 10,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "research_sources",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T21:56:36.900138+00:00",
+            "attempt": 0,
+            "digest": "a0c2ed3d5cf51f9d0f5cb599b1cc15d14473f6463f4757a8eccbe3d7d1be90d8",
+            "generation": 0,
+            "seq": 11,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "synthesize",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T21:56:36.900138+00:00",
+            "attempt": 0,
+            "digest": "4d31dabbad38d1f1f1c0ddcdf41e797a7ae3fc5f21733cf3325fa3e46b65b465",
+            "generation": 0,
+            "seq": 12,
+            "state_version": 6,
+            "status": "cancelled",
+            "step": "finalize",
+            "type": "step_done"
+          }
+        ],
+        "run_id": "r3-actual-island-paid-worker",
+        "schema_version": 1
+      }
+    ],
+    "has_more": false,
+    "next_cursor": 12,
+    "run_id": "r3-actual-island-paid-worker",
+    "schema_version": 1
+  },
+  "history_before_cancel": {
+    "batches": [
+      {
+        "backend_run_admission_v1": {
+          "dispatch_key": "island-research:f596af47df4c1903f529ced07bccf882fd0162610214080f8b6ff9ebfb819abf",
+          "domain": "actual-island-paid.fixture.test",
+          "event_protocol": 1,
+          "github_repo": "",
+          "organization_id": "2374",
+          "principal": {
+            "actor_id": "mlai_user:1010",
+            "kind": "user",
+            "user_id": "1010"
+          },
+          "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          },
+          "workflow": "island_refresh"
+        },
+        "backend_run_execution_v1": {
+          "admission_digest": "a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+          "execution_id": "admit:a6fdaebfb7b174f64fe24bc1e1c4a1c9bb55e8d44b5e9ded175a5edf78368f1c",
+          "generation": 0,
+          "request_digest": "346f1d40336fb059505e3cdde13764106ea61eb440a68a451f047aea05c41efb",
+          "schema_version": 1,
+          "scope": {
+            "connection_generation": null,
+            "connection_target_id": null,
+            "deletion_epoch": null,
+            "expected_source_sha": null,
+            "operation_attempt": null,
+            "operation_id": null,
+            "repository_id": null,
+            "source_run_id": null,
+            "website_connection_id": null
+          }
+        },
+        "emitted_at": "2026-11-02T21:56:36.880332+00:00",
+        "event": "run_events_v2",
+        "event_id": "848db7078b7a6705aaf733cab291efcbaf4900374bb0ec3eaf41e757d6c5673c",
+        "event_type": "run_events_v2",
+        "events": [
+          {
+            "at": "2026-11-02T21:56:36.847520+00:00",
+            "digest": "05d7a7d589383dd117404a6916b315adeb8b8c364efac0eed98e0b394f199e79",
+            "generation": 0,
+            "seq": 1,
+            "state_version": 1,
+            "status": "queued",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:36.861728+00:00",
+            "digest": "38e8cc5e8dca838f55071fa02ea763f041d8ff165391f9d2feeb4eaa13ed2204",
+            "generation": 0,
+            "seq": 2,
+            "state_version": 2,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:36.861728+00:00",
+            "attempt": 1,
+            "digest": "885adb8819a40d47f7a189a415541bb98b89a4d4569fba0ceabb9f5ea45eb0f6",
+            "generation": 0,
+            "seq": 3,
+            "state_version": 2,
+            "step": "load_context",
+            "type": "step_started"
+          },
+          {
+            "at": "2026-11-02T21:56:36.868676+00:00",
+            "digest": "dc1f9f5ecc257d93a09add535f783f73c5787c436f3635a7e1761dc34b1cf36d",
+            "generation": 0,
+            "seq": 4,
+            "state_version": 3,
+            "status": "running",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:36.868676+00:00",
+            "attempt": 1,
+            "digest": "c06ce133cda876c739c04f3e52d1f89aed4aaa26958912922fad8bf0f2e97f90",
+            "generation": 0,
+            "seq": 5,
+            "state_version": 3,
+            "status": "failed",
+            "step": "load_context",
+            "type": "step_done"
+          },
+          {
+            "at": "2026-11-02T21:56:36.874057+00:00",
+            "digest": "ad2bda399af856e433c1a7bfafe45b298aaafa495a6b6d860d2dac80cda82970",
+            "generation": 0,
+            "seq": 6,
+            "state_version": 4,
+            "status": "failed",
+            "step": "load_context",
+            "type": "run_state"
+          },
+          {
+            "at": "2026-11-02T21:56:36.880332+00:00",
+            "digest": "dea33cce80dde5b84a4639c4bf448f7a2640bcd32b2a9863e298a323d4c0a10c",
+            "generation": 0,
+            "seq": 7,
+            "state_version": 5,
+            "status": "failed",
+            "step": "load_context",
+            "type": "run_state"
+          }
+        ],
+        "run_id": "r3-actual-island-paid-worker",
+        "schema_version": 1
+      }
+    ],
+    "has_more": false,
+    "next_cursor": 7,
+    "run_id": "r3-actual-island-paid-worker",
+    "schema_version": 1
+  }
+}

@@ -7,10 +7,10 @@ from urllib.parse import urlencode
 
 
 def supported_action(action_id):
-    """Only topic selection and its delivery-mode follow-up are bridged."""
+    """Bridge reviewed topic, price-confirmation and delivery-mode actions."""
     return bool(
         re.fullmatch(
-            r"confirm_topic_btn_\d+|cancel_topic_btn|select_article_delivery_mode",
+            r"confirm_topic_btn_\d+|confirm_article_price|cancel_topic_btn|select_article_delivery_mode",
             str(action_id or ""),
         )
     )

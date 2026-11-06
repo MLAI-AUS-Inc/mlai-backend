@@ -41,6 +41,9 @@ def enabled(op):
 
 def locator(run):
     """Bind a causal observation to its original run and reserved attempt."""
+    from .website_run_authority import event_owned
+    if event_owned(run):
+        return None
     from .website_failure_contract import validate_failure,FailureContractError
     result=goals.mapping(run.result);request=goals.mapping(run.run_request)
     try:
@@ -106,7 +109,8 @@ def schedule(op,goal,*,classification,fresh,occurrence,now):
 
 def resume(op,run,context,*,user,now):
     """Retransmit an uncertain canonical resume with its original pending attempt."""
-    if not enabled(op):return False
+    from .website_run_authority import event_owned
+    if event_owned(run) or not enabled(op):return False
     plan=goals.mapping(op.receipt.get("article_recovery"));current=locator(run)
     if not plan or current is None:return False
     if not valid_plan(plan,op.receipt["goal"]):

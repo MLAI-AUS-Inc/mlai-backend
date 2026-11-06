@@ -1,0 +1,41 @@
+{
+  "dynamic_adapters": [
+    {
+      "path": "content_factory/staff_alert_rules.py",
+      "function": "enrich_alert_details",
+      "field": "code",
+      "expression": "failure_code(run) if run else None",
+      "site_sha256": "de161c13a5b6d8208a1099d32ca9de45a914553681d8572c97fa25a7d515029f",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.staff_console",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Read-only staff observation of the saved authenticated run failure, including unknown codes so staff can investigate; never used as new authority or causal emission.",
+      "test": "content_factory.tests_p2_staff.StaffTests.test_verified_staff_routes_and_detail_never_return_config_secrets"
+    },
+    {
+      "path": "content_factory/staff_console.py",
+      "function": "startup_row",
+      "field": "code",
+      "expression": "code",
+      "site_sha256": "401556f2489ff39301ae90d60bd4106e04d89a7c335b14919cd025692b9edfae",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.staff_console",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Read-only staff observation of the saved authenticated run failure, including unknown codes so staff can investigate; never used as new authority or causal emission.",
+      "test": "content_factory.tests_p2_staff.StaffTests.test_verified_staff_routes_and_detail_never_return_config_secrets"
+    },
+    {
+      "path": "content_factory/staff_console.py",
+      "function": "startup_detail",
+      "field": "code",
+      "expression": "failure_code(r)",
+      "site_sha256": "23f387cf103ffa8d1d07db93639fd815565ebb34c7cf76bbf99c0d7a99fea107",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.staff_console",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Read-only staff observation of the saved authenticated run failure, including unknown codes so staff can investigate; never used as new authority or causal emission.",
+      "test": "content_factory.tests_p2_staff.StaffTests.test_verified_staff_routes_and_detail_never_return_config_secrets"
+    }
+  ],
+  "nonfailure_sites": []
+}

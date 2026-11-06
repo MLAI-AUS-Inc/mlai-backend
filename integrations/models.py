@@ -13,6 +13,35 @@ class CommunityBridgePlatform(models.TextChoices):
     BUZZ = "buzz", "MLAI Chat"
 
 
+class CommunityBridgeMirrorDecision(models.TextChoices):
+    MIRROR = "mirror", "Mirror"
+    HOLD = "hold", "Hold for review"
+    EXCLUDE = "exclude", "Never mirror"
+
+
+class CommunityBridgeChannelAudience(models.TextChoices):
+    COMMUNITY = "community", "Community"
+    MEMBERS = "members", "Slack channel members"
+
+
+class SlackChannelMembershipState(models.TextChoices):
+    JOINED = "joined", "Joined"
+    LEFT = "left", "Left"
+
+
+class SlackChannelMembershipSource(models.TextChoices):
+    EVENT = "event", "Slack event"
+    INVENTORY = "inventory", "Owner inventory"
+    MESSAGE = "message", "Slack message"
+    PROBE = "probe", "Membership probe"
+
+
+class CommunityBridgeChannelSource(models.TextChoices):
+    MANUAL = "", "Manual or manifest"
+    EVENT = "event", "Slack channel event"
+    RECONCILE = "reconcile", "Slack channel reconciliation"
+
+
 class CommunityBridgeDeliveryType(models.TextChoices):
     CREATE = "create", "Create"
     EDIT = "edit", "Edit"
@@ -98,6 +127,8 @@ class GoogleConnection(models.Model):
         blank=True,
     )
     google_email = models.EmailField()
+    # Verified Google subject; legacy connections acquire it on reconnect.
+    provider_account_id = models.CharField(max_length=255, null=True, blank=True)
     refresh_token = EncryptedTextField()  # encrypted at rest
     scope = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
@@ -105,12 +136,12 @@ class GoogleConnection(models.Model):
 
     class Meta:
         constraints = [
-            # One Gmail mailbox per (user, startup). NULL-organization rows
-            # (legacy/unassigned) are treated as distinct by the DB and resolved
-            # at the app layer.
+            # Preserve each verified mailbox independently. NULL subjects keep
+            # existing legacy rows valid until their identity is verified.
             models.UniqueConstraint(
-                fields=["user", "organization"],
-                name="uniq_google_connection_user_org",
+                fields=["user", "organization", "provider_account_id"],
+                name="uniq_google_user_org_account",
+                nulls_distinct=False,
             ),
         ]
 
@@ -227,6 +258,37 @@ class SlackDmMirrorGrant(models.Model):
 
     def __str__(self):
         return f"{self.slack_workspace_id}:{self.slack_user_id} ({self.status})"
+
+
+class SlackChannelMembership(models.Model):
+    """Last observed public-channel membership of one consenting Slack grant."""
+
+    grant = models.ForeignKey(
+        SlackDmMirrorGrant,
+        on_delete=models.CASCADE,
+        related_name="public_channel_memberships",
+    )
+    slack_workspace_id = models.CharField(max_length=100)
+    slack_channel_id = models.CharField(max_length=100)
+    state = models.CharField(max_length=10, choices=SlackChannelMembershipState.choices)
+    source = models.CharField(max_length=16, choices=SlackChannelMembershipSource.choices)
+    observed_at = models.DateTimeField()
+    left_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "slack_channel_membership"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("grant", "slack_channel_id"),
+                name="slack_chan_grant_channel_uq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("slack_workspace_id", "slack_channel_id", "state"),
+                name="slack_channel_ws_state_idx",
+            ),
+        ]
 
 
 class SlackOwnerConversationInventory(models.Model):
@@ -612,6 +674,58 @@ class CommunityBridgeChannel(models.Model):
     sync_deletes = models.BooleanField(default=True)
     sync_replies = models.BooleanField(default=True)
     pilot_settings = models.JSONField(default=dict, blank=True)
+    audience = models.CharField(
+        max_length=10,
+        choices=CommunityBridgeChannelAudience.choices,
+        default=CommunityBridgeChannelAudience.MEMBERS,
+        db_index=True,
+    )
+    audience_generation = models.UUIDField(null=True, blank=True)
+    audience_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        validators=[RegexValidator(regex=r"^[0-9a-f]{64}$")],
+    )
+    audience_sync_pending = models.BooleanField(default=False, db_index=True)
+    reader_grant = models.ForeignKey(
+        SlackDmMirrorGrant,
+        on_delete=models.SET_NULL,
+        related_name="public_channel_reader_roles",
+        null=True,
+        blank=True,
+    )
+    sync_paused_reason = models.CharField(
+        max_length=20,
+        choices=[("", "Not paused"), ("no_reader", "No consenting reader")],
+        blank=True,
+        default="",
+    )
+    # Lifecycle mirroring: the row is the source of truth for whether a Slack
+    # channel is mirrored. `enabled` stays the delivery gate.
+    mirror_decision = models.CharField(
+        max_length=10,
+        choices=CommunityBridgeMirrorDecision.choices,
+        default=CommunityBridgeMirrorDecision.MIRROR,
+        db_index=True,
+    )
+    hold_reason = models.CharField(max_length=40, blank=True, default="")
+    lifecycle_source = models.CharField(
+        max_length=20, choices=CommunityBridgeChannelSource.choices, blank=True, default=""
+    )
+    # Last observed Slack state.
+    slack_visibility = models.CharField(max_length=10, default="public")
+    slack_archived = models.BooleanField(default=False)
+    slack_deleted = models.BooleanField(default=False)
+    slack_topic = models.TextField(blank=True, default="")
+    slack_purpose = models.TextField(blank=True, default="")
+    slack_created_at = models.DateTimeField(null=True, blank=True)
+    slack_seen_at = models.DateTimeField(null=True, blank=True)
+    # MLAI Chat room state last applied through the adapter.
+    room_state = models.JSONField(default=dict, blank=True)
+    room_sync_pending = models.BooleanField(default=False, db_index=True)
+    room_sync_error = models.CharField(max_length=100, blank=True, default="")
+    room_synced_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -642,6 +756,22 @@ class CommunityBridgeChannel(models.Model):
             self.discord_channel_id = self.discord_channel_id or self.destination_channel_id
             self.discord_channel_name = self.discord_channel_name or self.destination_channel_name
         return super().save(*args, **kwargs)
+
+
+class CommunityBridgeChannelRefresh(models.Model):
+    """A public Slack channel whose lifecycle changed and must be re-read."""
+
+    slack_workspace_id = models.CharField(max_length=100)
+    slack_channel_id = models.CharField(max_length=100, unique=True)
+    reason = models.CharField(max_length=40)
+    attempts = models.PositiveIntegerField(default=0)
+    available_at = models.DateTimeField(db_index=True)
+    last_error_code = models.CharField(max_length=100, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "community_bridge_channel_refresh"
 
 
 class CommunityBridgeIdentityLink(models.Model):

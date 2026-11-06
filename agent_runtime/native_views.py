@@ -80,6 +80,16 @@ class NativeInstallationStateView(NativeOwnerView):
         return Response(native_installations.installation_payload(row))
 
 
+class NativePersonalMentionView(NativeOwnerView):
+    """Submit identifiers for an owner's signed, per-message context consent."""
+
+    def post(self, request, installation_id):
+        from . import native_invocations, personal_context
+        data = schema.validated(schema.PersonalMentionSerializer, request.data)
+        row = personal_context.submit(request.user, installation_id, data)
+        return Response(native_invocations.payload(row), status=202)
+
+
 class NativeRegistryView(APIView):
     """Keeps bot tombstones available even when the operator stops native work.
 
@@ -108,9 +118,9 @@ class NativeRegistryView(APIView):
         # All native keys remain agent keys forever, including expired reservations.
         registered = AgentInstallation.objects.filter(public_key=public_key, community_id__isnull=False).exists()
         response = Response({"public_key": public_key, "relay_url": relay, "registered": registered})
-        community_installation = AgentInstallation.objects.filter(public_key=public_key, app_id="mlai-community", community_id__isnull=False).first() if registered else None
-        if getattr(community_installation, "app_id", None) == "mlai-community":
-            response.data["app_id"] = "mlai-community"
+        installation = AgentInstallation.objects.filter(public_key=public_key, community_id__isnull=False).first() if registered else None
+        if getattr(installation, "app_id", None) in {"openai-dot", "mlai-community"}:
+            response.data["app_id"] = installation.app_id
         response["Cache-Control"] = "no-store"
         return response
 

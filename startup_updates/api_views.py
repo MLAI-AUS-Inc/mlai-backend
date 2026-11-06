@@ -1,3 +1,6 @@
+from integrations.services.source_accounts import google_connection_for_binding
+
+from integrations.services.slack_source_privacy import slack_source_queryset
 import time
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 from functools import wraps
@@ -731,6 +734,8 @@ def _serialize_draft_for_editor(draft) -> dict:
         "metricEvidence": {item.get("metric_key"): {key: item.get(key) for key in ("quality", "source_provider", "basis", "limitations")} for item in structured_memo.get("kpi_snapshot", []) if isinstance(item, dict)},
         "month": month_value.strftime("%B"),
         "year": month_value.year,
+        **({"startupOverview": str(structured_memo.get("startupOverview") or "")}
+           if "startupOverview" in structured_memo else {}),
         "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
@@ -765,6 +770,8 @@ def _serialize_email_draft_month(draft) -> dict:
         "presentationMode": str(
             structured_memo.get("presentation_mode") or structured_memo.get("presentationMode") or ""
         ),
+        **({"startupOverview": str(structured_memo.get("startupOverview") or "")}
+           if "startupOverview" in structured_memo else {}),
         "highlights": _join_named_sections(structured_memo, _HIGHLIGHT_SECTIONS),
         "challenges": _join_text_items_with_newlines(structured_memo.get("lowlights")),
         "asks": _join_named_sections(structured_memo, [
@@ -788,6 +795,7 @@ def _serialize_draft_results_bundle(drafts) -> Optional[dict]:
         editor_past_months.append(
             {
                 "month": f"{payload['month']} {payload['year']}",
+                **({"startupOverview": payload["startupOverview"]} if "startupOverview" in payload else {}),
                 "highlights": payload["highlights"],
                 "challenges": payload["challenges"],
                 "asks": payload["asks"],
@@ -887,11 +895,19 @@ def _get_org_and_binding_for_run(run: ContentFactoryRun):
         organization.user_startup_bindings.select_related("user", "google_connection"),
         id=binding_id,
     )
+    from startup_updates.revisions import RevisionConflict
+    for provider, pin in ((run.run_request or {}).get("source_connection_pins") or {}).items():
+        if provider == "gmail":
+            if pin and not GoogleConnection.objects.filter(pk=pin, user=binding.user).exists():
+                raise RevisionConflict("The selected Gmail account changed.")
+        elif pin and not ExternalServiceConnection.objects.filter(pk=pin, user=binding.user,
+                organization=organization, provider=provider).exclude(status="disconnected").exists():
+            raise RevisionConflict(f"The selected {provider} account changed. Recheck it before continuing.")
     google_connection_id = get_startup_update_run_google_connection_id(run)
-    if google_connection_id is None:
-        google_connection = binding.google_connection or google_connection_for_org(
-            binding.user, binding.organization
-        )
+    if "gmail" not in (run.run_request or {}).get("input_sources", ["gmail"]):
+        google_connection = None
+    elif google_connection_id is None:
+        google_connection = google_connection_for_binding(binding)
         if google_connection is not None:
             pin_startup_update_run_connection(run, google_connection.id)
     else:
@@ -1077,31 +1093,12 @@ class StartupUpdateRunView(APIView):
             target_month = parse_startup_update_target_month(raw_target_month)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        google_connection = binding.google_connection or google_connection_for_org(
-            binding.user, binding.organization
-        )
-        input_sources, google_connection, gmail_scope_warnings = coerce_startup_update_sources_for_gmail_scope(
-            input_sources,
-            google_connection,
-        )
-        if gmail_required_for_sources(input_sources) and (
-            google_connection is None or not has_gmail_read_scope(google_connection)
-        ):
-            return Response(
-                {
-                    "error": "The bound user does not have a usable Gmail connection.",
-                    "code": GMAIL_INSUFFICIENT_SCOPE_CODE if google_connection else "gmail_connection_required",
-                    "sourceUnavailable": bool(google_connection),
-                    "source_unavailable": bool(google_connection),
-                    "source": "gmail",
-                    "retryable": False,
-                    "warning": GMAIL_RECONNECT_WARNING if google_connection else "Connect Gmail before selecting Gmail.",
-                    **gmail_scope_status_payload(google_connection),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if google_connection is not None and binding.google_connection_id != google_connection.id:
+        google_connection = google_connection_for_binding(binding)
+        # Preserve the complete selection. The durable preflight reports every
+        # failed permission/read together; admission must not silently remove
+        # Gmail or stop after inspecting only that source.
+        gmail_scope_warnings = {}
+        if "gmail" in input_sources and google_connection is not None and binding.google_connection_id != google_connection.id:
             binding.google_connection = google_connection
             binding.save(update_fields=["google_connection", "updated_at"])
 
@@ -1228,7 +1225,7 @@ class StartupUpdateIngestNextPageView(APIView):
         data = serializer.validated_data
 
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -1375,7 +1372,7 @@ class StartupUpdateHydrateThreadsView(APIView):
         data = serializer.validated_data
 
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -1447,7 +1444,7 @@ class StartupUpdateHydrationCandidatesView(APIView):
         limit = serializer.validated_data["limit"]
 
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -1533,7 +1530,7 @@ class StartupUpdateClassificationBatchView(APIView):
         limit = serializer.validated_data["limit"]
 
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -1593,7 +1590,7 @@ class StartupUpdateClassificationResultsView(APIView):
         serializer.is_valid(raise_exception=True)
 
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -1651,7 +1648,7 @@ class StartupUpdateExtractionBatchView(APIView):
         limit = serializer.validated_data["limit"]
 
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -1735,7 +1732,7 @@ class StartupUpdateExtractionResultsView(APIView):
         serializer.is_valid(raise_exception=True)
 
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -1888,16 +1885,8 @@ def _active_slack_connection_for_run(
     binding: UserStartupBinding,
     organization: Organization,
 ) -> Optional[ExternalServiceConnection]:
-    return (
-        ExternalServiceConnection.objects.filter(
-            user_id=binding.user_id,
-            organization=organization,
-            provider=ExternalServiceProvider.SLACK,
-        )
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+    return latest_external_connection_for_startup(user=binding.user,
+        organization=organization, provider=ExternalServiceProvider.SLACK)
 
 
 def _resolve_run_slack_connection(
@@ -1944,6 +1933,7 @@ def _resolve_run_slack_connection(
 
 def _locked_slack_run_context(
     run_id: str,
+    *, request=None,
 ) -> tuple[
     ContentFactoryRun,
     Organization,
@@ -1960,6 +1950,12 @@ def _locked_slack_run_context(
         run_id=run_id,
         workflow=STARTUP_UPDATE_WORKFLOW,
     )
+    from startup_updates.execution import validate_execution
+    token = request.headers.get("X-Pulse-Execution-Token") if request else None
+    validate_execution(initial_run, token)
+    if (initial_run.run_request or {}).get("source_preflight_version") and not (initial_run.run_request or {}).get("source_preflight_complete"):
+        from startup_updates.revisions import RevisionConflict
+        raise RevisionConflict("Check every selected source before collecting or saving evidence.")
     organization = get_object_or_404(
         Organization,
         domain=normalize_domain(initial_run.domain),
@@ -1989,6 +1985,7 @@ def _locked_slack_run_context(
         workflow=STARTUP_UPDATE_WORKFLOW,
         domain=initial_run.domain,
     )
+    validate_execution(run, token)
     locked_binding_id = (run.run_request or {}).get("binding_id")
     if str(locked_binding_id or "") != str(binding.pk):
         raise ConnectorOAuthError(
@@ -2009,7 +2006,7 @@ def _locked_slack_run_context(
         # them while the exact connection is locked so another Slack identity's
         # channel ids can never be carried into this run.
         run.run_request["slack_channel_ids"] = list(
-            SlackChannelSelection.objects.filter(
+            slack_source_queryset(SlackChannelSelection).filter(
                 connection=locked_connection,
                 selected=True,
             ).values_list("channel_id", flat=True)
@@ -2027,11 +2024,16 @@ def _locked_slack_run_context(
 
 
 def _locked_pipeline_run_context(
-    run_id: str,
+    run_id: str, *, request=None,
 ) -> tuple[ContentFactoryRun, Organization, UserStartupBinding, Any, Any]:
     """Lock a downstream run at its source-authority linearization point."""
 
     initial_run = _get_run_or_404(run_id)
+    from startup_updates.execution import validate_execution
+    validate_execution(initial_run, request.headers.get("X-Pulse-Execution-Token") if request else None)
+    if (initial_run.run_request or {}).get("source_preflight_version") and not (initial_run.run_request or {}).get("source_preflight_complete"):
+        from startup_updates.revisions import RevisionConflict
+        raise RevisionConflict("Check every selected source before collecting or saving evidence.")
     request_payload = initial_run.run_request or {}
     input_sources = request_payload.get("input_sources") or []
     if (
@@ -2045,10 +2047,11 @@ def _locked_pipeline_run_context(
             profile,
             _connection,
             _authority,
-        ) = _locked_slack_run_context(run_id)
+        ) = _locked_slack_run_context(run_id, request=request)
         _organization, _binding, google_connection, _profile = (
             _get_org_and_binding_for_run(run)
         )
+        validate_execution(run, request.headers.get("X-Pulse-Execution-Token") if request else None)
         return run, organization, binding, google_connection, profile
 
     run = get_object_or_404(
@@ -2057,6 +2060,7 @@ def _locked_pipeline_run_context(
         run_id=run_id,
         workflow=STARTUP_UPDATE_WORKFLOW,
     )
+    validate_execution(run, request.headers.get("X-Pulse-Execution-Token") if request else None)
     return (run, *_get_org_and_binding_for_run(run))
 
 
@@ -2074,7 +2078,7 @@ class StartupUpdateSlackBackfillView(APIView):
                     _profile,
                     connection,
                     authority,
-                ) = _locked_slack_run_context(run_id)
+                ) = _locked_slack_run_context(run_id, request=request)
                 cancelled_response = _reject_if_run_cancelled(run)
                 if cancelled_response is not None:
                     return cancelled_response
@@ -2082,7 +2086,7 @@ class StartupUpdateSlackBackfillView(APIView):
                 channel_ids = _run_slack_channel_ids(run)
                 if not channel_ids and "automatic_source_scope" not in (run.run_request or {}):
                     channel_ids = list(
-                        SlackChannelSelection.objects.filter(
+                        slack_source_queryset(SlackChannelSelection).filter(
                             connection=connection,
                             selected=True,
                         ).values_list("channel_id", flat=True)
@@ -2135,7 +2139,7 @@ class StartupUpdateSlackBackfillView(APIView):
                     _profile,
                     locked_connection,
                     locked_authority,
-                ) = _locked_slack_run_context(run_id)
+                ) = _locked_slack_run_context(run_id, request=request)
                 if (
                     locked_connection.pk != connection.pk
                     or locked_authority != authority
@@ -2147,7 +2151,7 @@ class StartupUpdateSlackBackfillView(APIView):
                 run_request["slack_channel_ids"] = channel_ids
                 if run_request.get("narrative_period") and not sync_result.get("has_more"):
                     from startup_updates.activity_scope import prepare_activity_classification
-                    artifacts = SlackThreadArtifact.objects.filter(connection=locked_connection, channel_id__in=channel_ids)
+                    artifacts = slack_source_queryset(SlackThreadArtifact).filter(connection=locked_connection, channel_id__in=channel_ids)
                     artifacts = _slack_threads_in_run_window(artifacts, run, locked_connection)
                     run_request = prepare_activity_classification(run_request, "slack", artifacts)
                 external_context = dict(run_request.get("external_context") or {})
@@ -2175,7 +2179,7 @@ def _slack_threads_in_run_window(queryset, run, connection):
     """Historical membership comes from in-range messages, not the latest reply."""
     if not run_activity_period(run.run_request or {}):
         return _apply_run_window(queryset, run, "latest_message_at")
-    messages = SlackMessageArtifact.objects.filter(
+    messages = slack_source_queryset(SlackMessageArtifact).filter(
         connection=connection, channel_id=OuterRef("channel_id"),
     ).filter(Q(thread_ts=OuterRef("thread_ts")) | Q(slack_message_ts=OuterRef("thread_ts")))
     messages = _apply_run_window(messages, run, "posted_at")
@@ -2190,7 +2194,7 @@ def _update_slack_filtering_summary(
     channel_ids: list[str],
     batch_context: Optional[dict] = None,
 ) -> None:
-    queryset = SlackThreadArtifact.objects.filter(
+    queryset = slack_source_queryset(SlackThreadArtifact).filter(
         organization=organization,
         connection=connection,
     )
@@ -2237,7 +2241,7 @@ class StartupUpdateSlackClassificationBatchView(APIView):
                 profile,
                 connection,
                 authority,
-            ) = _locked_slack_run_context(run_id)
+            ) = _locked_slack_run_context(run_id, request=request)
         except ConnectorOAuthError as exc:
             return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
@@ -2246,7 +2250,7 @@ class StartupUpdateSlackClassificationBatchView(APIView):
         _update_run_step(run, step_key="slack_relevance_classification")
 
         channel_ids = _run_slack_channel_ids(run)
-        queryset = SlackThreadArtifact.objects.filter(
+        queryset = slack_source_queryset(SlackThreadArtifact).filter(
             organization=organization,
             connection=connection,
             extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
@@ -2317,7 +2321,7 @@ class StartupUpdateSlackClassificationResultsView(APIView):
                 _profile,
                 connection,
                 authority,
-            ) = _locked_slack_run_context(run_id)
+            ) = _locked_slack_run_context(run_id, request=request)
         except ConnectorOAuthError as exc:
             return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
@@ -2343,7 +2347,7 @@ class StartupUpdateSlackClassificationResultsView(APIView):
                 )
             channel_id, thread_ts = parsed
             thread = get_object_or_404(
-                SlackThreadArtifact.objects.select_for_update(),
+                slack_source_queryset(SlackThreadArtifact).select_for_update(),
                 organization=organization,
                 connection=connection,
                 channel_id=channel_id,
@@ -2418,7 +2422,7 @@ class StartupUpdateSlackExtractionBatchView(APIView):
                 _profile,
                 connection,
                 authority,
-            ) = _locked_slack_run_context(run_id)
+            ) = _locked_slack_run_context(run_id, request=request)
         except ConnectorOAuthError as exc:
             return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
@@ -2427,7 +2431,7 @@ class StartupUpdateSlackExtractionBatchView(APIView):
         _update_run_step(run, step_key="slack_event_extraction")
 
         channel_ids = _run_slack_channel_ids(run)
-        queryset = SlackThreadArtifact.objects.filter(
+        queryset = slack_source_queryset(SlackThreadArtifact).filter(
             organization=organization,
             connection=connection,
             extraction_status__in=[ArtifactProcessingStatus.PENDING, ArtifactProcessingStatus.HYDRATED],
@@ -2484,7 +2488,7 @@ class StartupUpdateSlackExtractionResultsView(APIView):
                 _profile,
                 connection,
                 authority,
-            ) = _locked_slack_run_context(run_id)
+            ) = _locked_slack_run_context(run_id, request=request)
         except ConnectorOAuthError as exc:
             return _slack_authority_error_response(exc)
         cancelled_response = _reject_if_run_cancelled(run)
@@ -2514,7 +2518,7 @@ class StartupUpdateSlackExtractionResultsView(APIView):
                 )
             channel_id, thread_ts = parsed
             thread_artifact = get_object_or_404(
-                SlackThreadArtifact.objects.select_for_update(),
+                slack_source_queryset(SlackThreadArtifact).select_for_update(),
                 organization=organization,
                 connection=connection,
                 channel_id=channel_id,
@@ -2729,7 +2733,7 @@ class StartupUpdateLinearBackfillView(APIView):
     @transaction.atomic
     def post(self, request, run_id: str):
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -2737,15 +2741,8 @@ class StartupUpdateLinearBackfillView(APIView):
         _update_run_step(run, step_key="linear_backfill")
 
         project_ids = _run_linear_project_ids(run)
-        connection = (
-            binding.user.external_service_connections.filter(
-                provider=ExternalServiceProvider.LINEAR,
-                organization=organization,
-            )
-            .exclude(status="disconnected")
-            .order_by("-updated_at", "-id")
-            .first()
-        )
+        from integrations.services.source_accounts import connection_for_run
+        connection = connection_for_run(run, binding.user, organization, "linear")
         if connection is None:
             return Response({"error": "Linear is not connected."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2819,7 +2816,7 @@ class StartupUpdateLinearClassificationBatchView(APIView):
         limit = serializer.validated_data["limit"]
 
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -2871,7 +2868,7 @@ class StartupUpdateLinearClassificationResultsView(APIView):
         serializer.is_valid(raise_exception=True)
 
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -2948,7 +2945,7 @@ class StartupUpdateLinearExtractionBatchView(APIView):
         limit = serializer.validated_data["limit"]
 
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -3000,7 +2997,7 @@ class StartupUpdateLinearExtractionResultsView(APIView):
         serializer.is_valid(raise_exception=True)
 
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -3291,14 +3288,18 @@ class StartupUpdateNotionBackfillView(APIView):
     @transaction.atomic
     def post(self, request, run_id: str):
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
         _update_run_step(run, step_key="notion_backfill")
 
-        connection = _latest_notion_connection(binding.user, organization)
+        from integrations.services.source_accounts import connection_for_run
+        connection = connection_for_run(run, binding.user, organization, "notion")
+        pin = (run.run_request or {}).get("notion_connection_id")
+        if pin and (connection is None or str(connection.pk) != str(pin)):
+            return Response({"error": "source_authority_changed", "detail": "Notion changed. Recheck the connection before continuing."}, status=409)
         if connection is None:
             return Response({"error": "Notion is not connected."}, status=status.HTTP_400_BAD_REQUEST)
         if not str(connection.access_token or "").strip():
@@ -3429,7 +3430,7 @@ class StartupUpdateNotionBackfillView(APIView):
                 "source_period": run_activity_period(run_request),
                 "index_partial": bool(store.get("index_partial")),
                 "pages_indexed": len(store.get("pages") or []),
-                "warnings": warnings,
+                "warnings": list(dict.fromkeys([*(notion_context.get("warnings") or []), *warnings])),
             }
         )
         external_context["notion"] = notion_context
@@ -3466,13 +3467,17 @@ class StartupUpdateNotionClassificationBatchView(APIView):
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
         _update_run_step(run, step_key="notion_relevance_classification")
-        connection = _latest_notion_connection(binding.user, organization)
+        from integrations.services.source_accounts import connection_for_run
+        connection = connection_for_run(run, binding.user, organization, "notion")
+        pin = (run.run_request or {}).get("notion_connection_id")
+        if pin and (connection is None or str(connection.pk) != str(pin)):
+            return Response({"error": "source_authority_changed", "detail": "Notion changed. Recheck the connection before continuing."}, status=409)
         if connection is None:
             return Response({"error": "Notion is not connected."}, status=status.HTTP_400_BAD_REQUEST)
         store = _get_notion_run_store(connection, run.run_id)
@@ -3495,13 +3500,17 @@ class StartupUpdateNotionClassificationResultsView(APIView):
         serializer = NotionClassificationResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
         _update_run_step(run, step_key="notion_relevance_classification")
-        connection = _latest_notion_connection(binding.user, organization)
+        from integrations.services.source_accounts import connection_for_run
+        connection = connection_for_run(run, binding.user, organization, "notion")
+        pin = (run.run_request or {}).get("notion_connection_id")
+        if pin and (connection is None or str(connection.pk) != str(pin)):
+            return Response({"error": "source_authority_changed", "detail": "Notion changed. Recheck the connection before continuing."}, status=409)
         if connection is None:
             return Response({"error": "Notion is not connected."}, status=status.HTTP_400_BAD_REQUEST)
         store = _get_notion_run_store(connection, run.run_id)
@@ -3534,13 +3543,17 @@ class StartupUpdateNotionExtractionBatchView(APIView):
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
         _update_run_step(run, step_key="notion_event_extraction")
-        connection = _latest_notion_connection(binding.user, organization)
+        from integrations.services.source_accounts import connection_for_run
+        connection = connection_for_run(run, binding.user, organization, "notion")
+        pin = (run.run_request or {}).get("notion_connection_id")
+        if pin and (connection is None or str(connection.pk) != str(pin)):
+            return Response({"error": "source_authority_changed", "detail": "Notion changed. Recheck the connection before continuing."}, status=409)
         if connection is None:
             return Response({"error": "Notion is not connected."}, status=status.HTTP_400_BAD_REQUEST)
         store = _get_notion_run_store(connection, run.run_id)
@@ -3584,13 +3597,17 @@ class StartupUpdateNotionExtractionResultsView(APIView):
         serializer = NotionExtractionResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
             return cancelled_response
         _update_run_step(run, step_key="notion_event_extraction")
-        connection = _latest_notion_connection(binding.user, organization)
+        from integrations.services.source_accounts import connection_for_run
+        connection = connection_for_run(run, binding.user, organization, "notion")
+        pin = (run.run_request or {}).get("notion_connection_id")
+        if pin and (connection is None or str(connection.pk) != str(pin)):
+            return Response({"error": "source_authority_changed", "detail": "Notion changed. Recheck the connection before continuing."}, status=409)
         if connection is None:
             return Response({"error": "Notion is not connected."}, status=status.HTTP_400_BAD_REQUEST)
         store = _get_notion_run_store(connection, run.run_id)
@@ -3698,7 +3715,7 @@ class StartupUpdateGoogleAnalyticsBackfillView(APIView):
     @transaction.atomic
     def post(self, request, run_id: str):
         run, _organization, _binding, _google_connection, _profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -3753,7 +3770,7 @@ class StartupUpdateGoogleAnalyticsClassificationBatchView(APIView):
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
         run, _organization, _binding, _google_connection, _profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -3784,7 +3801,7 @@ class StartupUpdateGoogleAnalyticsClassificationResultsView(APIView):
         serializer = GoogleAnalyticsClassificationResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         run, _organization, _binding, _google_connection, _profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -3817,7 +3834,7 @@ class StartupUpdateGoogleAnalyticsExtractionBatchView(APIView):
         serializer.is_valid(raise_exception=True)
         limit = serializer.validated_data["limit"]
         run, _organization, _binding, _google_connection, _profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -3852,7 +3869,7 @@ class StartupUpdateGoogleAnalyticsExtractionResultsView(APIView):
         serializer = GoogleAnalyticsExtractionResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         run, organization, binding, google_connection, profile = (
-            _locked_pipeline_run_context(run_id)
+            _locked_pipeline_run_context(run_id, request=request)
         )
         cancelled_response = _reject_if_run_cancelled(run)
         if cancelled_response is not None:
@@ -3998,7 +4015,7 @@ class StartupUpdateCurationContextView(APIView):
     def get(self, request, run_id: str):
         try:
             run, organization, binding, google_connection, profile = (
-                _locked_pipeline_run_context(run_id)
+                _locked_pipeline_run_context(run_id, request=request)
             )
         except ConnectorOAuthError as exc:
             return _slack_authority_error_response(exc)
@@ -4041,7 +4058,7 @@ class StartupUpdateCurationResultsView(APIView):
         serializer.is_valid(raise_exception=True)
         try:
             run, _organization, _binding, _google_connection, _profile = (
-                _locked_pipeline_run_context(run_id)
+                _locked_pipeline_run_context(run_id, request=request)
             )
         except ConnectorOAuthError as exc:
             return _slack_authority_error_response(exc)
@@ -4070,7 +4087,7 @@ class StartupUpdateReviewCandidatesView(APIView):
     def get(self, request, run_id: str):
         try:
             run, _organization, _binding, _google_connection, _profile = (
-                _locked_pipeline_run_context(run_id)
+                _locked_pipeline_run_context(run_id, request=request)
             )
         except ConnectorOAuthError as exc:
             return _slack_authority_error_response(exc)
@@ -4094,7 +4111,7 @@ class StartupUpdateFounderReviewAutoApproveView(APIView):
     def post(self, request, run_id: str):
         try:
             run, _organization, _binding, _google_connection, _profile = (
-                _locked_pipeline_run_context(run_id)
+                _locked_pipeline_run_context(run_id, request=request)
             )
         except ConnectorOAuthError as exc:
             return _slack_authority_error_response(exc)
@@ -4146,7 +4163,7 @@ class StartupUpdateCuratedTimelineView(APIView):
     def get(self, request, run_id: str):
         try:
             run, organization, binding, google_connection, profile = (
-                _locked_pipeline_run_context(run_id)
+                _locked_pipeline_run_context(run_id, request=request)
             )
         except ConnectorOAuthError as exc:
             return _slack_authority_error_response(exc)
@@ -4199,7 +4216,7 @@ class StartupUpdateTimelineView(APIView):
     def get(self, request, run_id: str):
         try:
             run, organization, binding, google_connection, profile = (
-                _locked_pipeline_run_context(run_id)
+                _locked_pipeline_run_context(run_id, request=request)
             )
         except ConnectorOAuthError as exc:
             return _slack_authority_error_response(exc)
@@ -4224,7 +4241,7 @@ class StartupUpdateDraftResultsView(APIView):
     def get(self, request, run_id: str):
         try:
             run, _organization, _binding, _google_connection, _profile = (
-                _locked_pipeline_run_context(run_id)
+                _locked_pipeline_run_context(run_id, request=request)
             )
         except ConnectorOAuthError as exc:
             return _slack_authority_error_response(exc)
@@ -4252,7 +4269,7 @@ class StartupUpdateDraftResultsView(APIView):
     def post(self, request, run_id: str):
         try:
             run, organization, binding, google_connection, profile = (
-                _locked_pipeline_run_context(run_id)
+                _locked_pipeline_run_context(run_id, request=request)
             )
         except ConnectorOAuthError as exc:
             return _slack_authority_error_response(exc)
@@ -4262,6 +4279,13 @@ class StartupUpdateDraftResultsView(APIView):
         require_month_source_contract(run.run_request or {})
         serializer = DraftResultsSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        from rest_framework.exceptions import ValidationError
+        months = [item["month"].isoformat() for item in serializer.validated_data["drafts"]]
+        if not months or len(set(months)) != len(months) or set(months) != set((run.run_request or {}).get("draft_months", [])):
+            raise ValidationError({"drafts": "Provide exactly one draft for every requested reporting period."})
+        receipt_version = request.headers.get("X-Pulse-Receipt-Version", "1")
+        if receipt_version not in {"1", "2"}:
+            raise ValidationError({"receiptVersion": "Unsupported worker receipt version."})
         _update_run_step(run, step_key="draft_generation")
 
         replace_existing = bool((run.run_request or {}).get("force_regenerate"))
@@ -4298,6 +4322,8 @@ class StartupUpdateDraftResultsView(APIView):
                         raise RevisionConflict("Generation base revision does not match this run.")
                     from startup_updates.cover_images import generated_cover_image
                     memo = generated_cover_image(item["structured_memo"], run.run_request)
+                    from startup_updates.financial_history import generated_history_selection
+                    memo = generated_history_selection(memo, run.run_request)
                     from startup_updates.evidence_contract import content_hash, validate_generated_metric_claims
                     try:
                         validate_generated_metric_claims(memo, snapshot.payload.get("metrics"))
@@ -4306,7 +4332,20 @@ class StartupUpdateDraftResultsView(APIView):
                         raise ValidationError(str(exc))
                     # A generation retry may only acknowledge the exact same output.
                     prior = (run.run_request or {}).get("saved_revisions", {}).get(item["month"].isoformat())
-                    if prior:
+                    repair_id = item.get("repair_revision_id")
+                    if repair_id and prior and prior["input_hash"] != content_hash(memo):
+                        if draft.current_revision_id != repair_id or prior["revision_id"] != repair_id or int(prior.get("repair_count", 0)) >= 2:
+                            raise RevisionConflict("This revision cannot accept another automatic repair.")
+                        if draft.current_revision.validation.get("groundedness_status") not in {"failed", "needs_review"}:
+                            raise RevisionConflict("Only an independently reviewed generated revision can be repaired.")
+                        revision = save_revision(draft, memo, snapshot=snapshot, audience=draft.current_revision.audience,
+                            expected_revision=repair_id, validation={"groundedness_status": "pending", "run_id": run.run_id})
+                        current_request = dict(run.run_request or {})
+                        current_request.setdefault("saved_revisions", {})[item["month"].isoformat()] = {
+                            "revision_id": revision.pk, "input_hash": content_hash(memo), "repair_count": int(prior.get("repair_count", 0)) + 1}
+                        run.run_request = current_request
+                        run.save(update_fields=["run_request", "updated_at"])
+                    elif prior:
                         if draft.current_revision_id != prior["revision_id"] or prior["input_hash"] != content_hash(memo):
                             raise RevisionConflict()
                     else:
@@ -4323,7 +4362,10 @@ class StartupUpdateDraftResultsView(APIView):
                     draft.model_name = item.get("model_name", "")
                     draft.save(update_fields=["run", "model_name", "updated_at"])
                 draft.refresh_from_db()
-                saved.append(_serialize_draft(draft))
+                from startup_updates.revisions import worker_revision_payload
+                value = _serialize_draft(draft)
+                value.update(worker_revision_payload(draft.current_revision, version=int(receipt_version)))
+                saved.append(value)
 
             if backups_changed:
                 set_startup_update_run_cancel_backups(run, backups)
@@ -4414,19 +4456,17 @@ class StartupUpdateOpenRunsView(APIView):
         except (TypeError, ValueError):
             limit = 100
 
-        runs = list(
-            ContentFactoryRun.objects.filter(
-                workflow=STARTUP_UPDATE_WORKFLOW,
-                status__in=list(OPEN_RUN_STATUSES),
-            ).order_by("-updated_at")[:limit]
-        )
-        return Response(
-            {
-                "count": len(runs),
-                "runs": [_serialize_open_run(run) for run in runs],
-            },
-            status=status.HTTP_200_OK,
-        )
+        from django.db.models import Q
+        try:
+            after = max(0, int(request.query_params.get("after_id", 0)))
+        except (TypeError, ValueError):
+            return Response({"detail": "Invalid recovery cursor."}, status=400)
+        rows = list(ContentFactoryRun.objects.filter(workflow=STARTUP_UPDATE_WORKFLOW, id__gt=after)
+            .filter(Q(status__in=list(OPEN_RUN_STATUSES)) | Q(status="failed", resume_available=True))
+            .order_by("id")[:limit+1])
+        runs = rows[:limit]
+        return Response({"count": len(runs), "runs": [_serialize_open_run(run) for run in runs],
+            "next_cursor": runs[-1].pk if len(rows)>limit else None})
 
 
 class MonthlyDispatchTargetsView(APIView):
@@ -4476,7 +4516,7 @@ class StartupUpdateEvidenceSnapshotView(APIView):
     def post(self, request, run_id):
         from startup_updates.revisions import capture_snapshot
         from startup_updates.models import MonthlyEvidenceSnapshot
-        run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id)
+        run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id, request=request)
         cancelled = _reject_if_run_cancelled(run)
         if cancelled is not None:
             return cancelled
@@ -4510,48 +4550,219 @@ class StartupUpdateEvidenceSnapshotView(APIView):
 
 
 class StartupUpdateSourceEvidenceRefreshView(APIView):
-    """Refresh selected uploads/Stripe before freezing reporting evidence."""
+    """Refresh selected evidence with provider I/O outside database transactions."""
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    def post(self, request, run_id):
+        from startup_updates.source_evidence import refresh_manual_documents, EXTRACTION_VERSION
+        with transaction.atomic():
+            run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id, request=request)
+            cancelled = _reject_if_run_cancelled(run)
+            if cancelled is not None:
+                return cancelled
+            run_request = dict(run.run_request or {})
+            if run_request.get("source_evidence_refreshed"):
+                return Response(run_request["source_evidence_refreshed"])
+        sources = set(run_request.get("input_sources", []))
+        from startup_updates.event_sources import fetch_event_page, commit_event_page
+        from startup_updates.bank_sources import fetch_bank_page, commit_bank_page
+        progress = (run.result or {}).get("event_source_progress") or {}
+        for provider in sorted(sources & {"humanitix", "luma", "bank_feed"}):
+            if progress.get(provider, {}).get("complete"):
+                continue
+            try:
+                rows, page = (fetch_bank_page(run, binding, progress.get(provider, {}))
+                    if provider == "bank_feed" else fetch_event_page(run, binding, provider, progress.get(provider, {})))
+            except PermissionError:
+                return Response({"detail": f"Reconnect {provider} before continuing."}, status=409)
+            except Exception:
+                return Response({"detail": f"{provider} could not refresh. Your progress is saved.",
+                    "retryable": True, "retry_after_seconds": 15}, status=503)
+            with transaction.atomic():
+                run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id, request=request)
+                if provider == "bank_feed":
+                    commit_bank_page(run, rows, page)
+                else:
+                    commit_event_page(run, provider, rows, page)
+                run.save(update_fields=["result", "updated_at"])
+            return Response({"pending": True, "provider": provider})
+        warnings = refresh_manual_documents(organization, run) if "manual_documents" in sources else []
+        stripe_complete = False
+        if "stripe" in sources:
+            from integrations.services.finance import sync_stripe_connection, publish_financial_metric_observations
+            connections = ExternalServiceConnection.objects.filter(organization=organization,
+                user=binding.user, provider=ExternalServiceProvider.STRIPE).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
+            pin = (run_request.get("source_connection_pins") or {}).get("stripe")
+            if pin:
+                connections = connections.filter(pk=pin)
+            connections = list(connections)
+            if not connections:
+                return Response({"error": "source_unavailable", "detail": "Reconnect Stripe before continuing."}, status=409)
+            for stripe in connections:
+                try:
+                    sync_stripe_connection(stripe)
+                except Exception:
+                    return Response({"error": "source_refresh_wait", "detail": "Stripe could not refresh. Your progress is saved.",
+                        "retryable": True, "retry_after_seconds": 15}, status=503)
+            stripe_complete = True
+        with transaction.atomic():
+            run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id, request=request)
+            cancelled = _reject_if_run_cancelled(run)
+            if cancelled is not None:
+                return cancelled
+            current = dict(run.run_request or {})
+            if current.get("source_evidence_refreshed"):
+                return Response(current["source_evidence_refreshed"])
+            receipt = {"version": EXTRACTION_VERSION, "stripe_complete": stripe_complete,
+                "warnings": warnings, "completed_at": timezone.now().isoformat()}
+            current["source_evidence_refreshed"] = receipt
+            current["external_context"] = {**(current.get("external_context") or {}), "source_refresh": receipt}
+            run.run_request = current
+            if stripe_complete and "xero" not in sources:
+                publish_financial_metric_observations(organization=organization, run=run)
+            run.save(update_fields=["run_request", "updated_at"])
+        return Response(receipt)
+
+
+def _run_accounts_scoped(function):
+    @wraps(function)
+    def scoped(self, request, run_id, *args, **kwargs):
+        from integrations.services.source_accounts import report_account_scope
+        run = _get_run_or_404(run_id)
+        organization, binding, _google, _profile = _get_org_and_binding_for_run(run)
+        with report_account_scope(binding.user, organization, (run.run_request or {}).get("source_connection_pins")):
+            return function(self, request, run_id, *args, **kwargs)
+    return scoped
+
+
+class StartupUpdateSourcePreflightView(APIView):
+    """Check every selected source and checkpoint bounded discovery before collection."""
+    authentication_classes = []
+    permission_classes = [HasRooApiKey]
+
+    @_run_accounts_scoped
+    def post(self, request, run_id):
+        from startup_updates.preflight import require_source_preflight, SourcesNotReady, apply_xero_cooldown, source_failure_check
+        from startup_updates.activity_scope import discover_resource_page
+        from startup_updates.services import refresh_startup_update_run_source_context, build_startup_update_target_windows
+        run = _get_run_or_404(run_id)
+        organization, binding, _google, _profile = _get_org_and_binding_for_run(run)
+        if run.status in {"cancelled", "completed"}:
+            return Response({"error": "run_cancelled"}, status=409)
+        saved = dict(run.run_request or {})
+        def failed_checks(checks):
+            """Keep every failure durable even when a later preparation probe fails."""
+            with transaction.atomic():
+                locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+                from startup_updates.execution import validate_execution
+                validate_execution(locked, request.headers.get("X-Pulse-Execution-Token"))
+                if locked.status == "cancelled" or locked.run_request != saved:
+                    return Response({"error": "run_cancelled"}, status=409)
+                locked.run_request = {**(locked.run_request or {}), "source_preflight_complete": False}
+                locked.result = {**(locked.result or {}), "source_preflight": {
+                    "checks": checks, "ready": False, "checked_at": timezone.now().isoformat()}}
+                locked.save(update_fields=["run_request", "result", "updated_at"])
+            return Response({"ready": False, "checks": checks})
+        # Probes and provider I/O never hold a run/organization transaction.
+        from django.utils.dateparse import parse_datetime
+        previous = (run.result or {}).get("source_preflight") or {}
+        checks = previous.get("checks")
+        checked_at = parse_datetime(str(previous.get("checked_at") or ""))
+        expired = checked_at is None or checked_at.tzinfo is None or (timezone.now() - checked_at).total_seconds() > 120
+        if not checks or expired or any(check.get("status") != "ready" for check in checks):
+            checked_at = timezone.now()
+            try:
+                checks = require_source_preflight(user=binding.user, organization=organization,
+                    input_sources=saved.get("input_sources"), manual_document_ids=saved.get("manual_document_ids"),
+                    manual_summary=saved.get("manual_summary", ""), connection_pins=saved.get("source_connection_pins"))
+            except SourcesNotReady as exc:
+                checks = exc.detail["sourceChecks"]
+                return failed_checks(checks)
+        pins = saved.get("source_connection_pins") or {}
+        mismatches = {c["provider"] for c in checks if pins.get(c["provider"]) is not None
+            and str(c.get("connectionId")) != str(pins[c["provider"]])}
+        if mismatches:
+            return failed_checks([{**c, "status": "needs_reconnect",
+                "message": "This account changed. Start again with the intended connection."}
+                if c["provider"] in mismatches else c for c in checks])
+        discovery = dict((run.result or {}).get("source_discovery") or {})
+        if saved.get("automatic_source_scope_requested"):
+            for provider in sorted(set(saved.get("input_sources", [])) & {"slack", "linear", "google_analytics"}):
+                if not discovery.get(provider, {}).get("complete"):
+                    try:
+                        discovery[provider] = discover_resource_page(binding.user, organization, provider, discovery.get(provider))
+                    except Exception as exc:
+                        return failed_checks([{**c, **source_failure_check(provider, exc)}
+                            if c["provider"] == provider else c for c in checks])
+                    break
+        complete = not saved.get("automatic_source_scope_requested") or all(discovery.get(p, {}).get("complete") for p in
+            set(saved.get("input_sources", [])) & {"slack", "linear", "google_analytics"})
+        if complete:
+            # All selected connections have passed. Only now perform the
+            # existing period-specific financial collection, outside row locks.
+            from vibe_raising.views import _sync_selected_connector_sources_for_draft
+            try:
+                warnings = _sync_selected_connector_sources_for_draft(binding.user, saved["input_sources"],
+                    organization=organization, automatic_scope=bool(saved.get("automatic_source_scope_requested")))
+            except (ConnectorOAuthError, ConnectorRateLimitError, requests.RequestException) as exc:
+                # Linear is the only preparation branch that raises these;
+                # Xero returns its failures in the warnings mapping.
+                return failed_checks([{**c, **source_failure_check("linear", exc)}
+                    if c["provider"] == "linear" else c for c in checks])
+            if any(warnings.values()):
+                return failed_checks(apply_xero_cooldown([
+                    {**c, "status": "temporarily_unavailable", "message": "This source could not refresh. Check it before continuing."}
+                    if warnings.get(c["provider"]) else c for c in checks]))
+        with transaction.atomic():
+            locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+            from startup_updates.execution import validate_execution
+            validate_execution(locked, request.headers.get("X-Pulse-Execution-Token"))
+            if locked.status == "cancelled" or locked.run_request != saved:
+                return Response({"error": "run_cancelled", "detail": "The generation request changed."}, status=409)
+            locked.result = {**(locked.result or {}), "source_preflight": {"checks": checks, "ready": False, "checked_at": checked_at.isoformat()}, "source_discovery": discovery}
+            if complete:
+                current = dict(locked.run_request or {})
+                if saved.get("automatic_source_scope_requested"):
+                    current["automatic_source_scope"] = {p: item["ids"] for p, item in discovery.items()}
+                current["source_preflight_complete"] = False
+                current["source_connection_pins"] = {c["provider"]: c.get("connectionId") for c in checks if c.get("connectionId")}
+                locked.run_request = current
+            locked.save(update_fields=["result", "run_request", "updated_at"])
+        if complete:
+            # Preserve the established connector -> run lock order. Never take
+            # Slack authority locks while already holding the run row lock.
+            from datetime import date
+            windows = build_startup_update_target_windows(date.fromisoformat(saved["current_month"]))
+            refresh_startup_update_run_source_context(run=locked, organization=organization,
+                input_sources=saved["input_sources"], start_date=windows["financial_start_date"],
+                end_date=windows["financial_end_date"], manual_document_ids=saved.get("manual_document_ids"),
+                manual_summary=saved.get("manual_summary", ""),
+                execution_token=request.headers.get("X-Pulse-Execution-Token"))
+            # A quota can be reached after the lightweight probe, including by
+            # another worker. Never open the barrier on partially refreshed data.
+            checks = apply_xero_cooldown(checks)
+            complete = all(check.get("status") == "ready" for check in checks)
+            with transaction.atomic():
+                final = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+                validate_execution(final, request.headers.get("X-Pulse-Execution-Token"))
+                if final.status == "cancelled":
+                    return Response({"error": "run_cancelled"}, status=409)
+                final.run_request = {**(final.run_request or {}), "source_preflight_complete": complete}
+                final.result = {**(final.result or {}), "source_preflight": {"checks": checks, "ready": complete, "checked_at": checked_at.isoformat()}}
+                final.save(update_fields=["run_request", "result", "updated_at"])
+        return Response({"ready": complete, "pending": not complete and all(c.get("status") == "ready" for c in checks), "checks": checks})
+
+
+class StartupUpdateExecutionView(APIView):
+    """Claim or resume an execution using existing durable run state."""
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
     @transaction.atomic
     def post(self, request, run_id):
-        run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id)
-        cancelled = _reject_if_run_cancelled(run)
-        if cancelled is not None:
-            return cancelled
-        run_request = dict(run.run_request or {})
-        if run_request.get("source_evidence_refreshed"):
-            return Response(run_request["source_evidence_refreshed"])
-        from startup_updates.source_evidence import refresh_manual_documents, EXTRACTION_VERSION
-        sources = set(run_request.get("input_sources", []))
-        warnings = refresh_manual_documents(organization, run) if "manual_documents" in sources else []
-        stripe_complete = False
-        if "stripe" in sources:
-            from integrations.services.finance import sync_stripe_connection, publish_financial_metric_observations
-            connections = list(ExternalServiceConnection.objects.filter(organization=organization,
-                user=binding.user, provider=ExternalServiceProvider.STRIPE).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED))
-            stripe_complete = bool(connections)
-            if not connections:
-                warnings.append("Stripe was selected but no connected account is available.")
-            for stripe in connections:
-                try:
-                    sync_stripe_connection(stripe)
-                except Exception as exc:
-                    stripe_complete = False
-                    warnings.append(f"Stripe evidence unavailable ({type(exc).__name__}); cached values require confirmation.")
-            if stripe_complete:
-                # Xero was already refreshed for the exact target period; the
-                # Stripe publisher must not refresh a different month here.
-                if "xero" not in sources:
-                    run.run_request = {**run_request, "source_evidence_refreshed": {"stripe_complete": True}}
-                    publish_financial_metric_observations(organization=organization, run=run)
-        receipt = {"version": EXTRACTION_VERSION, "stripe_complete": stripe_complete,
-            "warnings": warnings, "completed_at": timezone.now().isoformat()}
-        run_request["source_evidence_refreshed"] = receipt
-        external = dict(run_request.get("external_context") or {})
-        external["source_refresh"] = receipt
-        run_request["external_context"] = external
-        run.run_request = run_request
-        run.save(update_fields=["run_request", "updated_at"])
-        return Response(receipt)
+        from startup_updates.execution import claim_execution
+        run = get_object_or_404(ContentFactoryRun.objects.select_for_update(), run_id=run_id, workflow=STARTUP_UPDATE_WORKFLOW)
+        organization, binding, _google, _profile = _get_org_and_binding_for_run(run)
+        result = claim_execution(run, owner=request.data.get("owner"), resume=request.data.get("resume") is True)
+        return Response(result)

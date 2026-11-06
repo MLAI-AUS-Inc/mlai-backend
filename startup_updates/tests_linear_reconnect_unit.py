@@ -36,6 +36,7 @@ class LinearFixture:
             token_type="Bearer", token_expires_at=timezone.now() - timedelta(days=1),
             updated_at=timezone.now() - timedelta(days=2), scopes=[],
             status="connected", last_error="", last_synced_at=None,
+            provider_metadata={},
             account_label="Example", external_account_id="workspace", save=MagicMock(),
         )
 
@@ -181,12 +182,15 @@ class LinearStatusTests(LinearFixture, SimpleTestCase):
             connectors.ExternalServiceConnection, "objects",
         ) as rows, patch.object(connectors.LinearProjectSelection, "objects"), patch.object(
             connectors, "_provider_configuration_error", return_value=None,
-        ):
+        ), patch("integrations.services.source_accounts.report_account_id", return_value=None):
             rows.filter.return_value.exclude.return_value.filter.return_value.order_by.return_value.first.return_value = self.connection
+            rows.filter.return_value.exclude.return_value.filter.return_value.order_by.return_value.__iter__.return_value = [self.connection]
             source = connectors._serialize_external_source(self.user, "linear", self.organization)
         self.assertEqual(source["status"], "needs_reauth")
         self.assertFalse(source["selected"])
         self.assertEqual(source["warning"], connectors.LINEAR_RECONNECT_MESSAGE)
+        self.assertEqual(source["reportAccountId"], self.connection.pk)
+        self.assertEqual([row["connectionId"] for row in source["accounts"]], [self.connection.pk])
         capability = source_capabilities(source)
         self.assertFalse(capability["usableForUpdates"])
         self.assertTrue(capability["canConnect"])
@@ -250,38 +254,33 @@ class PulseLinearRecoveryTests(LinearFixture, SimpleTestCase):
             result = view.post(request)
         return result, create, dispatch, rows
 
-    def test_failed_refresh_then_generate_with_other_selected_sources(self):
+    def test_admission_keeps_every_selection_for_the_durable_source_barrier(self):
         with patch.object(connectors.requests, "post", return_value=response(400)) as post:
-            failed, create, dispatch, rows = self.start(["slack", "linear"])
-            self.assertEqual(failed.status_code, 409)
-            self.assertEqual(failed.data["code"], "startup_update_sources_unavailable")
-            self.assertEqual(failed.data["unavailableSources"], ["linear"])
-            self.assertEqual(failed.data["detail"], connectors.LINEAR_RECONNECT_MESSAGE)
-            self.assertEqual(self.connection.status, "error")
-            create.assert_not_called()
-            dispatch.assert_not_called()
-            self.assertEqual(rows.filter.return_value.update.call_count, 2)
-            post.reset_mock()
-            success, create, dispatch, _ = self.start(["slack"])
-        self.assertEqual(success.status_code, 201)
+            result, create, dispatch, rows = self.start(["slack", "linear"])
+            self.assertEqual(result.status_code, 201)
+            self.assertEqual(create.call_args.kwargs["input_sources"], ["slack", "linear"])
+            self.assertEqual(result.data["sourceChecks"], [])
+            dispatch.assert_called_once()
+            rows.filter.return_value.update.assert_not_called()
+            post.assert_not_called()
+            result, create, dispatch, _ = self.start(["slack"])
+        self.assertEqual(result.status_code, 201)
         self.assertEqual(create.call_args.kwargs["input_sources"], ["slack"])
         self.assertTrue(create.call_args.kwargs["automatic_source_scope"])
         dispatch.assert_called_once()
         post.assert_not_called()
 
-    def test_known_failed_selected_source_returns_409_before_run_creation(self):
+    def test_known_failed_source_is_preserved_for_all_source_checking(self):
         self.connection.status = "error"
         with patch.object(connectors.requests, "post") as post:
             result, create, dispatch, _ = self.start(["slack", "linear"])
-        self.assertEqual(result.status_code, 409)
-        self.assertIn("Linear", result.data["detail"])
-        self.assertIn("other sources", result.data["detail"])
-        self.assertEqual(result.data["unavailableSources"], ["linear"])
-        create.assert_not_called()
-        dispatch.assert_not_called()
+        self.assertEqual(result.status_code, 201)
+        self.assertEqual(create.call_args.kwargs["input_sources"], ["slack", "linear"])
+        self.assertEqual(self.connection.status, "error")
+        dispatch.assert_called_once()
         post.assert_not_called()
 
-    def test_successful_refresh_is_saved_before_the_creation_transaction(self):
+    def test_admission_does_not_rotate_credentials_in_the_creation_transaction(self):
         events = []
         self.connection.save.side_effect = lambda **kwargs: events.append("refreshed")
         @contextmanager
@@ -289,11 +288,12 @@ class PulseLinearRecoveryTests(LinearFixture, SimpleTestCase):
             events.append("begin")
             yield
             events.append("commit")
-        with patch.object(connectors.requests, "post", return_value=response(payload={"access_token": "synthetic-new", "expires_in": 3600})):
+        with patch.object(connectors.requests, "post") as post:
             result, _, dispatch, _ = self.start(["linear"], atomic=atomic)
         self.assertEqual(result.status_code, 201)
-        self.assertEqual(events, ["refreshed", "begin", "commit"])
+        self.assertEqual(events, ["begin", "commit"])
         dispatch.assert_called_once()
+        post.assert_not_called()
 
     def test_catalog_rejection_is_persisted_after_creation_rolls_back(self):
         self.connection.token_expires_at = timezone.now() + timedelta(hours=1)
@@ -320,21 +320,22 @@ class PulseLinearRecoveryTests(LinearFixture, SimpleTestCase):
         self.assertEqual(self.connection.status, "error")
         dispatch.assert_not_called()
 
-    def test_temporary_failure_is_retryable_without_marking_reconnect(self):
-        with patch.object(connectors.requests, "post", side_effect=Timeout("sensitive-detail")):
-            result, create, dispatch, rows = self.start(["linear"])
-        self.assertEqual(result.status_code, 503)
-        self.assertEqual(result.data["detail"], connectors.LINEAR_UNAVAILABLE_MESSAGE)
-        self.assertEqual(self.connection.status, "connected")
-        rows.filter.return_value.update.assert_not_called()
-        create.assert_not_called()
-        dispatch.assert_not_called()
-
-    def test_rate_limit_returns_retry_after_without_marking_reconnect(self):
-        with patch.object(connectors.requests, "post", return_value=response(429, **{"Retry-After": "42"})):
-            result, create, dispatch, _ = self.start(["linear"])
-        self.assertEqual(result.status_code, 503)
-        self.assertEqual(result["Retry-After"], "42")
-        self.assertEqual(self.connection.status, "connected")
-        create.assert_not_called()
-        dispatch.assert_not_called()
+    def test_provider_timeouts_and_rate_limits_report_all_selected_checks(self):
+        from startup_updates.preflight import SourcesNotReady, require_source_preflight
+        for outcome in (Timeout("sensitive-detail"), connectors.ConnectorRateLimitError(42)):
+            def probe(provider, **kwargs):
+                if provider == "linear":
+                    raise outcome
+                return {}
+            with self.subTest(outcome=type(outcome).__name__), patch(
+                "startup_updates.preflight.probe_source", side_effect=probe,
+            ), patch("startup_updates.preflight.close_old_connections"), patch(
+                "startup_updates.preflight.connections.close_all",
+            ), self.assertRaises(SourcesNotReady) as failure:
+                require_source_preflight(user=self.user, organization=self.organization,
+                    input_sources=["linear", "slack"])
+            self.assertEqual(failure.exception.detail["unavailableSources"], ["linear"])
+            checks = failure.exception.detail["sourceChecks"]
+            self.assertEqual([row["provider"] for row in checks], ["linear", "slack"])
+            self.assertEqual([row["status"] for row in checks], ["temporarily_unavailable", "ready"])
+            self.assertNotIn("sensitive-detail", str(failure.exception.detail))

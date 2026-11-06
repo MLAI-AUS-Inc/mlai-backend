@@ -17,6 +17,7 @@ from content_factory.models import ArticlePublishStatus, GeneratedComponent, Key
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from roo.models import PointsAccount
+from roo.services import PointsService
 from workflow_runs.models import (
     ContentFactoryApprovalState,
     ContentFactoryRun,
@@ -236,6 +237,21 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             result={},
         )
         self.client.force_authenticate(user=self.user)
+
+    def _record_original_article_payment(self):
+        """Seed the original persisted debit needed before revising an article."""
+        from roo.models import Ledger
+        from content_factory.models import ContentFactoryJob
+        charge = Ledger.objects.create(user=self.user, kind="SPEND", source="CONTENT_FACTORY", delta=-12,
+            reference_id=self.run.run_id, idempotency_key=f"content_factory:charge:{self.run.run_id}")
+        self.run.run_request.update(client_request_id=self.run.run_id,
+            roo_points_authorized=True, roo_points_action="article_generation",
+            roo_points_cost=12, roo_points_required=12, roo_points_billing_status="charged",
+            roo_points_ledger_id=str(charge.pk))
+        self.run.save(update_fields=["run_request", "updated_at"])
+        ContentFactoryJob.objects.create(job_id=self.run.run_id, domain=self.run.domain,
+            client_request_id=self.run.run_id, billing_source_job_id=self.run.run_id,
+            billing_status="charged", billing_amount=12, billing_ledger=charge)
 
     def _create_mlai_featured_components(self):
         for name in (
@@ -2152,14 +2168,12 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             )
 
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(
-            sorted(response.data["cancelledRunIds"]),
-            sorted([cancellable_one.run_id, cancellable_two.run_id]),
-        )
+        # A failed sibling keeps its failure (IF-20): it is hidden, not cancelled.
+        self.assertEqual(response.data["cancelledRunIds"], [cancellable_one.run_id])
         self.assertEqual(response.data["protectedRunIds"], [protected.run_id])
         self.assertEqual(checked_pull_requests, ["https://github.com/MLAI-AUS-Inc/mlai-au/pull/77"])
         self.assertTrue(any(cancellable_one.run_id in url for url in cancelled_urls))
-        self.assertTrue(any(cancellable_two.run_id in url for url in cancelled_urls))
+        self.assertFalse(any(cancellable_two.run_id in url for url in cancelled_urls))
         # Closing the PR permits a stop request, but its untyped reply cannot
         # establish cancellation or erase the attempt's external evidence.
         self.assertTrue(any(protected.run_id in url for url in cancelled_urls))
@@ -2168,7 +2182,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         cancellable_two.refresh_from_db()
         protected.refresh_from_db()
         self.assertEqual(cancellable_one.status, ContentFactoryRunStatus.CANCELLED)
-        self.assertEqual(cancellable_two.status, ContentFactoryRunStatus.CANCELLED)
+        self.assertEqual(cancellable_two.status, ContentFactoryRunStatus.FAILED)
+        self.assertTrue(cancellable_two.result["draft_deleted_at"])
         self.assertEqual(protected.status, ContentFactoryRunStatus.BLOCKED)
         self.assertEqual(protected.result["draft_pr_url"], "https://github.com/MLAI-AUS-Inc/mlai-au/pull/77")
         self.assertNotIn("reconciliation_refund_pending", protected.result)
@@ -2181,6 +2196,11 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertIn(source_run_id, draft_source_run_ids)
         self.assertNotIn(cancellable_one.run_id, draft_run_ids)
         self.assertNotIn(cancellable_two.run_id, draft_run_ids)
+        # The kept failure is hidden wherever a cancelled run is, not only from drafts.
+        full = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+        latest_run_ids = {item["runId"] for item in full.data["latestRuns"]}
+        self.assertIn(protected.run_id, latest_run_ids)
+        self.assertNotIn(cancellable_two.run_id, latest_run_ids)
 
     def _setup_blocked_draft_with_copied_setup_pr(self, run_id):
         """TalaThrive (18 Oct): drafts blocked on setup carried the merged setup PR #42."""
@@ -2342,6 +2362,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_from_completed_revision_uses_revision_draft_comments(self):
+        self._record_original_article_payment()
         revision_run = self._create_bound_run(
             run_id="article-run-comments-revision",
             workflow="article_revision",
@@ -2382,7 +2403,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         with patch("content_factory.vibe_marketing_views.http_client.post", side_effect=fake_post):
             response = self.client.post(f"/api/v1/vibe-marketing/runs/{revision_run.run_id}/comments/submit", {}, format="json")
 
-        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(captured["url"], "https://content-factory.test/api/runs/article-run-comments-revision/component-revisions")
         self.assertEqual(captured["payload"]["source_run_id"], revision_run.run_id)
         self.assertEqual(captured["payload"]["comments"][0]["comment_id"], str(revision_comment.id))
@@ -2390,6 +2411,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_sends_anchor_to_content_factory_revision(self):
+        self._record_original_article_payment()
         comment = VibeMarketingComponentComment.objects.create(
             run=self.run,
             actor=self.user,
@@ -2434,6 +2456,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_failed_package_review_draft_can_submit_section_deletion(self):
+        self._record_original_article_payment()
         self.run.status = ContentFactoryRunStatus.FAILED
         self.run.current_step = "package_content_delivery"
         self.run.result = {
@@ -2902,6 +2925,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_retries_latest_submitted_batch(self):
+        self._record_original_article_payment()
         comment = VibeMarketingComponentComment.objects.create(
             run=self.run,
             actor=self.user,
@@ -2929,6 +2953,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_from_failed_revision_retries_source_batch(self):
+        self._record_original_article_payment()
         revision_run = self._create_bound_run(
             run_id="article-run-comments-revision",
             workflow="article_revision",
@@ -2970,6 +2995,7 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
 
     @override_settings(CONTENT_FACTORY_URL="https://content-factory.test", CONTENT_FACTORY_API_KEY="secret-key", IS_LOCAL_ENV=False)
     def test_submit_keeps_retryable_timeout_batch_submitted(self):
+        self._record_original_article_payment()
         comment = VibeMarketingComponentComment.objects.create(
             run=self.run,
             actor=self.user,
@@ -6128,6 +6154,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertFalse(config.articles_scaffolded)
 
     def test_merge_setup_pr_marks_setup_merged_and_daily_ready(self):
+        PointsService.credit_purchased_topup(user=self.user, delta=12,
+            description="Synthetic article funding", idempotency_key="setup-merge-article-funding")
         config = self._prepare_articles_setup_gate(status="pr_created")
         config.connected_slack_user_id = "U123"
         config.save(update_fields=["connected_slack_user_id", "updated_at"])
@@ -6206,6 +6234,8 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         workflow_steps = {step["id"]: step for step in bootstrap_response.data["workflowProgress"]["steps"]}
         self.assertEqual(workflow_steps["research"]["status"], "ready")
 
+        article_price = bootstrap_response.data["articleCapabilities"]["prices"]["article"]
+        self.assertEqual(article_price, 12)
         queued_article = self._create_bound_run(
             run_id="article-after-setup-merge",
             workflow="article_generation",
@@ -6214,15 +6244,17 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
             status=ContentFactoryRunStatus.QUEUED,
             result={},
         )
-        with patch("content_factory.vibe_marketing_views._queue_content_factory_run", return_value=queued_article):
+        with patch("content_factory.vibe_marketing_views._queue_content_factory_run", return_value=queued_article) as queue:
             article_response = self.client.post(
                 "/api/v1/vibe-marketing/article/",
-                {"topic": "AI adoption", "targetKeyword": "ai adoption"},
+                {"expectedCostPoints": article_price, "topic": "AI adoption", "targetKeyword": "ai adoption"},
                 format="json",
             )
 
-        self.assertEqual(article_response.status_code, 202)
+        self.assertEqual(article_response.status_code, 202, article_response.data)
         self.assertEqual(article_response.data["runId"], "article-after-setup-merge")
+        self.assertEqual(PointsAccount.objects.get(user=self.user).balance_microroo, 0)
+        queue.assert_called_once()
 
         enable_response = self.client.post(
             f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/enable-daily-automation",

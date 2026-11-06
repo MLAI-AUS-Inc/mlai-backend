@@ -332,6 +332,7 @@ class DeferredScheduledConfirmRefundTests(TestCase):
                 confirmed_keyword="scheduled keyword",
                 slack_user_id="U-CONFIRM",
                 source_run_id="scheduled-source-1",
+                expected_cost_points=12,
             )
 
         self.source_job.refresh_from_db()

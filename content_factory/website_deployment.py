@@ -18,6 +18,11 @@ INSTRUCTIONS = {
     "github_actions": "Open the repository's Actions tab and run its deployment workflow for the merged branch.",
     "unknown": "Deploy the merged branch using your hosting provider's production deployment process.",
 }
+PLAIN_HOST_LINES = {
+    "vercel": "Your website is hosted on Vercel. If it still hasn't updated in an hour, check Vercel for an update that didn't finish.",
+    "netlify": "Your website is hosted on Netlify. If it still hasn't updated in an hour, check Netlify for an update that didn't finish.",
+    "cloudflare": "Your website is hosted on Cloudflare Pages. If it still hasn't updated in an hour, check Cloudflare Pages for an update that didn't finish.",
+}
 
 
 def enabled():
