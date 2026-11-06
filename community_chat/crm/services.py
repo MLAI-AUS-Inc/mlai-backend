@@ -380,15 +380,18 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
     if "sms_only_without_whatsapp" in data:
         blast.sms_only_without_whatsapp = data["sms_only_without_whatsapp"]
     email = data.get("email") or {}
-    if "mailbox_id" in email:
-        chosen = (
+    if "mailbox_id" in email and is_owner(actor):
+        blast.mailbox = (
             None
             if email["mailbox_id"] is None
             else _found(SenderMailbox, email["mailbox_id"], "mailbox_not_found")
         )
-        # Staff keep main's mailbox choice for existing pre-stream mailboxes;
-        # only owners may pick a technical stream identity.
-        if is_owner(actor) or legacy_mailbox(chosen) or (chosen is None and legacy_path_enabled()):
+    elif "mailbox_id" in email and legacy_path_enabled():
+        # Staff keep main's choice of an existing pre-stream mailbox. Any other
+        # id (a stream identity, or an old client's stale id) is ignored.
+        chosen = (None if email["mailbox_id"] is None
+                  else SenderMailbox.objects.filter(pk=email["mailbox_id"]).first())
+        if (email["mailbox_id"] is None) or legacy_mailbox(chosen):
             blast.mailbox = chosen
     if "subject" in email:
         blast.subject = " ".join(email["subject"].split())
