@@ -16,7 +16,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from core.models import User
 from community_chat.admin_access import admin_sections
 from community_chat.models import CommunityChatDevice
-from community_chat.staff_console_views import StartupListView, StartupDetailView, StartupActionView, AlertListView, AlertAckView
+from community_chat.staff_console_views import StartupListView, StartupDetailView, StartupActionView, AlertListView, AlertAckView, StartupSafetyStateView
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun
 from .models import OrganizationContentConfig
@@ -56,7 +56,8 @@ class StaffTests(TestCase):
 
     def test_all_routes_refuse_founder_member_signedout_staff_without_verified_admin(self):
         views = [(StartupListView, {}), (StartupDetailView, {"organization_id": self.org.pk}),
-                 (StartupActionView, {"organization_id": self.org.pk}), (AlertListView, {}), (AlertAckView, {"alert_id": "unknown"})]
+                 (StartupActionView, {"organization_id": self.org.pk}), (AlertListView, {}), (AlertAckView, {"alert_id": "unknown"}),
+                 (StartupSafetyStateView, {"organization_id": self.org.pk, "run_id": "run-1"})]
         for view, args in views:
             for user, verified in ((False, False), (self.built.owner, True), (self.staff, False)):
                 with self.subTest(view=view, user=user):

@@ -1,0 +1,46 @@
+{
+  "final": {
+    "escalation": null,
+    "preview_url": "https://example.com/articles/pilot",
+    "resume_generation": 2,
+    "review_token": "<acknowledged-task>",
+    "self_heal_exhausted": false,
+    "status": "passed",
+    "task_id": "<acknowledged-task>",
+    "trigger": "manual_retry"
+  },
+  "held": {
+    "escalation": "safety_review",
+    "preview_url": "https://example.com/articles/pilot",
+    "resume_generation": 2,
+    "review_token": "held-task",
+    "self_heal_exhausted": true,
+    "status": "blocking_findings",
+    "task_id": "held-task"
+  },
+  "recheck": {
+    "article_preview_quality": {
+      "escalation": "safety_review",
+      "preview_url": "https://example.com/articles/pilot",
+      "resume_generation": 2,
+      "review_token": "<acknowledged-task>",
+      "self_heal_exhausted": true,
+      "status": "queued",
+      "task_id": "<acknowledged-task>",
+      "trigger": "manual_retry"
+    },
+    "idempotent": false,
+    "status": "quality_review_queued"
+  },
+  "running": {
+    "escalation": "safety_review",
+    "preview_url": "https://example.com/articles/pilot",
+    "resume_generation": 2,
+    "review_token": "<acknowledged-task>",
+    "self_heal_exhausted": true,
+    "status": "running",
+    "task_id": "<acknowledged-task>",
+    "trigger": "manual_retry"
+  },
+  "schema_version": 1
+}
