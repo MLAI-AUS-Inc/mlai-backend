@@ -216,6 +216,9 @@ def _access_token(connection):
         if not isinstance(access,str) or not access:
             raise CalendarError('invalid_response')
         updates={'access_token':access,'access_token_expires_at':_expires(token)}
+        if scope is not None:
+            updates['scopes'] = str(scope).split()
+            connection.scopes = updates['scopes']
         if token.get('refresh_token'):
             updates['refresh_token']=token['refresh_token']
         changed=MentorCalendarConnection.objects.filter(pk=fresh.pk,revision=fresh.revision,status='connected').update(**updates)
@@ -311,12 +314,17 @@ def readiness(profile):
     for connection in MentorCalendarConnection.objects.filter(user_id=profile.user_id):
         if not connection.conflict_calendar_ids and not connection.booking_calendar_id:
             continue
-        if connection.status!='connected' or connection.last_error_code or not connection.checked_at or not google.CALENDAR_SCOPES.issubset(connection.scopes):
+        if connection.status!='connected' or not connection.checked_at or not google.CALENDAR_SCOPES.issubset(connection.scopes):
             reasons.append({'code':'calendar_reconnect_required','detail':'Reconnect or check your selected calendar.'})
         metadata={item.get('id'):item for item in connection.calendar_metadata if isinstance(item,dict)}
         if any(i not in metadata or not metadata[i].get('can_check_conflicts') for i in connection.conflict_calendar_ids):
             reasons.append({'code':'calendar_reconnect_required','detail':'Check permissions on your selected calendars.'})
         destination=metadata.get(connection.booking_calendar_id,{})
+        if (connection.booking_calendar_id and profile.location_type == 'video'
+                and getattr(profile, 'meeting_artifact_policy', {})
+                and google.MEET_SETTINGS_SCOPE not in connection.scopes):
+            reasons.append({'code': 'meet_reconnect_required',
+                'detail': 'Reconnect Google to enable automatic transcription and Gemini notes.'})
         if connection.booking_calendar_id and (not destination.get('can_write') or (profile.location_type=='video' and not destination.get('can_create_meet'))):
             reasons.append({'code':'calendar_permission_required','detail':'Choose a writable calendar with the required meeting capability.'})
         if connection.booking_calendar_id and connection.booking_calendar_id not in connection.conflict_calendar_ids:
@@ -438,3 +446,18 @@ def verify_booking(session,target=None):
     start=getattr(session,'protected_starts_at',None) or session.starts_at-timedelta(minutes=before)
     end=getattr(session,'protected_ends_at',None) or session.ends_at+timedelta(minutes=after)
     check_after_create(session,start,end,target)
+
+
+def configure_capture(session, result, target=None):
+    """Verify the frozen capture promise, returning safe durable provider state."""
+    from mentoring.meeting_policy import required
+    if not required(session):
+        return {}
+    c, identifier = _target(session, target)
+    client = _client(c)
+    # Refresh first: the provider may have narrowed the stored permission grant.
+    _access_token(c)
+    if google.MEET_SETTINGS_SCOPE not in c.scopes:
+        raise CalendarError('meet_reconnect_required')
+    outcome = client.configure_capture(result['meet_link'])
+    return {**outcome, 'verified_at': timezone.now().isoformat()}

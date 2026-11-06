@@ -55,6 +55,7 @@ class MentorProfile(models.Model):
     booking_horizon_days = models.PositiveSmallIntegerField(default=30)
     start_increment_minutes = models.PositiveSmallIntegerField(default=15)
     booking_revision = models.PositiveIntegerField(default=1)
+    meeting_artifact_policy = models.JSONField(default=dict, blank=True)
     location_type = models.CharField(
         max_length=16, choices=LOCATION_CHOICES, default=LOCATION_VIDEO
     )
@@ -229,6 +230,7 @@ class MentorSession(models.Model):
     buffer_after_minutes = models.PositiveSmallIntegerField(default=0)
     calendar_snapshot = models.JSONField(default=dict, blank=True)
     booking_snapshot = models.JSONField(default=dict, blank=True)
+    meeting_provisioning = models.JSONField(default=dict, blank=True)
     failure_code = models.CharField(max_length=64, default='', blank=True)
 
     # Snapshots taken at request time so later profile edits change nothing.

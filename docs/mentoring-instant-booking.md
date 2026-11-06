@@ -48,3 +48,13 @@ Database-free provider, scheduling and view suites run through `scripts/test_wit
 - Source review fixes were rechecked independently. No production data, OAuth credentials or live provider accounts were used in these tests.
 
 The frontend companion passed 7,337 unit tests, desktop checks, TypeScript, its E2E build and focused browser regressions. The full repository `just ci` was attempted but stopped during dependency downloads as free local disk space dropped. A real Google OAuth/Meet pilot and production migration approval remain rollout prerequisites.
+
+
+## Automatic transcription and Gemini notes
+
+See [the capture contract and rollout runbook](mentoring-automatic-capture.md).
+New explicit activation defaults both features on for video sessions. Existing
+profiles and frozen bookings retain their policy until explicitly changed.
+Meet settings consent and actual account eligibility are additional prerequisites;
+Calendar connection alone does not grant them. New required-capture video bookings
+confirm only after event/Meet creation and read-back verification of both settings.

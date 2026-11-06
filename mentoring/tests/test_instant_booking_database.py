@@ -33,6 +33,8 @@ class InstantBookingDatabaseTests(TransactionTestCase):
             location_type='mlai_space')
         self.start = (timezone.now()+timedelta(days=4)).replace(hour=11,minute=0,second=0,microsecond=0)
         MentorAvailabilityRule.objects.create(mentor=self.profile,weekday=self.start.weekday(),start_time=time(9),end_time=time(17))
+        p = patch('mentoring.conflicts.read', return_value=[])
+        p.start(); self.addCleanup(p.stop)
         self.provider = MagicMock()
         self.provider.calendar_target.return_value = {'connection_id':1,'calendar_id':'synthetic-calendar','revision':1}
         self.provider.fetch_busy.return_value = []
@@ -47,6 +49,51 @@ class InstantBookingDatabaseTests(TransactionTestCase):
         p=patch.object(MentoringService,'_notify_safely')
         p.start()
         self.addCleanup(p.stop)
+
+    def video_booking(self):
+        from mentoring.meeting_policy import REQUIRED_POLICY
+        self.profile.location_type = 'video'
+        self.profile.meeting_artifact_policy = dict(REQUIRED_POLICY)
+        self.profile.save()
+        self.provider.configure_capture.return_value = {'verified': True, 'policy_version': 1}
+        self.created['meet_link'] = 'https://meet.google.com/abc-defg-hij'
+        quote = instant.make_quote(founder=self.founder, mentor_id=self.profile.pk,
+            starts_at=self.start.isoformat(), expected_price=40)
+        return instant.book(founder=self.founder, quote=quote['quote'],
+            brief={'stage': 'idea', 'struggle': 'users', 'outcome': 'plan'}, client_request_id=str(uuid.uuid4()))
+
+    def test_video_capture_is_verified_before_automatic_confirmation(self):
+        attempt = self.video_booking()
+        self.assertEqual(attempt.session.status, 'provisioning')
+        instant.process_attempt(attempt.pk)
+        attempt.refresh_from_db(); attempt.session.refresh_from_db()
+        self.assertEqual(attempt.status, 'confirmed')
+        self.assertEqual(attempt.session.status, 'accepted')
+        self.assertTrue(attempt.session.meeting_provisioning['verified'])
+        self.assertEqual(self.balance(self.founder), 60)
+        self.provider.invite_attendees.assert_not_called()
+        instant.process_attempt(attempt.pk)
+        self.provider.invite_attendees.assert_called_once()
+
+    def test_unverified_capture_stays_pending_without_inviting(self):
+        attempt = self.video_booking()
+        self.provider.configure_capture.return_value = {'verified': False}
+        instant.process_attempt(attempt.pk)
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.status, 'reconciling')
+        self.assertEqual(attempt.session.status, 'provisioning')
+        self.provider.invite_attendees.assert_not_called()
+
+    def test_capture_permission_failure_refunds_once_and_cleans_same_event(self):
+        attempt = self.video_booking()
+        self.provider.configure_capture.side_effect = CalendarError('permission')
+        instant.process_attempt(attempt.pk)
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.status, 'failed')
+        self.assertEqual(self.balance(self.founder), 100)
+        instant.process_attempt(attempt.pk)
+        self.assertEqual(self.balance(self.founder), 100)
+        self.provider.cancel_booking.assert_called_once()
 
     def user(self,name,points=0):
         u=get_user_model().objects.create_user(email=f'{name}@instant-tests.invalid',first_name=name,slack_id=f'UINSTANT{name}')
