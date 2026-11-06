@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import time, timedelta
 from threading import Barrier
 from unittest import skipUnless
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import uuid
 
 from django.contrib.auth import get_user_model
@@ -14,6 +14,7 @@ from django.utils import timezone
 
 from mentoring.models import MentorAvailabilityRule, MentorProfile, MentorSession
 from mentoring.service import MentoringError, MentoringService
+from mentoring.conflicts import read as read_calendar_conflicts
 from roo.services import PointsService
 
 
@@ -25,6 +26,9 @@ class BookingDatabaseTests(TransactionTestCase):
         notification = patch.object(MentoringService, '_notify_safely')
         notification.start()
         self.addCleanup(notification.stop)
+        provider = patch('mentoring.conflicts.read', return_value=[])
+        provider.start()
+        self.addCleanup(provider.stop)
         self.mentor_user = self.user('mentor')
         self.founder = self.user('founder', points=100)
         self.mentor = MentorProfile.objects.create(
@@ -38,6 +42,100 @@ class BookingDatabaseTests(TransactionTestCase):
             mentor=self.mentor, weekday=self.starts_at.weekday(),
             start_time=time(9), end_time=time(17),
         )
+
+    def test_missing_meeting_repair_keeps_existing_price_time_and_ledger(self):
+        from types import SimpleNamespace
+        from mentoring import meeting_repair
+        from mentoring.calendars import google
+        self.mentor.location_type = 'video'
+        self.mentor.save()
+        session, _ = self.request()
+        MentoringService.accept(session.pk, self.mentor_user)
+        session.refresh_from_db()
+        frozen = (session.starts_at, session.ends_at, session.price_roo, session.charge_ledger_entry_id)
+        target = {'connection_id': 1, 'calendar_id': 'synthetic', 'revision': 1}
+        with patch.object(meeting_repair.calendars, 'calendar_target', return_value=target):
+            meeting_repair.prepare(session.pk, connection_id=1, calendar_id='synthetic')
+        client = MagicMock()
+        client.configure_capture.return_value = {'verified': True, 'policy_version': 1}
+        result = {'event_id': google.event_id(session.pk), 'meet_link': 'https://meet.google.com/abc-defg-hij', 'status': 'created'}
+        c = SimpleNamespace(scopes=[google.MEET_SETTINGS_SCOPE])
+        with patch.object(meeting_repair.calendars, 'lookup_booking', return_value=result), \
+             patch.object(meeting_repair.calendars, '_target', return_value=(c, 'synthetic')), \
+             patch.object(meeting_repair.calendars, '_client', return_value=client), \
+             patch.object(meeting_repair.calendars, '_access_token'), \
+             patch.object(meeting_repair.calendars, 'verify_booking'), \
+             patch.object(meeting_repair.calendars, 'invite_attendees') as invite, \
+             patch.object(meeting_repair.calendars, 'create_booking') as create:
+            meeting_repair.process(session.pk)
+            meeting_repair.process(session.pk)
+        session.refresh_from_db()
+        self.assertEqual(session.status, 'accepted')
+        self.assertEqual(frozen, (session.starts_at, session.ends_at, session.price_roo, session.charge_ledger_entry_id))
+        self.assertEqual(session.meet_link, result['meet_link'])
+        self.assertEqual(self.balance(self.founder), 60)
+        invite.assert_called_once(); create.assert_not_called()
+
+    def test_cancelled_unknown_repair_retains_time_until_event_deleted(self):
+        from mentoring import meeting_repair
+        session, _ = self.request()
+        MentoringService.accept(session.pk, self.mentor_user)
+        session.refresh_from_db()
+        session.meeting_provisioning = {'repair': True, 'cleanup_pending': True, 'unknown_create': True}
+        session.save()
+        MentoringService.cancel(session.pk, self.founder)
+        with patch.object(meeting_repair.calendars, 'cancel_booking', return_value={'outcome': 'absent'}):
+            meeting_repair.process(session.pk)
+        session.refresh_from_db()
+        self.assertTrue(session.time_reservations.filter(active=True).exists())
+        session.meeting_claimed_at = None
+        session.save()
+        with patch.object(meeting_repair.calendars, 'cancel_booking', return_value={'outcome': 'deleted'}):
+            meeting_repair.process(session.pk)
+        self.assertFalse(session.time_reservations.filter(active=True).exists())
+        self.assertEqual(self.balance(self.founder), 100)
+
+    def test_busy_calendar_rejects_legacy_request_before_session_or_charge(self):
+        with patch('mentoring.conflicts.read', return_value=[(self.starts_at, self.starts_at + timedelta(hours=1))]):
+            with self.assertRaises(MentoringError) as caught:
+                self.request()
+        self.assertEqual(caught.exception.code, 'slot_unavailable')
+        self.assertEqual(MentorSession.objects.count(), 0)
+        self.assertEqual(self.balance(self.founder), 100)
+
+    def test_busy_event_added_after_request_blocks_acceptance_without_charge(self):
+        session, _ = self.request()
+        with patch('mentoring.conflicts.read', return_value=[(self.starts_at, self.starts_at + timedelta(hours=1))]):
+            with self.assertRaises(MentoringError):
+                MentoringService.accept(session.pk, self.mentor_user)
+        session.refresh_from_db()
+        self.assertEqual(session.status, 'requested')
+        self.assertIsNone(session.charge_ledger_entry_id)
+        self.assertEqual(self.balance(self.founder), 100)
+
+    def test_personal_calendar_protects_legacy_monday_incident(self):
+        from datetime import date, datetime, timezone as utc
+        from mentoring.calendar_models import MentorCalendarConnection
+        self.mentor.timezone = 'Australia/Melbourne'
+        self.mentor.session_minutes = 15
+        self.mentor.save()
+        self.mentor.availability_rules.all().delete()
+        MentorAvailabilityRule.objects.create(mentor=self.mentor, weekday=0, start_time=time(9), end_time=time(17))
+        MentorCalendarConnection.objects.create(user=self.mentor_user, provider_subject='synthetic',
+            email='mentor@example.invalid', conflict_calendar_ids=['work', 'personal'], booking_calendar_id='work')
+        # Override only the synthetic upstream response; exercise source resolution,
+        # HTTP-shaped availability and the real scheduling engine together.
+        from mentoring import conflicts
+        from mentoring.calendars import service as calendars
+        start = datetime(2026, 11, 8, 22, tzinfo=utc.utc)
+        with patch('mentoring.conflicts.read', side_effect=read_calendar_conflicts), \
+             patch.object(calendars, 'fetch_busy', return_value=[(start, start + timedelta(hours=9))]) as provider, \
+             patch('mentoring.service.timezone.now', return_value=start - timedelta(days=3)):
+            result = MentoringService.availability(self.mentor.pk, date(2026, 11, 9), date(2026, 11, 9))
+        self.assertEqual(result['booking_mode'], 'legacy_request')
+        self.assertEqual(result['busy_check'], 'ok')
+        self.assertEqual(result['slots'], [])
+        provider.assert_called_once()
 
     def user(self, name, points=0):
         user = get_user_model().objects.create_user(

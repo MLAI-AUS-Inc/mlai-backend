@@ -48,7 +48,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_reviewed_migration_inventory(self):
         names = sorted(p.name for p in (Path(__file__).resolve().parents[1] / 'migrations').glob('0*.py'))
-        self.assertEqual(names, ['0001_initial.py', '0002_invites_brief_questions_followup.py', '0003_instant_bookings.py'])
+        self.assertEqual(names, ['0001_initial.py', '0002_invites_brief_questions_followup.py', '0003_instant_bookings.py', '0004_meeting_capture.py'])
 
 
 class InviteFixture(unittest.TestCase):

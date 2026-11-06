@@ -1,4 +1,5 @@
 """Bounded Google Calendar API adapter using a mentor's own OAuth grant."""
+import re
 import uuid
 from datetime import timezone
 from urllib.parse import quote, urlparse
@@ -11,13 +12,14 @@ from .errors import CalendarError
 API = 'https://www.googleapis.com/calendar/v3'
 TOKEN_URL = 'https://oauth2.googleapis.com/token'
 USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo'
-SCOPES = (
-    'openid', 'email',
+CALENDAR_SCOPES = frozenset({
     'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
     'https://www.googleapis.com/auth/calendar.events.freebusy',
     'https://www.googleapis.com/auth/calendar.events.owned',
-)
-CALENDAR_SCOPES = frozenset(SCOPES[2:])
+})
+MEET_SETTINGS_SCOPE = 'https://www.googleapis.com/auth/meetings.space.settings'
+SCOPES = ('openid', 'email', *sorted(CALENDAR_SCOPES), MEET_SETTINGS_SCOPE)
+MEET_API = 'https://meet.googleapis.com/v2'
 TIMEOUT = (3.05, 10)
 
 
@@ -88,6 +90,44 @@ class GoogleCalendarClient:
         if 'If-Match' in extra:
             headers['If-Match'] = extra['If-Match']
         return send(method, API + path, headers=headers, **kwargs)
+
+    def meet_api(self, method, path, **kwargs):
+        """Use the same organizer grant against the fixed Meet API origin."""
+        token = self.token() if callable(self.token) else self.token
+        if not token:
+            raise CalendarError('reconnect_required')
+        return send(method, MEET_API + path, headers={'Authorization': 'Bearer ' + token}, **kwargs)
+
+    def configure_capture(self, link):
+        """Configure and read back both required artifacts on the event's own space."""
+        parsed = urlparse(link)
+        code = parsed.path.removeprefix('/')
+        if (parsed.scheme != 'https' or parsed.netloc != 'meet.google.com'
+                or parsed.query or parsed.fragment or not re.fullmatch(r'[a-z]+-[a-z]+-[a-z]+', code)):
+            raise CalendarError('invalid_meeting_identity')
+        space = self.meet_api('GET', '/spaces/' + code)
+        name = space.get('name', '')
+        if not isinstance(name, str) or not re.fullmatch(r'spaces/[a-zA-Z0-9_-]+', name) or space.get('meetingUri') != link:
+            raise CalendarError('invalid_meeting_identity')
+        artifacts = {
+            'transcriptionConfig': {'autoTranscriptionGeneration': 'ON'},
+            'smartNotesConfig': {'autoSmartNotesGeneration': 'ON'},
+        }
+        mask = ','.join('config.artifactConfig.' + field + '.' + next(iter(config))
+                        for field, config in artifacts.items())
+        def enabled(row):
+            space_config = row.get('config')
+            config = space_config.get('artifactConfig') if isinstance(space_config, dict) else None
+            return isinstance(config, dict) and all(isinstance(config.get(field), dict)
+                       and config[field].get(key) == 'ON'
+                       for field, values in artifacts.items() for key in values)
+        if not enabled(space):
+            self.meet_api('PATCH', '/' + name, params={'updateMask': mask},
+                          json={'config': {'artifactConfig': artifacts}})
+        verified = self.meet_api('GET', '/' + name)
+        if verified.get('name') != name or verified.get('meetingUri') != link or not enabled(verified):
+            raise CalendarError('capture_not_verified')
+        return {'space_name': name, 'verified': True, 'policy_version': 1}
 
     @staticmethod
     def events_path(calendar_id):
@@ -239,6 +279,10 @@ class GoogleCalendarClient:
                         raise CalendarError('event_identity_mismatch')
                     continue
                 if event.get('status') == 'cancelled' or event.get('transparency') == 'transparent':
+                    continue
+                if any(a.get('self') and a.get('responseStatus') == 'declined' for a in event.get('attendees', [])):
+                    continue
+                if event.get('eventType') == 'workingLocation':
                     continue
                 # A bounded Calendar events query already expands recurrences and
                 # selects overlapping occurrences, including all-day events.

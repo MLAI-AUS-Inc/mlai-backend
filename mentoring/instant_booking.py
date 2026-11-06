@@ -64,8 +64,8 @@ def _principals(session):
 
 def reserve_session(session):
     """Reserve participant time; PostgreSQL exclusion is the final race guard."""
-    before = session.buffer_before_minutes if session.booking_mode == 'instant' else 0
-    after = session.buffer_after_minutes if session.booking_mode == 'instant' else 0
+    before = session.buffer_before_minutes
+    after = session.buffer_after_minutes
     for user_id in sorted(set(_principals(session))):
         start = session.starts_at - timedelta(minutes=before) if user_id == session.mentor.user_id else session.starts_at
         end = session.ends_at + timedelta(minutes=after) if user_id == session.mentor.user_id else session.ends_at
@@ -106,7 +106,8 @@ def availability(profile, first_day, last_day):
     tz = ZoneInfo(profile.timezone)
     start = datetime.combine(first_day, datetime.min.time(), tzinfo=tz).astimezone(utc.utc)
     end = datetime.combine(last_day + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(utc.utc)
-    busy = _calendars().fetch_busy(profile, start, end)
+    busy = _calendars().fetch_busy(profile, start - timedelta(minutes=profile.buffer_before_minutes),
+        end + timedelta(minutes=profile.buffer_after_minutes))
     return available_slots(profile, first_day, last_day, external_busy=busy, now=now)
 
 
@@ -114,6 +115,8 @@ def make_quote(*, founder, mentor_id, starts_at, expected_price):
     """Bind the member's reviewed instant-booking terms for five minutes."""
     profile = MentoringService._get_active_mentor(parse_mentor_id(mentor_id))
     target = _ready(profile)
+    if not getattr(founder, 'email', '') or '@' not in founder.email:
+        raise MentoringError('email_required', 'Add an email address to receive your Calendar invitation.', 409)
     start = parse_aware_datetime(starts_at)
     if profile.user_id == founder.pk:
         raise MentoringError('own_mentor_profile', 'You cannot book yourself.', 409)
@@ -126,11 +129,12 @@ def make_quote(*, founder, mentor_id, starts_at, expected_price):
         'founder_id': founder.pk, 'mentor_id': profile.pk, 'starts_at': start.isoformat(),
         'price_roo': profile.price_roo, 'session_minutes': profile.session_minutes,
         'location_type': profile.location_type, 'revision': profile.booking_revision,
+        'meeting_artifact_policy': dict(profile.meeting_artifact_policy),
         'buffer_before_minutes': profile.buffer_before_minutes,
         'buffer_after_minutes': profile.buffer_after_minutes, 'calendar_fingerprint': _json_digest(target),
     }
     public = {key: terms[key] for key in ('mentor_id', 'starts_at', 'price_roo', 'session_minutes', 'location_type', 'buffer_before_minutes', 'buffer_after_minutes')}
-    return {**public, 'quote': signing.dumps(terms, salt=QUOTE_SALT, compress=True),
+    return {**public, 'capture_required': profile.location_type == 'video' and bool(profile.meeting_artifact_policy), 'quote': signing.dumps(terms, salt=QUOTE_SALT, compress=True),
             'expires_at': (timezone.now() + timedelta(seconds=QUOTE_MAX_AGE)).isoformat()}
 
 
@@ -147,6 +151,8 @@ def _load_quote(quote, founder):
 def _assert_quote_current(profile, terms):
     target = _ready(profile)
     fields = ('session_minutes', 'price_roo', 'location_type', 'buffer_before_minutes', 'buffer_after_minutes')
+    if terms.get('meeting_artifact_policy', {}) != profile.meeting_artifact_policy:
+        raise MentoringError('settings_changed', 'Meeting settings changed. Please review again.', 409)
     if profile.booking_revision != terms['revision'] or any(getattr(profile, f) != terms[f] for f in fields):
         raise MentoringError('settings_changed', 'The mentor changed their settings. Please review again.', 409)
     if _json_digest(target) != terms['calendar_fingerprint']:
@@ -180,8 +186,10 @@ def book(*, founder, quote, brief, client_request_id):
     start = parse_aware_datetime(terms['starts_at'])
     end = start + timedelta(minutes=terms['session_minutes'])
     before, after = scheduling.protected_interval(start, terms['session_minutes'], terms['buffer_before_minutes'], terms['buffer_after_minutes'])
-    busy = _calendars().fetch_busy(profile, before, after)
+    from . import conflicts
     checked_at = timezone.now()
+    calendar_config = conflicts.fingerprint(profile)
+    busy = _calendars().fetch_busy(profile, before, after)
     try:
         with transaction.atomic():
             _lock_users(founder.pk, profile.user_id)
@@ -191,6 +199,7 @@ def book(*, founder, quote, brief, client_request_id):
                 return previous
             profile = MentorProfile.objects.select_for_update().select_related('user').get(pk=profile.pk)
             trusted_target = _assert_quote_current(profile, terms)
+            conflicts.validate(profile, {'config': calendar_config, 'checked_at': checked_at})
             now = timezone.now()
             if (now - checked_at).total_seconds() > 10 or now >= start:
                 raise MentoringError('slot_unavailable', 'Please check this time again.', 409)
@@ -400,6 +409,9 @@ def process_attempt(attempt_id):
     try:
         provider = _calendars()
         if attempt.status == 'confirmed':
+            if not MentorBookingAttempt.objects.filter(pk=attempt.pk, status='confirmed',
+                    lease_token=token, generation=generation, session__status='accepted').exists():
+                return
             provider.invite_attendees(session, target=session.calendar_snapshot)
             result = None
         elif attempt.status in ('failed', 'cancelled'):
@@ -422,6 +434,12 @@ def process_attempt(attempt_id):
             if result:
                 _record_event_observed(attempt.pk)
             if result and result.get('status') == 'created':
+                from .meeting_policy import required
+                capture = provider.configure_capture(session, result, target=session.calendar_snapshot) if required(session) else {}
+                if required(session) and not (isinstance(capture, dict) and capture.get('verified') is True):
+                    from .calendars.errors import CalendarError
+                    raise CalendarError('capture_not_verified')
+                result['capture'] = capture
                 provider.verify_booking(session, target=session.calendar_snapshot)
         with transaction.atomic():
             _lock_users(*_principals(session))
@@ -452,6 +470,7 @@ def process_attempt(attempt_id):
                 session.calendar_event_id = result['event_id']
                 session.meet_link = result.get('meet_link', '')
                 session.meeting_status = MentorSession.MEETING_CREATED
+                session.meeting_provisioning = result.get('capture', {})
                 session.responded_at = timezone.now()
                 session.save()
                 live.status = 'confirmed'
@@ -472,7 +491,7 @@ def process_attempt(attempt_id):
             if live.lease_token != token or live.generation != generation:
                 _requeue_late_cleanup(live)
                 return
-            hard_codes = {'slot_unavailable', 'permission', 'invalid_request', 'conference_unavailable', 'conference_failed', 'calendar_conflict', 'reconnect_required', 'calendar_not_configured'}
+            hard_codes = {'slot_unavailable', 'permission', 'invalid_request', 'conference_unavailable', 'conference_failed', 'calendar_conflict', 'reconnect_required', 'calendar_not_configured', 'meet_reconnect_required', 'invalid_meeting_policy', 'invalid_meeting_identity'}
             if getattr(exc, 'code', '') in hard_codes and not getattr(exc, 'uncertain', False) and live.status not in TERMINAL:
                 _cancel_local(live, code=getattr(exc, 'code', 'booking_failed'))
             elif live.status == 'confirmed':
@@ -515,4 +534,13 @@ def process_due_bookings(limit=5, time_budget_seconds=30):
     ).order_by('expires_at', 'pk').values_list('pk', flat=True)[:max(1,min(limit,100))]
     for pk in due:
         MentoringService.settle(pk)
+    from .meeting_repair import process as repair
+    repairs = MentorSession.objects.filter(meeting_provisioning__repair=True).filter(
+        Q(status='accepted', meet_link='') | Q(status='accepted', notification_status__in=('pending', 'failed'))
+        | Q(status='cancelled', meeting_provisioning__cleanup_pending=True)
+    ).order_by('updated_at').values_list('pk', flat=True)[:limit]
+    for pk in repairs:
+        if monotonic() - started >= budget:
+            break
+        repair(pk)
     return {'processed': processed}

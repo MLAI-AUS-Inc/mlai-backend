@@ -53,6 +53,9 @@ class MentoringBaseView(APIView):
         return response
 
     def handle_exception(self, exc):
+        from mentoring.calendars.errors import CalendarError
+        if isinstance(exc, CalendarError):
+            return Response({'code': exc.code, 'detail': 'We could not verify the calendar. Reconnect Google or try again.'}, status=503)
         if isinstance(exc, MentoringDisabled):
             return Response({'code': 'mentor_booking_disabled', 'detail': 'Mentor booking is not available.'}, status=404)
         if isinstance(exc, MentoringError):

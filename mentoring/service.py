@@ -388,6 +388,9 @@ def validate_profile_update(payload, current):
         if type(payload['accepting_bookings']) is not bool:
             raise MentoringError('invalid_field', 'accepting_bookings must be true or false.', 400)
         clean['accepting_bookings'] = payload['accepting_bookings']
+    if 'meeting_artifact_policy' in payload:
+        from .meeting_policy import validate_policy
+        clean['meeting_artifact_policy'] = validate_policy(payload['meeting_artifact_policy'])
     # Video capability is verified by personal calendar readiness for instant bookings.
     return clean
 
@@ -416,6 +419,7 @@ def serialize_mentor(profile, *, include_private=False):
         'booking_horizon_days': getattr(profile, 'booking_horizon_days', 30),
         'start_increment_minutes': getattr(profile, 'start_increment_minutes', 15),
         'booking_revision': getattr(profile, 'booking_revision', 1),
+        'meeting_artifact_policy': getattr(profile, 'meeting_artifact_policy', {}),
         'booking_mode': getattr(profile, 'booking_mode', 'legacy_request'),
     }
     if include_private:
@@ -478,6 +482,7 @@ def serialize_session(session, viewer):
         },
         'brief_answers': session_brief_answers(session),
         'booking_mode': getattr(session, 'booking_mode', 'legacy_request'),
+        'capture_enabled': bool(getattr(session, 'meeting_provisioning', {}).get('verified')),
         'requested_at': session.requested_at.isoformat(),
         'responded_at': session.responded_at.isoformat() if session.responded_at else None,
     }
@@ -584,19 +589,17 @@ class MentoringService:
     @classmethod
     def _google_busy(cls, mentor, first_day, last_day):
         """Return (busy intervals, busy_check) where busy_check is ok, failed or off."""
-        email = getattr(mentor, 'busy_calendar_email', '') or ''
-        if not email or not google.is_enabled():
-            return [], 'off'
-        window_start = datetime.combine(first_day - timedelta(days=1), time.min, tzinfo=dt_timezone.utc)
-        window_end = datetime.combine(last_day + timedelta(days=2), time.min, tzinfo=dt_timezone.utc)
+        from . import conflicts
+        from .calendars.errors import CalendarError
+        start, end = conflicts.window(mentor, first_day, last_day)
         try:
-            return google.busy_times(email, window_start, window_end), 'ok'
-        except Exception as exc:
-            logger.warning('free/busy failed for mentor %s: %s', mentor.pk, getattr(exc, 'code', exc.__class__.__name__))
+            return conflicts.read(mentor, start, end), 'ok'
+        except (CalendarError, google.GoogleError) as exc:
+            logger.warning('Mentor calendar unavailable: mentor=%s code=%s', mentor.pk, exc.code)
             return [], 'failed'
 
     @classmethod
-    def _free_slots(cls, mentor, first_day, last_day, now=None, settle_first=True, with_google=False):
+    def _free_slots(cls, mentor, first_day, last_day, now=None, settle_first=True, with_google=False, external_busy=None):
         now = now or timezone.now()
         problem = scheduling.validate_range(first_day, last_day)
         if problem:
@@ -607,15 +610,19 @@ class MentoringService:
             (r.weekday, r.start_time, r.end_time)
             for r in mentor.availability_rules.all()
         ]
-        busy = MentorSession.objects.filter(
-            mentor=mentor, status__in=MentorSession.ACTIVE_STATUSES,
-            ends_at__gt=now,
-        ).values_list('starts_at', 'ends_at')
-        busy = list(busy)
         busy_check = 'off'
-        if with_google:
+        if external_busy is not None:
+            busy_check = 'ok'
+        elif with_google:
             google_busy, busy_check = cls._google_busy(mentor, first_day, last_day)
-            busy += google_busy
+            if busy_check != 'ok':
+                return [], busy_check
+        if with_google or external_busy is not None:
+            from .instant_booking import available_slots
+            return available_slots(mentor, first_day, last_day, external_busy=(external_busy if external_busy is not None else google_busy), now=now), busy_check
+        busy = list(MentorSession.objects.filter(
+            mentor=mentor, status__in=MentorSession.ACTIVE_STATUSES, ends_at__gt=now,
+        ).values_list('starts_at', 'ends_at'))
         slots = scheduling.generate_slots(
             rules=rules, tz_name=mentor.timezone, session_minutes=mentor.session_minutes,
             first_day=first_day, last_day=last_day, busy=busy, now=now,
@@ -630,12 +637,16 @@ class MentoringService:
         tz = ZoneInfo(mentor.timezone)
         first_day = first_day or now.astimezone(tz).date()
         last_day = last_day or first_day + timedelta(days=13)
+        problem = scheduling.validate_range(first_day, last_day)
+        if problem:
+            raise MentoringError('invalid_range', problem, 400)
+        from .calendars.errors import CalendarError
         if getattr(mentor, 'booking_mode', 'legacy_request') == 'instant':
             from . import instant_booking
             try:
                 slots = instant_booking.availability(mentor, first_day, last_day)
                 busy_check = 'ok'
-            except Exception as exc:
+            except (CalendarError, MentoringError) as exc:
                 logger.warning('Instant calendar unavailable: mentor=%s code=%s', mentor.pk, getattr(exc, 'code', 'calendar_unavailable'))
                 slots, busy_check = [], 'failed'
         else:
@@ -646,6 +657,7 @@ class MentoringService:
             'session_minutes': mentor.session_minutes,
             'price_roo': mentor.price_roo,
             'busy_check': busy_check,
+            'availability_status': 'verified' if busy_check == 'ok' else 'temporarily_unavailable',
             'booking_mode': getattr(mentor, 'booking_mode', 'legacy_request'),
             'slots': [s.isoformat() for s in slots],
         }
@@ -737,7 +749,7 @@ class MentoringService:
     def update_profile(cls, user, payload):
         if not isinstance(payload, dict):
             raise MentoringError('invalid_payload', 'A JSON object is required.', 400)
-        scheduling_fields = {'session_minutes', 'price_roo', 'availability', 'timezone', 'away_dates', 'location_type', 'brief_questions', 'buffer_before_minutes', 'buffer_after_minutes', 'minimum_notice_minutes', 'booking_horizon_days', 'start_increment_minutes'}
+        scheduling_fields = {'meeting_artifact_policy', 'session_minutes', 'price_roo', 'availability', 'timezone', 'away_dates', 'location_type', 'brief_questions', 'buffer_before_minutes', 'buffer_after_minutes', 'minimum_notice_minutes', 'booking_horizon_days', 'start_increment_minutes'}
         preflight_target = None
         preflight_revision = None
         # Permission and fresh-provider validation use a candidate copy OUTSIDE
@@ -746,6 +758,10 @@ class MentoringService:
         if initial is None:
             raise MentoringError('not_a_mentor', 'Your account is not set up as a mentor.', 404)
         clean_initial = validate_profile_update(payload, {'location_type': initial.location_type})
+        if clean_initial.get('accepting_bookings') and not initial.accepting_bookings and 'meeting_artifact_policy' not in payload:
+            from .meeting_policy import REQUIRED_POLICY
+            payload = {**payload, 'meeting_artifact_policy': dict(REQUIRED_POLICY)}
+            clean_initial['meeting_artifact_policy'] = dict(REQUIRED_POLICY)
         will_accept = clean_initial.get('accepting_bookings', initial.accepting_bookings)
         instant_write = clean_initial.get('accepting_bookings') is True or (
             initial.booking_mode == 'instant' and bool(scheduling_fields.intersection(payload)))
@@ -776,7 +792,10 @@ class MentoringService:
                 raise MentoringError('settings_changed', 'Your settings changed. Refresh before saving.', 409)
             if preflight_target is not None:
                 from .calendars.service import calendar_target
-                if profile.booking_revision != preflight_revision or calendar_target(profile, verify=False) != preflight_target:
+                candidate = MentorProfile.objects.get(pk=profile.pk)
+                for field, value in clean_initial.items():
+                    setattr(candidate, field, value)
+                if profile.booking_revision != preflight_revision or calendar_target(candidate, verify=False) != preflight_target:
                     raise MentoringError('settings_changed', 'Calendar settings changed. Refresh before saving.', 409)
             current = {'location_type': profile.location_type}
             clean = validate_profile_update(payload, current)
@@ -913,6 +932,9 @@ class MentoringService:
         if mentor.user_id == founder.pk:
             raise MentoringError('own_mentor_profile', 'You cannot book yourself.', 409)
         cls.sweep(mentor=mentor)
+        from . import conflicts
+        check = conflicts.preflight(mentor, starts_at - timedelta(minutes=mentor.buffer_before_minutes),
+            starts_at + timedelta(minutes=mentor.session_minutes + mentor.buffer_after_minutes))
         now = timezone.now()
         try:
             with transaction.atomic():
@@ -932,14 +954,16 @@ class MentoringService:
                 mentor = MentorProfile.objects.select_for_update().select_related('user').get(pk=mentor.pk)
                 if not mentor.is_active:
                     raise MentoringError('mentor_not_found', 'Mentor not found.', 404)
+                if mentor.booking_mode != 'legacy_request':
+                    raise MentoringError('upgrade_required', 'Open the updated booking page.', 409)
+                conflicts.validate(mentor, check)
                 if expected_price != mentor.price_roo:
                     raise MentoringError('price_changed', 'The price has changed. Please review it.', 400)
                 brief_fields = validate_brief(brief, mentor.brief_questions)
                 chosen, detail = cls._location(mentor)
                 ends_at = starts_at + timedelta(minutes=mentor.session_minutes)
                 day = starts_at.astimezone(ZoneInfo(mentor.timezone)).date()
-                slots = cls.free_slots(mentor, day - timedelta(days=1), day + timedelta(days=1),
-                                       now=now, settle_first=False)
+                slots = cls._free_slots(mentor, day, day, now=now, settle_first=False, external_busy=check['busy'])[0]
                 if starts_at not in slots:
                     raise MentoringError('slot_unavailable', 'That time is no longer available.', 409)
                 if MentorSession.objects.filter(
@@ -956,6 +980,8 @@ class MentoringService:
                     mentor=mentor, founder=founder, starts_at=starts_at, ends_at=ends_at,
                     price_roo=mentor.price_roo,
                     location_type=chosen, location_detail=detail,
+                    buffer_before_minutes=mentor.buffer_before_minutes,
+                    buffer_after_minutes=mentor.buffer_after_minutes,
                     client_request_id=request_id, requested_at=now,
                     expires_at=scheduling.request_expiry(now=now, starts_at=starts_at, ttl_hours=_ttl_hours()),
                     **brief_fields,
@@ -1099,6 +1125,10 @@ class MentoringService:
             raise MentoringError('invalid_state', 'Only an accepted video session has a meeting.', 409)
         if session.meeting_status == MentorSession.MEETING_CREATED and session.meet_link:
             return session  # a retried call is a success
+        if getattr(session, 'meeting_provisioning', {}).get('repair'):
+            from .meeting_repair import process
+            process(session.pk)
+            return cls._load_session(session_id, actor)
         now = timezone.now()
         stale_before = now - timedelta(seconds=MEETING_CLAIM_TIMEOUT_SECONDS)
         if (
@@ -1136,7 +1166,7 @@ class MentoringService:
         return session
 
     @classmethod
-    def _transition(cls, session_id, actor, *, require_mentor, target):
+    def _transition(cls, session_id, actor, *, require_mentor, target, calendar_check=None):
         expired = False
         initial = cls._load_session(session_id, actor)
         with transaction.atomic():
@@ -1153,6 +1183,12 @@ class MentoringService:
                 # Leave the atomic block normally so the refund commits, then report.
                 expired = True
             else:
+                if target == MentorSession.STATUS_ACCEPTED:
+                    from . import conflicts
+                    conflicts.validate(session.mentor, calendar_check)
+                    if any(scheduling.overlaps(session.starts_at - timedelta(minutes=session.buffer_before_minutes),
+                            session.ends_at + timedelta(minutes=session.buffer_after_minutes), a, b) for a, b in calendar_check['busy']):
+                        raise MentoringError('slot_unavailable', 'The calendar is no longer free.', 409)
                 handler = getattr(cls, f'_do_{target}')
                 handler(session, actor, timezone.now())
         if expired:
@@ -1161,7 +1197,17 @@ class MentoringService:
 
     @classmethod
     def accept(cls, session_id, actor):
-        return cls._transition(session_id, actor, require_mentor=True, target=MentorSession.STATUS_ACCEPTED)
+        initial = cls._load_session(session_id, actor)
+        if initial.mentor.user_id != actor.pk:
+            raise MentoringError('not_session_mentor', 'Only the mentor can do this.', 403)
+        if initial.status == MentorSession.STATUS_ACCEPTED:
+            return initial
+        cls._need(initial, MentorSession.STATUS_REQUESTED)
+        from . import conflicts
+        check = conflicts.preflight(initial.mentor,
+            initial.starts_at - timedelta(minutes=initial.buffer_before_minutes),
+            initial.ends_at + timedelta(minutes=initial.buffer_after_minutes))
+        return cls._transition(session_id, actor, require_mentor=True, target=MentorSession.STATUS_ACCEPTED, calendar_check=check)
 
     @classmethod
     def decline(cls, session_id, actor):
@@ -1229,14 +1275,14 @@ class MentoringService:
         if is_instant:
             from .instant_booking import mark_cancelled_cleanup
             mark_cancelled_cleanup(session)
-        elif session.calendar_event_id:
+        elif session.calendar_event_id and not getattr(session, 'meeting_provisioning', {}).get('repair'):
             event_id = session.calendar_event_id
             transaction.on_commit(lambda: cls._delete_event_safely(session.pk, event_id))
         session.status = MentorSession.STATUS_CANCELLED
         session.cancelled_at = now
         session.cancelled_by = actor
         session.save()
-        if not is_instant:
+        if not is_instant and not getattr(session, 'meeting_provisioning', {}).get('cleanup_pending'):
             _release_reservations(session)
 
     @classmethod
