@@ -575,10 +575,13 @@ def queue_blast(
             if blast.status != Blast.Status.DRAFT:
                 raise BlastError("blast_not_draft", 409, blast_status=blast.status)
             if Channel.EMAIL in (blast.channels or []):
-                from .deliverability.streams import assign_stream, protected_domain
-                if blast.mailbox_id and protected_domain(blast.mailbox.email.rsplit("@", 1)[-1]):
+                from .deliverability.streams import assign_stream, legacy_mailbox_path, protected_domain
+                legacy = legacy_mailbox_path(blast)
+                if not legacy and blast.mailbox_id and protected_domain(blast.mailbox.email.rsplit("@", 1)[-1]):
                     raise BlastError("protected_domain", 409)
-                if not (blast.stats or {}).get("warmup"):
+                if legacy:
+                    blast.stream = None
+                elif not (blast.stats or {}).get("warmup"):
                     assign_stream(blast, actor=actor, mailbox=blast.mailbox)
             check_channels_available(blast.channels or [], status=403)
             check_ready(blast)

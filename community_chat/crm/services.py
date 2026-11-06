@@ -14,8 +14,8 @@ from django.db.models.functions import Lower
 
 from core.models import AccountBan
 from crm import sending_domains
-from crm.blasts import check_channel_rules
-from crm.deliverability.streams import assign_stream, is_owner, protected_domain
+from crm.blasts import BlastError, check_channel_rules
+from crm.deliverability.streams import assign_stream, is_owner, legacy_mailbox, legacy_path_enabled, protected_domain
 from crm.engagement import RESERVED_ATTRIBUTE_KEYS
 from crm.luma_sync import users_by_email
 from crm.models import (
@@ -263,11 +263,14 @@ def save_mailbox(mailbox: Optional[SenderMailbox], data: dict, *, actor) -> Send
 
     require_mlai_admin(actor)
     creating = mailbox is None
-    domain = sending_domains.domain_of(data["email"]) if creating else mailbox.domain
-    if protected_domain(domain) or (mailbox is not None and protected_domain(sending_domains.domain_of(mailbox.email))):
-        raise CrmError("mailbox_domain_protected")
-    if not is_owner(actor):
-        raise CrmError("owner_required", 403)
+    # Existing pre-stream mailboxes stay editable by admins exactly as on main
+    # (limits, switching off and on). New mailboxes always follow the stream rules.
+    if not (not creating and legacy_mailbox(mailbox)):
+        domain = sending_domains.domain_of(data["email"]) if creating else mailbox.domain
+        if protected_domain(domain) or (mailbox is not None and protected_domain(sending_domains.domain_of(mailbox.email))):
+            raise CrmError("mailbox_domain_protected")
+        if not is_owner(actor):
+            raise CrmError("owner_required", 403)
     if creating:
         email = data["email"]
         domain = sending_domains.domain_of(email)
@@ -377,12 +380,16 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
     if "sms_only_without_whatsapp" in data:
         blast.sms_only_without_whatsapp = data["sms_only_without_whatsapp"]
     email = data.get("email") or {}
-    if "mailbox_id" in email and is_owner(actor):
-        blast.mailbox = (
+    if "mailbox_id" in email:
+        chosen = (
             None
             if email["mailbox_id"] is None
             else _found(SenderMailbox, email["mailbox_id"], "mailbox_not_found")
         )
+        # Staff keep main's mailbox choice for existing pre-stream mailboxes;
+        # only owners may pick a technical stream identity.
+        if is_owner(actor) or legacy_mailbox(chosen) or (chosen is None and legacy_path_enabled()):
+            blast.mailbox = chosen
     if "subject" in email:
         blast.subject = " ".join(email["subject"].split())
     if "body_markdown" in email:
@@ -404,7 +411,18 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
     if "variables" in whatsapp:
         blast.whatsapp_variables = whatsapp["variables"]
     check_channel_rules(blast)
-    assign_stream(blast, actor=actor, mailbox=blast.mailbox if is_owner(actor) else None)
+    if Channel.EMAIL in (blast.channels or []) and legacy_mailbox(blast.mailbox if blast.mailbox_id else None):
+        blast.stream = None  # Main's pre-stream path: no stream, no root-domain refusal.
+    elif Channel.EMAIL in (blast.channels or []) and blast.mailbox_id is None and legacy_path_enabled():
+        # Main kept mailbox-less drafts; nothing can send until a mailbox is chosen.
+        try:
+            assign_stream(blast, actor=actor, mailbox=None)
+        except BlastError as exc:
+            if exc.code != "stream_not_configured":
+                raise
+            blast.stream = None
+    else:
+        assign_stream(blast, actor=actor, mailbox=blast.mailbox if is_owner(actor) else None)
     with transaction.atomic():
         from crm.models import SendingStream
         stream_ids = {original_stream_id, blast.stream_id}

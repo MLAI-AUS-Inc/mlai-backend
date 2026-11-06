@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 REVIEW_CLEARED_SUBJECT = "You're in"
 REVIEW_CLEARED_BODY = "Your MLAI membership is approved. You can now post in the community."
-REVIEW_CLEARED_FROM = system_mail.DEFAULT_FROM
+REVIEW_CLEARED_FROM = "MLAI <notifications@mlai.au>"
 # Remember a sent "You're in" for a year; the provider key dedupes retries too.
 REVIEW_CLEARED_GUARD_SECONDS = 365 * 24 * 3600
 
@@ -58,7 +58,7 @@ def send_review_cleared_email(member_id, user_id):
         with system_mail.observe("resend") as attempt:
             response = http_client.post(
                 "https://api.resend.com/emails",
-                json={"from": system_mail.sender(), "to": [user.email],
+                json={"from": REVIEW_CLEARED_FROM, "to": [user.email],
                       "subject": REVIEW_CLEARED_SUBJECT, "text": REVIEW_CLEARED_BODY},
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
                          "Idempotency-Key": key},

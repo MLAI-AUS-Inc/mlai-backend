@@ -98,7 +98,9 @@ def send_community_chat_email_code(user, code, delivery_id=None):
         "to": user.email,
         "identifiers": {"id": str(user.id)} if user.id is not None else {"email": user.email},
     }
-    request_body["from"] = str(getattr(settings, "CUSTOMERIO_FROM_EMAIL", "") or system_mail.sender())
+    from_email = str(getattr(settings, "CUSTOMERIO_FROM_EMAIL", "") or "").strip()
+    if from_email:  # Otherwise the Customer.io template keeps its own sender, as on main.
+        request_body["from"] = from_email
     with system_mail.observe("customerio", "signin") as attempt:
         response = APIClient(api_key).send_email(request_body)
         attempt.accepted(response)

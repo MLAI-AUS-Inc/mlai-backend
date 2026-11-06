@@ -215,8 +215,8 @@ def email_block(blast) -> Optional[str]:
         return "not_configured"
     if blast.mailbox_id is None or not blast.mailbox.enabled:
         return "mailbox_disabled"
-    from .deliverability.streams import protected_domain
-    if protected_domain(blast.mailbox.email.rsplit("@", 1)[-1]):
+    from .deliverability.streams import legacy_mailbox_path, protected_domain
+    if protected_domain(blast.mailbox.email.rsplit("@", 1)[-1]) and not legacy_mailbox_path(blast):
         return "protected_domain"
     if getattr(blast, "pause_state", ""):
         return "blast_paused"

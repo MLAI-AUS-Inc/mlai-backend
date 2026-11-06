@@ -1218,14 +1218,18 @@ CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS = int(
     os.getenv('CONTENT_AUTOMATION_EMAIL_ACTION_MAX_AGE_SECONDS', str(48 * 60 * 60))
 )
 RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
-MLAI_SYSTEM_FROM_EMAIL = os.getenv('MLAI_SYSTEM_FROM_EMAIL', '').strip() or os.getenv('RESEND_FROM_EMAIL', '').strip() or 'MLAI <notifications@notify.mlai.au>'
-# Backwards-compatible alias; new system-mail payloads use the canonical setting.
-RESEND_FROM_EMAIL = MLAI_SYSTEM_FROM_EMAIL
+# Existing system mail keeps its configured sender: RESEND_FROM_EMAIL (host .env)
+# or main's verified root default. It never inherits the system_email app's
+# notify.mlai.au identity below, which is used only by that app's own sends.
+RESEND_FROM_EMAIL = os.getenv('RESEND_FROM_EMAIL', '').strip() or 'Roo <notifications@mlai.au>'
 # Transactional email sent by our own code through Resend (system_email app).
 # Separate key, domain and webhook from CRM sending; never uses CRM mailboxes or
 # warm-up caps. Each message key listed in SYSTEM_EMAIL_RESEND_MESSAGES (or
 # "all") is sent this way; unlisted keys stay on their legacy provider.
 SYSTEM_EMAIL_RESEND_API_KEY = os.getenv('SYSTEM_EMAIL_RESEND_API_KEY', '').strip()
+MLAI_SYSTEM_FROM_EMAIL = os.getenv(
+    'MLAI_SYSTEM_FROM_EMAIL', 'MLAI <notifications@notify.mlai.au>'
+).strip()
 SYSTEM_EMAIL_REPLY_TO = os.getenv('SYSTEM_EMAIL_REPLY_TO', 'team@mlai.au').strip()
 SYSTEM_EMAIL_UNSUBSCRIBE_MAILTO = os.getenv('SYSTEM_EMAIL_UNSUBSCRIBE_MAILTO', '').strip()
 SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET = os.getenv('SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET', '').strip()
@@ -1239,7 +1243,7 @@ SYSTEM_EMAIL_ALERT_SLACK_CHANNEL_ID = os.getenv('SYSTEM_EMAIL_ALERT_SLACK_CHANNE
 # Customer.io App API key (already used for magic-link emails). When set, it is
 # the preferred transport for notification-channel emails; Resend is fallback.
 CUSTOMERIO_API_KEY = os.getenv('CUSTOMERIO_API_KEY', '')
-CUSTOMERIO_FROM_EMAIL = os.getenv('CUSTOMERIO_FROM_EMAIL', '').strip() or MLAI_SYSTEM_FROM_EMAIL
+CUSTOMERIO_FROM_EMAIL = os.getenv('CUSTOMERIO_FROM_EMAIL', '').strip()
 # Transactional message id of the Victor:AI completed-registration receipt.
 CUSTOMERIO_VICTOR_REGISTRATION_TEMPLATE_ID = os.getenv(
     'CUSTOMERIO_VICTOR_REGISTRATION_TEMPLATE_ID', '4'

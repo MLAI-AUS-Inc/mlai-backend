@@ -5,6 +5,10 @@ import math
 DEFAULTS = {
     "CRM_STREAMS": "news:news.mlai.au:hello@news.mlai.au:marketing|event_update;notify:notify.mlai.au:notifications@notify.mlai.au:transactional",
     "CRM_PROTECTED_DOMAINS": ("mlai.au",),
+    # Keeps main's pre-stream email path (staff mailboxes, warm-up) working while
+    # waves and preflight are off. It never applies to a stream-assigned blast or
+    # a stream-domain mailbox; turning it off is the explicit root-domain cutover.
+    "CRM_LEGACY_MAILBOX_PATH_ENABLED": True,
     "CRM_DELIVERABILITY_OWNERS": ("tech@mlai.au",),
     "CRM_DELIVERABILITY_SLACK_CHANNEL": "",
     "CRM_GUARDIAN_ENABLED": False,

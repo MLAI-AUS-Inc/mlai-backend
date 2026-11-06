@@ -28,6 +28,7 @@ import json
 import logging
 import time
 from datetime import timedelta
+from email.utils import formataddr, parseaddr
 from urllib.parse import quote, urlencode
 from uuid import UUID
 
@@ -69,6 +70,8 @@ READY_STATUSES = ("completed", "awaiting_approval", "approval_required")
 # Founder copy (contract section 11.1). No codes, no dashes.
 SUBJECT = "Your draft is ready"
 BODY = "Tap to review it and copy it to your website."
+SENDER_NAME = "MLAI"
+DEFAULT_SENDER_ADDRESS = "notifications@mlai.au"
 
 
 def enabled() -> bool:
@@ -254,7 +257,8 @@ def draft_link(run_id, company_id) -> str:
 
 
 def _sender() -> str:
-    return system_mail.sender()
+    _, address = parseaddr(str(getattr(settings, "RESEND_FROM_EMAIL", "") or ""))
+    return formataddr((SENDER_NAME, address if "@" in address else DEFAULT_SENDER_ADDRESS))
 
 
 def email_payload(email, link) -> dict:

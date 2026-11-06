@@ -9,18 +9,22 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-DEFAULT_FROM = 'MLAI <notifications@notify.mlai.au>'
+DEFAULT_FROM = 'Roo <notifications@mlai.au>'
 logger = logging.getLogger(__name__)
 
 
 def sender():
-    """Return the single configured identity for newly prepared system messages."""
-    return str(getattr(settings, 'MLAI_SYSTEM_FROM_EMAIL', '') or DEFAULT_FROM).strip()
+    """Existing system mail keeps main's sender: RESEND_FROM_EMAIL or its verified root default.
+
+    Moving this mail to notify.mlai.au is a separate cutover, owned by the system_email
+    app (MLAI_SYSTEM_FROM_EMAIL), never an implicit default change.
+    """
+    return str(getattr(settings, 'RESEND_FROM_EMAIL', '') or DEFAULT_FROM).strip()
 
 
 def resend_key():
-    """Prefer the notify-restricted credential; retain the legacy rollout fallback."""
-    return str(getattr(settings, 'CRM_NOTIFY_API_KEY', '') or getattr(settings, 'RESEND_API_KEY', '') or '').strip()
+    """Existing system mail keeps main's credential, which is authorised for its sender."""
+    return str(getattr(settings, 'RESEND_API_KEY', '') or '').strip()
 
 
 def provider_id(response):

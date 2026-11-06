@@ -13,6 +13,32 @@ def protected_domain(domain):
     return str(domain).strip().lower().rstrip(".") in {"mlai.au", *policy.value("CRM_PROTECTED_DOMAINS")}
 
 
+def legacy_path_enabled():
+    """CRM_LEGACY_MAILBOX_PATH_ENABLED keeps main's pre-stream email path while waves and preflight are off."""
+    return bool(policy.value("CRM_LEGACY_MAILBOX_PATH_ENABLED")
+                and not policy.value("CRM_WAVES_ENABLED") and not policy.value("CRM_PREFLIGHT_ENABLED"))
+
+
+def legacy_mailbox(mailbox):
+    """An existing mailbox outside every stream domain, while the legacy path is explicitly on."""
+    if mailbox is None or not legacy_path_enabled():
+        return False
+    domain = mailbox.email.rsplit("@", 1)[-1].strip().lower()
+    return domain not in {item["domain"] for item in stream_definitions()}
+
+
+def legacy_mailbox_path(blast):
+    """True for main's pre-stream email path, kept explicitly by CRM_LEGACY_MAILBOX_PATH_ENABLED.
+
+    The new stream path stays strict: a blast that has a stream, a mailbox on a
+    stream domain, or any blast while waves or preflight own email sending never
+    takes this path, so root-domain refusal and the guardian still apply there.
+    """
+    if getattr(blast, "stream_id", None) or getattr(blast, "mailbox_id", None) is None:
+        return False
+    return legacy_mailbox(blast.mailbox)
+
+
 def stream_definitions(raw=None):
     """Validate all configured identities before any stream-sync writes occur."""
     definitions = []

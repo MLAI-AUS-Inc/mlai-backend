@@ -886,7 +886,7 @@ def _send_email_via_customerio(
         request_body["subject"] = subject
         request_body["body"] = html_body or html.escape(text).replace("\n", "<br>")
         request_body["body_plain"] = text
-    from_email = str(getattr(settings, "CUSTOMERIO_FROM_EMAIL", "") or system_mail.sender()).strip()
+    from_email = str(getattr(settings, "CUSTOMERIO_FROM_EMAIL", "") or "").strip()
     if from_email:
         request_body["from"] = from_email
     try:

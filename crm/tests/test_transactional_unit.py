@@ -11,16 +11,17 @@ from integrations import system_mail
 
 class TransactionalUnitTests(SimpleTestCase):
     @override_settings(CRM_TRANSACTIONAL_MONITOR_ENABLED=True, CRM_NOTIFY_API_KEY='notify-only',
-        RESEND_API_KEY='', CUSTOMERIO_API_KEY='', MLAI_SYSTEM_FROM_EMAIL='MLAI <system@notify.example.test>')
-    def test_notification_route_uses_the_notify_key_and_does_not_mark_malformed_responses_accepted(self):
+        RESEND_API_KEY='legacy-key', CUSTOMERIO_API_KEY='', RESEND_FROM_EMAIL='',
+        MLAI_SYSTEM_FROM_EMAIL='MLAI <system@notify.example.test>')
+    def test_notification_route_keeps_mains_key_and_sender_and_does_not_mark_malformed_responses_accepted(self):
         from integrations.services import notification_adapters as adapters
         channel = SimpleNamespace(route_id='synthetic@example.test')
         response = SimpleNamespace(status_code=200, json=lambda: {'id': 'synthetic-receipt'})
         with patch.object(adapters.http_client, 'post', return_value=response) as post, patch.object(system_mail, '_record') as record:
             result = adapters._send_email(channel, subject='Synthetic', text='Synthetic', html_body=None, idempotency_key='synthetic')
             self.assertTrue(result[0]); self.assertEqual(result[1], 'synthetic-receipt')
-            self.assertEqual(post.call_args.kwargs['headers']['Authorization'], 'Bearer notify-only')
-            self.assertEqual(post.call_args.kwargs['json']['from'], system_mail.sender())
+            self.assertEqual(post.call_args.kwargs['headers']['Authorization'], 'Bearer legacy-key')
+            self.assertEqual(post.call_args.kwargs['json']['from'], 'Roo <notifications@mlai.au>')
             self.assertTrue(record.call_args.args[1]['ok'])
         response.json = lambda: ['invalid-provider-shape']
         with patch.object(adapters.http_client, 'post', return_value=response), patch.object(system_mail, '_record') as record:
@@ -28,19 +29,42 @@ class TransactionalUnitTests(SimpleTestCase):
                 adapters._send_email(channel, subject='Synthetic', text='Synthetic', html_body=None, idempotency_key='synthetic')
             self.assertFalse(record.call_args.args[1]['ok'])
 
-    @override_settings(MLAI_SYSTEM_FROM_EMAIL='MLAI <system@notify.example.test>', RESEND_FROM_EMAIL='legacy@example.test')
-    def test_all_system_payload_builders_use_the_canonical_sender(self):
+    @override_settings(MLAI_SYSTEM_FROM_EMAIL='MLAI <system@notify.example.test>', RESEND_FROM_EMAIL='Roo <legacy@example.test>')
+    def test_existing_system_payload_builders_keep_the_configured_legacy_sender(self):
         from content_factory import founder_notification_outbox as founder, website_notification_transport as website
-        self.assertEqual(founder._sender(), system_mail.sender())
-        self.assertEqual(founder.email_payload('recipient@example.test', 'https://example.test')['from'], system_mail.sender())
+        self.assertEqual(system_mail.sender(), 'Roo <legacy@example.test>')
+        self.assertEqual(founder._sender(), 'MLAI <legacy@example.test>')
+        self.assertEqual(founder.email_payload('recipient@example.test', 'https://example.test')['from'], 'MLAI <legacy@example.test>')
         self.assertEqual(website.email_payload(SimpleNamespace(route_id='recipient@example.test'),
-            {'subject': 'Synthetic', 'text': 'Synthetic', 'link': 'https://example.test'})['from'], system_mail.sender())
+            {'subject': 'Synthetic', 'text': 'Synthetic', 'link': 'https://example.test'})['from'], 'Roo <legacy@example.test>')
+
+    @override_settings(MLAI_SYSTEM_FROM_EMAIL='MLAI <system@notify.example.test>', RESEND_FROM_EMAIL='')
+    def test_unset_legacy_sender_keeps_mains_verified_default_never_the_notify_identity(self):
+        from content_factory import founder_notification_outbox as founder, website_notification_transport as website
+        from community_chat import onboarding_admin
+        self.assertEqual(system_mail.sender(), 'Roo <notifications@mlai.au>')
+        self.assertEqual(founder._sender(), 'MLAI <notifications@mlai.au>')
+        self.assertEqual(website.email_payload(SimpleNamespace(route_id='recipient@example.test'),
+            {'subject': 'Synthetic', 'text': 'Synthetic', 'link': 'https://example.test'})['from'], 'Roo <notifications@mlai.au>')
+        self.assertEqual(onboarding_admin.REVIEW_CLEARED_FROM, 'MLAI <notifications@mlai.au>')
+        for value in (system_mail.sender(), founder._sender(), onboarding_admin.REVIEW_CLEARED_FROM):
+            self.assertNotIn('notify.', value)
+
+    @override_settings(CUSTOMERIO_API_KEY='synthetic-key', CUSTOMERIO_COMMUNITY_CHAT_CODE_MESSAGE_ID='9', CUSTOMERIO_FROM_EMAIL='', SYSTEM_EMAIL_RESEND_MESSAGES=(),
+        MLAI_SYSTEM_FROM_EMAIL='MLAI <system@notify.example.test>', CRM_TRANSACTIONAL_MONITOR_ENABLED=False)
+    def test_customerio_keeps_its_template_sender_when_none_is_configured(self):
+        from community_chat import email_delivery
+        user = SimpleNamespace(id=7, email='member@example.test', full_name='', first_name='Synthetic')
+        with patch.object(email_delivery, 'APIClient') as client:
+            client.return_value.send_email.return_value = {'delivery_id': 'synthetic'}
+            email_delivery.send_community_chat_email_code(user, '123456')
+        self.assertNotIn('from', client.return_value.send_email.call_args.args[0])
 
     @override_settings(CRM_NOTIFY_API_KEY='notify-restricted', RESEND_API_KEY='legacy')
-    def test_notify_key_is_preferred_with_a_legacy_rollout_fallback(self):
-        self.assertEqual(system_mail.resend_key(), 'notify-restricted')
-        with override_settings(CRM_NOTIFY_API_KEY=''):
-            self.assertEqual(system_mail.resend_key(), 'legacy')
+    def test_existing_system_mail_keeps_mains_resend_credential(self):
+        self.assertEqual(system_mail.resend_key(), 'legacy')
+        with override_settings(RESEND_API_KEY=''):
+            self.assertEqual(system_mail.resend_key(), '')
 
     @override_settings(CRM_TRANSACTIONAL_MONITOR_ENABLED=False)
     def test_disabled_observer_never_writes_or_changes_results(self):
