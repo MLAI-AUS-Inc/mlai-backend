@@ -283,23 +283,54 @@ def held_article_quality(run) -> bool:
     return bool(quality.get("status") == "blocking_findings" and quality.get("self_heal_exhausted"))
 
 
+RECHECK_PENDING_STATUSES = frozenset({"queued", "running"})
+
+
+def recheck_acknowledged(remote, held_quality):
+    """Accept only a positive, current receipt that a fresh quality check is queued.
+
+    Fails closed: a missing, malformed, refused or still-held response never
+    counts, and neither does a check for a different preview or an older
+    generation than the one that was held.
+    """
+    if not isinstance(remote, dict) or remote.get("error") or remote.get("status") != "quality_review_queued":
+        return False
+    quality = remote.get("article_preview_quality")
+    if not isinstance(quality, dict) or quality.get("status") not in RECHECK_PENDING_STATUSES:
+        return False
+    held = mapping(held_quality)
+    held_url = held.get("preview_url") or held.get("previewUrl")
+    new_url = quality.get("preview_url") or quality.get("previewUrl")
+    if held_url and new_url != held_url:
+        return False
+    held_generation = held.get("resume_generation")
+    new_generation = quality.get("resume_generation")
+    if isinstance(held_generation, int) and not (isinstance(new_generation, int) and new_generation >= held_generation):
+        return False
+    return True
+
+
 def _recheck_article_quality(run):
     """Run the article's hosted quality check again; a pass unlocks approval for the founder.
 
     This never waives a finding. It asks Content Factory for a fresh review of
-    the current preview, which also clears a hold that a since-fixed rule set.
+    the current preview. The held state and its approval blocker are replaced
+    only on a positive receipt, and only if no newer check has landed since.
     """
     from .vibe_marketing_views import _call_content_factory_run_action
+    held = mapping(mapping(run.result).get("article_preview_quality"))
     remote = _call_content_factory_run_action(run_id=run.run_id, action="retry-preview-quality",
                                               payload={}, workflow=run.workflow)
-    remote = remote if isinstance(remote, dict) else {}
-    if remote.get("error"):
-        return {"status": "refused", "detail": str(remote.get("error"))[:300]}
+    if not recheck_acknowledged(remote, held):
+        detail = remote.get("error") if isinstance(remote, dict) else None
+        return {"status": "refused", "detail": str(detail or "The quality check was not queued.")[:300]}
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
         result = dict(mapping(current.result))
-        if isinstance(remote.get("article_preview_quality"), dict):
-            result["article_preview_quality"] = remote["article_preview_quality"]
+        if mapping(result.get("article_preview_quality")) != held:
+            # A newer revision or check already replaced the held state; keep it.
+            return {"status": "observe", "detail": "A newer quality state is already recorded."}
+        result["article_preview_quality"] = remote["article_preview_quality"]
         result.pop("approval_blocker", None)
         ContentFactoryRun.objects.filter(pk=current.pk).update(result=result)
     return {"status": "queued", "action": "recheck_article_quality"}
