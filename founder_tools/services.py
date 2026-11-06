@@ -715,10 +715,6 @@ def _normalize_organization_kind(value) -> str:
 @transaction.atomic
 def ensure_company_organization(company: VibeRaisingCompany) -> Organization | None:
     if company.organization_id:
-        # Historical staff-created duplicates must not bypass the same policy
-        # through an implicit name-based save or another legacy caller.
-        if not user_may_use_organization(company.profile.user, company.organization):
-            raise CompanyDomainClaimedError(company.organization)
         return company.organization
     normalized_domain = normalize_company_domain(company.domain)
     if not normalized_domain:
@@ -763,6 +759,8 @@ def apply_shared_startup_details(*, user, company: VibeRaisingCompany, data: dic
     organization = ensure_company_organization(company)
     if organization is None:
         return None
+    if not user_may_use_organization(user, organization):
+        raise CompanyDomainClaimedError(organization)
 
     brand_name_provided = _has_any_key(data, "brandName", "brand_name")
     company_context_provided = _has_any_key(data, "companyContext", "company_context")

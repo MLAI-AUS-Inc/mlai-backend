@@ -30,6 +30,7 @@ from .services import (
     queue_domain_claim_alert,
     seed_new_company_founder_and_author,
     set_active_company,
+    user_may_use_organization,
 )
 from vibe_raising.registration import (
     attempt_company_verification,
@@ -245,6 +246,11 @@ class FounderToolsCompanyView(APIView):
                 company = profile.companies.filter(name__iexact=data["name"]).first()
                 first_save = company is None
                 company = company or VibeRaisingCompany(profile=profile)
+
+            # Name-based legacy saves must not mutate a historical duplicate
+            # whose organisation belongs to another founder.
+            if company.organization_id and not user_may_use_organization(request.user, company.organization):
+                raise CompanyDomainClaimedError(company.organization)
 
             if "domain" in plain_fields:
                 assert_company_domain_available(

@@ -106,6 +106,9 @@ class StartupDatabaseTests(TestCase):
         self.assertEqual(VibeRaisingCompany.objects.count(), 3)
 
     def test_historical_staff_duplicate_cannot_break_account_or_picker(self):
+        from content_factory.models import OrganizationContentConfig
+        from founder_tools.services import CompanyDomainClaimedError, apply_shared_startup_details
+
         self.owner.is_staff = True
         self.owner.save(update_fields=["is_staff"])
         duplicate = VibeRaisingCompany.objects.create(
@@ -130,8 +133,14 @@ class StartupDatabaseTests(TestCase):
                 {"name": "Historical duplicate", "shortDescription": "Must not overwrite"}, format="json")
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data["code"], "company_domain_claimed")
+        with self.assertRaises(CompanyDomainClaimedError):
+            apply_shared_startup_details(user=self.owner, company=duplicate,
+                                        data={"shortDescription": "Must not overwrite"})
         self.foreign.refresh_from_db()
+        self.foreign.organization.refresh_from_db()
         self.assertEqual(self.foreign.name, "Other")
+        self.assertEqual(self.foreign.organization.name, "Other")
+        self.assertFalse(OrganizationContentConfig.objects.filter(organization=self.foreign.organization).exists())
 
     @override_settings(MY_STARTUP_ONE_FIELD_START_ENABLED=True)
     def test_staff_and_superusers_cannot_create_against_a_foreign_domain(self):
