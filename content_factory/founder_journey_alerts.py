@@ -114,6 +114,10 @@ YOUR_TURN_STATUSES = frozenset({"awaiting_approval", "approval_required", "await
 OWNER_CANCELLATION_REASONS = ("owner_cancelled", "draft_deleted", "article_discarded")
 SCHEDULER_WORKFLOWS = ("island_refresh",)
 SCHEDULER_REQUEST_SOURCE = "mlai_backend_scheduler"
+# Daily research automations stamp this request-id prefix. Their topic batches
+# wait on the founder by design, and the automation pauses itself after three
+# unanswered days, so an unpicked batch is not a stuck founder (your_turn_72h).
+AUTOMATION_RESEARCH_REQUEST_PREFIX = "automation-research:"
 # Until owner cancels record cancellation_reason (BE6), this is the shape
 # _cancel_local_article_run leaves: empty error, steps 'Cancelled by user.'.
 LEGACY_OWNER_CANCEL_MESSAGE = "Cancelled by user."
@@ -432,7 +436,7 @@ def run_alert_reasons(run, *, now) -> list[str]:
     if status == "blocked":
         reasons.append("startup_autofill_blocked" if run.workflow == "startup_autofill" else "run_blocked")
     waiting = status in YOUR_TURN_STATUSES or (status == "blocked" and bool(run_action_id(run.result)))
-    if waiting and run.updated_at and run.updated_at <= now - YOUR_TURN_AFTER:
+    if waiting and run.updated_at and not is_automation_research(run) and not is_superseded(run) and run.updated_at <= now - YOUR_TURN_AFTER:
         reasons.append("your_turn_72h")
     return reasons
 
@@ -454,6 +458,28 @@ def is_first_article_switch(run) -> bool:
     request = run.run_request if isinstance(run.run_request, dict) else {}
     return (result.get("cancellation_reason") == "superseded"
             and str(request.get("client_request_id") or "").startswith(FIRST_ARTICLE_REQUEST_PREFIX))
+
+
+def is_automation_research(run) -> bool:
+    """A topic batch from a research automation, which waits on the founder by design."""
+    request = run.run_request if isinstance(run.run_request, dict) else {}
+    return str(request.get("client_request_id") or "").startswith(AUTOMATION_RESEARCH_REQUEST_PREFIX)
+
+
+def _newer_runs():
+    """Runs of the same org and workflow created after the outer run (or ``run``)."""
+    return ContentFactoryRun.objects.filter(organization_id=OuterRef("organization_id"), workflow=OuterRef("workflow"),
+                                            created_at__gt=OuterRef("created_at"))
+
+
+def is_superseded(run) -> bool:
+    """A newer run of the same workflow replaced this one, so only the newest can be the founder's turn.
+
+    A founder who asks for topics three times in a few minutes is waiting on one
+    decision, not three (TalaThrive, 2 Nov).
+    """
+    return ContentFactoryRun.objects.filter(organization_id=run.organization_id, workflow=run.workflow,
+                                            created_at__gt=run.created_at).exists()
 
 
 def is_scheduler_run(run) -> bool:
@@ -534,7 +560,9 @@ def _detect(*, now, since, limit) -> dict:
         "your_turn_72h": base.filter(updated_at__lte=now - YOUR_TURN_AFTER).filter(
             Q(status__in=YOUR_TURN_STATUSES) | (Q(status="blocked") & (
                 Q(result__failure__action__has_key="id") | Q(result__failure__has_key="action_id")
-                | Q(result__has_key="action_id")))),
+                | Q(result__has_key="action_id")))).filter(
+            ~Q(run_request__has_key="client_request_id")
+            | ~Q(run_request__client_request_id__startswith=AUTOMATION_RESEARCH_REQUEST_PREFIX)).exclude(Exists(_newer_runs())),
     }
     for reason, queryset in candidates.items():
         # Ids first: results can be large, and receipts are written while we walk.
