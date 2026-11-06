@@ -8,6 +8,11 @@ REASONS = {
     'postmaster_spam_rate': 'more people than usual marked it as spam',
     'blocklist': 'an email provider started rejecting our messages',
     'seed_spam': 'our inbox checks found a problem',
+    'cohort_quarantine': 'one audience group had unusually high bounce or complaint rates',
+    'click_anomaly': 'fewer people followed links at an inbox provider',
+    'transactional_failure_rate': 'sign-in or notification delivery attempts are failing',
+    'transactional_hard_bounce_rate': 'system email is reaching too many invalid addresses',
+    'transactional_delivery_latency': 'system email delivery is taking longer than expected',
 }
 
 

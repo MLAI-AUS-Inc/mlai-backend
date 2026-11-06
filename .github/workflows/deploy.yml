@@ -128,7 +128,7 @@ jobs:
       run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit crm.tests.test_audience_contract_unit crm.tests.test_segment_trees_unit crm.tests.test_audience_profiles_unit crm.tests.test_audience_rules_unit crm.tests.test_admin_gate_unit
 
     - name: Check CRM blasts, sending domains and the listmonk client without database access
-      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit crm.tests.test_deliverability_unit crm.tests.test_deliverability_monitors_unit crm.tests.test_deliverability_planner_unit crm.tests.test_preflight_content_unit crm.tests.test_preflight_seed_unit crm.tests.test_campaign_copy_unit
+      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit crm.tests.test_deliverability_unit crm.tests.test_deliverability_monitors_unit crm.tests.test_transactional_unit crm.tests.test_deliverability_planner_unit crm.tests.test_preflight_content_unit crm.tests.test_preflight_seed_unit crm.tests.test_campaign_copy_unit
 
     - name: Verify event discounts against disposable migration state
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency
@@ -774,7 +774,7 @@ jobs:
       run: python manage.py test crm.tests.test_api_database crm.tests.test_segments_database crm.tests.test_segment_builder_database crm.tests.test_audience_catalog_database crm.tests.test_audience_profile_database crm.tests.test_admin_gate_database --verbosity 2
 
     - name: Verify CRM blasts, senders and listmonk feedback on PostgreSQL
-      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database crm.tests.test_deliverability_database crm.tests.test_deliverability_monitors_database crm.tests.test_send_simulation_database crm.tests.test_campaign_waves_database crm.tests.test_campaign_wave_migration_database crm.tests.test_preflight_database crm.tests.test_preflight_migration_database crm.tests.test_campaign_ui_database --verbosity 2
+      run: python manage.py test crm.tests.test_blasts_database crm.tests.test_sending_database crm.tests.test_resend_warmup_database crm.tests.test_deliverability_database crm.tests.test_deliverability_monitors_database crm.tests.test_send_simulation_database crm.tests.test_transactional_database crm.tests.test_lifecycle_database crm.tests.test_reconfirmation_database crm.tests.test_import_hygiene_database crm.tests.test_campaign_waves_database crm.tests.test_campaign_wave_migration_database crm.tests.test_preflight_database crm.tests.test_preflight_migration_database crm.tests.test_campaign_ui_database --verbosity 2
 
     - name: Verify Founder recovery policy and authority on PostgreSQL
       run: |
@@ -1416,6 +1416,31 @@ jobs:
         CRM_CONFIG_CHECK_SECONDS: ${{ vars.CRM_CONFIG_CHECK_SECONDS || '' }}
         CRM_REPUTATION_MAX_AGE_HOURS: ${{ vars.CRM_REPUTATION_MAX_AGE_HOURS || '' }}
         CRM_MONITORS_ENABLED: ${{ vars.CRM_MONITORS_ENABLED || '' }}
+        CRM_LIFECYCLE_ENABLED: ${{ vars.CRM_LIFECYCLE_ENABLED || '' }}
+        CRM_TRANSACTIONAL_MONITOR_ENABLED: ${{ vars.CRM_TRANSACTIONAL_MONITOR_ENABLED || '' }}
+        CRM_CUSTOMERIO_NOTIFY_DKIM_VERIFIED: ${{ vars.CRM_CUSTOMERIO_NOTIFY_DKIM_VERIFIED || '' }}
+        CRM_TRANSACTIONAL_INTERVAL_SECONDS: ${{ vars.CRM_TRANSACTIONAL_INTERVAL_SECONDS || '' }}
+        CRM_TRANSACTIONAL_WINDOW_MINUTES: ${{ vars.CRM_TRANSACTIONAL_WINDOW_MINUTES || '' }}
+        CRM_TRANSACTIONAL_MIN_SAMPLE: ${{ vars.CRM_TRANSACTIONAL_MIN_SAMPLE || '' }}
+        CRM_TRANSACTIONAL_FAILURE_RED: ${{ vars.CRM_TRANSACTIONAL_FAILURE_RED || '' }}
+        CRM_TRANSACTIONAL_MAX_ROWS: ${{ vars.CRM_TRANSACTIONAL_MAX_ROWS || '' }}
+        CRM_TRANSACTIONAL_LATENCY_SECONDS: ${{ vars.CRM_TRANSACTIONAL_LATENCY_SECONDS || '' }}
+        CRM_TRANSACTIONAL_LATENCY_HOLD_MINUTES: ${{ vars.CRM_TRANSACTIONAL_LATENCY_HOLD_MINUTES || '' }}
+        CRM_TRANSACTIONAL_EVENT_LOOKBACK_MINUTES: ${{ vars.CRM_TRANSACTIONAL_EVENT_LOOKBACK_MINUTES || '' }}
+        MLAI_SYSTEM_FROM_EMAIL: ${{ vars.MLAI_SYSTEM_FROM_EMAIL || '' }}
+        CUSTOMERIO_FROM_EMAIL: ${{ vars.CUSTOMERIO_FROM_EMAIL || '' }}
+        CRM_LIFECYCLE_BATCH_SIZE: ${{ vars.CRM_LIFECYCLE_BATCH_SIZE || '' }}
+        CRM_LIFECYCLE_PASS_LOCK_SECONDS: ${{ vars.CRM_LIFECYCLE_PASS_LOCK_SECONDS || '' }}
+        CRM_IMPORT_DOMAIN_MAX_NEW: ${{ vars.CRM_IMPORT_DOMAIN_MAX_NEW || '' }}
+        CRM_RECONFIRMATION_RESPONSE_DAYS: ${{ vars.CRM_RECONFIRMATION_RESPONSE_DAYS || '' }}
+        CRM_RECONFIRMATION_CONSENT_MONTHS: ${{ vars.CRM_RECONFIRMATION_CONSENT_MONTHS || '' }}
+        CRM_RECONFIRMATION_DAILY_FRACTION: ${{ vars.CRM_RECONFIRMATION_DAILY_FRACTION || '' }}
+        CRM_GUARD_COHORT_MIN_COUNT: ${{ vars.CRM_GUARD_COHORT_MIN_COUNT || '' }}
+        CRM_GUARD_COHORT_FACTOR: ${{ vars.CRM_GUARD_COHORT_FACTOR || '' }}
+        CRM_GUARD_CLICK_MIN_SAMPLE: ${{ vars.CRM_GUARD_CLICK_MIN_SAMPLE || '' }}
+        CRM_GUARD_CLICK_RATIO: ${{ vars.CRM_GUARD_CLICK_RATIO || '' }}
+        CRM_GUARD_CLICK_BASELINE_DAYS: ${{ vars.CRM_GUARD_CLICK_BASELINE_DAYS || '' }}
+        CRM_GUARD_CLICK_LOOKBACK_DAYS: ${{ vars.CRM_GUARD_CLICK_LOOKBACK_DAYS || '' }}
         CRM_SEED_HEARTBEAT_ENABLED: ${{ vars.CRM_SEED_HEARTBEAT_ENABLED || '' }}
         CRM_DELIVERABILITY_EMAIL_ALERTS_ENABLED: ${{ vars.CRM_DELIVERABILITY_EMAIL_ALERTS_ENABLED || '' }}
         CRM_MONITOR_INTERVAL_SECONDS: ${{ vars.CRM_MONITOR_INTERVAL_SECONDS || '' }}

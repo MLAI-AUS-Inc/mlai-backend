@@ -26,7 +26,7 @@ VERSION = '2026-11-05.1'
 
 def policy_hash():
     prefixes = ('CRM_SUBJECT_', 'CRM_BODY_', 'CRM_HTML_', 'CRM_LINKS_', 'CRM_SPAM_', 'CRM_FOOTER_',
-        'CRM_ALLOWED_ACRONYMS', 'CRM_SEED_SPAM_', 'CRM_PREFLIGHT_POSTMASTER_', 'CRM_POSTMASTER_MAX_AGE_DAYS')
+        'CRM_ALLOWED_ACRONYMS', 'CRM_SEED_SPAM_', 'CRM_PREFLIGHT_POSTMASTER_', 'CRM_POSTMASTER_MAX_AGE_DAYS', 'CRM_RECONFIRMATION_')
     values = {key: policy.value(key) for key in policy.DEFAULTS if key.startswith(prefixes)}
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 

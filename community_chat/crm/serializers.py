@@ -470,6 +470,8 @@ def contact_row(contact: Contact) -> dict:
 
 
 def contact_detail(contact: Contact, *, now, registrations, deliveries, replies, history) -> dict:
+    from crm.deliverability.typos import suggestion
+    from crm.deliverability import policy
     inferred_until = None
     if (
         contact.marketing_consent == Contact.MarketingConsent.UNKNOWN
@@ -480,6 +482,7 @@ def contact_detail(contact: Contact, *, now, registrations, deliveries, replies,
         inferred_until = lapses_at if lapses_at > now else None
     return {
         **contact_row(contact),
+        'email_typo_suggestion': suggestion(contact.email) if policy.value('CRM_LIFECYCLE_ENABLED') else None,
         "phone": contact.phone,
         "city": contact.city,
         "linkedin_url": contact.linkedin_url,
@@ -783,6 +786,7 @@ class BlastPauseInput(serializers.Serializer):
 
 
 def blast_detail(blast, stats: Optional[dict] = None) -> dict:
+    from crm.deliverability.reconfirmation import is_reconfirmation
     stats = stats or {"channels": {}, "replies": 0}
     from crm.deliverability.copy import status_message
     from crm.deliverability.preflight.presentation import result_dto
@@ -806,6 +810,7 @@ def blast_detail(blast, stats: Optional[dict] = None) -> dict:
         "segment_id": str(blast.segment_id) if blast.segment_id else None,
         "segment_definition": blast.segment_definition or None,
         'audience_preset': (blast.stats or {}).get('audience_preset') or None,
+        'lifecycle_kind': 'reconfirmation' if is_reconfirmation(blast) else None,
         "progress": blast_progress(blast, stats["channels"]),
         "last_error": blast.last_error or None,
         "created_at": iso(blast.created_at),

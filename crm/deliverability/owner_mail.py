@@ -4,6 +4,7 @@ import hashlib
 from datetime import timedelta
 
 from django.conf import settings
+from integrations import system_mail
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -61,10 +62,12 @@ def send(subject, body, *, key, now):
             payload = {'from': state['from'], 'to': [owner], 'subject': state['subject'], 'text': state['body']}
         outcome = 'uncertain'
         try:
-            result = json_request('POST', 'https://api.resend.com/emails', json=payload,
-                headers={'Authorization': 'Bearer ' + settings.CRM_NOTIFY_API_KEY, 'Idempotency-Key': 'crm-owner-' + identity})
-            if isinstance(result.get('id'), str) and result['id']:
-                outcome = 'sent'
+            with system_mail.observe("resend") as attempt:
+                result = json_request('POST', 'https://api.resend.com/emails', json=payload,
+                    headers={'Authorization': 'Bearer ' + settings.CRM_NOTIFY_API_KEY, 'Idempotency-Key': 'crm-owner-' + identity})
+                if isinstance(result.get('id'), str) and result['id']:
+                    outcome = 'sent'
+                    attempt.accepted(result)
         except Unavailable:
             pass
         with transaction.atomic():

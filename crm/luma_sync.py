@@ -12,6 +12,7 @@ import logging
 import time
 from collections import Counter
 from datetime import datetime, timedelta
+from dataclasses import replace
 from typing import Iterable, Optional
 
 import requests
@@ -167,7 +168,9 @@ def sync_event_guests(
         guest_record(raw, consent_labels=consent_labels, whatsapp_labels=whatsapp_labels)
         for raw in raw_guests
     ]
-    records = one_guest_per_email(record for record in parsed if record)
+    from .email_aliases import canonical_emails
+    aliases = canonical_emails(record.email for record in parsed if record)
+    records = one_guest_per_email(replace(record, email=aliases.get(record.email, record.email)) for record in parsed if record)
     skipped = sum(1 for record in parsed if record is None)
 
     with transaction.atomic():

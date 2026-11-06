@@ -360,3 +360,19 @@ may be resumed only by its actor; a system pause still requires an owner's
 incident acknowledgement. The API's current-consent preset also checks the
 source permission before handing off to listmonk, without changing subscriber
 status or consent itself.
+
+## Transactional cutover gate (Phase 7)
+
+The system sender, notify-key preference and independent alert-only monitor
+are implemented in source; no provider, DNS or environment was changed.
+Follow [the system-email runbook](../../docs/crm.md#system-email-and-sign-in-monitoring-phase-7)
+before deployment. Explicitly set `MLAI_SYSTEM_FROM_EMAIL` and
+`CUSTOMERIO_FROM_EMAIL` only after both providers verify notify DKIM. Disable
+Resend domain tracking; Customer.io API calls disable tracking per message.
+Do not rotate a frozen pending outbox payload to a new From address.
+`CRM_TRANSACTIONAL_MONITOR_ENABLED` is independent of campaign switches,
+while `CRM_CUSTOMERIO_NOTIFY_DKIM_VERIFIED` remains false until an operator
+has current provider evidence. Customer.io inbox delivery remains unknown
+without an authenticated feedback integration. DMARC enforcement is held
+until aggregate reports identify all legitimate senders and a separately
+authorized staged DNS change has been reviewed.
