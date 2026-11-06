@@ -80,13 +80,14 @@ class StartupProfileDraftUnitTests(unittest.TestCase):
         self.addCleanup(fake_modules.stop)
         self.ns = {
             "ensure_company_organization": Mock(return_value=self.org),
+            "organization_owner_user_id": Mock(return_value=self.user.id),
             "founder_actor_id_for_user": lambda user: "actor",
             "actor_ids_for_user": lambda user: {"actor"},
             "_is_synthetic_actor_id": lambda actor: False,
             "normalize_company_linkedin_url": lambda value: str(value or "").strip(),
         }
         load_bodies(ROOT / "founder_tools/services.py", {
-            "apply_shared_startup_details", "string_list_from_value", "_first_value",
+            "apply_shared_startup_details", "user_may_use_organization", "string_list_from_value", "_first_value",
             "_has_any_key", "_submitted_value", "_bool_from_value", "_normalize_organization_kind",
         }, self.ns)
         self.shared_details = Mock(wraps=self.ns["apply_shared_startup_details"])
