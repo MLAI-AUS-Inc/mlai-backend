@@ -112,6 +112,8 @@ def founder_quality(quality, *, target=None):
 
 
 _TOP_LEVEL = object()
+# Staff audit records (actors, notes, sources) never reach a founder response.
+STAFF_ONLY_RESULT_KEYS = ("staff_actions_v1", "staff_safety_verification_v1")
 
 
 def founder_result(result, *, target=_TOP_LEVEL):
@@ -124,7 +126,7 @@ def founder_result(result, *, target=_TOP_LEVEL):
         return result
     if target is _TOP_LEVEL:
         target = current_preview_target(result)
-    view = dict(result)
+    view = {key: value for key, value in result.items() if key not in STAFF_ONLY_RESULT_KEYS}
     blocker = view.get("approval_blocker")
     if "approval_blocker" in view:
         view["approval_blocker"] = founder_blocker(blocker)

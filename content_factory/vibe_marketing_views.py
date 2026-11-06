@@ -14553,9 +14553,11 @@ def _sync_steps_from_remote(run, remote_data):
 def _sync_local_run_from_remote(run, remote_data):
     from .run_owned_observations import refresh_owned_run
     from .hosted_quality_alerts import queue_hosted_quality_review_alert
+    from .staff_safety_verification import notify_after_staff_safety_verification
     owned = refresh_owned_run(run)
     if owned is not None:
         queue_hosted_quality_review_alert(owned)
+        notify_after_staff_safety_verification(owned)
         return owned
     from content_factory.run_state import stale_execution_event
     from .portable_drafts import portable_run_update_allowed
@@ -14578,6 +14580,7 @@ def _sync_local_run_from_remote(run, remote_data):
     from .first_article_entitlement import settle_entitlement_for_run
     settle_entitlement_for_run(run)
     queue_hosted_quality_review_alert(run)
+    notify_after_staff_safety_verification(run)
     return run
 
 
@@ -15537,6 +15540,13 @@ def _autofill_start_response(run, *, reused_active_run=False, research_company_i
     return Response(payload, status=status.HTTP_202_ACCEPTED)
 
 
+# Content Factory actions that only the audited staff console may send. The
+# capability is a process-local object, so no founder or service route that
+# forwards an action name from a URL can supply it.
+STAFF_ONLY_REMOTE_ACTIONS = frozenset({"record-staff-safety-verification"})
+STAFF_ACTION_CAPABILITY = object()
+
+
 def _call_content_factory_run_action(
     *,
     run_id,
@@ -15549,7 +15559,11 @@ def _call_content_factory_run_action(
     control_user=None,
     control_command_key=None,
     expected_run_binding=None,
+    staff_capability=None,
 ):
+    if action in STAFF_ONLY_REMOTE_ACTIONS and staff_capability is not STAFF_ACTION_CAPABILITY:
+        return {"error": "Unsupported run action.", "errors": ["Unsupported run action."],
+                "content_factory_status_code": 404, "retryable": False}
     require_unlocked_remote_call()
     admitted_child = None
     if action in {"cancel", "deny", "approve"}:

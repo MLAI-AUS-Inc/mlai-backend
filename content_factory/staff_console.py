@@ -22,7 +22,7 @@ from . import registry_policy
 from .models import OrganizationContentConfig
 from .staff_alert_rules import mapping, failure_code, open_alert, overdue, global_alerts
 
-ACTIONS = {"retry_now", "switch_to_draft", "release_or_refund", "resolve_and_notify"}
+ACTIONS = {"retry_now", "switch_to_draft", "release_or_refund", "resolve_and_notify", "verify_safety_claims"}
 RECEIPT_KEYS = ("self_heal_v1", "points_v1", "channel_v1", "re_pin_v1", "model_spend", "snapshot_drift_v1", "event_progress")
 
 
@@ -355,9 +355,12 @@ def _recheck_article_quality(run):
     return {"status": "queued", "action": "recheck_article_quality"}
 
 
-def _perform(action, run, org, user, *, now, command_key=None):
+def _perform(action, run, org, user, *, now, command_key=None, data=None):
     unavailable = {"status": "refused", "detail": "Not available yet.", "receipt": None}
-    if action == "retry_now" and held_article_quality(run):
+    if action == "verify_safety_claims":
+        from .staff_safety_verification import verify_safety_claims
+        receipt = verify_safety_claims(run, org, user, data or {}, now=now, command_key=command_key)
+    elif action == "retry_now" and held_article_quality(run):
         receipt = _recheck_article_quality(run)
     elif action == "retry_now":
         decide, apply = provider("failure_policy_engine", "decide"), provider("failure_policy_engine", "apply")
@@ -451,14 +454,19 @@ def perform_action(organization_id, data, *, by_user):
             idem.abandon(scope, key, digest)
             return 409, {"status": "refused", "detail": idem.CONFLICT_DETAIL, "reason": idem.CONFLICT_REASON}, False
         try:
-            response = _perform(action, run, org, by_user, now=now, command_key=key)
+            response = _perform(action, run, org, by_user, now=now, command_key=key, data=data)
             with transaction.atomic():
                 current = ContentFactoryRun.objects.select_for_update().get(pk=run.pk, organization_id=org.pk)
                 result = mapping(current.result)
                 history = result.get("staff_actions_v1", [])
                 history = history if isinstance(history, list) else []
-                history = history[-19:] + [{"action": action, "at": now.isoformat(), "by_user_id": by_user.pk,
-                    "note": str(data.get("note") or "")[:500], "outcome": response["status"]}]
+                entry = {"action": action, "at": now.isoformat(), "by_user_id": by_user.pk,
+                         "note": str(data.get("note") or "")[:500], "outcome": response["status"]}
+                audit = mapping(mapping(response.get("receipt")).get("audit"))
+                if audit:
+                    # Sentence hashes, sources and staff notes only; never article prose.
+                    entry.update(request_key=audit.get("request_key"), claims=audit.get("claims"))
+                history = history[-19:] + [entry]
                 ContentFactoryRun.objects.filter(pk=current.pk).update(result={**result, "staff_actions_v1": history})
             idem.finish(scope, key, digest, status=200, body=response)
         finally:
