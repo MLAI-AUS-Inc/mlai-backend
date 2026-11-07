@@ -21,6 +21,7 @@ def automatically_repairable(session):
     return (session.status == 'accepted' and session.location_type == 'video'
         and session.starts_at > timezone.now() and session.booking_mode == 'legacy_request'
         and session.mentor.booking_mode == 'instant'
+        and session.mentor.meeting_artifact_policy == REQUIRED_POLICY
         and session.meeting_status == 'unavailable' and session.meeting_error == 'google_off'
         and not session.meet_link and not session.calendar_event_id
         and not session.calendar_snapshot and not session.meeting_path

@@ -535,6 +535,7 @@ def process_due_bookings(limit=5, time_budget_seconds=30):
     for pk in due:
         MentoringService.settle(pk)
     from .meeting_repair import process as repair, recover_unlinked
+    from .meeting_policy import REQUIRED_POLICY
     # Converting a mentor to instant booking must also recover historical
     # confirmations skipped while the old global Google integration was off.
     # Known/uncertain provider writes are deliberately excluded: never guess a
@@ -543,6 +544,7 @@ def process_due_bookings(limit=5, time_budget_seconds=30):
         Q(meeting_claimed_at__isnull=True) | Q(meeting_claimed_at__lte=now-timedelta(minutes=5)),
         status='accepted', location_type='video', starts_at__gt=now,
         booking_mode='legacy_request', mentor__booking_mode='instant',
+        mentor__meeting_artifact_policy=REQUIRED_POLICY,
         meeting_status='unavailable', meeting_error='google_off', meet_link='',
         calendar_event_id='', calendar_snapshot={}, meeting_path='', meeting_provisioning={},
     ).order_by(F('meeting_claimed_at').asc(nulls_first=True), 'starts_at', 'pk').values_list('pk', flat=True)[:limit]

@@ -138,7 +138,7 @@ class LegacyMeetingRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.session = SimpleNamespace(pk=uuid.uuid4(), status='accepted', location_type='video',
             starts_at=datetime.now(timezone.utc)+timedelta(days=3), booking_mode='legacy_request',
-            mentor=SimpleNamespace(booking_mode='instant'), meeting_status='unavailable',
+            mentor=SimpleNamespace(booking_mode='instant', meeting_artifact_policy=dict(meeting_policy.REQUIRED_POLICY)), meeting_status='unavailable',
             meeting_error='google_off', meet_link='', calendar_event_id='', calendar_snapshot={},
             meeting_path='', meeting_provisioning={})
         self.manager = MagicMock()
@@ -168,6 +168,9 @@ class LegacyMeetingRecoveryTests(unittest.TestCase):
                 target.assert_not_called()
             setattr(self.session, field, original)
         self.session.mentor.booking_mode = 'legacy_request'
+        self.assertFalse(meeting_repair.automatically_repairable(self.session))
+        self.session.mentor.booking_mode = 'instant'
+        self.session.mentor.meeting_artifact_policy = {}
         self.assertFalse(meeting_repair.automatically_repairable(self.session))
 
     def test_missing_permission_defers_without_changing_charge_or_status(self):

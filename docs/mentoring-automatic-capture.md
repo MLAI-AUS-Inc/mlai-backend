@@ -91,7 +91,8 @@ separate operational acceptance work; they have not been performed by local test
 
 The scheduled booking worker automatically admits future legacy video sessions
 that were skipped with `unavailable/google_off` once their mentor uses instant
-booking. Admission requires no event ID, calendar target, Meet link, provider
+booking with the saved required transcription/notes policy. Recovery never opts
+a mentor into capture. Admission requires no event ID, calendar target, Meet link, provider
 path or provisioning state: this is positive evidence that the old provider was
 never invoked, not an inference from a Google 404. The worker verifies the
 mentor's selected personal calendar, rechecks eligibility under participant

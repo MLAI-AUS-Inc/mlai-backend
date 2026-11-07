@@ -88,6 +88,8 @@ class BookingDatabaseTests(TransactionTestCase):
         self.assertEqual((session.meeting_status, session.meeting_error), ('unavailable', 'google_off'))
         frozen = (session.starts_at, session.ends_at, session.price_roo, session.charge_ledger_entry_id)
         self.mentor.booking_mode = 'instant'
+        from mentoring.meeting_policy import REQUIRED_POLICY
+        self.mentor.meeting_artifact_policy = dict(REQUIRED_POLICY)
         self.mentor.save()
         target = {'connection_id': 1, 'calendar_id': 'synthetic', 'revision': 1}
         result = {'event_id': google.event_id(session.pk), 'meet_link': 'https://meet.google.com/abc-defg-hij', 'status': 'created'}
