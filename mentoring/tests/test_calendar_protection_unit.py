@@ -134,6 +134,62 @@ class MeetCaptureTests(unittest.TestCase):
         self.assertFalse(meeting_policy.required(SimpleNamespace(location_type='video', booking_snapshot={})))
 
 
+class LegacyMeetingRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.session = SimpleNamespace(pk=uuid.uuid4(), status='accepted', location_type='video',
+            starts_at=datetime.now(timezone.utc)+timedelta(days=3), booking_mode='legacy_request',
+            mentor=SimpleNamespace(booking_mode='instant'), meeting_status='unavailable',
+            meeting_error='google_off', meet_link='', calendar_event_id='', calendar_snapshot={},
+            meeting_path='', meeting_provisioning={})
+        self.manager = MagicMock()
+        self.manager.select_related.return_value.get.return_value = self.session
+        patcher = patch.object(meeting_repair.MentorSession, 'objects', self.manager)
+        patcher.start(); self.addCleanup(patcher.stop)
+
+    def test_skipped_legacy_booking_uses_verified_owner_target(self):
+        target = {'connection_id': 7, 'calendar_id': 'owner', 'revision': 2}
+        with patch.object(meeting_repair.calendars, 'calendar_target', return_value=target) as verify, \
+                patch.object(meeting_repair, 'prepare') as prepare:
+            meeting_repair.recover_unlinked(self.session.pk)
+        verify.assert_called_once_with(self.session.mentor, verify=True)
+        prepare.assert_called_once_with(self.session.pk, connection_id=7, calendar_id='owner', automatic=True)
+
+    def test_ambiguous_or_ineligible_bookings_never_adopt_a_new_calendar(self):
+        for field, value in [('status','cancelled'), ('location_type','mlai_space'),
+                ('starts_at',datetime.now(timezone.utc)-timedelta(seconds=1)), ('booking_mode','instant'),
+                ('meeting_status','failed'), ('meeting_error','timeout'),
+                ('meet_link','https://meet.google.com/abc-defg-hij'), ('calendar_event_id','legacy-id'),
+                ('calendar_snapshot',{'connection_id': 9}), ('meeting_path','calendar'),
+                ('meeting_provisioning',{'unknown_create':True})]:
+            original = getattr(self.session, field)
+            with self.subTest(field=field), patch.object(meeting_repair.calendars, 'calendar_target') as target:
+                setattr(self.session, field, value)
+                meeting_repair.recover_unlinked(self.session.pk)
+                target.assert_not_called()
+            setattr(self.session, field, original)
+        self.session.mentor.booking_mode = 'legacy_request'
+        self.assertFalse(meeting_repair.automatically_repairable(self.session))
+
+    def test_missing_permission_defers_without_changing_charge_or_status(self):
+        with patch.object(meeting_repair.calendars, 'calendar_target', side_effect=CalendarError('meet_reconnect_required')), \
+                patch.object(meeting_repair, 'prepare') as prepare:
+            meeting_repair.recover_unlinked(self.session.pk)
+        prepare.assert_not_called()
+        update = self.manager.filter.return_value.update.call_args.kwargs
+        self.assertEqual(set(update), {'meeting_claimed_at', 'updated_at'})
+        self.assertEqual(self.manager.filter.call_args.kwargs['meeting_provisioning'], {})
+
+    def test_cancellation_during_readiness_check_cannot_prepare_repair(self):
+        initial = self.session
+        cancelled = SimpleNamespace(**vars(initial)); cancelled.status = 'cancelled'
+        self.manager.select_for_update.return_value.select_related.return_value.get.return_value = cancelled
+        target = {'connection_id': 7, 'calendar_id': 'owner', 'revision': 2}
+        with patch.object(meeting_repair.transaction, 'atomic'), patch.object(meeting_repair, '_lock_users'), \
+                patch.object(meeting_repair.calendars, 'calendar_target', return_value=target), self.assertRaises(CalendarError):
+            initial.founder_id = 2; initial.mentor.user_id = 7
+            meeting_repair.prepare(initial.pk, connection_id=7, calendar_id='owner', automatic=True)
+
+
 class RepairedMeetingCleanupTests(unittest.TestCase):
     def setUp(self):
         self.session = SimpleNamespace(pk=uuid.uuid4(), status='cancelled', founder_id=2,

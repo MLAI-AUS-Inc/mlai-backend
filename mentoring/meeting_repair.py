@@ -1,6 +1,7 @@
 """Bounded, durable repair of an existing accepted meeting; never moves Roo."""
 from datetime import timedelta
 from copy import copy
+import logging
 
 from django.db import transaction
 from django.utils import timezone
@@ -12,10 +13,44 @@ from .meeting_policy import REQUIRED_POLICY
 from .models import MentorSession
 from .service import MentoringError, _lock_users
 
+logger = logging.getLogger(__name__)
 
-def prepare(session_id, *, connection_id, calendar_id):
+
+def automatically_repairable(session):
+    """Only adopt a legacy booking whose provider was explicitly never invoked."""
+    return (session.status == 'accepted' and session.location_type == 'video'
+        and session.starts_at > timezone.now() and session.booking_mode == 'legacy_request'
+        and session.mentor.booking_mode == 'instant'
+        and session.meeting_status == 'unavailable' and session.meeting_error == 'google_off'
+        and not session.meet_link and not session.calendar_event_id
+        and not session.calendar_snapshot and not session.meeting_path
+        and not session.meeting_provisioning)
+
+
+def recover_unlinked(session_id):
+    """Admit a safe, previously skipped booking to durable repair without charging."""
+    session = MentorSession.objects.select_related('mentor__user').get(pk=session_id)
+    if not automatically_repairable(session):
+        return
+    try:
+        target = calendars.calendar_target(session.mentor, verify=True)
+        prepare(session_id, connection_id=target['connection_id'],
+            calendar_id=target['calendar_id'], automatic=True)
+    except (CalendarError, MentoringError) as exc:
+        # Retry readiness failures after five minutes; never overwrite a repair
+        # or cancellation another worker committed while the provider was read.
+        MentorSession.objects.filter(pk=session_id, status='accepted',
+            meeting_status='unavailable', meeting_error='google_off',
+            calendar_event_id='', calendar_snapshot={}, meeting_provisioning={}).update(
+                meeting_claimed_at=timezone.now(), updated_at=timezone.now())
+        logger.warning('Mentor legacy recovery deferred: session=%s code=%s', session_id, exc.code)
+
+
+def prepare(session_id, *, connection_id, calendar_id, automatic=False):
     """Freeze an explicitly supplied owner-verified repair target without provider writes."""
     initial = MentorSession.objects.select_related('mentor__user').get(pk=session_id)
+    if automatic and not automatically_repairable(initial):
+        raise CalendarError('settings_changed')
     if initial.status != 'accepted' or initial.location_type != 'video' or initial.meet_link or initial.starts_at <= timezone.now():
         raise MentoringError('invalid_state', 'Only a confirmed video session missing its link can be repaired.', 409)
     candidate = copy(initial.mentor)
@@ -31,6 +66,8 @@ def prepare(session_id, *, connection_id, calendar_id):
     with transaction.atomic():
         _lock_users(initial.founder_id, initial.mentor.user_id)
         live = MentorSession.objects.select_for_update().select_related('mentor__user').get(pk=session_id)
+        if automatic and not automatically_repairable(live):
+            raise CalendarError('settings_changed')
         if live.status != 'accepted' or live.meet_link or calendars.calendar_target(live.mentor) != target:
             raise CalendarError('settings_changed')
         if live.calendar_event_id != initial.calendar_event_id or live.calendar_snapshot != initial.calendar_snapshot:

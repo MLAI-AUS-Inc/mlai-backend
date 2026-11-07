@@ -89,6 +89,19 @@ separate operational acceptance work; they have not been performed by local test
 
 ## Existing confirmed session missing its link
 
+The scheduled booking worker automatically admits future legacy video sessions
+that were skipped with `unavailable/google_off` once their mentor uses instant
+booking. Admission requires no event ID, calendar target, Meet link, provider
+path or provisioning state: this is positive evidence that the old provider was
+never invoked, not an inference from a Google 404. The worker verifies the
+mentor's selected personal calendar, rechecks eligibility under participant
+locks, then uses the same deterministic repair and required capture verification.
+No appointment terms or ledger entries change. Readiness failures are logged by
+safe code and retried after five minutes, with oldest unattempted work first and
+the existing per-tick count/time budgets. Known or uncertain old provider writes
+still require the explicit procedure below; they are never moved to a guessed
+organizer. New instant bookings continue to confirm only after setup succeeds.
+
 `repair_mentor_meeting <session-id>` inspects one session without changing it.
 Only an explicitly authorised `--apply --connection-id <id> --calendar-id <id>`
 prepares a repair. Validate the exact screenshot session (11 November, 16:00 AEDT)
