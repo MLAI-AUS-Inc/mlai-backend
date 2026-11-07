@@ -76,6 +76,46 @@ class BookingDatabaseTests(TransactionTestCase):
         self.assertEqual(self.balance(self.founder), 60)
         invite.assert_called_once(); create.assert_not_called()
 
+    def test_worker_recovers_skipped_booking_after_mentor_converts_without_recharging(self):
+        from types import SimpleNamespace
+        from mentoring import instant_booking, meeting_repair
+        from mentoring.calendars import google
+        self.mentor.location_type = 'video'
+        self.mentor.save()
+        session, _ = self.request()
+        MentoringService.accept(session.pk, self.mentor_user)
+        session.refresh_from_db()
+        self.assertEqual((session.meeting_status, session.meeting_error), ('unavailable', 'google_off'))
+        frozen = (session.starts_at, session.ends_at, session.price_roo, session.charge_ledger_entry_id)
+        self.mentor.booking_mode = 'instant'
+        from mentoring.meeting_policy import REQUIRED_POLICY
+        self.mentor.meeting_artifact_policy = dict(REQUIRED_POLICY)
+        self.mentor.save()
+        target = {'connection_id': 1, 'calendar_id': 'synthetic', 'revision': 1}
+        result = {'event_id': google.event_id(session.pk), 'meet_link': 'https://meet.google.com/abc-defg-hij', 'status': 'created'}
+        client = MagicMock()
+        client.configure_capture.return_value = {'verified': True, 'policy_version': 1}
+        c = SimpleNamespace(scopes=[google.MEET_SETTINGS_SCOPE])
+        with patch.object(meeting_repair.calendars, 'calendar_target', return_value=target), \
+             patch.object(meeting_repair.calendars, 'lookup_booking', return_value=None), \
+             patch.object(meeting_repair.calendars, 'fetch_busy', return_value=[]), \
+             patch.object(meeting_repair.calendars, 'create_booking', return_value=result) as create, \
+             patch.object(meeting_repair.calendars, '_target', return_value=(c, 'synthetic')), \
+             patch.object(meeting_repair.calendars, '_client', return_value=client), \
+             patch.object(meeting_repair.calendars, '_access_token'), \
+             patch.object(meeting_repair.calendars, 'verify_booking'), \
+             patch.object(meeting_repair.calendars, 'invite_attendees') as invite:
+            instant_booking.process_due_bookings()
+            instant_booking.process_due_bookings()
+        session.refresh_from_db()
+        self.assertEqual(session.status, 'accepted')
+        self.assertEqual(frozen, (session.starts_at, session.ends_at, session.price_roo, session.charge_ledger_entry_id))
+        self.assertEqual(session.meet_link, result['meet_link'])
+        self.assertTrue(session.meeting_provisioning['verified'])
+        self.assertEqual(session.notification_status, 'sent')
+        self.assertEqual(self.balance(self.founder), 60)
+        create.assert_called_once(); invite.assert_called_once()
+
     def test_cancelled_unknown_repair_retains_time_until_event_deleted(self):
         from mentoring import meeting_repair
         session, _ = self.request()

@@ -14,7 +14,7 @@ from time import monotonic
 from django.conf import settings
 from django.core import signing
 from django.db import IntegrityError, connection, transaction
-from django.db.models import Case, IntegerField, Q, Value, When
+from django.db.models import Case, F, IntegerField, Q, Value, When
 from django.utils import timezone
 
 from .models import MentorBookingAttempt, MentorProfile, MentorSession, MentorTimeReservation
@@ -534,11 +534,30 @@ def process_due_bookings(limit=5, time_budget_seconds=30):
     ).order_by('expires_at', 'pk').values_list('pk', flat=True)[:max(1,min(limit,100))]
     for pk in due:
         MentoringService.settle(pk)
-    from .meeting_repair import process as repair
+    from .meeting_repair import process as repair, recover_unlinked
+    from .meeting_policy import REQUIRED_POLICY
+    # Converting a mentor to instant booking must also recover historical
+    # confirmations skipped while the old global Google integration was off.
+    # Known/uncertain provider writes are deliberately excluded: never guess a
+    # different organizer or create a second event to repair an ambiguous one.
+    unlinked = MentorSession.objects.filter(
+        Q(meeting_claimed_at__isnull=True) | Q(meeting_claimed_at__lte=now-timedelta(minutes=5)),
+        status='accepted', location_type='video', starts_at__gt=now,
+        booking_mode='legacy_request', mentor__booking_mode='instant',
+        mentor__meeting_artifact_policy=REQUIRED_POLICY,
+        meeting_status='unavailable', meeting_error='google_off', meet_link='',
+        calendar_event_id='', calendar_snapshot={}, meeting_path='', meeting_provisioning={},
+    ).order_by(F('meeting_claimed_at').asc(nulls_first=True), 'starts_at', 'pk').values_list('pk', flat=True)[:limit]
+    for pk in unlinked:
+        if monotonic() - started >= budget:
+            break
+        recover_unlinked(pk)
     repairs = MentorSession.objects.filter(meeting_provisioning__repair=True).filter(
         Q(status='accepted', meet_link='') | Q(status='accepted', notification_status__in=('pending', 'failed'))
         | Q(status='cancelled', meeting_provisioning__cleanup_pending=True)
-    ).order_by('updated_at').values_list('pk', flat=True)[:limit]
+    ).filter(
+        Q(meeting_claimed_at__isnull=True) | Q(meeting_claimed_at__lte=now-timedelta(minutes=2)),
+    ).order_by(F('meeting_claimed_at').asc(nulls_first=True), 'updated_at', 'pk').values_list('pk', flat=True)[:limit]
     for pk in repairs:
         if monotonic() - started >= budget:
             break
