@@ -18492,9 +18492,9 @@ def _resolve_topic_selection_candidate_by_submission(candidates, *, requested_id
     return matches[0] if len(matches) == 1 else None
 
 
-def _topic_selection_candidates_for_source(organization, source_run_id):
+def _topic_selection_candidates_for_source(organization, config, source_run_id):
     """Keep a reviewed discovery's identity when dashboard deduplication picks another run."""
-    from .research_workspace import current_research_runs, research_config
+    from .research_workspace import current_research_runs
     rows = ContentFactoryRun.objects.filter(
         organization=organization,
         domain=organization.domain,
@@ -18502,7 +18502,7 @@ def _topic_selection_candidates_for_source(organization, source_run_id):
         workflow__in=DISCOVERY_WORKFLOWS,
         status__in=DISCOVERY_TOPIC_CANDIDATE_STATUSES,
     )
-    source = current_research_runs(rows, research_config(organization)).first()
+    source = current_research_runs(rows, config).first()
     if source is None:
         return []
     declined = {
@@ -18529,7 +18529,7 @@ def _resolve_topic_selection_candidate(organization, config, topic_candidate_id,
         expected_prefix = f"topic:run:{_topic_candidate_id_part(source_run_id, fallback='source')}:"
         if not requested_id.startswith(expected_prefix):
             return None
-        candidates = _topic_selection_candidates_for_source(organization, source_run_id)
+        candidates = _topic_selection_candidates_for_source(organization, config, source_run_id)
     else:
         candidates = _topic_selection_candidate_pool(organization, config)
     exact_matches = [candidate for candidate in candidates if str(candidate.get("id") or "").strip() == requested_id]
