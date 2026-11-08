@@ -7,10 +7,12 @@ unverifiable ABNs are reported for manual review and left untouched —
 the command never flips ``registered`` off, so it can't silently lock anyone out; the
 update guard re-checks at point of use.
 
+To check a single startup, pass ``--company-id <company-uuid>``.
 Read-only by default. Pass ``--commit`` to persist.
 """
 
 import time
+from uuid import UUID
 
 from django.core.management.base import BaseCommand
 from django.db.models import Q
@@ -26,6 +28,9 @@ class Command(BaseCommand):
     help = "Backfill ABR verification and optional ACNs for registered startups."
 
     def add_arguments(self, parser):
+        parser.add_argument(
+            "--company-id", type=UUID, help="Limit verification to the company with this UUID."
+        )
         parser.add_argument(
             "--commit",
             action="store_true",
@@ -45,6 +50,9 @@ class Command(BaseCommand):
         companies = VibeRaisingCompany.objects.filter(registered=True).filter(
             Q(abr_verified_at__isnull=True) | Q(entity_type_code=""),
         ).select_related("profile").order_by("created_at")
+
+        if options["company_id"] is not None:
+            companies = companies.filter(pk=options["company_id"])
 
         total = companies.count()
         self.stdout.write(f"Backfilling ABR verification for {total} registered startup(s) (commit={commit})")
@@ -87,4 +95,4 @@ class Command(BaseCommand):
                 self.stdout.write(f"  - {label}: {code}")
         if not commit:
             self.stdout.write("")
-            self.stdout.write("Dry run — re-run with --commit to persist verified ACNs.")
+            self.stdout.write("Dry run — re-run with --commit to persist ABR verification.")

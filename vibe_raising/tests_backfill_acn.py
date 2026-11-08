@@ -105,3 +105,23 @@ class BackfillCompanyAcnTests(TestCase):
         output = self._run("--commit")
         # Only the registered-but-unverified "target" is processed.
         self.assertIn("Verified: 1/1", output)
+
+    def test_scoped_backfill_only_contacts_abr_for_selected_company(self):
+        selected = self._company(name="selected", abn=NON_COMPANY_ABN)
+        other = self._company(name="other", abn=COMPANY_ABN)
+        active_sole_trader = {**_abr(NON_COMPANY_ABN), "active": True, "entity_type_code": "IND"}
+        args = ["--company-id", str(selected.pk), "--sleep", "0"]
+        with patch(_ABR_PATH, return_value=active_sole_trader) as lookup:
+            call_command("backfill_company_acn", *args, stdout=StringIO())
+            selected.refresh_from_db()
+            self.assertIsNone(selected.abr_verified_at)
+            lookup.assert_called_once_with(NON_COMPANY_ABN)
+            lookup.reset_mock()
+
+            call_command("backfill_company_acn", *args, "--commit", stdout=StringIO())
+            lookup.assert_called_once_with(NON_COMPANY_ABN)
+        selected.refresh_from_db()
+        other.refresh_from_db()
+        self.assertIsNotNone(selected.abr_verified_at)
+        self.assertIsNone(selected.acn)
+        self.assertIsNone(other.abr_verified_at)
