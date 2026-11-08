@@ -122,3 +122,11 @@ migration closure in a disposable database. The PostgreSQL concurrency test
 holds each external send open, verifies that withdrawal waits on the account
 lock, and then verifies that a retry cannot send after withdrawal completes.
 That test is included in CI's privacy-boundary PostgreSQL job.
+
+## Check a founder's ABR verification
+
+For a registered startup missing verification, run
+`python manage.py backfill_company_acn --company-id <company-uuid>` to check
+its saved ABN against the Australian Business Register. Use the Founder Tools
+company UUID. Add `--commit` to save a successful result for that company.
+A verified sole trader can qualify for the coworking discount without an ACN.
