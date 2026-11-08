@@ -11,7 +11,7 @@ from .content_islands import seed_islands_from_bootstrap_pillars
 from .editorial_catalog import merge_strategy
 from .island_selection import selection_runs
 from .models import ContentIsland, ContentIslandKeyword, OrganizationContentConfig, ResearchedKeyword, TopicFeedback
-from .research_workspace import RESET_KEY, ResearchWorkspaceConflict, current_research_runs, reset_workspace
+from .research_workspace import RESET_KEY, ResearchWorkspaceConflict, current_research_runs, require_current_research, reset_workspace
 from .run_ownership import reserve_admitted_run, user_principal
 from .service_views import SEOClusterBulkUpsertView, SEOContentIslandBulkSyncView, SEOKeywordBulkUpsertView
 from .services.island_refresh_scheduler import dispatch_island_refresh
@@ -74,6 +74,8 @@ class ResearchWorkspaceResetTests(TestCase):
         self.transition("resume")
         self.config.refresh_from_db()
         self.assertFalse(current_research_runs(ContentFactoryRun.objects.filter(pk=self.old_run.pk), self.config).exists())
+        with self.assertRaises(ResearchWorkspaceConflict):
+            require_current_research(self.org, self.old_run)
         self.assertEqual(self.callback(SEOContentIslandBulkSyncView, islands=[], run_id=self.old_run.run_id).status_code, 409)
         self.assertEqual(self.callback(SEOClusterBulkUpsertView, clusters=[]).status_code, 409)
         # A worker mirroring an unknown old run after the cutoff cannot turn it
@@ -84,6 +86,8 @@ class ResearchWorkspaceResetTests(TestCase):
         self.assertEqual(self.callback(SEOKeywordBulkUpsertView, keywords=[{"keyword": "unadmitted"}],
                                       session_id=mirror.run_id).status_code, 409)
         with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False):
+            with self.assertRaises(ResearchWorkspaceConflict):
+                self.admit(self.old_run.run_id)
             fresh = self.admit()
         self.assertEqual(self.callback(SEOKeywordBulkUpsertView, keywords=[{"keyword": "Fresh idea"}],
                                       session_id=fresh.run_id).status_code, 200)

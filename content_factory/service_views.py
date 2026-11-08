@@ -7590,7 +7590,7 @@ def _retired_research_result(organization, run_id):
 
 
 def _research_result_retired():
-    return Response({"code": "research_workspace_changed", "retryable": False}, status=409)
+    return Response({"detail": "This result belongs to a previous research workspace.", "retryable": False}, status=409)
 
 
 class SEOKeywordBulkUpsertView(APIView):

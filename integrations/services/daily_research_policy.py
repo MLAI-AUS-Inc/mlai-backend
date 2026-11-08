@@ -122,6 +122,8 @@ def daily_topic_policy(run, *, now=None):
         | Q(run_request__custom_topic_title__isnull=False)
         | Q(run_request__custom_topic_seed__isnull=False)
     ).only("run_id", "created_at", "status", "run_request", "result").order_by("created_at")
+    if cutoff:
+        sources = sources.filter(created_at__gte=cutoff)
     for source in current_research_runs(sources, config):
         request, result = source.run_request or {}, source.result or {}
         state = result.get("island_research_selection", {})

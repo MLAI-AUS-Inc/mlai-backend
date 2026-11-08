@@ -15157,7 +15157,7 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                 except ResearchWorkspaceConflict as exc:
                     # Reuse dispatch lookup/refund handling for a request that
                     # lost permission to start after its original preflight.
-                    editorial_rejection = Response({"detail": str(exc), "code": "research_workspace_changed"}, status=409)
+                    editorial_rejection = Response({"detail": str(exc)}, status=409)
                     break
             try:
                 post_attempted = True
