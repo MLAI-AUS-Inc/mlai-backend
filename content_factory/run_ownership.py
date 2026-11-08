@@ -316,18 +316,18 @@ def _admission_budget(payload, *, workflow, existing=None):
     return request
 
 
-def reserve_admitted_run(*, organization, principal, workflow, payload, reserved_run_id=None):
+def reserve_admitted_run(*, organization, principal, workflow, payload, reserved_run_id=None,
+                         check_research_workspace=False):
     """Reserve before dispatch, after the caller's existing permission checks.
 
     No old Run is automatically enrolled and no network call occurs here.
     The returned identity is added to the outbound request only after commit.
     Reservation-only admission does not transfer Job or snapshot ownership.
+    A research caller with a saved reset can opt into the tenant-scoped check.
     """
     from .research_workspace import RESEARCH_WORKFLOWS, require_research_admission, research_config, reset_state
     globally_admitting = admission_enabled()
-    scoped_research = workflow in RESEARCH_WORKFLOWS and bool(reset_state(research_config(organization)))
-    admitting = globally_admitting or scoped_research
-    if not admitting and WIRE_REQUEST_KEY not in payload:
+    if not globally_admitting and not check_research_workspace and WIRE_REQUEST_KEY not in payload:
         return None
     from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
     key = payload.get("client_request_id")
@@ -343,9 +343,13 @@ def reserve_admitted_run(*, organization, principal, workflow, payload, reserved
         # Serialize retries even after the initial key has been renamed to its
         # worker ID; run_id uniqueness alone no longer guards that lookup.
         type(organization).objects.select_for_update().get(pk=organization.pk)
+        config = research_config(organization) if workflow in RESEARCH_WORKFLOWS else None
+        admitting = globally_admitting or bool(reset_state(config))
+        if not admitting and WIRE_REQUEST_KEY not in payload:
+            return None
         run = admitted_run_for_key(key, lock=True)
-        if workflow in RESEARCH_WORKFLOWS:
-            require_research_admission(organization, run, key)
+        if config is not None:
+            require_research_admission(config, organization, run, key)
         # Resolve an exact retry before consulting mutable backend budget
         # settings. The original cap remains part of the immutable digest.
         prepared = _admission_budget(payload, workflow=workflow, existing=run)

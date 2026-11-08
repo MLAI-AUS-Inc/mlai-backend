@@ -1444,7 +1444,7 @@
       "identity": "content_factory/run_ownership.py:reserve_admitted_run:6d456f927b6ca4618878d69efe45c83b07714799f1258c7c4d1c62105c2b3fde:1",
       "path": "content_factory/run_ownership.py",
       "function": "reserve_admitted_run",
-      "line": 381,
+      "line": 370,
       "kind": "model_get_or_create",
       "fields": [],
       "statement_sha256": "6d456f927b6ca4618878d69efe45c83b07714799f1258c7c4d1c62105c2b3fde",
@@ -1452,7 +1452,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "cb0fae28812cb8896266149b3d60ec3787c1b76021a841f08d06c546acb72c52",
+      "function_sha256": "0eb37a174c838d00f384722e150d51d52219457f825090139922a23269cdce7f",
       "classification": "new_admission",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
@@ -3089,7 +3089,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:6a7c9391187a262de03d7c2cb786c5c72bbdf212a8f9913b0b15ea15ce44683d:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15381,
+      "line": 15456,
       "kind": "inferred_run_save",
       "fields": [
         "run_request",
@@ -3102,7 +3102,7 @@
         "portable_reservation"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "0ffb78b91275e0132ee443bb0d4099cdcc4ee21608f1644b14c67fe0dd62cef1",
+      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
@@ -3394,7 +3394,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15414,
+      "line": 15489,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3406,7 +3406,7 @@
         "run"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "0ffb78b91275e0132ee443bb0d4099cdcc4ee21608f1644b14c67fe0dd62cef1",
+      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
@@ -3480,7 +3480,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:f40fe594d02b001537d58480ad7cc8611166a2e9c9572bc73dbde6978a15712e:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15278,
+      "line": 15353,
       "kind": "model_update",
       "fields": [
         "status"
@@ -3492,7 +3492,7 @@
         "remote_data"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "0ffb78b91275e0132ee443bb0d4099cdcc4ee21608f1644b14c67fe0dd62cef1",
+      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
@@ -3506,7 +3506,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:669eb9f79164a269775fb125857f46dd8931706566e619e175a0bbd750be355e:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15220,
+      "line": 15295,
       "kind": "model_update",
       "fields": [
         "run_request"
@@ -3518,7 +3518,7 @@
         "acknowledged"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "0ffb78b91275e0132ee443bb0d4099cdcc4ee21608f1644b14c67fe0dd62cef1",
+      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",

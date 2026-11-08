@@ -35,11 +35,12 @@ class ResearchWorkspaceResetTests(TestCase):
         self.old_run.result["island_research_selection"] = {"selected_ids": ["old"]}
         self.old_run.save(update_fields=["status", "result"])
 
-    def admit(self, run_id=None):
+    def admit(self, run_id=None, *, check_research_workspace=False):
         run_id = run_id or str(uuid4())
         return reserve_admitted_run(
             organization=self.org, principal=user_principal(1, "founder:1"), workflow="auto_discovery",
             payload={"domain": self.org.domain, "client_request_id": run_id}, reserved_run_id=run_id,
+            check_research_workspace=check_research_workspace,
         )
 
     def transition(self, action):
@@ -87,8 +88,8 @@ class ResearchWorkspaceResetTests(TestCase):
                                       session_id=mirror.run_id).status_code, 409)
         with override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=False):
             with self.assertRaises(ResearchWorkspaceConflict):
-                self.admit(self.old_run.run_id)
-            fresh = self.admit()
+                self.admit(self.old_run.run_id, check_research_workspace=True)
+            fresh = self.admit(check_research_workspace=True)
         self.assertEqual(self.callback(SEOKeywordBulkUpsertView, keywords=[{"keyword": "Fresh idea"}],
                                       session_id=fresh.run_id).status_code, 200)
         self.assertTrue(ResearchedKeyword.objects.filter(organization=self.org, keyword="Fresh idea").exists())

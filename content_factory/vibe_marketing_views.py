@@ -15150,10 +15150,12 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                         organization=context.organization, workflow=workflow, actor_id=actor_id, payload=payload)
             from .run_ownership import WIRE_REQUEST_KEY, admission_enabled, reserve_admitted_run, user_principal
             from .research_workspace import RESEARCH_WORKFLOWS, ResearchWorkspaceConflict, reset_state
-            if admission_enabled() or WIRE_REQUEST_KEY in payload or (workflow in RESEARCH_WORKFLOWS and reset_state(config)):
+            scoped_research = workflow in RESEARCH_WORKFLOWS and bool(reset_state(config))
+            if admission_enabled() or WIRE_REQUEST_KEY in payload or scoped_research:
                 try:
                     reserve_admitted_run(organization=context.organization,
-                        principal=user_principal(context.profile.user.pk, actor_id), workflow=workflow, payload=payload)
+                        principal=user_principal(context.profile.user.pk, actor_id), workflow=workflow, payload=payload,
+                        check_research_workspace=scoped_research)
                 except ResearchWorkspaceConflict as exc:
                     # Reuse dispatch lookup/refund handling for a request that
                     # lost permission to start after its original preflight.

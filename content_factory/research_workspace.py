@@ -107,9 +107,8 @@ def require_current_research(organization, run):
         raise ResearchWorkspaceConflict("This research has been retired. Start a new research run.")
 
 
-def require_research_admission(organization, existing, dispatch_key):
+def require_research_admission(config, organization, existing, dispatch_key):
     """Serialize fresh research admission with a workspace reset."""
-    config = research_config(organization)
     if research_paused(config):
         raise ResearchWorkspaceConflict(RESET_DETAIL)
     cutoff = research_cutoff(config)
