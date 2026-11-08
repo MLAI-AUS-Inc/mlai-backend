@@ -1813,6 +1813,8 @@ def _latest_runs_for_org(organization, limit=24, *, config=None, prefetch_feedba
     rows = ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=VIBE_MARKETING_WORKFLOWS).exclude(status=ContentFactoryRunStatus.CANCELLED)
     if config is None:
         config = _get_config(organization)
+    from .research_workspace import current_research_runs
+    rows = current_research_runs(rows, config)
     connection = getattr(config, "website_connection", None)
     if connection:
         from django.db.models import Q
@@ -1844,14 +1846,15 @@ def _latest_runs_for_org(organization, limit=24, *, config=None, prefetch_feedba
 
 
 
-def _recent_discovery_topic_runs_for_org(organization, limit=RECENT_DISCOVERY_TOPIC_RUN_LIMIT):
-    return list(
-        ContentFactoryRun.objects.filter(
-            domain=organization.domain,
-            workflow__in=DISCOVERY_WORKFLOWS,
-            status__in=DISCOVERY_TOPIC_CANDIDATE_STATUSES,
-        ).order_by("-updated_at")[:limit]
+def _recent_discovery_topic_runs_for_org(organization, limit=RECENT_DISCOVERY_TOPIC_RUN_LIMIT, *, config=None):
+    from .research_workspace import current_research_runs, research_config
+    rows = ContentFactoryRun.objects.filter(
+        domain=organization.domain,
+        workflow__in=DISCOVERY_WORKFLOWS,
+        status__in=DISCOVERY_TOPIC_CANDIDATE_STATUSES,
     )
+    config = config if config is not None else research_config(organization)
+    return list(current_research_runs(rows, config).order_by("-updated_at")[:limit])
 
 
 def _active_startup_autofill_run_for_domain(domain):
@@ -12817,7 +12820,7 @@ def _compute_bootstrap_payload(context, request=None, *, view="summary", config=
         latest_runs = _latest_runs_for_org(context.organization, config=config, prefetch_feedback=True)
     # Bootstrap is a read projection. Explicit full reads must not perform
     # GitHub reconciliation either; dedicated mutations/background work own it.
-    discovery_topic_runs = _recent_discovery_topic_runs_for_org(context.organization)
+    discovery_topic_runs = _recent_discovery_topic_runs_for_org(context.organization, config=config)
     topic_limit = 8 if compact else None
     declined_topic_feedback_all = list_topic_feedback(context.organization, feedback_type="declined", limit=100)
     declined_topic_feedback = declined_topic_feedback_all[:8] if compact else declined_topic_feedback_all
@@ -15146,9 +15149,16 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
                     portable_reservation = reserve_portable_dispatch_intent(
                         organization=context.organization, workflow=workflow, actor_id=actor_id, payload=payload)
             from .run_ownership import WIRE_REQUEST_KEY, admission_enabled, reserve_admitted_run, user_principal
-            if admission_enabled() or WIRE_REQUEST_KEY in payload:
-                reserve_admitted_run(organization=context.organization,
-                    principal=user_principal(context.profile.user.pk, actor_id), workflow=workflow, payload=payload)
+            from .research_workspace import RESEARCH_WORKFLOWS, ResearchWorkspaceConflict, reset_state
+            if admission_enabled() or WIRE_REQUEST_KEY in payload or (workflow in RESEARCH_WORKFLOWS and reset_state(config)):
+                try:
+                    reserve_admitted_run(organization=context.organization,
+                        principal=user_principal(context.profile.user.pk, actor_id), workflow=workflow, payload=payload)
+                except ResearchWorkspaceConflict as exc:
+                    # Reuse dispatch lookup/refund handling for a request that
+                    # lost permission to start after its original preflight.
+                    editorial_rejection = Response({"detail": str(exc), "code": "research_workspace_changed"}, status=409)
+                    break
             try:
                 post_attempted = True
                 from content_factory.run_queue_position import with_interactive_queue_class
@@ -18240,6 +18250,9 @@ def start_article_research(*, user, context, data, request_hash=None):
     """Execute the canonical owned operation for HTTP and MCP transports."""
     command = ContentCommand(user=user, data=data)
     config = _get_config(context.organization)
+    from .research_workspace import RESET_DETAIL, research_paused
+    if research_paused(config):
+        return Response({"detail": RESET_DETAIL}, status=409)
     from .editorial_catalog import discovery_audience_context, CatalogConflict
     try:
         research_audience = discovery_audience_context(config.pillar_strategy, command.data)
@@ -18366,7 +18379,7 @@ class VibeMarketingDiscoveryView(APIView):
 
 
 def _topic_selection_candidate_pool(organization, config):
-    discovery_topic_runs = _recent_discovery_topic_runs_for_org(organization)
+    discovery_topic_runs = _recent_discovery_topic_runs_for_org(organization, config=config)
     declined_topic_feedback = list_topic_feedback(organization, feedback_type="declined", limit=100)
     declined_keyword_keys = {
         normalize_topic_feedback_keyword(item.keyword)
@@ -18479,13 +18492,15 @@ def _resolve_topic_selection_candidate_by_submission(candidates, *, requested_id
 
 def _topic_selection_candidates_for_source(organization, source_run_id):
     """Keep a reviewed discovery's identity when dashboard deduplication picks another run."""
-    source = ContentFactoryRun.objects.filter(
+    from .research_workspace import current_research_runs, research_config
+    rows = ContentFactoryRun.objects.filter(
         organization=organization,
         domain=organization.domain,
         run_id=source_run_id,
         workflow__in=DISCOVERY_WORKFLOWS,
         status__in=DISCOVERY_TOPIC_CANDIDATE_STATUSES,
-    ).first()
+    )
+    source = current_research_runs(rows, research_config(organization)).first()
     if source is None:
         return []
     declined = {

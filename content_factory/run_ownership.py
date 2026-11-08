@@ -323,7 +323,10 @@ def reserve_admitted_run(*, organization, principal, workflow, payload, reserved
     The returned identity is added to the outbound request only after commit.
     Reservation-only admission does not transfer Job or snapshot ownership.
     """
-    admitting = admission_enabled()
+    from .research_workspace import RESEARCH_WORKFLOWS, require_research_admission, research_config, reset_state
+    globally_admitting = admission_enabled()
+    scoped_research = workflow in RESEARCH_WORKFLOWS and bool(reset_state(research_config(organization)))
+    admitting = globally_admitting or scoped_research
     if not admitting and WIRE_REQUEST_KEY not in payload:
         return None
     from workflow_runs.models import ContentFactoryRun, ContentFactoryRunStatus
@@ -334,13 +337,15 @@ def reserve_admitted_run(*, organization, principal, workflow, payload, reserved
     if (type(initial_id) is not str or not initial_id or len(initial_id) > 100
             or initial_id != initial_id.strip()):
         raise RunOwnershipConflict("A bounded backend reservation identity is required.")
-    facts = getattr(settings, "ARTICLES_RUN_FACT_AUTHORITY_ENABLED", False) is True
-    events = getattr(settings, "ARTICLES_RUN_EVENT_AUTHORITY_ENABLED", False) is True
+    facts = globally_admitting and getattr(settings, "ARTICLES_RUN_FACT_AUTHORITY_ENABLED", False) is True
+    events = globally_admitting and getattr(settings, "ARTICLES_RUN_EVENT_AUTHORITY_ENABLED", False) is True
     with transaction.atomic():
         # Serialize retries even after the initial key has been renamed to its
         # worker ID; run_id uniqueness alone no longer guards that lookup.
         type(organization).objects.select_for_update().get(pk=organization.pk)
         run = admitted_run_for_key(key, lock=True)
+        if workflow in RESEARCH_WORKFLOWS:
+            require_research_admission(organization, run, key)
         # Resolve an exact retry before consulting mutable backend budget
         # settings. The original cap remains part of the immutable digest.
         prepared = _admission_budget(payload, workflow=workflow, existing=run)

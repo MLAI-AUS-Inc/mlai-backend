@@ -1078,6 +1078,9 @@ jobs:
     - name: Verify retired blog archive guard and table removal on PostgreSQL
       run: python manage.py test content_factory.tests_hosting_retirement_database --noinput --verbosity 2
 
+    - name: Verify the company-scoped research reset and callback fences
+      run: python manage.py test content_factory.tests_research_workspace_database --noinput --verbosity 2
+
     - name: Run first-article and bootstrap-budget PostgreSQL tests
       run: python manage.py test content_factory.tests_website_first_article_database content_factory.tests_website_sealed_database content_factory.tests_article_publication_observation_database content_factory.tests_dispatch_admission_database content_factory.tests_website_cost_database content_factory.tests_website_cost_recovery_database content_factory.tests_website_operational_alerts_database content_factory.tests_website_repair_alerts_database content_factory.tests_website_stage_stalls_database content_factory.tests_website_preview_cleanup_budget_database content_factory.tests_website_cleanup_failures_database tests.test_articles_bootstrap_endpoint_budget --verbosity 2
 

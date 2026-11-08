@@ -68,6 +68,9 @@ class CustomIslandUnitTests(unittest.TestCase):
         self.assertTrue(custom_island_slug({**clean, "name": "人工智能"}).startswith("custom-island-"))
 
     def setUp(self):
+        reset = patch("content_factory.research_workspace.research_config", return_value=None)
+        reset.start()
+        self.addCleanup(reset.stop)
         self.selection_patch = patch("content_factory.island_selection.selection_runs", return_value=[])
         self.selection_patch.start()
         self.addCleanup(self.selection_patch.stop)

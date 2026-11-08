@@ -274,26 +274,28 @@ def seed_islands_from_bootstrap_pillars(organization):
     """
     # Function-local: vibe_marketing_views is ~17k lines and pulls in most of the
     # app, so importing it at module scope would create an import cycle.
-    from django.utils import timezone
-
-    from content_factory.models import (
-        ContentIsland,
-        ContentIslandOrigin,
-        ContentIslandStatus,
-        OrganizationContentConfig,
-    )
+    from django.db import transaction
+    from organizations.models import Organization
+    from content_factory.models import OrganizationContentConfig
     from content_factory.vibe_marketing_views import _topic_pillars_for_bootstrap
+    from .research_workspace import research_paused
 
-    config = OrganizationContentConfig.objects.filter(organization=organization).first()
-    try:
-        pillars = _topic_pillars_for_bootstrap(organization, config)
-    except Exception as exc:  # pragma: no cover - seeding must never break a read
-        logger.warning(
-            "content_islands seed failed to derive pillars for %s: %s",
-            organization.domain,
-            exc,
-        )
-        return []
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=organization.pk)
+        config = OrganizationContentConfig.objects.filter(organization=organization).first()
+        if research_paused(config):
+            return []
+        try:
+            pillars = _topic_pillars_for_bootstrap(organization, config)
+        except Exception as exc:  # pragma: no cover - seeding must never break a read
+            logger.warning("content_islands seed failed to derive pillars for %s: %s", organization.domain, exc)
+            return []
+        return _create_seed_islands(organization, pillars)
+
+
+def _create_seed_islands(organization, pillars):
+    from django.utils import timezone
+    from .models import ContentIsland, ContentIslandOrigin, ContentIslandStatus
 
     now = timezone.now()
     taken_slugs = set(

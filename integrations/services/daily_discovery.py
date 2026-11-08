@@ -431,9 +431,16 @@ def _dispatch_existing_scheduled_record(
     now=None,
     force: bool = False,
 ) -> dict:
+    from content_factory.research_workspace import research_config, research_paused
+
     now = now or timezone.now()
 
     with transaction.atomic():
+        from organizations.models import Organization
+        domain = ScheduledDiscoveryDispatch.objects.values_list("domain", flat=True).get(pk=dispatch_id)
+        organization = Organization.objects.select_for_update().filter(domain=domain).first()
+        if organization and research_paused(research_config(organization)):
+            return {"status": "skipped", "reason": "research_workspace_reset", "dispatch_id": dispatch_id}
         dispatch = ScheduledDiscoveryDispatch.objects.select_for_update().get(pk=dispatch_id)
         if dispatch.state != ScheduledDiscoveryDispatchState.SCHEDULED:
             if not force:

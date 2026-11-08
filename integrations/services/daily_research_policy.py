@@ -95,12 +95,15 @@ def pause_if_unanswered(organization, *, now=None):
 def daily_topic_policy(run, *, now=None):
     """Use actual sent cards, not research attempts, to expire novelty/preferences."""
     from content_factory.models import ContentIsland, NotificationDelivery
+    from content_factory.research_workspace import current_research_runs, research_config, research_cutoff
     from workflow_runs.models import ContentFactoryRun
     current = now or timezone.now()
     organization = run.automation.organization
+    config = research_config(organization)
+    cutoff = research_cutoff(config)
     deliveries = list(NotificationDelivery.objects.filter(
         automation_run__automation__organization=organization, event_type="topic_selection", status="sent",
-        delivered_at__gte=current - timedelta(days=30),
+        delivered_at__gte=max(current - timedelta(days=30), cutoff) if cutoff else current - timedelta(days=30),
     ).only("request_payload", "delivered_at"))
     recent, consumed = {}, set()
     for delivery in deliveries:
@@ -119,7 +122,7 @@ def daily_topic_policy(run, *, now=None):
         | Q(run_request__custom_topic_title__isnull=False)
         | Q(run_request__custom_topic_seed__isnull=False)
     ).only("run_id", "created_at", "status", "run_request", "result").order_by("created_at")
-    for source in sources:
+    for source in current_research_runs(sources, config):
         request, result = source.run_request or {}, source.result or {}
         state = result.get("island_research_selection", {})
         managed_slugs.update(state.get("managed_slugs", []))
