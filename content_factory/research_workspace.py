@@ -83,13 +83,14 @@ def accepts_research_write(config, run_id):
         return False
     rows = ContentFactoryRun.objects.filter(
         organization_id=config.organization_id, run_id=str(run_id), workflow__in=RESEARCH_WORKFLOWS,
+        created_at__gte=cutoff,
     ).exclude(status__in={"cancelled", "failed", "blocked", "denied"})
     # A scheduled refresh can report before its run snapshot is mirrored. The
     # scheduler's saved provider ID is still sufficient, and is tenant scoped.
     scheduled = _scheduled_runs(config.organization_id, cutoff)
     if rows.filter(scheduled).exists():
         return True
-    run = rows.filter(created_at__gte=cutoff).first()
+    run = rows.first()
     if owner_receipt(run) is not None:
         return True
     if ContentFactoryRun.objects.filter(run_id=str(run_id)).exists():
