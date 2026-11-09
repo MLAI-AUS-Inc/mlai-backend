@@ -476,6 +476,50 @@ class StartTests(CardFixture, TestCase):
         self.assertFalse(self.runs().exists())
 
 
+class ConnectedWebsiteGateTests(CardFixture, TestCase):
+    """GitHub-first onboarding: no first article until the website is connected."""
+
+    def setUp(self):
+        super().setUp()
+        self.enterContext(override_settings(ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE=True))
+
+    def connected(self, value):
+        return patch("content_factory.founder_journey_cohort.has_connected_website", return_value=value)
+
+    def test_without_a_connected_website_the_press_is_refused_and_starts_nothing(self):
+        with self.connected(False):
+            response = self.press()
+        self.assertEqual((response.status_code, response.data["reason"]), (409, "website_not_connected"))
+        self.assertIn("GitHub", response.data["detail"])
+        self.assertFalse(self.runs().exists())
+        self.assertFalse(free_rows(self.org).exists())
+
+    def test_once_the_website_is_connected_the_press_starts(self):
+        with self.connected(True):
+            response = self.press()
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertTrue(self.runs().exists())
+
+    def test_the_journey_asks_for_the_website_before_the_first_article(self):
+        with self.connected(False):
+            journey = journeys.project_founder_journey(self.org, user=self.owner, company=self.company)
+        self.assertEqual((journey["stage"], journey["headline"]), ("website", "Connect your website on GitHub"))
+        self.assertEqual(journey["next"]["kind"], "add_website")
+        self.assertIn("first article is on us", journey["body"])
+        website = next(step for step in journey["steps"] if step["id"] == "website")
+        self.assertNotEqual(website["state"], "done")
+        with self.connected(True):
+            journey = journeys.project_founder_journey(self.org, user=self.owner, company=self.company)
+        self.assertEqual(journey["stage"], "first_article")
+
+    def test_with_the_gate_off_nothing_changes(self):
+        with override_settings(ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE=False), self.connected(False):
+            journey = journeys.project_founder_journey(self.org, user=self.owner, company=self.company)
+            response = self.press()
+        self.assertEqual(journey["stage"], "first_article")
+        self.assertEqual(response.status_code, 201, response.data)
+
+
 class EmailNormalisationTests(CardFixture, TestCase):
     """One free article per person: plus tags and Gmail dots do not make a new account."""
 

@@ -70,6 +70,8 @@ DETAIL_INVALID_AUDIENCE = "Describe your customer in a short sentence."
 DETAIL_INVALID_PROFILE = "Check your startup's name and one-line description."
 DETAIL_SWITCH_UNAVAILABLE = "You can't switch topics right now."
 DETAIL_OWNER_ONLY = "Only the startup owner can do this."
+DETAIL_WEBSITE_NOT_CONNECTED = ("Connect your website on GitHub and set up your articles page first. "
+                                "Your first article is on us once it's connected.")
 
 
 class FirstArticleRefusal(Exception):
@@ -474,6 +476,27 @@ def _public_topic(topic) -> dict:
 
 # ---------------------------------------------------------------------------
 # The card
+
+
+def requires_connected_website() -> bool:
+    """True when ``ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE`` is on (code default off)."""
+    return bool(getattr(settings, "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE", False))
+
+
+def website_gate_open(organization) -> bool:
+    """Whether a first article may be written: the gate is off, or the website is connected.
+
+    Connected means a GitHub website connection whose current generation has a
+    verified articles target (:func:`founder_journey_cohort.has_connected_website`).
+    MLAI never hosts founder blogs, so an article needs a website to go to.
+    """
+    return not requires_connected_website() or cohorts.has_connected_website(organization)
+
+
+def require_connected_website(organization) -> None:
+    """Raise a 409 refusal while the website is not connected and the gate is on."""
+    if not website_gate_open(organization):
+        raise FirstArticleRefusal(409, DETAIL_WEBSITE_NOT_CONNECTED, "website_not_connected")
 
 
 def _in_flight_article_run(organization):
@@ -969,6 +992,7 @@ def start_first_article(context, user, data, *, attempt_source="start", idempote
     from .first_article_entitlement import entitlement_state
     organization, company = context.organization, context.company
     require_owner(user, organization)
+    require_connected_website(organization)
     press = parse_press(data)
     if idempotency_key is not None:
         from . import first_article_commands as commands

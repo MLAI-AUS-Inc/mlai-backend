@@ -21,6 +21,11 @@ STEP_COPY = {
     "publishing": ("Publish your article", "You choose when and where to publish.", None),
     "done": ("Your article", "Your delivered draft stays available in the app.", None),
 }
+# With ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE on, the website comes first.
+GATED_STEP_COPY = {
+    "website": ("Connect your website", "Connect your website on GitHub before your first article.", None),
+    "setup": ("Your articles page", "Your articles page lives on your own website.", None),
+}
 
 
 def _mapping(value):
@@ -171,10 +176,15 @@ def enrich_journey(payload, *, organization, company, config, user, run, connect
         failure = {"code": code if isinstance(code, str) and code in known else "UNREGISTERED_FAILURE_CODE",
             "copy": deepcopy(current_copy)}
     website = _mapping(payload.get("website"))
+    from .content_first_article import requires_connected_website
+    from .founder_journey_cohort import has_connected_website
+    gated = requires_connected_website()
+    website_connected = not gated or has_connected_website(organization)
     live = bool(stage == "done" and _mapping(payload.get("next")).get("kind") == "view_article")
     setup_done = website.get("publishAutomatically") == "on"
     statuses = {
-        "website": "done" if website.get("hasWebsite") else "optional",
+        "website": "done" if website.get("hasWebsite") and website_connected else
+            "pending" if gated else "optional",
         "first_article": "done" if run is not None else "pending",
         "writing": "done" if ready else "pending",
         "review": "done" if copied or approved else "pending",
@@ -184,8 +194,9 @@ def enrich_journey(payload, *, organization, company, config, user, run, connect
     }
     if stage in statuses and statuses[stage] != "done":
         statuses[stage] = "blocked" if failed or state == "your_turn" else "working" if state == "working" else "pending"
+    step_copy = {**STEP_COPY, **(GATED_STEP_COPY if gated else {})}
     steps = [{"id": key, "state": statuses[key],
-        "copy": deepcopy(current_copy) if key == stage else _copy(*STEP_COPY[key])} for key in STEPS]
+        "copy": deepcopy(current_copy) if key == stage else _copy(*step_copy[key])} for key in STEPS]
     offer = _mapping(payload.get("publishOffer"))
     quality_ready = bool(run is not None and article_review_identity_is_complete(run))
     from .website_run_authority import event_owned
