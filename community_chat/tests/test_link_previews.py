@@ -338,7 +338,7 @@ class CommunityChatSlackVideoTests(_SlackPreviewTestBase):
 
     def stream_url(self, get_client):
         self.provider(get_client, {"ok": True, "file": dict(VIDEO_FILE)})
-        response = self.client.get(reverse("community_chat_link_preview_video"), {"slack_file": "F0CFW8C6TAR"})
+        response = self.client.get(reverse("community_chat_link_preview_file"), {"slack_file": "F0CFW8C6TAR"})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response["Cache-Control"], "private, no-store")
         return response.data["stream_url"]
@@ -354,7 +354,8 @@ class CommunityChatSlackVideoTests(_SlackPreviewTestBase):
         self.assertTrue(response.data["image_is_thumbnail"])
         self.assertEqual(response.data["duration"], 95.5)
         self.assertEqual((response.data["width"], response.data["height"]), (1920, 1080))
-        self.assertIn("/link-preview/video/?slack_file=F0CFW8C6TAR", response.data["video_playback_url"])
+        self.assertIn("/link-preview/file/?slack_file=F0CFW8C6TAR", response.data["file_url"])
+        self.assertEqual(response.data["file_kind"], "video")
         self.assertEqual(response.data["description"], "Video shared in MLAI Slack")
 
     @patch("community_chat.slack_file_previews.requests.Session.get")
@@ -402,7 +403,7 @@ class CommunityChatSlackVideoTests(_SlackPreviewTestBase):
         self.assertEqual(response["Content-Range"], "bytes 3-5/10")
 
     def test_stream_rejects_forged_tokens(self):
-        response = APIClient().get(reverse("community_chat_link_preview_video_stream"), {"token": "forged"})
+        response = APIClient().get(reverse("community_chat_link_preview_file_stream"), {"token": "forged"})
 
         self.assertEqual(response.status_code, 403)
 
@@ -418,10 +419,101 @@ class CommunityChatSlackVideoTests(_SlackPreviewTestBase):
         self.assertEqual(response.status_code, 403)
 
     @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
-    def test_non_video_files_cannot_mint_stream_urls(self, get_client):
-        self.provider(get_client, {"ok": True, "file": {**VIDEO_FILE, "mimetype": "application/pdf",
-            "filetype": "pdf", "mp4": "", "thumb_video": ""}})
+    def test_external_files_cannot_mint_stream_urls(self, get_client):
+        self.provider(get_client, {"ok": True, "file": {**VIDEO_FILE, "mimetype": "application/vnd.google-apps.document",
+            "filetype": "gdoc", "mp4": "", "thumb_video": "", "is_external": True, "external_type": "gdrive"}})
 
-        response = self.client.get(reverse("community_chat_link_preview_video"), {"slack_file": "F0CFW8C6TAR"})
+        response = self.client.get(reverse("community_chat_link_preview_file"), {"slack_file": "F0CFW8C6TAR"})
 
         self.assertEqual(response.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+
+    def preview_of(self, get_client, file):
+        self.provider(get_client, {"ok": True, "file": {
+            "id": "F0CFW8C6TAR", "team_id": "TMLAI", "channels": ["CRANDOM"],
+            "permalink": VIDEO_FILE["permalink"], **file}})
+        response = self.client.get(reverse("community_chat_link_preview"), {"url": VIDEO_FILE["permalink"]})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.data
+
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
+    def test_audio_clip_returns_player_metadata(self, get_client):
+        data = self.preview_of(get_client, {
+            "title": "Voice memo", "mimetype": "audio/webm", "filetype": "webm",
+            "media_display_type": "audio", "duration_ms": 12500, "size": 40000,
+            "aac": "https://files.slack.com/files-tmb/T-F-x/voice.m4a",
+            "audio_wave_samples": [0, 40, 120, 55], "url_private_download": "https://files.slack.com/files-pri/T-F/voice.webm"})
+
+        self.assertEqual(data["file_kind"], "audio")
+        self.assertEqual(data["duration"], 12.5)
+        self.assertEqual(data["waveform"], [0, 40, 100, 55])
+        self.assertIn("/link-preview/file/?slack_file=", data["file_url"])
+        self.assertEqual(data["image_url"], "")
+
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
+    def test_snippet_returns_bounded_plain_preview(self, get_client):
+        data = self.preview_of(get_client, {
+            "title": "deploy.py", "mimetype": "text/plain", "filetype": "python", "mode": "snippet",
+            "pretty_type": "Python", "size": 900, "lines": 42,
+            "preview": "import os\x07\nprint('hi')", "preview_highlight": "<div>unsafe</div>",
+            "url_private_download": "https://files.slack.com/files-pri/T-F/deploy.py"})
+
+        self.assertEqual(data["file_kind"], "snippet")
+        self.assertEqual(data["preview_text"], "import os\nprint('hi')")
+        self.assertEqual(data["preview_lines"], 42)
+        self.assertEqual(data["pretty_type"], "Python")
+        self.assertNotIn("unsafe", str(data))
+
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
+    def test_documents_report_kind_size_and_page_thumbnail(self, get_client):
+        pdf = self.preview_of(get_client, {
+            "title": "Deck.pdf", "mimetype": "application/pdf", "filetype": "pdf", "pretty_type": "PDF",
+            "size": 2_400_000, "thumb_pdf": "https://files.slack.com/files-tmb/T-F-x/deck_thumb_pdf.png",
+            "url_private_download": "https://files.slack.com/files-pri/T-F/deck.pdf"})
+        sheet = self.preview_of(get_client, {
+            "title": "Budget.xlsx", "filetype": "xlsx", "pretty_type": "Excel Spreadsheet",
+            "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "size": 5000,
+            "url_private_download": "https://files.slack.com/files-pri/T-F/budget.xlsx"})
+
+        self.assertEqual((pdf["file_kind"], pdf["size"]), ("pdf", 2_400_000))
+        self.assertIn("slack_file=F0CFW8C6TAR", pdf["image_url"])
+        self.assertEqual(sheet["file_kind"], "spreadsheet")
+        self.assertEqual(sheet["image_url"], "")
+        self.assertIn("file_url", sheet)
+
+    @patch("community_chat.slack_file_previews.requests.Session.get")
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
+    def test_document_downloads_are_opaque_attachments(self, get_client, session_get):
+        self.provider(get_client, {"ok": True, "file": {
+            "id": "F0CFW8C6TAR", "team_id": "TMLAI", "channels": ["CRANDOM"],
+            "title": "page.html", "mimetype": "text/html", "filetype": "html",
+            "url_private_download": "https://files.slack.com/files-pri/T-F/page.html"}})
+        url = self.client.get(reverse("community_chat_link_preview_file"), {"slack_file": "F0CFW8C6TAR"}).data["stream_url"]
+        session_get.return_value = _FakeRangeResponse(
+            body=b"<script>x</script>", headers={"Content-Type": "text/html", "Content-Range": "bytes 0-17/18"})
+
+        response = APIClient().get(url, HTTP_RANGE="bytes=0-")
+
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response["Content-Type"], "application/octet-stream")
+        self.assertEqual(response["Content-Disposition"], "attachment")
+        self.assertIn("sandbox", response["Content-Security-Policy"])
+        self.assertEqual(session_get.call_args.args[0], "https://files.slack.com/files-pri/T-F/page.html")
+
+    @patch("community_chat.slack_file_previews.requests.Session.get")
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
+    def test_audio_streams_from_the_aac_transcode(self, get_client, session_get):
+        self.provider(get_client, {"ok": True, "file": {
+            "id": "F0CFW8C6TAR", "team_id": "TMLAI", "channels": ["CRANDOM"],
+            "title": "Voice memo", "mimetype": "audio/webm", "filetype": "webm",
+            "aac": "https://files.slack.com/files-tmb/T-F-x/voice.m4a",
+            "url_private_download": "https://files.slack.com/files-pri/T-F/voice.webm"}})
+        url = self.client.get(reverse("community_chat_link_preview_file"), {"slack_file": "F0CFW8C6TAR"}).data["stream_url"]
+        session_get.return_value = _FakeRangeResponse(
+            body=b"aac", headers={"Content-Type": "audio/mp4", "Content-Range": "bytes 0-2/3"})
+
+        response = APIClient().get(url, HTTP_RANGE="bytes=0-")
+
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response["Content-Type"], "audio/mp4")
+        self.assertEqual(session_get.call_args.args[0], "https://files.slack.com/files-tmb/T-F-x/voice.m4a")

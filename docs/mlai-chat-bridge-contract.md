@@ -944,18 +944,31 @@ JSON. Slack timeline images use an uncropped `thumb_1024` (or the next available
 is checked before either cache; account/workspace scopes and rendition keys remain
 separate. No Slack credential or private download URL is returned to clients.
 
-### Slack video playback (November 2026)
+### Slack file previews, playback and downloads (November 2026)
 
-`link-preview/` returns `duration` (seconds), `width`, `height` and
-`video_playback_url` for a Slack video the member can see; its `image_url` is
-Slack's `thumb_video` poster. `GET link-preview/video/?slack_file=F…`
+For a Slack file the member can see, `link-preview/` adds `file_kind` (`image`,
+`gif`, `video`, `audio`, `pdf`, `document`, `spreadsheet`, `presentation`,
+`snippet`, `email`, `canvas`, `archive`, `external` or `file`), plus `filetype`,
+`pretty_type` and `size` when Slack reports them. Kind-specific fields:
+`duration` (video, audio), `width`/`height` (video poster or image original),
+`waveform` (audio, up to 200 samples 0–100), `preview_text`/`preview_lines`
+(snippet, spreadsheet, email: plain text, at most 60 lines / 4,000 characters,
+control characters removed; Slack's HTML highlight is never returned) and
+`email_subject`/`email_from`. Video posters use `thumb_video`; PDFs and other
+documents use Slack's page thumbnail as `image_url`. GIFs larger than the 10 MB
+proxy limit fall back to Slack's static rendition.
+
+`file_url` is present for every non-external file. `GET link-preview/file/?slack_file=F…`
 (account-authenticated) re-checks file access and returns `stream_url`, a signed
 URL bound to the caller's MLAI Chat session that expires after six hours.
-`GET link-preview/video/stream/?token=…` serves at most 4 MiB per request as
-`206 Partial Content` with `Content-Range`, preferring Slack's `mp4`
-transcode. Each range re-validates the session, community access and Slack file
-authority, and is capped at 240 requests a minute per session. Clients mint the
-URL when playback starts and download videos as consecutive ranges.
+`GET link-preview/file/stream/?token=…` serves at most 4 MiB per request as
+`206 Partial Content` with `Content-Range`. Video prefers Slack's `mp4`
+transcode and audio its `aac` transcode, served with their media type; every
+other file is served as `application/octet-stream` with `Content-Disposition:
+attachment` and a sandbox CSP. Each range re-validates the session, community
+access and Slack file authority, and is capped at 240 requests a minute per
+session. Clients mint the URL when playback or a download starts and download
+files as consecutive ranges.
 
 `GET slack/?read_state=1&cursor=0` returns `channels`, `next_cursor`, and
 `retry_after_seconds`. Each channel has `available`, `last_read`, `latest_ts`,

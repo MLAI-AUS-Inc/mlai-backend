@@ -1203,10 +1203,10 @@ class LinkPreviewView(APIView):
             payload["image_url"] = request.build_absolute_uri(
                 f"{image_path}?{urlencode({'slack_file': slack_preview.file_id})}"
             )
-        if slack_preview and slack_preview.is_video:
-            video_path = reverse("community_chat_link_preview_video")
-            payload["video_playback_url"] = request.build_absolute_uri(
-                f"{video_path}?{urlencode({'slack_file': slack_preview.file_id})}"
+        if slack_preview and slack_preview.is_streamable:
+            file_path = reverse("community_chat_link_preview_file")
+            payload["file_url"] = request.build_absolute_uri(
+                f"{file_path}?{urlencode({'slack_file': slack_preview.file_id})}"
             )
         if not slack_preview and preview.image_url:
             image_path = reverse("community_chat_link_preview_image")
@@ -1309,11 +1309,11 @@ def _preview_pending_response(exc, endpoint):
     return response
 
 
-class LinkPreviewVideoView(APIView):
-    """Mint a short-lived stream URL for one Slack video the member can see.
+class LinkPreviewFileView(APIView):
+    """Mint a short-lived stream URL for one Slack file the member can see.
 
-    Media elements cannot send the account bearer token, so playback uses a
-    signed URL bound to this MLAI Chat session instead.
+    Media elements cannot send the account bearer token, so playback and
+    downloads use a signed URL bound to this MLAI Chat session instead.
     """
 
     authentication_classes = (CommunityChatAccountAuthentication,)
@@ -1322,9 +1322,9 @@ class LinkPreviewVideoView(APIView):
     community_chat_throttle_scope = "community_chat_link_preview"
 
     def get(self, request):
-        from .slack_file_videos import (
+        from .slack_file_streams import (
             STREAM_TOKEN_MAX_AGE_SECONDS,
-            authorize_slack_video,
+            authorize_slack_file,
             issue_stream_token,
         )
 
@@ -1333,17 +1333,17 @@ class LinkPreviewVideoView(APIView):
         try:
             if session is None:
                 raise SlackFilePreviewError("An MLAI Chat session is required.")
-            metadata = authorize_slack_video(file_id, user=request.user)
+            metadata = authorize_slack_file(file_id, user=request.user)
         except SlackFilePreviewDeferred as exc:
-            return _preview_pending_response(exc, "link_preview_video")
+            return _preview_pending_response(exc, "link_preview_file")
         except SlackFilePreviewError as exc:
             response = Response(
-                {"error": "preview_video_unavailable", "detail": str(exc)},
+                {"error": "preview_file_unavailable", "detail": str(exc)},
                 status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
             response["Cache-Control"] = "private, no-store"
             return response
-        stream_path = reverse("community_chat_link_preview_video_stream")
+        stream_path = reverse("community_chat_link_preview_file_stream")
         response = Response({
             "stream_url": request.build_absolute_uri(
                 f"{stream_path}?{urlencode({'token': issue_stream_token(session, file_id)})}"
@@ -1355,12 +1355,12 @@ class LinkPreviewVideoView(APIView):
         return response
 
 
-def link_preview_video_stream(request):
-    """Serve one bounded byte range of a Slack video to a signed media request."""
-    from .slack_file_videos import (
-        SlackVideoStreamDenied,
+def link_preview_file_stream(request):
+    """Serve one bounded byte range of a Slack file to a signed request."""
+    from .slack_file_streams import (
+        SlackFileStreamDenied,
         allow_stream_request,
-        fetch_slack_video_range,
+        fetch_slack_file_range,
         stream_session,
     )
 
@@ -1375,19 +1375,19 @@ def link_preview_video_stream(request):
         return plain(405, {"Allow": "GET, HEAD"})
     try:
         session, file_id = stream_session(request.GET.get("token"))
-    except SlackVideoStreamDenied:
+    except SlackFileStreamDenied:
         return plain(403)
     if not allow_stream_request(session.pk):
         return plain(429, {"Retry-After": "60"})
     try:
-        chunk = fetch_slack_video_range(
+        chunk = fetch_slack_file_range(
             file_id,
             user=session.user,
             range_header=request.headers.get("Range", ""),
         )
     except SlackFilePreviewDeferred as exc:
         logger.info(
-            "community_chat_dependency_wait endpoint=link_preview_video_stream dependency=slack reason=%s retry_after_seconds=%s",
+            "community_chat_dependency_wait endpoint=link_preview_file_stream dependency=slack reason=%s retry_after_seconds=%s",
             exc.reason, exc.retry_after,
         )
         return plain(503, {"Retry-After": str(exc.retry_after)})
@@ -1405,6 +1405,10 @@ def link_preview_video_stream(request):
     response["Accept-Ranges"] = "bytes"
     response["Cache-Control"] = "private, no-store"
     response["X-Content-Type-Options"] = "nosniff"
+    if chunk.content_type == "application/octet-stream":
+        # Documents never render on the API origin, even if opened directly.
+        response["Content-Disposition"] = "attachment"
+        response["Content-Security-Policy"] = "sandbox; default-src 'none'"
     # Native webviews load media from a non-HTTP origin; the URL is signed.
     response["Cross-Origin-Resource-Policy"] = "cross-origin"
     return response

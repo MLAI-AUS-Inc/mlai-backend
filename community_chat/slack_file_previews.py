@@ -87,7 +87,8 @@ class SlackFilePreview:
     content_type: str
     has_thumbnail: bool = False
     is_video: bool = False
-    video_metadata: dict | None = None
+    file_metadata: dict | None = None
+    is_streamable: bool = False
 
     @property
     def is_image(self) -> bool:
@@ -102,8 +103,7 @@ class SlackFilePreview:
             "image_url": "",
             "image_is_thumbnail": self.content_type not in ALLOWED_IMAGE_TYPES,
         }
-        if self.is_video:
-            payload.update(self.video_metadata or {})
+        payload.update(self.file_metadata or {})
         return payload
 
 
@@ -145,9 +145,10 @@ def _preview(file_id, raw_url, file_data):
     title = str(file_data.get("title") or file_data.get("name") or "Slack file").strip()
     content_type = str(file_data.get("mimetype") or "").split(";", 1)[0].strip().lower()
     href = str(file_data.get("permalink") or raw_url).strip()
-    from .slack_file_videos import is_slack_video, slack_video_metadata
+    from .slack_file_streams import slack_file_metadata, slack_stream_source
 
-    is_video = is_slack_video(file_data)
+    metadata = slack_file_metadata(file_data)
+    is_video = metadata["file_kind"] == "video"
     filetype = "image" if content_type in ALLOWED_IMAGE_TYPES else "video" if is_video else "file"
     return SlackFilePreview(
         file_id=file_id,
@@ -158,7 +159,8 @@ def _preview(file_id, raw_url, file_data):
         content_type=content_type,
         has_thumbnail=bool(_slack_thumbnail_url(file_data)),
         is_video=is_video,
-        video_metadata=slack_video_metadata(file_data) if is_video else None,
+        file_metadata=metadata,
+        is_streamable=bool(slack_stream_source(file_data)[0]),
     )
 
 
@@ -181,7 +183,14 @@ def _slack_thumbnail_url(file_data):
 
 def slack_image_download_url(file_data, *, original=False):
     """Use Slack's uncropped display rendition, preserving animated originals."""
-    if not original and file_data.get("mimetype") != "image/gif":
+    oversized_gif = (
+        file_data.get("mimetype") == "image/gif"
+        and isinstance(file_data.get("size"), int)
+        and file_data["size"] > SLACK_IMAGE_LIMIT_BYTES
+    )
+    # GIFs keep their animation unless they exceed the proxy limit; then
+    # Slack's static rendition is better than no preview at all.
+    if not original and (file_data.get("mimetype") != "image/gif" or oversized_gif):
         thumbnail = _slack_thumbnail_url(file_data)
         if thumbnail:
             return thumbnail
