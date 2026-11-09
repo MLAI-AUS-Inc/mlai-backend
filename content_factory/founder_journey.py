@@ -79,6 +79,9 @@ OWNER_CANCELLATIONS = frozenset({"owner_cancelled", "draft_deleted", "article_di
 EMAIL_CLAUSE = "We'll email you when it's ready."
 COPY = {
     "website": ("What's your startup's website?", "We'll read it and fill in the rest.", "Add your website"),
+    "connect_github": ("Connect your website on GitHub",
+                       "Your first article is on us once your website and articles page are connected.",
+                       "Continue setup"),
     "first_free_topic": ("Your first article is on us", "Here's your first article: {topic}", "Write my first article · free"),
     "first_free": ("Your first article is on us", "Pick a topic and we'll write it.", "Write my first article · free"),
     "first_paid": ("Your articles", "Pick a topic and we'll write it.", "Write an article · {price} points"),
@@ -735,6 +738,13 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
 
     if decision is None and not has_website and not _one_liner(organization):
         decision = _decide("website", None, "website", next_kind="add_website")
+
+    if decision is None and run is None:
+        from .content_first_article import website_gate_open
+        if not website_gate_open(organization):
+            # GitHub-first onboarding: the guided setup (GitHub, readers,
+            # authors, articles page) comes before any article is written.
+            decision = _decide("website", None, "connect_github", next_kind="add_website")
 
     if decision is None:
         decision = _first_article_decision(organization=organization, company=company, config=config, user=user,
