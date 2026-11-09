@@ -944,6 +944,19 @@ JSON. Slack timeline images use an uncropped `thumb_1024` (or the next available
 is checked before either cache; account/workspace scopes and rendition keys remain
 separate. No Slack credential or private download URL is returned to clients.
 
+### Slack video playback (November 2026)
+
+`link-preview/` returns `duration` (seconds), `width`, `height` and
+`video_playback_url` for a Slack video the member can see; its `image_url` is
+Slack's `thumb_video` poster. `GET link-preview/video/?slack_file=F…`
+(account-authenticated) re-checks file access and returns `stream_url`, a signed
+URL bound to the caller's MLAI Chat session that expires after six hours.
+`GET link-preview/video/stream/?token=…` serves at most 4 MiB per request as
+`206 Partial Content` with `Content-Range`, preferring Slack's `mp4`
+transcode. Each range re-validates the session, community access and Slack file
+authority, and is capped at 240 requests a minute per session. Clients mint the
+URL when playback starts and download videos as consecutive ranges.
+
 `GET slack/?read_state=1&cursor=0` returns `channels`, `next_cursor`, and
 `retry_after_seconds`. Each channel has `available`, `last_read`, `latest_ts`,
 `is_unread`, `unread_count`, `count_source`, and `fetched_at`. Missing source state

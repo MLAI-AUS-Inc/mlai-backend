@@ -86,13 +86,15 @@ class SlackFilePreview:
     site_name: str
     content_type: str
     has_thumbnail: bool = False
+    is_video: bool = False
+    video_metadata: dict | None = None
 
     @property
     def is_image(self) -> bool:
         return self.content_type in ALLOWED_IMAGE_TYPES or self.has_thumbnail
 
-    def as_payload(self) -> dict[str, str | bool]:
-        return {
+    def as_payload(self) -> dict[str, str | bool | int | float]:
+        payload = {
             "href": self.href,
             "title": self.title,
             "description": self.description,
@@ -100,6 +102,9 @@ class SlackFilePreview:
             "image_url": "",
             "image_is_thumbnail": self.content_type not in ALLOWED_IMAGE_TYPES,
         }
+        if self.is_video:
+            payload.update(self.video_metadata or {})
+        return payload
 
 
 @dataclass(frozen=True)
@@ -140,7 +145,10 @@ def _preview(file_id, raw_url, file_data):
     title = str(file_data.get("title") or file_data.get("name") or "Slack file").strip()
     content_type = str(file_data.get("mimetype") or "").split(";", 1)[0].strip().lower()
     href = str(file_data.get("permalink") or raw_url).strip()
-    filetype = "image" if content_type in ALLOWED_IMAGE_TYPES else "file"
+    from .slack_file_videos import is_slack_video, slack_video_metadata
+
+    is_video = is_slack_video(file_data)
+    filetype = "image" if content_type in ALLOWED_IMAGE_TYPES else "video" if is_video else "file"
     return SlackFilePreview(
         file_id=file_id,
         href=href,
@@ -149,11 +157,15 @@ def _preview(file_id, raw_url, file_data):
         site_name="MLAI Slack",
         content_type=content_type,
         has_thumbnail=bool(_slack_thumbnail_url(file_data)),
+        is_video=is_video,
+        video_metadata=slack_video_metadata(file_data) if is_video else None,
     )
 
 
 def _slack_thumbnail_url(file_data):
     for field in (
+        # Slack's video poster frame; image files never carry it.
+        "thumb_video",
         "thumb_1024",
         "thumb_960",
         "thumb_800",
@@ -285,14 +297,17 @@ def _validate_download_url(url):
         raise SlackFilePreviewError("The Slack image URL was unavailable.")
 
 
-def _download_response(session, url, token):
+IMAGE_ACCEPT = "image/avif,image/webp,image/png,image/jpeg,image/gif;q=0.8"
+
+
+def _download_response(session, url, token, *, headers=None):
     # Slack remote-file URLs are app supplied. Validate every hop before
     # attaching the member token; never follow an external or HTTP redirect.
+    request_headers = {"Accept": IMAGE_ACCEPT, **(headers or {})}
     for _ in range(3):
         _validate_download_url(url)
         response = session.get(url, allow_redirects=False, stream=True, timeout=SLACK_REQUEST_TIMEOUT,
-            headers={"Accept": "image/avif,image/webp,image/png,image/jpeg,image/gif;q=0.8",
-                     "Authorization": f"Bearer {token}"})
+            headers={**request_headers, "Authorization": f"Bearer {token}"})
         if not (response.is_redirect or response.is_permanent_redirect):
             return response
         destination = response.headers.get("Location", "")

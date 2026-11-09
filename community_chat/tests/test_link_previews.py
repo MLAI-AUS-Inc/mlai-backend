@@ -48,7 +48,7 @@ def _public_key(private_int):
 
 
 @override_settings(SLACK_BRIDGE_BOT_TOKEN="xoxb-test", MESSAGE_SYNC_ENABLED=True, SLACK_OWNER_INVENTORY_ENABLED=True, MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID="TMLAI", COMMUNITY_CHAT_SIGNUP_ENABLED=False)
-class CommunityChatLinkPreviewTests(TestCase):
+class _SlackPreviewTestBase(TestCase):
     def setUp(self):
         cache.clear()
         self.user = get_user_model().objects.create_user(
@@ -97,6 +97,10 @@ class CommunityChatLinkPreviewTests(TestCase):
 
     def tearDown(self):
         cache.clear()
+
+
+@override_settings(SLACK_BRIDGE_BOT_TOKEN="xoxb-test", MESSAGE_SYNC_ENABLED=True, SLACK_OWNER_INVENTORY_ENABLED=True, MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID="TMLAI", COMMUNITY_CHAT_SIGNUP_ENABLED=False)
+class CommunityChatLinkPreviewTests(_SlackPreviewTestBase):
 
     def test_private_network_urls_are_rejected(self):
         with self.assertRaises(LinkPreviewError):
@@ -297,3 +301,127 @@ class CommunityChatLinkPreviewTests(TestCase):
             session_get.call_args.kwargs["headers"]["Authorization"],
             "Bearer xoxp-owner",
         )
+
+
+class _FakeRangeResponse(_FakeResponse):
+    def __init__(self, *, body, status_code=206, headers=None):
+        super().__init__(body=body, content_type="video/mp4")
+        self.status_code = status_code
+        self.headers.update(headers or {})
+
+
+VIDEO_FILE = {
+    "id": "F0CFW8C6TAR", "team_id": "TMLAI",
+    "title": "Founder story.mp4",
+    "name": "founder_story.mp4",
+    "mimetype": "video/mp4",
+    "filetype": "mp4",
+    "channels": ["CRANDOM"],
+    "duration_ms": 95500,
+    "thumb_video": "https://files.slack.com/files-tmb/T-F-x/founder_story_thumb_video.jpg",
+    "thumb_video_w": 1920,
+    "thumb_video_h": 1080,
+    "mp4": "https://files.slack.com/files-tmb/T-F-x/founder_story.mp4",
+    "permalink": "https://mlai-aus.slack.com/files/U123/F0CFW8C6TAR/founder_story.mp4",
+    "url_private_download": "https://files.slack.com/files-pri/T-F/download/founder_story.mp4",
+}
+
+
+@override_settings(SLACK_BRIDGE_BOT_TOKEN="xoxb-test", MESSAGE_SYNC_ENABLED=True, SLACK_OWNER_INVENTORY_ENABLED=True, MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID="TMLAI", COMMUNITY_CHAT_SIGNUP_ENABLED=False)
+class CommunityChatSlackVideoTests(_SlackPreviewTestBase):
+    def setUp(self):
+        super().setUp()
+        self.member()
+        CommunityBridgeChannel.objects.create(audience="community", slack_visibility="public", mirror_decision="mirror",
+            slack_workspace_id="TMLAI", slack_channel_id="CRANDOM",
+            destination_platform=CommunityBridgePlatform.BUZZ, destination_channel_id="buzz-random")
+
+    def stream_url(self, get_client):
+        self.provider(get_client, {"ok": True, "file": dict(VIDEO_FILE)})
+        response = self.client.get(reverse("community_chat_link_preview_video"), {"slack_file": "F0CFW8C6TAR"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Cache-Control"], "private, no-store")
+        return response.data["stream_url"]
+
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
+    def test_slack_video_preview_returns_poster_duration_and_playback_url(self, get_client):
+        self.provider(get_client, {"ok": True, "file": dict(VIDEO_FILE)})
+
+        response = self.client.get(reverse("community_chat_link_preview"), {"url": VIDEO_FILE["permalink"]})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("slack_file=F0CFW8C6TAR", response.data["image_url"])
+        self.assertTrue(response.data["image_is_thumbnail"])
+        self.assertEqual(response.data["duration"], 95.5)
+        self.assertEqual((response.data["width"], response.data["height"]), (1920, 1080))
+        self.assertIn("/link-preview/video/?slack_file=F0CFW8C6TAR", response.data["video_playback_url"])
+        self.assertEqual(response.data["description"], "Video shared in MLAI Slack")
+
+    @patch("community_chat.slack_file_previews.requests.Session.get")
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
+    def test_slack_video_poster_uses_the_video_thumbnail(self, get_client, session_get):
+        self.provider(get_client, {"ok": True, "file": dict(VIDEO_FILE)})
+        session_get.return_value = _FakeResponse(body=b"\xff\xd8poster", content_type="image/jpeg")
+
+        response = self.client.get(reverse("community_chat_link_preview_image"), {"slack_file": "F0CFW8C6TAR"})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(session_get.call_args.args[0], VIDEO_FILE["thumb_video"])
+
+    @patch("community_chat.slack_file_previews.requests.Session.get")
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
+    def test_signed_stream_serves_a_bounded_range_with_member_credentials(self, get_client, session_get):
+        url = self.stream_url(get_client)
+        session_get.return_value = _FakeRangeResponse(
+            body=b"abcdefghij", headers={"Content-Range": "bytes 100-109/5000000"})
+
+        response = APIClient().get(url, HTTP_RANGE="bytes=100-")
+
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.content, b"abcdefghij")
+        self.assertEqual(response["Content-Range"], "bytes 100-109/5000000")
+        self.assertEqual(response["Content-Type"], "video/mp4")
+        self.assertEqual(response["Accept-Ranges"], "bytes")
+        self.assertEqual(session_get.call_args.args[0], VIDEO_FILE["mp4"])
+        headers = session_get.call_args.kwargs["headers"]
+        self.assertEqual(headers["Authorization"], "Bearer xoxp-owner")
+        self.assertEqual(headers["Range"], f"bytes=100-{100 + 4 * 1024 * 1024 - 1}")
+        self.assertNotIn("xoxp", url)
+
+    @patch("community_chat.slack_file_previews.requests.Session.get")
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
+    def test_stream_slices_a_source_that_ignores_range(self, get_client, session_get):
+        url = self.stream_url(get_client)
+        session_get.return_value = _FakeRangeResponse(
+            body=b"0123456789", status_code=200, headers={"Content-Length": "10"})
+
+        response = APIClient().get(url, HTTP_RANGE="bytes=3-5")
+
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.content, b"345")
+        self.assertEqual(response["Content-Range"], "bytes 3-5/10")
+
+    def test_stream_rejects_forged_tokens(self):
+        response = APIClient().get(reverse("community_chat_link_preview_video_stream"), {"token": "forged"})
+
+        self.assertEqual(response.status_code, 403)
+
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
+    def test_stream_stops_when_the_chat_session_is_revoked(self, get_client):
+        from community_chat.models import CommunityChatAccountSession
+
+        url = self.stream_url(get_client)
+        CommunityChatAccountSession.objects.filter(user=self.user).update(revoked_at=timezone.now())
+
+        response = APIClient().get(url, HTTP_RANGE="bytes=0-")
+
+        self.assertEqual(response.status_code, 403)
+
+    @patch("integrations.services.slack_dm_mirror._invoke_slack_with_locked_connection")
+    def test_non_video_files_cannot_mint_stream_urls(self, get_client):
+        self.provider(get_client, {"ok": True, "file": {**VIDEO_FILE, "mimetype": "application/pdf",
+            "filetype": "pdf", "mp4": "", "thumb_video": ""}})
+
+        response = self.client.get(reverse("community_chat_link_preview_video"), {"slack_file": "F0CFW8C6TAR"})
+
+        self.assertEqual(response.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
