@@ -80,6 +80,15 @@ class NativeInstallationStateView(NativeOwnerView):
         return Response(native_installations.installation_payload(row))
 
 
+class NativeInstallationPictureView(NativeOwnerView):
+    """Owner-chosen avatar for their personal Dot, uploaded to MLAI Chat media first."""
+
+    def post(self, request, installation_id):
+        data = schema.validated(schema.PictureSerializer, request.data)
+        row = native_installations.set_picture(request.user, installation_id, data["picture"])
+        return Response(native_installations.installation_payload(row))
+
+
 class NativePersonalMentionView(NativeOwnerView):
     """Submit identifiers for an owner's signed, per-message context consent."""
 

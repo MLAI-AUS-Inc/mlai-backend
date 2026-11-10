@@ -404,6 +404,9 @@ class RegistrationTests(SimpleTestCase):
         from agent_runtime.native_views import NativePersonalMentionView
         match = resolve(f"/api/v1/agent-runtime/installations/{uuid4()}/mentions/")
         self.assertIs(match.func.view_class, NativePersonalMentionView)
+        from agent_runtime.native_views import NativeInstallationPictureView
+        match = resolve(f"/api/v1/agent-runtime/installations/{uuid4()}/picture/")
+        self.assertIs(match.func.view_class, NativeInstallationPictureView)
 
     @override_settings(AGENT_RUNTIME_ENABLED=False)
     def test_every_registered_runtime_route_stops_before_database_access(self):

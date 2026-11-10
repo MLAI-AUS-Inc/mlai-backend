@@ -10,6 +10,7 @@ urlpatterns = [
     path("enrollments/<uuid:enrollment_id>/confirm/", native_views.NativeEnrollmentConfirmView.as_view()),
     path("installations/<uuid:installation_id>/state/", native_views.NativeInstallationStateView.as_view()),
     path("installations/<uuid:installation_id>/revoke/", views.RevokeInstallationView.as_view()),
+    path("installations/<uuid:installation_id>/picture/", native_views.NativeInstallationPictureView.as_view()),
     # Personal-context requests from desktop/web/iOS. Production mounts only this
     # module, so the route must live here, not only in agent_runtime/urls.py.
     path("installations/<uuid:installation_id>/mentions/", native_views.NativePersonalMentionView.as_view()),

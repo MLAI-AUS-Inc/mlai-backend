@@ -100,6 +100,7 @@ remains `24h`. Changing these defaults is a separate owner deployment action.
 | `AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY` | `false` | true / false |
 | `AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY` | `24h` | 24h / grant |
 | `AGENT_RUNTIME_NATIVE_DURABLE_WATCH` | `false` | true / false |
+| `AGENT_RUNTIME_NATIVE_GUEST_REPLY_ENABLED` | `false` | true / false (requires personal conversation access) |
 | `AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS` | `600` | 60–86400 |
 | `AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS` | `86400` | 600–604800 |
 | `AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED` | `false` | true / false |
@@ -366,6 +367,36 @@ The personal-context request endpoint
 `POST /api/v1/agent-runtime/installations/<id>/mentions/` was previously only in
 `agent_runtime/urls.py`, which production does not mount, so personal-context
 requests returned 404. It is now in `native_setup_urls.py`.
+
+### Fixed reply to other members
+
+When someone other than the owner tags a personal Dot, the native worker posts
+one short, MLAI-written reply as the Dot, threaded under their message and
+addressed to them ("I only take requests from the person I work for, so I
+haven't read or passed on your message"). The Dot provider is never contacted
+and no message text is read.
+
+- Switch: `AGENT_RUNTIME_NATIVE_GUEST_REPLY_ENABLED` (default `false`). It
+  requires `AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED` here and the relay's
+  personal-conversation capability (`MLAI_CHAT_AGENT_PERSONAL_CONTEXT_ENABLED`),
+  and a relay with the `guest_mentions` / `guest_reply` operations.
+- Each tick scans the last 30 minutes of mentions. The relay returns
+  identifiers only and leaves out mentions the Dot already answered, and refuses
+  a second answer, so the worker keeps no reply state and no migration is needed.
+- Only active installations whose latest grant is not revoked, whose owner is
+  active and whose bound device is unchanged ever reply. At most 50 guest replies
+  per Dot per rolling day. Each reply is audited as `native.guest.replied` with
+  event identifiers only.
+
+### Dot avatar
+
+`POST /api/v1/agent-runtime/installations/<id>/picture/` with
+`{"picture": "<MLAI Chat media URL>"}` (or `null` to clear) re-signs the Dot's
+kind 0 profile with that picture and publishes it through the enrollment path.
+Upload the image to MLAI Chat media first: the relay accepts only a
+`<sha256>.<png|jpg|jpeg|webp|gif>` URL directly under its own media origin.
+Reconnecting keeps the chosen picture, and installation payloads include
+`picture`. OpenAI exposes no API for a Dot's own avatar, so the owner chooses it.
 
 Official contracts: [Dot app connections](https://learn.chatgpt.com/docs/dots/computers-and-apps),
 [action review](https://learn.chatgpt.com/docs/dots/controls), and
