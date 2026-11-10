@@ -72,7 +72,8 @@ class CampaignWaveTests(CrmApiMixin, TestCase):
         self.news.mailbox.save()
         cache.set('crm:deliverability:healthy', True, 3600)
         for domain, provider in (('google.test', 'google'), ('microsoft.test', 'microsoft')):
-            MailDomainInfo.objects.create(domain=domain, provider=provider, mx=['mx.' + domain], has_mx=True, checked_at=self.now)
+            MailDomainInfo.objects.create(domain=domain, provider=provider, mx=['mx.' + domain], has_mx=True, checked_at=self.now - timedelta(hours=1))
+        # A fixed clock: rows checked after it would read as unchecked domains.
 
     def blast(self, **fields):
         return Blast.objects.create(stream=self.news, mailbox=self.news.mailbox, created_by=self.admin,
@@ -83,7 +84,7 @@ class CampaignWaveTests(CrmApiMixin, TestCase):
     def contacts(self, count):
         offset = Contact.objects.count()
         return Contact.objects.bulk_create([Contact(email=f'person-{offset + n}@{"google.test" if n % 2 else "microsoft.test"}',
-            marketing_consent='granted', marketing_consent_at=self.now, source='manual') for n in range(count)])
+            marketing_consent='granted', marketing_consent_at=self.now - timedelta(days=1), source='manual') for n in range(count)])
 
     def queue(self, count=100, **fields):
         self.contacts(count)

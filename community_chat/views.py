@@ -1203,7 +1203,12 @@ class LinkPreviewView(APIView):
             payload["image_url"] = request.build_absolute_uri(
                 f"{image_path}?{urlencode({'slack_file': slack_preview.file_id})}"
             )
-        elif not slack_preview and preview.image_url:
+        if slack_preview and slack_preview.is_streamable:
+            file_path = reverse("community_chat_link_preview_file")
+            payload["file_url"] = request.build_absolute_uri(
+                f"{file_path}?{urlencode({'slack_file': slack_preview.file_id})}"
+            )
+        if not slack_preview and preview.image_url:
             image_path = reverse("community_chat_link_preview_image")
             payload["image_url"] = request.build_absolute_uri(
                 f"{image_path}?{urlencode({'url': preview.image_url})}"
@@ -1284,6 +1289,129 @@ class LinkPreviewImageView(APIView):
         )
         response["Cross-Origin-Resource-Policy"] = "same-site"
         return response
+
+
+def _preview_pending_response(exc, endpoint):
+    logger.info(
+        "community_chat_dependency_wait endpoint=%s dependency=slack reason=%s retry_after_seconds=%s",
+        endpoint, exc.reason, exc.retry_after,
+    )
+    response = Response(
+        {
+            "error": "preview_pending",
+            "detail": str(exc),
+            "retry_after_seconds": exc.retry_after,
+        },
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+    response["Retry-After"] = str(exc.retry_after)
+    response["Cache-Control"] = "private, no-store"
+    return response
+
+
+class LinkPreviewFileView(APIView):
+    """Mint a short-lived stream URL for one Slack file the member can see.
+
+    Media elements cannot send the account bearer token, so playback and
+    downloads use a signed URL bound to this MLAI Chat session instead.
+    """
+
+    authentication_classes = (CommunityChatAccountAuthentication,)
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [CommunityChatScopedThrottle]
+    community_chat_throttle_scope = "community_chat_link_preview"
+
+    def get(self, request):
+        from .slack_file_streams import (
+            STREAM_TOKEN_MAX_AGE_SECONDS,
+            authorize_slack_file,
+            issue_stream_token,
+        )
+
+        file_id = str(request.query_params.get("slack_file") or "").strip().upper()
+        session = getattr(request, "community_chat_account_session", None)
+        try:
+            if session is None:
+                raise SlackFilePreviewError("An MLAI Chat session is required.")
+            metadata = authorize_slack_file(file_id, user=request.user)
+        except SlackFilePreviewDeferred as exc:
+            return _preview_pending_response(exc, "link_preview_file")
+        except SlackFilePreviewError as exc:
+            response = Response(
+                {"error": "preview_file_unavailable", "detail": str(exc)},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+            response["Cache-Control"] = "private, no-store"
+            return response
+        stream_path = reverse("community_chat_link_preview_file_stream")
+        response = Response({
+            "stream_url": request.build_absolute_uri(
+                f"{stream_path}?{urlencode({'token': issue_stream_token(session, file_id)})}"
+            ),
+            "expires_in": STREAM_TOKEN_MAX_AGE_SECONDS,
+            **metadata,
+        })
+        response["Cache-Control"] = "private, no-store"
+        return response
+
+
+def link_preview_file_stream(request):
+    """Serve one bounded byte range of a Slack file to a signed request."""
+    from .slack_file_streams import (
+        SlackFileStreamDenied,
+        allow_stream_request,
+        fetch_slack_file_range,
+        stream_session,
+    )
+
+    def plain(status_code, extra=None):
+        response = HttpResponse(status=status_code)
+        response["Cache-Control"] = "private, no-store"
+        for key, value in (extra or {}).items():
+            response[key] = value
+        return response
+
+    if request.method not in ("GET", "HEAD"):
+        return plain(405, {"Allow": "GET, HEAD"})
+    try:
+        session, file_id = stream_session(request.GET.get("token"))
+    except SlackFileStreamDenied:
+        return plain(403)
+    if not allow_stream_request(session.pk):
+        return plain(429, {"Retry-After": "60"})
+    try:
+        chunk = fetch_slack_file_range(
+            file_id,
+            user=session.user,
+            range_header=request.headers.get("Range", ""),
+        )
+    except SlackFilePreviewDeferred as exc:
+        logger.info(
+            "community_chat_dependency_wait endpoint=link_preview_file_stream dependency=slack reason=%s retry_after_seconds=%s",
+            exc.reason, exc.retry_after,
+        )
+        return plain(503, {"Retry-After": str(exc.retry_after)})
+    except SlackFilePreviewError:
+        return plain(404)
+    if chunk.status == 416:
+        return plain(416, {"Content-Range": chunk.content_range, "Accept-Ranges": "bytes"})
+    response = HttpResponse(
+        b"" if request.method == "HEAD" else chunk.body,
+        status=206,
+        content_type=chunk.content_type,
+    )
+    response["Content-Range"] = chunk.content_range
+    response["Content-Length"] = str(len(chunk.body))
+    response["Accept-Ranges"] = "bytes"
+    response["Cache-Control"] = "private, no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    if chunk.content_type == "application/octet-stream":
+        # Documents never render on the API origin, even if opened directly.
+        response["Content-Disposition"] = "attachment"
+        response["Content-Security-Policy"] = "sandbox; default-src 'none'"
+    # Native webviews load media from a non-HTTP origin; the URL is signed.
+    response["Cross-Origin-Resource-Policy"] = "cross-origin"
+    return response
 
 
 class SlackOriginMessageDeleteView(APIView):

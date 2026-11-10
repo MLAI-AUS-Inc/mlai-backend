@@ -30,7 +30,7 @@ class FounderJourneyCorsTests(SimpleTestCase):
         response = self.client.get("/healthz/live", HTTP_ORIGIN=ORIGIN)
         self.assertEqual(response["Access-Control-Allow-Origin"], ORIGIN)
         exposed = {value.strip().lower() for value in response["Access-Control-Expose-Headers"].split(",")}
-        self.assertEqual(exposed, {"x-request-id", "retry-after", "etag"})
+        self.assertEqual(exposed, {"x-request-id", "retry-after", "etag", "content-range"})
 
     def test_settings_entries(self):
         self.assertIn("if-none-match", settings.CORS_ALLOW_HEADERS)
