@@ -138,6 +138,8 @@ class ReconfirmationDatabaseTests(CrmApiMixin, TestCase):
 
     def test_real_dispatcher_uses_personal_links_and_ten_percent_shared_daily_cap(self):
         self.now = datetime(2026, 11, 9, 9, tzinfo=volume.MELBOURNE)
+        # The domain row must not postdate the fixed clock, or it reads as unchecked.
+        MailDomainInfo.objects.update(checked_at=self.now - timedelta(hours=1))
         for n in range(100): self.person(f'person-{n}')
         draft = reconfirmation.prepare_draft('news', actor=self.admin, now=self.now)
         cache.set('crm:deliverability:healthy', True, 3600)
