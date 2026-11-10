@@ -353,8 +353,10 @@ CORS_ALLOW_HEADERS = (
     # with If-None-Match and reads the ETag cross-origin.
     "if-none-match",
     "if-match",
+    # MLAI Chat downloads Slack videos as signed byte ranges.
+    "range",
 )
-CORS_EXPOSE_HEADERS = ["X-Request-ID", "Retry-After", "ETag"]
+CORS_EXPOSE_HEADERS = ["X-Request-ID", "Retry-After", "ETag", "Content-Range"]
 
 # Bound request buffering before application-specific parsers run. Larger
 # uploads use the dedicated streaming/media paths rather than unbounded Django
