@@ -617,6 +617,11 @@ def _setup_surface(config, journey, *, goal=None):
             error = WebsiteAuthorityError("articles_page_choice_required", "Choose the articles page to prepare.", retryable=False)
             error.user_action = {"id": "choose_articles_page", "candidates": candidates}
             raise error
+        # An "ambiguous" scan with no listing page at all has nothing to choose
+        # between. Tiger Tutor (6 Nov 2026) stopped here 41 times with a
+        # non-retryable "scan the repository" that no scan could change. Create
+        # the default page, as choose_page() already does for an empty list.
+        return "none", "/articles"
     raise WebsiteAuthorityError("article_surface_unresolved", "Scan the repository to identify an articles page before setup.", retryable=False)
 
 

@@ -255,6 +255,20 @@ class PrepareJourneyReplayTests(SimpleTestCase):
         self.assertEqual(self.op.state, "needs_user")
         self.assertEqual(self.op.receipt["user_action"], {"id": "choose_articles_page", "candidates": ["/stories", "/news"]})
 
+    def test_ambiguous_scan_without_any_listing_page_creates_the_default_page(self):
+        """Tiger Tutor (6 Nov 2026): 41 non-retryable "scan the repository" stops."""
+        for resolution in ({"existence_state": "ambiguous"},
+                {"existence_state": "ambiguous", "listing_surface": {"route": None}, "ranked_candidates": {"listing_surface_candidates": []}}):
+            with self.subTest(resolution=resolution):
+                self.facts["resolution"] = resolution
+                self.assertEqual(prepare._setup_surface(self.config, self.journey()), ("none", "/articles"))
+
+    def test_an_unknown_scan_state_still_asks_for_a_scan(self):
+        self.facts["resolution"] = {"existence_state": "unknown"}
+        with self.assertRaises(prepare.WebsiteAuthorityError) as raised:
+            prepare._setup_surface(self.config, self.journey())
+        self.assertEqual(raised.exception.code, "article_surface_unresolved")
+
     def test_saved_setup_choice_wins(self):
         self.config.article_system = {"pending_article_system_setup": {"mode": "existing", "route_path": "/journal"}}
         self.assertEqual(prepare._setup_surface(self.config, self.journey()), ("existing", "/journal"))
