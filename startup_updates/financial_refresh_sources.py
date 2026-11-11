@@ -5,7 +5,7 @@ Stripe receipts are separate payment-source evidence, never accounting revenue.
 """
 import calendar
 import copy
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
@@ -151,7 +151,25 @@ def build_candidate_evidence(request, progress):
             "stripeBasis": "Invoices created in this window; payment evidence only, never added to accounting revenue."}}
 
 
-def failure_details(exc, provider):
+# Waits longer than this are a provider quota (Xero's daily limit), not a
+# blip. Parking a refresh for an hour looks stuck, so fail it and say when.
+LONG_WAIT_SECONDS = 300
+
+
+def local_time(moment, tz_name):
+    """Format a deadline in the founder's reporting timezone, e.g. 12:00 am."""
+    try:
+        zone = ZoneInfo(tz_name or "UTC")
+    except (KeyError, ValueError):
+        zone = ZoneInfo("UTC")
+    local = moment.astimezone(zone)
+    text = f"{local:%I:%M %p}".lstrip("0").lower()
+    if local.date() != timezone.now().astimezone(zone).date():
+        text += f" on {local:%a} {local.day} {local:%b}"
+    return text
+
+
+def failure_details(exc, provider, *, tz_name=None, now=None):
     """Expose safe retry/reconnect information without upstream bodies or tokens."""
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
@@ -159,12 +177,19 @@ def failure_details(exc, provider):
     reconnect = not temporary and (isinstance(exc, ConnectorOAuthError) or status in {401, 403})
     retryable = not reconnect and (temporary or isinstance(exc, (requests.RequestException, TimeoutError)) or status == 429)
     delay = min(3600, max(15, getattr(exc, "retry_after_seconds", 15)))
+    wait = delay
     if status == 429:
-        raw = getattr(response, "headers", {}).get("Retry-After", "60")
-        try:
-            delay = min(3600, max(15, int(raw)))
-        except (TypeError, ValueError):
-            delay = 60
+        wait = requests._retry_after_seconds(getattr(response, "headers", {}).get("Retry-After"))
+        delay = min(3600, max(15, wait))
+    elif isinstance(exc, ConnectorRateLimitError):
+        wait = exc.retry_after_seconds
+    name = provider.title()
+    if retryable and wait > LONG_WAIT_SECONDS:
+        retry_at = (now or timezone.now()) + timedelta(seconds=wait)
+        return {"provider": provider, "status": "failed", "reason": "rate_limited", "retryAt": retry_at.isoformat(),
+            "detail": f"{name} has reached its {'daily ' if provider == 'xero' else ''}API limit. "
+                f"Try again after {local_time(retry_at, tz_name)}. "
+                "Your saved chart and writing are unchanged."}, False, wait
     return {"provider": provider, "status": "reconnect_required" if reconnect else "failed",
-        "detail": f"Reconnect {provider.title()} to refresh this source." if reconnect else
-            f"{provider.title()} could not finish refreshing. Your saved chart is unchanged."}, retryable, delay
+        "detail": f"Reconnect {name} to refresh this source." if reconnect else
+            f"{name} could not finish refreshing. Your saved chart is unchanged."}, retryable, delay

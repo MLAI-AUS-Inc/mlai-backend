@@ -66,6 +66,17 @@ connected credential or advance its successful-sync cursor. Only quota metadata
 is shared, never tokens or financial evidence. See Xero's
 [rate-limit contract](https://developer.xero.com/documentation/best-practices/api-call-efficiencies/rate-limits/).
 
+The chart-only financial refresh retries a short wait (up to 5 minutes) at most
+twice per read and shows the retry time in the founder's reporting timezone. A
+longer wait, such as Xero's daily limit, fails the refresh at once and names the
+local time to try again, so the panel never sits on "Refreshing" for an hour. A
+recovered read clears its retry deadline and attempt count. Every Xero 429, every
+response with fewer than 1,000 daily calls left, and every 250th call otherwise
+logs `Xero API usage` with the endpoint, remaining minute/day budget, problem and
+caller. The daily budget is shared by every environment using the same Xero app
+and tenant, so a drop between logged counts that these lines do not explain
+points at another caller.
+
 ## Collection, execution and review
 
 - Slack, Linear and Analytics discovery is checkpointed rather than silently

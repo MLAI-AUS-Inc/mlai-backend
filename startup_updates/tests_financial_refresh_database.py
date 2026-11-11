@@ -2,7 +2,7 @@
 import calendar
 import copy
 from datetime import date, timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from django.contrib.auth import get_user_model
@@ -239,6 +239,43 @@ class FinancialRefreshDatabaseTests(TestCase):
                     run.save(update_fields=["result"])
         run.refresh_from_db()
         self.assertEqual(run.result["sources"]["xero"]["status"], "failed")
+
+    def test_xero_daily_quota_fails_fast_with_deadline_and_skips_stripe(self):
+        from integrations.services.external_connectors import ConnectorRateLimitError
+        run = self.start()
+        fetch = self.complete(run, Mock(side_effect=ConnectorRateLimitError(7200)))
+        value = refresh.serialize_refresh(run)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(value["status"], "failed")
+        self.assertNotIn("retryAfterSeconds", value)
+        self.assertIn("daily API limit", value["detail"])
+        self.assertIn("Try again after", value["detail"])
+        self.assertEqual(run.result["sources"]["xero"]["reason"], "rate_limited")
+        self.assertEqual(run.result["sources"]["stripe"]["status"], "pending")
+
+    def test_recovered_retry_clears_deadline_and_keeps_working(self):
+        run = self.start()
+        failures = iter([TimeoutError()])
+        def provider(*args):
+            error = next(failures, None)
+            if error:
+                raise error
+            return self.provider(*args)
+        with patch("startup_updates.financial_refresh.fetch_stage", side_effect=provider):
+            refresh.advance_refresh(run.run_id)
+            run.refresh_from_db()
+            self.assertIn("Waiting to retry Xero at", run.result["sources"]["xero"]["detail"])
+            run.result["retryAt"] = (timezone.now() - timedelta(seconds=1)).isoformat()
+            run.save(update_fields=["result"])
+            # One worker pass must run every remaining read, not stop after one.
+            passes = 0
+            while refresh.advance_refresh(run.run_id):
+                passes += 1
+        run.refresh_from_db()
+        self.assertEqual(run.status, "completed")
+        self.assertNotIn("retryAt", run.result)
+        self.assertNotIn("attempts", run.result)
+        self.assertGreater(passes, 5)
 
     def test_candidate_is_scoped_to_company_user_month_revision_and_settings(self):
         draft, revision = self.draft()

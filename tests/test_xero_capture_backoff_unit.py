@@ -130,3 +130,44 @@ class CatalogueTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class XeroUsageLogTests(unittest.TestCase):
+    def setUp(self):
+        cache.clear()
+        self.url = "https://api.xero.com/api.xro/2.0/Reports/ProfitAndLoss"
+        self.headers = {"Xero-Tenant-Id": "tenant-a", "Authorization": "Bearer synthetic-not-a-token"}
+
+    def call(self, result):
+        with patch.object(http_client.requests, "request", return_value=result), \
+                self.assertLogs("integrations.http_client", level="INFO") as logs:
+            http_client.get(self.url, headers=self.headers)
+        return "\n".join(logs.output)
+
+    def test_quota_hit_logs_problem_endpoint_and_caller_without_secrets(self):
+        result = response(429, 7200)
+        result.headers.update({"X-Rate-Limit-Problem": "day", "X-DayLimit-Remaining": "0"})
+        line = self.call(result)
+        self.assertIn("WARNING", line)
+        self.assertIn("endpoint=Reports/ProfitAndLoss", line)
+        self.assertIn("problem=day", line)
+        self.assertIn("retry_after=7200", line)
+        self.assertIn("caller=", line)
+        self.assertNotIn("synthetic-not-a-token", line)
+        self.assertNotIn("tenant-a", line)
+
+    def test_low_daily_budget_is_logged(self):
+        result = response()
+        result.headers["X-DayLimit-Remaining"] = "873"
+        self.assertIn("day_remaining=873", self.call(result))
+
+    def test_healthy_budget_logs_only_every_250_calls(self):
+        quiet = response()
+        quiet.headers["X-DayLimit-Remaining"] = "4321"
+        with patch.object(http_client.requests, "request", return_value=quiet), \
+                patch.object(http_client.logger, "info") as info:
+            http_client.get(self.url, headers=self.headers)
+        info.assert_not_called()
+        marker = response()
+        marker.headers["X-DayLimit-Remaining"] = "4250"
+        self.assertIn("day_remaining=4250", self.call(marker))
