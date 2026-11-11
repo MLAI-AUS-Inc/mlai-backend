@@ -56,6 +56,8 @@ def tick(*, schedule=False, fanout=False, deliver=False, webhooks=False, native=
         stage("native_invocations", lambda: poll_native_mentions(limit=limit))
         stage("native_replies", lambda: dispatch_native_replies(limit=limit))
         stage("native_expired", lambda: expire_native_invocations(limit=limit))
+        from agent_runtime.native_guest import answer_guest_mentions
+        stage("native_guest_replies", lambda: answer_guest_mentions(limit=limit))
     if webhooks:
         from agent_runtime.event_webhooks import dispatch_webhooks
         stage("webhooks", lambda: dispatch_webhooks(limit=limit))
