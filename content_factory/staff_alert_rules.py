@@ -156,9 +156,19 @@ def run_alert_rule_sweep(now=None, limit=None):
     cache.set(cursor_key, configs[-1].organization_id if len(configs) == limit else 0, 86400)
     by_org = {row.organization_id: row for row in configs}
     day_start = timezone.make_aware(datetime.combine(now.astimezone(LOCAL).date(), time.min), LOCAL)
-    runs = list(ContentFactoryRun.objects.filter(organization_id__in=by_org).filter(
+    # One tick used to load every terminal run of 500 startups whole: 2,047 rows
+    # holding 179 MB of result JSON in production, which grew the scheduler to
+    # 1.2-1.8 GB and had it OOM-killed on every tick for 20 hours (10 Nov 2026).
+    # Rows are now streamed with only the columns the rules read, scheduler
+    # workflows are left to SQL, and history before the alert start date is
+    # never replayed. Only a run that raises an incident stays in memory.
+    from .founder_journey_alerts import SCHEDULER_WORKFLOWS, alerts_since
+    runs = (ContentFactoryRun.objects.filter(organization_id__in=by_org, created_at__gte=alerts_since())
+        .exclude(workflow__in=SCHEDULER_WORKFLOWS).filter(
         Q(status__in=TERMINAL | {"queued", "pending", "starting"}) | Q(created_at__gte=day_start)
-        | Q(result__article_preview_quality__self_heal_exhausted=True)).order_by("organization_id", "pk"))
+        | Q(result__article_preview_quality__self_heal_exhausted=True))
+        .only("run_id", "organization_id", "status", "workflow", "created_at", "result", "run_request")
+        .order_by("organization_id", "pk").iterator(chunk_size=50))
     queued = 0
     incidents = []
     setup = {}
