@@ -236,6 +236,26 @@ class StaffTests(TestCase):
             rules.run_alert_rule_sweep()
         log.assert_not_called()
 
+    def test_sweep_never_replays_runs_from_before_the_alert_start_date(self):
+        """10 Nov 2026: one tick loaded every terminal run whole and the scheduler was OOM-killed."""
+        old = self.new_run(result={})
+        ContentFactoryRun.objects.filter(pk=old.pk).update(created_at=timezone.now() - timedelta(days=30))
+        since = (timezone.now() - timedelta(days=1)).date().isoformat()
+        with override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE=since):
+            self.assertEqual(rules.run_alert_rule_sweep()["queued"], 0)
+            self.new_run(result={})
+            self.assertEqual(rules.run_alert_rule_sweep()["queued"], 1)
+
+    def test_sweep_streams_only_the_columns_the_rules_read(self):
+        self.new_run(result={})
+        with CaptureQueriesContext(connection) as queries:
+            rules.run_alert_rule_sweep()
+        # The batch scan orders by startup; an incident's own run is re-read whole, one at a time.
+        scans = [q["sql"] for q in queries if 'FROM "content_factory_run"' in q["sql"] and '"organization_id" ASC' in q["sql"]]
+        self.assertEqual(len(scans), 1, [q["sql"][:200] for q in queries])
+        for heavy in ("verification_summary", "acceptance_summary", "step_order", "selection_data"):
+            self.assertNotIn(heavy, scans[0].split(" FROM ")[0])
+
     def test_rules_off_do_no_queries_or_effects(self):
         with override_settings(ARTICLES_STAFF_ALERT_RULES_ENABLED=False), self.assertNumQueries(0):
             self.assertEqual(rules.run_alert_rule_sweep(), {"status": "disabled"})
