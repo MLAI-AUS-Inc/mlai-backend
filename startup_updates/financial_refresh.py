@@ -20,7 +20,7 @@ from startup_updates.evidence_contract import content_hash, reporting_period
 from startup_updates.financial_history import build_snapshot, history_payload
 from startup_updates.financial_refresh_sources import (
     apply_stage, build_candidate_evidence, connection_identity, failure_details,
-    fetch_stage, month_slots, next_stage,
+    fetch_stage, local_time, month_slots, next_stage,
 )
 from startup_updates.models import MonthlyEvidenceSnapshot, MonthlyUpdateDraft, StartupProfile, StartupDataDeletionRequest
 from startup_updates.revisions import RevisionConflict
@@ -231,9 +231,11 @@ def submit_refresh(refresh_id):
 
 def _finish(run, progress):
     request = run.run_request
-    if progress["sources"]["xero"]["status"] != "ready":
+    xero = progress["sources"]["xero"]
+    if xero["status"] != "ready":
         run.status = "failed"
-        progress["detail"] = "The accounting chart could not refresh. Your saved chart and writing are unchanged."
+        progress["detail"] = (xero["detail"] if xero.get("reason") == "rate_limited" else
+            "The accounting chart could not refresh. Your saved chart and writing are unchanged.")
         return
     captured = timezone.now()
     payload = build_candidate_evidence(request, progress)
@@ -274,6 +276,9 @@ def advance_refresh(refresh_id):
             run.save(update_fields=["status", "result", "updated_at"])
             return False
         stage = next_stage(progress, run.run_request["inputSources"])
+        if progress["sources"].get("xero", {}).get("status") in {"failed", "reconnect_required"}:
+            # The chart needs Xero; reading Stripe now would only delay the answer.
+            stage = None
         if stage is None:
             try:
                 _finish(run, progress)
@@ -306,13 +311,21 @@ def advance_refresh(refresh_id):
             run.status, progress["detail"] = "failed", "A financial connection changed. Reconnect it and refresh again."
         else:
             if error is None:
+                # Retries are per read: a recovered read must not leave a stale
+                # deadline (which stopped the worker after every later stage) or
+                # spend the next read's attempts.
+                progress.pop("attempts", None)
+                progress.pop("retryAt", None)
                 progress = apply_stage(progress, provider, step, receipt)
             else:
-                failure, retryable, delay = failure_details(error, provider)
+                failure, retryable, delay = failure_details(error, provider, tz_name=request.get("timezone"))
                 attempts = int(progress.get("attempts", 0)) + 1
                 if retryable and attempts < 3:
-                    progress.update(attempts=attempts, retryAt=(timezone.now() + timedelta(seconds=delay)).isoformat())
-                    progress["sources"][provider]["detail"] = f"Waiting to retry {provider.title()}. Your writing is safe."
+                    retry_at = timezone.now() + timedelta(seconds=delay)
+                    progress.update(attempts=attempts, retryAt=retry_at.isoformat())
+                    progress["sources"][provider]["detail"] = (
+                        f"Waiting to retry {provider.title()} at {local_time(retry_at, request.get('timezone'))}. "
+                        "Your writing is safe.")
                 else:
                     progress["sources"][provider] = failure
                     progress.pop("attempts", None)

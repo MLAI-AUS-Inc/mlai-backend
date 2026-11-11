@@ -132,3 +132,37 @@ class FinancialRefreshUnitTests(TestCase):
             self.assertNotIn("Reconnect", failure["detail"])
             if isinstance(error, ConnectorRateLimitError):
                 self.assertEqual(delay, 120)
+
+    def test_daily_quota_fails_fast_with_local_deadline(self):
+        from integrations.services.external_connectors import ConnectorRateLimitError
+        now = datetime(2026, 11, 6, 10, 46, tzinfo=timezone.utc)
+        with patch("startup_updates.financial_refresh_sources.timezone.now", return_value=now):
+            failure, retryable, wait = failure_details(
+                ConnectorRateLimitError(8000), "xero", tz_name="Australia/Sydney", now=now)
+        self.assertFalse(retryable)
+        self.assertEqual(wait, 8000)
+        self.assertEqual(failure["reason"], "rate_limited")
+        self.assertEqual(failure["retryAt"], "2026-11-06T12:59:20+00:00")
+        self.assertIn("daily API limit", failure["detail"])
+        self.assertIn("Try again after 11:59 pm.", failure["detail"])
+
+    def test_quota_429_response_uses_retry_after_and_names_next_day(self):
+        response = Mock(status_code=429, headers={"Retry-After": "7200"})
+        now = datetime(2026, 11, 6, 12, 30, tzinfo=timezone.utc)
+        with patch("startup_updates.financial_refresh_sources.timezone.now", return_value=now):
+            failure, retryable, _wait = failure_details(
+                requests_error(response), "xero", tz_name="Australia/Sydney", now=now)
+        self.assertFalse(retryable)
+        self.assertIn("Try again after 1:30 am on Sat 7 Nov.", failure["detail"])
+
+    def test_short_quota_still_retries(self):
+        response = Mock(status_code=429, headers={"Retry-After": "45"})
+        failure, retryable, delay = failure_details(requests_error(response), "xero")
+        self.assertTrue(retryable)
+        self.assertEqual(delay, 45)
+        self.assertNotIn("reason", failure)
+
+
+def requests_error(response):
+    from integrations import http_client
+    return http_client.HTTPError(response=response)

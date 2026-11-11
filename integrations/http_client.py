@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import hashlib
 import json
+import logging
 import math
+import threading
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -17,6 +19,8 @@ import requests
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 3
 DEFAULT_READ_TIMEOUT_SECONDS = 5
 MAX_READ_TIMEOUT_SECONDS = 90
+XERO_LOW_DAY_REMAINING = 1000
+logger = logging.getLogger(__name__)
 
 
 def _xero_cooldown_key(url: str, headers: Mapping[str, str]) -> str | None:
@@ -53,6 +57,38 @@ def xero_cooldown_seconds(tenant_id: str | None) -> int:
     from django.core.cache import cache
     deadline = cache.get(key)
     return max(0, math.ceil(deadline - time.time())) if deadline else 0
+
+
+def _int_header(headers: Mapping[str, str], name: str) -> int | None:
+    try:
+        return int(headers.get(name) or "")
+    except (TypeError, ValueError):
+        return None
+
+
+def _log_xero_usage(url: str, cooldown_key: str, response: requests.Response) -> None:
+    """Record Xero quota use by endpoint and caller, without tokens or bodies.
+
+    Xero's daily limit is shared by every environment using the same app and
+    tenant, so a drop between two logged counts that our calls do not explain
+    points at another caller.
+    """
+    headers = response.headers
+    day_remaining = _int_header(headers, "X-DayLimit-Remaining")
+    limited = response.status_code == 429
+    if not limited and (day_remaining is None or (
+            day_remaining >= XERO_LOW_DAY_REMAINING and day_remaining % 250)):
+        return
+    segments = [part for part in urlparse(url).path.split("/")[3:] if part]
+    endpoint = "/".join(segments[:2] if segments[:1] == ["Reports"] else segments[:1]) or "-"
+    (logger.warning if limited else logger.info)(
+        "Xero API usage status=%s endpoint=%s day_remaining=%s minute_remaining=%s "
+        "app_minute_remaining=%s problem=%s retry_after=%s tenant=%s caller=%s",
+        response.status_code, endpoint, day_remaining,
+        _int_header(headers, "X-MinLimit-Remaining"), _int_header(headers, "X-AppMinLimit-Remaining"),
+        headers.get("X-Rate-Limit-Problem") or "-", headers.get("Retry-After") or "-",
+        cooldown_key[-12:], threading.current_thread().name,
+    )
 
 
 def _xero_backoff_response(url: str, seconds: int) -> requests.Response:
@@ -112,6 +148,8 @@ def request(method: str, url: str, **kwargs: Any) -> requests.Response:
             return _xero_backoff_response(url, math.ceil(deadline - time.time()))
     with requests.request(method, url, **kwargs) as response:
         response.content
+        if cooldown_key:
+            _log_xero_usage(url, cooldown_key, response)
         if cooldown_key and response.status_code == 429:
             seconds = _retry_after_seconds(response.headers.get("Retry-After"))
             cache.set(cooldown_key, time.time() + seconds, timeout=seconds + 1)
