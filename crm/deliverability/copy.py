@@ -16,7 +16,7 @@ REASONS = {
 }
 
 
-def status_message(blast, *, now=None):
+def status_message(blast, *, now=None, providers=None, deferred=None):
     """Keep internal diagnostics and provider configuration out of staff copy."""
     from django.utils import timezone
     from crm.blast_email import parse_iso
@@ -55,12 +55,14 @@ def status_message(blast, *, now=None):
         return None
     if blast.stream.state == 'slowed':
         return {'tone': 'info', 'text': "Sending a little more slowly today to keep MLAI's emails out of spam folders. It will continue during planned sending times."}
-    providers = (blast.stream.state_detail or {}).get('providers') or {}
+    if providers is None:
+        providers = _provider_states(blast)
     for provider, state in sorted(providers.items()):
-        if state.get('state') in ('held', 'throttled'):
+        if state in ('held', 'throttled'):
             name = {'google': 'Gmail', 'microsoft': 'Outlook', 'yahoo': 'Yahoo', 'apple': 'Apple Mail'}.get(provider, 'An email provider')
             return {'tone': 'info', 'text': f'{name} asked us to slow down, so people with those addresses will get it a bit later.'}
-    deferred = email.get('frequency_deferred') or 0
+    if deferred is None:
+        deferred = _frequency_deferred(blast, now)
     if deferred:
         return {'tone': 'info', 'text': f'{deferred:,} people were emailed recently, so their copies will go once enough time has passed.'}
     if not volume.window(blast.stream, now, critical=volume.time_critical(blast, now)):
@@ -73,3 +75,26 @@ def status_message(blast, *, now=None):
             return {'tone': 'info', 'text': f'Next batch: about {count:,} people, {when}.'}
     return {'tone': 'info', 'text': 'Sending gradually, with the most active members first.'}
     return None
+
+
+def _saved(blast):
+    state = getattr(blast, '_state', None)
+    return state is not None and not state.adding and getattr(blast, 'pk', None) is not None
+
+
+def _provider_states(blast):
+    """Open provider throttle/hold incidents, the same source the dispatcher caps on."""
+    if not _saved(blast):
+        return {}
+    from .waves import provider_states
+    return provider_states(blast)
+
+
+def _frequency_deferred(blast, now):
+    """Unbatched recipients the frequency cap is holding back right now."""
+    if not _saved(blast):
+        return 0
+    from crm.models import BlastDelivery
+    from . import planner
+    pending = BlastDelivery.objects.filter(blast_id=blast.pk, channel='email', wave__isnull=True, status='queued')
+    return pending.count() - planner.eligible_rows(pending, blast, now).count()
