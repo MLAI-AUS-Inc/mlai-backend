@@ -202,7 +202,7 @@ class AdminTests(unittest.TestCase):
     def test_invite_link_shape(self):
         with self.settings_patch():
             link = mentoring_admin.invite_link('abc')
-        self.assertTrue(link.endswith('/mentoring/apply?invite=abc'))
+        self.assertTrue(link.endswith('/mentoring/apply?mentor_invite=abc'))
 
     def settings_patch(self):
         return patch.object(service.settings, 'COMMUNITY_CHAT_FRONTEND_URL', 'https://chat.example/', create=True)
