@@ -1,0 +1,2389 @@
+{
+  "purpose": "Fresh disposable local test database only; no staging or production",
+  "migration_count": 396,
+  "inventory_sha256": "7b0e11050cc25c68fe060d8c1444e1c9d9bf92a968c3660fe787125200feca3f",
+  "roo_leaf": [
+    [
+      "roo",
+      "0047_cybertest_phase_contract"
+    ]
+  ],
+  "migrations": [
+    {
+      "app": "admin",
+      "name": "0001_initial",
+      "file": ".venv/Lib/site-packages/django/contrib/admin/migrations/0001_initial.py",
+      "sha256": "f4716989d9815b6231f0d7291754835e008c96818447fe57984bbf8985883335"
+    },
+    {
+      "app": "admin",
+      "name": "0002_logentry_remove_auto_add",
+      "file": ".venv/Lib/site-packages/django/contrib/admin/migrations/0002_logentry_remove_auto_add.py",
+      "sha256": "2c127e659a2236edea0ed57eccd38786ae84e365790a80b96b758c617f50be43"
+    },
+    {
+      "app": "admin",
+      "name": "0003_logentry_add_action_flag_choices",
+      "file": ".venv/Lib/site-packages/django/contrib/admin/migrations/0003_logentry_add_action_flag_choices.py",
+      "sha256": "02700a827190720e5c417495a395071b6baa28a34e74bc8f90824afaafc01841"
+    },
+    {
+      "app": "agent_runtime",
+      "name": "0001_initial",
+      "file": "agent_runtime/migrations/0001_initial.py",
+      "sha256": "3afbe048cdbffce9274698d6679f58dcf9eaa4ad3d2d68f857b5c5d69270ca92"
+    },
+    {
+      "app": "auth",
+      "name": "0001_initial",
+      "file": ".venv/Lib/site-packages/django/contrib/auth/migrations/0001_initial.py",
+      "sha256": "845cff319606332f49ef20ce165d1a17e522c426c5e56d7616133e9e4eaba5ef"
+    },
+    {
+      "app": "auth",
+      "name": "0002_alter_permission_name_max_length",
+      "file": ".venv/Lib/site-packages/django/contrib/auth/migrations/0002_alter_permission_name_max_length.py",
+      "sha256": "feaf97e0e8f7d148bec3db9bab2349c5e15888117c1ff2829deff63ef9e16cff"
+    },
+    {
+      "app": "auth",
+      "name": "0003_alter_user_email_max_length",
+      "file": ".venv/Lib/site-packages/django/contrib/auth/migrations/0003_alter_user_email_max_length.py",
+      "sha256": "9d5657b4db9872dc26c2d634c2f5911a3d69ab1d8552af4c6d633bc4001dfabf"
+    },
+    {
+      "app": "auth",
+      "name": "0004_alter_user_username_opts",
+      "file": ".venv/Lib/site-packages/django/contrib/auth/migrations/0004_alter_user_username_opts.py",
+      "sha256": "9538db342c9a9bec4ca12b3137fb80772c4ea4afb861e8647a2962b1ea58344a"
+    },
+    {
+      "app": "auth",
+      "name": "0005_alter_user_last_login_null",
+      "file": ".venv/Lib/site-packages/django/contrib/auth/migrations/0005_alter_user_last_login_null.py",
+      "sha256": "79f60a35dc000fdd427bc05c85233ae5b9c4ada078ff0688fc9f78604bf7eaee"
+    },
+    {
+      "app": "auth",
+      "name": "0006_require_contenttypes_0002",
+      "file": ".venv/Lib/site-packages/django/contrib/auth/migrations/0006_require_contenttypes_0002.py",
+      "sha256": "00cb16e3405f14b62dbeffa15c68c9030291e4ddd513d733648ba460d6c5e781"
+    },
+    {
+      "app": "auth",
+      "name": "0007_alter_validators_add_error_messages",
+      "file": ".venv/Lib/site-packages/django/contrib/auth/migrations/0007_alter_validators_add_error_messages.py",
+      "sha256": "115db87dc327530fb5e1964ba3d03f9746492f90600406947be39f54f6cc042f"
+    },
+    {
+      "app": "auth",
+      "name": "0008_alter_user_username_max_length",
+      "file": ".venv/Lib/site-packages/django/contrib/auth/migrations/0008_alter_user_username_max_length.py",
+      "sha256": "02857f65f7d648147a5d12596b200a83e29145391d3f986ceb84b3b865a2c351"
+    },
+    {
+      "app": "auth",
+      "name": "0009_alter_user_last_name_max_length",
+      "file": ".venv/Lib/site-packages/django/contrib/auth/migrations/0009_alter_user_last_name_max_length.py",
+      "sha256": "19a89500e7f108a7397da9b1733181f92105f758663b3685b60f5c2da384d76e"
+    },
+    {
+      "app": "auth",
+      "name": "0010_alter_group_name_max_length",
+      "file": ".venv/Lib/site-packages/django/contrib/auth/migrations/0010_alter_group_name_max_length.py",
+      "sha256": "0963ed6498ac0b3a8430b6ca34c1b4a4b1d5f55b43d3db902f15a03ff74b14cd"
+    },
+    {
+      "app": "auth",
+      "name": "0011_update_proxy_permissions",
+      "file": ".venv/Lib/site-packages/django/contrib/auth/migrations/0011_update_proxy_permissions.py",
+      "sha256": "85a5dde708dc4b6111e1bc71ce723ecfba7b1f8aedecfd130900ff7782765436"
+    },
+    {
+      "app": "auth",
+      "name": "0012_alter_user_first_name_max_length",
+      "file": ".venv/Lib/site-packages/django/contrib/auth/migrations/0012_alter_user_first_name_max_length.py",
+      "sha256": "6cefbc9f80903763ff8492a537a22836ef69f2227e19d402509b8099d2baecb0"
+    },
+    {
+      "app": "community_chat",
+      "name": "0001_initial",
+      "file": "community_chat/migrations/0001_initial.py",
+      "sha256": "6e97fcd39afab395123862561a31575d442dbcee4c61bbbe22d6ff18eef741f5"
+    },
+    {
+      "app": "community_chat",
+      "name": "0002_device_auth",
+      "file": "community_chat/migrations/0002_device_auth.py",
+      "sha256": "ec98b5d293f71364191a73d8283c692f86ae36759f165d87a0de0db91e7b173e"
+    },
+    {
+      "app": "community_chat",
+      "name": "0003_device_installation_metadata",
+      "file": "community_chat/migrations/0003_device_installation_metadata.py",
+      "sha256": "de214562e04f75bc21675d5b72190e741c3ef871061eaf48ea7931c0bf04d124"
+    },
+    {
+      "app": "community_chat",
+      "name": "0004_bootstrap_token_origin",
+      "file": "community_chat/migrations/0004_bootstrap_token_origin.py",
+      "sha256": "ae18b9306764370e6c6acc6e46d2bee333f51b2585d27a84cfaf154b15d87cf6"
+    },
+    {
+      "app": "community_chat",
+      "name": "0005_email_code_challenges",
+      "file": "community_chat/migrations/0005_email_code_challenges.py",
+      "sha256": "daa859209d52b63554b7fc42c01668def8a505d4654c77221cce3e3fcb3e1163"
+    },
+    {
+      "app": "community_chat",
+      "name": "0006_account_sessions",
+      "file": "community_chat/migrations/0006_account_sessions.py",
+      "sha256": "28c73c1e01300671a76ab229709ebcf3c78d5485beb08bc66fc6c9c975276d3f"
+    },
+    {
+      "app": "community_chat",
+      "name": "0007_active_installation_constraint",
+      "file": "community_chat/migrations/0007_active_installation_constraint.py",
+      "sha256": "68e5a681e1a3a670586e5898d4657d830a33119907092be8c157e38c47dc00b6"
+    },
+    {
+      "app": "community_chat",
+      "name": "0008_token_usage",
+      "file": "community_chat/migrations/0008_token_usage.py",
+      "sha256": "14ea820478929435e0d1bf0c0bc887b328d6bcd7842bb5d63572d2dcedbe99f0"
+    },
+    {
+      "app": "community_chat",
+      "name": "0009_volunteer",
+      "file": "community_chat/migrations/0009_volunteer.py",
+      "sha256": "1631853a26defc22694ab8e9ca419f450995e271afa178f75e0245a3daf3df5d"
+    },
+    {
+      "app": "community_chat",
+      "name": "0010_moderator",
+      "file": "community_chat/migrations/0010_moderator.py",
+      "sha256": "6ad13a7a2dc114da26695448cdcd10e21cf60e6ee217ab4d861ec9b229255c59"
+    },
+    {
+      "app": "community_chat",
+      "name": "0011_account_privacy_controls",
+      "file": "community_chat/migrations/0011_account_privacy_controls.py",
+      "sha256": "12752a2977a198010039332dcaeb06287e3e449e7b152b2a7bf86e50368b3d42"
+    },
+    {
+      "app": "community_chat",
+      "name": "0012_member_onboarding",
+      "file": "community_chat/migrations/0012_member_onboarding.py",
+      "sha256": "2747b2eb19011e9ddc3c0f31602e1a52c0a8f8b4d3b5fab784fc98c1c822c46d"
+    },
+    {
+      "app": "community_chat",
+      "name": "0013_account_deletion_tasks",
+      "file": "community_chat/migrations/0013_account_deletion_tasks.py",
+      "sha256": "f3db0a005fde3e54944db2cb9aeab2f06bada537abd5cb1e90296b608105ba41"
+    },
+    {
+      "app": "community_chat",
+      "name": "0014_chat_roles",
+      "file": "community_chat/migrations/0014_chat_roles.py",
+      "sha256": "1cec29524c914656564a303cdf400716de1c92ada4339d8f86a6a0fc2904bca3"
+    },
+    {
+      "app": "community_chat",
+      "name": "0015_token_insights",
+      "file": "community_chat/migrations/0015_token_insights.py",
+      "sha256": "74e0c6bc5952e453445a42998905fd79609ecaf653cf7f695ac3c31d534aa3ef"
+    },
+    {
+      "app": "content_analytics",
+      "name": "0001_initial",
+      "file": "content_analytics/migrations/0001_initial.py",
+      "sha256": "480d711eb2f706ac84bc260e4b1fc759677c53d69042fc095aef48203a257989"
+    },
+    {
+      "app": "content_analytics",
+      "name": "0002_article_analytics_location_history",
+      "file": "content_analytics/migrations/0002_article_analytics_location_history.py",
+      "sha256": "ae35dc63913cf34404a89e5cb0448869d841387562a2d6ffa321dd1b74a4c80f"
+    },
+    {
+      "app": "content_analytics",
+      "name": "0003_articleperformancereport_and_more",
+      "file": "content_analytics/migrations/0003_articleperformancereport_and_more.py",
+      "sha256": "850bb479283cb70b4ee84ba91934d46325a97568a0e6d562f5163388b82c3e07"
+    },
+    {
+      "app": "content_factory",
+      "name": "0001_split_content_factory_apps",
+      "file": "content_factory/migrations/0001_split_content_factory_apps.py",
+      "sha256": "07a84e09c8342bbe7a59833ac439c5f729e89d5c5c29eadbde93c2b63b67baf7"
+    },
+    {
+      "app": "content_factory",
+      "name": "0002_move_legacy_contenttypes",
+      "file": "content_factory/migrations/0002_move_legacy_contenttypes.py",
+      "sha256": "7cde5af1372fc240c1be5a131e419c708f163dfe0c6a19a33e346951c2a9b4c3"
+    },
+    {
+      "app": "content_factory",
+      "name": "0003_website_baseline_snapshot",
+      "file": "content_factory/migrations/0003_website_baseline_snapshot.py",
+      "sha256": "1101829fb5ccdea1429443a3ce745dd8c9f9bd612b004c1aa01c448e262a6d48"
+    },
+    {
+      "app": "content_factory",
+      "name": "0004_vibe_marketing_component_comment",
+      "file": "content_factory/migrations/0004_vibe_marketing_component_comment.py",
+      "sha256": "55018bf046b31e3489f1a7783e34f80bfc6855326f2468417c78e8bc083a03c9"
+    },
+    {
+      "app": "content_factory",
+      "name": "0005_vibe_marketing_component_comment_anchor",
+      "file": "content_factory/migrations/0005_vibe_marketing_component_comment_anchor.py",
+      "sha256": "5d7fdcbbfbd0bff16332369126935ad9b5a8f751a11dcc8fe0a2525a94e227e3"
+    },
+    {
+      "app": "content_factory",
+      "name": "0006_topic_feedback",
+      "file": "content_factory/migrations/0006_topic_feedback.py",
+      "sha256": "4664e66ead260ffdaeb27b6d3920f58443915925edd65b8876bcc4405eeebae1"
+    },
+    {
+      "app": "content_factory",
+      "name": "0007_backfill_topic_coverage_memory",
+      "file": "content_factory/migrations/0007_backfill_topic_coverage_memory.py",
+      "sha256": "28e6c98e564375c1764aab83bbd34ce6b5350385840440712cc26a7b503adcdd"
+    },
+    {
+      "app": "content_factory",
+      "name": "0008_researchedkeyword_difficulty_source",
+      "file": "content_factory/migrations/0008_researchedkeyword_difficulty_source.py",
+      "sha256": "47dceade44c7c9d60b1a4013d50428ab06d185187d5ac8fc68e5598ec4c2056e"
+    },
+    {
+      "app": "content_factory",
+      "name": "0009_researchedkeyword_topic_picker_metrics",
+      "file": "content_factory/migrations/0009_researchedkeyword_topic_picker_metrics.py",
+      "sha256": "d52a465cb1b848adf4dab5222567bfe4fde4847aa301145e027c75a744c138ce"
+    },
+    {
+      "app": "content_factory",
+      "name": "0010_backfill_review_draft_delivery_mode",
+      "file": "content_factory/migrations/0010_backfill_review_draft_delivery_mode.py",
+      "sha256": "e9de74d7e0523426d6c2f36aaf15fe5db5a66ba5e24b77eebe6157f86aa461cd"
+    },
+    {
+      "app": "content_factory",
+      "name": "0011_vibe_marketing_component_comment_context",
+      "file": "content_factory/migrations/0011_vibe_marketing_component_comment_context.py",
+      "sha256": "638933be5487aa149a50adf193de1f12184b0ed3d628f89b41bde1921bc7ecd6"
+    },
+    {
+      "app": "content_factory",
+      "name": "0012_research_automations",
+      "file": "content_factory/migrations/0012_research_automations.py",
+      "sha256": "1c184e696a70392af398d3178623bda8f336a855897bd16b73c23493f688be91"
+    },
+    {
+      "app": "content_factory",
+      "name": "0013_writtenarticle_wa_org_created_idx",
+      "file": "content_factory/migrations/0013_writtenarticle_wa_org_created_idx.py",
+      "sha256": "01ae59760f4ced1a20972886ffb32df164f4849be807ad32557335a2a0edd325"
+    },
+    {
+      "app": "content_factory",
+      "name": "0014_contentfactorycallbackevent",
+      "file": "content_factory/migrations/0014_contentfactorycallbackevent.py",
+      "sha256": "7f99f480b13da64c87cf2bd0534efd1cd869cba7599730933781a687437fe9a2"
+    },
+    {
+      "app": "content_factory",
+      "name": "0014_writtenarticle_publish_status",
+      "file": "content_factory/migrations/0014_writtenarticle_publish_status.py",
+      "sha256": "fb08d605f30d7057e045ac608599e5280d464132521645c1d786a26838f733c1"
+    },
+    {
+      "app": "content_factory",
+      "name": "0015_merge_20260610_0823",
+      "file": "content_factory/migrations/0015_merge_20260610_0823.py",
+      "sha256": "74e44c503f041982b89511c88be54e8b13f382d4acc4d319bf2dc0744adbbed0"
+    },
+    {
+      "app": "content_factory",
+      "name": "0016_writtenarticle_source_run_id",
+      "file": "content_factory/migrations/0016_writtenarticle_source_run_id.py",
+      "sha256": "5c65d0ed40017e00aab31cbf83c0c371e81b80f09dd0b34809a8290e323c88d5"
+    },
+    {
+      "app": "content_factory",
+      "name": "0017_backfill_writtenarticle_source_run_id",
+      "file": "content_factory/migrations/0017_backfill_writtenarticle_source_run_id.py",
+      "sha256": "fdeb39551df993501106692cf224b6fb950e74aff29aed70b9d2569b2446c397"
+    },
+    {
+      "app": "content_factory",
+      "name": "0018_notification_channel_verification",
+      "file": "content_factory/migrations/0018_notification_channel_verification.py",
+      "sha256": "4ad837759b866324bb5964b2c5a5a0834ec871ffd676ab3d3d0dbcda77e0d47b"
+    },
+    {
+      "app": "content_factory",
+      "name": "0019_notification_delivery_per_channel_keys",
+      "file": "content_factory/migrations/0019_notification_delivery_per_channel_keys.py",
+      "sha256": "368079c88a76afd4eaf5671cd99ab49029f1530d15c77bbceaccdf7951d253a9"
+    },
+    {
+      "app": "content_factory",
+      "name": "0020_organizationcontentconfig_article_system_setup_cache_and_more",
+      "file": "content_factory/migrations/0020_organizationcontentconfig_article_system_setup_cache_and_more.py",
+      "sha256": "e61654e316a4ba04a27891f11b82151b3da24e0298ce12eec80beccce4831661"
+    },
+    {
+      "app": "content_factory",
+      "name": "0021_organizationcontentconfig_auto_publish_requires_review",
+      "file": "content_factory/migrations/0021_organizationcontentconfig_auto_publish_requires_review.py",
+      "sha256": "0b4fa60d0cc84bd4f373cb9c36e583860e54e330b40968e0a20577a5f9debc5e"
+    },
+    {
+      "app": "content_factory",
+      "name": "0022_writtenarticle_content_path_and_more",
+      "file": "content_factory/migrations/0022_writtenarticle_content_path_and_more.py",
+      "sha256": "084c867fac366a7e3750a3c76e11e1a955a1abfd8711a5753477e1c3f9b45295"
+    },
+    {
+      "app": "content_factory",
+      "name": "0023_design_snapshot",
+      "file": "content_factory/migrations/0023_design_snapshot.py",
+      "sha256": "eabe86b4831d1404cfee0641727ebced3a370d2118d6d362dcd60e621cc9ee5d"
+    },
+    {
+      "app": "content_factory",
+      "name": "0024_generatedcomponent_import_statement_metadata",
+      "file": "content_factory/migrations/0024_generatedcomponent_import_statement_metadata.py",
+      "sha256": "14eda0a51294cac559d3841b3368d2caf124cf12fdfa9b7bc03f33856c2e7939"
+    },
+    {
+      "app": "content_factory",
+      "name": "0025_orgconfig_use_component_library",
+      "file": "content_factory/migrations/0025_orgconfig_use_component_library.py",
+      "sha256": "e2f93f2e5ce53c2ba59e64734ebc38f30d63e71bc4ea0b9a9b8aceb4901cb6b2"
+    },
+    {
+      "app": "content_factory",
+      "name": "0026_organizationcontentconfig_authors_and_more",
+      "file": "content_factory/migrations/0026_organizationcontentconfig_authors_and_more.py",
+      "sha256": "ac222dc456a5307363bca9c6a8ece4a153cb2f1de291606bad0e7e701b16009a"
+    },
+    {
+      "app": "content_factory",
+      "name": "0027_healing_record_archived_state",
+      "file": "content_factory/migrations/0027_healing_record_archived_state.py",
+      "sha256": "36d3ace234f229ffcd4260fe1f8467bea998f52bc81d24d621295963b9159a66"
+    },
+    {
+      "app": "content_factory",
+      "name": "0028_organizationcontentconfig_scan_artifact_cache",
+      "file": "content_factory/migrations/0028_organizationcontentconfig_scan_artifact_cache.py",
+      "sha256": "0ede9ef32c44bf55df2e1eb578819f09e15603839d624c04126d3abb0d9e0b18"
+    },
+    {
+      "app": "content_factory",
+      "name": "0029_notificationchannel_delivery_enabled",
+      "file": "content_factory/migrations/0029_notificationchannel_delivery_enabled.py",
+      "sha256": "3c0c957c0aa643a15eb3a179a0391802bf79046d5c2c94370c7ac41b93a45ec6"
+    },
+    {
+      "app": "content_factory",
+      "name": "0030_callback_event_lease",
+      "file": "content_factory/migrations/0030_callback_event_lease.py",
+      "sha256": "8d07c5d835ba4ae760d5a36c223b2ebc9f7cacd156e5104363f0000ddbc3f465"
+    },
+    {
+      "app": "content_factory",
+      "name": "0030_learning_entries_and_healing_framework",
+      "file": "content_factory/migrations/0030_learning_entries_and_healing_framework.py",
+      "sha256": "1e98c5c8b2e42ee175d2753a786bcea4bcaf613aa494d2d0055181c4e54fdee0"
+    },
+    {
+      "app": "content_factory",
+      "name": "0031_merge_callback_lease_learning_entries",
+      "file": "content_factory/migrations/0031_merge_callback_lease_learning_entries.py",
+      "sha256": "0994dfaa0ad04db0b325fd2431ba0cd877f06230d0137bc74eb981c0192ba414"
+    },
+    {
+      "app": "content_factory",
+      "name": "0032_writtenarticle_analytics_identity",
+      "file": "content_factory/migrations/0032_writtenarticle_analytics_identity.py",
+      "sha256": "f506b34c2c2813bb9209a4cb7793ff49d2a5474460af74322efb41c64f19ea75"
+    },
+    {
+      "app": "content_factory",
+      "name": "0033_activate_account_email_notification_channels",
+      "file": "content_factory/migrations/0033_activate_account_email_notification_channels.py",
+      "sha256": "bd18247b34fe5928b76fafa47c86e7ad0d83bbd56bf19cd9883bb86a526e40aa"
+    },
+    {
+      "app": "content_factory",
+      "name": "0034_keywordvelocity_trend_provenance",
+      "file": "content_factory/migrations/0034_keywordvelocity_trend_provenance.py",
+      "sha256": "3ed9ebfd23e41039e2f00f03602c5e172915f75e14ff8d7930643d56db319e10"
+    },
+    {
+      "app": "content_factory",
+      "name": "0035_notificationdelivery_performance_report_and_more",
+      "file": "content_factory/migrations/0035_notificationdelivery_performance_report_and_more.py",
+      "sha256": "cdd80b277121c1ee2e9053e7c46f0508d7238acbcc1794d79f80d978ae842785"
+    },
+    {
+      "app": "content_factory",
+      "name": "0036_researched_keyword_ai_search_metrics",
+      "file": "content_factory/migrations/0036_researched_keyword_ai_search_metrics.py",
+      "sha256": "a4ebb336a42cbea76ea9fb6459910fa0dcae8d67ddb02603678393f87f0e5765"
+    },
+    {
+      "app": "content_factory",
+      "name": "0037_content_islands",
+      "file": "content_factory/migrations/0037_content_islands.py",
+      "sha256": "9bb0e0b67496963235b74fa38f5c88f7198f3392e434cd84bb45a58fdb5c9ff2"
+    },
+    {
+      "app": "content_factory",
+      "name": "0038_delete_seo_topicmap_researchsession",
+      "file": "content_factory/migrations/0038_delete_seo_topicmap_researchsession.py",
+      "sha256": "5245c3a774e3a87f9d3b517336f6a481fd47dfba069650b7cb249e51288e0e95"
+    },
+    {
+      "app": "content_factory",
+      "name": "0039_encrypt_github_credentials",
+      "file": "content_factory/migrations/0039_encrypt_github_credentials.py",
+      "sha256": "7f9c310bfe575dd3a63f76044cdf8011913f7f9f083772fea13602d1cbd51eea"
+    },
+    {
+      "app": "content_factory",
+      "name": "0040_backfill_github_credential_envelopes",
+      "file": "content_factory/migrations/0040_backfill_github_credential_envelopes.py",
+      "sha256": "f7e5d4b509b02c3147c0a9dd3f625b991b4813cfde30bb75527184f1bae4dda7"
+    },
+    {
+      "app": "content_factory",
+      "name": "0041_writtenarticle_editorial_attribution",
+      "file": "content_factory/migrations/0041_writtenarticle_editorial_attribution.py",
+      "sha256": "f886d0392acbe3885fb4a74cf882e9bb24c3af3df9ed90d3d719975f8ff980b5"
+    },
+    {
+      "app": "content_factory",
+      "name": "0042_website_connection_lifecycle",
+      "file": "content_factory/migrations/0042_website_connection_lifecycle.py",
+      "sha256": "cefdb7443a004a2a45fe00f0202a7aed70b97312865ef3b31a626ebf2ba9224d"
+    },
+    {
+      "app": "content_factory",
+      "name": "0043_merge_credentials_website",
+      "file": "content_factory/migrations/0043_merge_credentials_website.py",
+      "sha256": "01c1ae66568c29f3b849e78cf5edab5ba886c1202eb5628867fee9fdaee4f7da"
+    },
+    {
+      "app": "content_factory",
+      "name": "0044_website_target_generation_key",
+      "file": "content_factory/migrations/0044_website_target_generation_key.py",
+      "sha256": "c292d587182fe2faeeb168871ec1b98dd84f7a5ca7542fd767e5c2be7b33950c"
+    },
+    {
+      "app": "content_factory",
+      "name": "0045_content_dispatch_outbox",
+      "file": "content_factory/migrations/0045_content_dispatch_outbox.py",
+      "sha256": "dd19e7021999bcf2eeedd0c802460d08728ad3b42515d7d3a07d74142f9f774b"
+    },
+    {
+      "app": "content_factory",
+      "name": "0046_connected_website_article_delivery_preview",
+      "file": "content_factory/migrations/0046_connected_website_article_delivery_preview.py",
+      "sha256": "77dd54e766fb10bed421136f6015839bd27e9536dc8f352a04b76c38538c45e2"
+    },
+    {
+      "app": "content_factory",
+      "name": "0047_content_island_removed_at",
+      "file": "content_factory/migrations/0047_content_island_removed_at.py",
+      "sha256": "9c8d2c6995511f75e25741177ddbd2b48be14f44cb546985b065e7e137a937fb"
+    },
+    {
+      "app": "content_factory",
+      "name": "0048_hosted_article_sites",
+      "file": "content_factory/migrations/0048_hosted_article_sites.py",
+      "sha256": "c3445dc7f057f05b973116619e20861f095cc9245726431213a765c3f88b5d5d"
+    },
+    {
+      "app": "content_factory",
+      "name": "0049_writtenarticle_run",
+      "file": "content_factory/migrations/0049_writtenarticle_run.py",
+      "sha256": "ea240f47e5f5c66acc7c1ed0259e9fa95aafd982ce5be022dc160e97b0bd5270"
+    },
+    {
+      "app": "content_factory",
+      "name": "0050_retire_hosted_article_sites",
+      "file": "content_factory/migrations/0050_retire_hosted_article_sites.py",
+      "sha256": "7b054fa4f50b993d4625ee0d1411c2a96dcb6a20885fdba88f1826db5d5ad108"
+    },
+    {
+      "app": "content_factory",
+      "name": "0051_remove_retired_blog_records",
+      "file": "content_factory/migrations/0051_remove_retired_blog_records.py",
+      "sha256": "ae9163b69dce7f56c6914917b8746262d3abca4ce7080a32fe3aa9b71548f839"
+    },
+    {
+      "app": "content_factory",
+      "name": "0052_author_photo",
+      "file": "content_factory/migrations/0052_author_photo.py",
+      "sha256": "eda66a5e1c0798519d853b7b1881608ee421c0775ef6a7c9f48dfd43ef8a0540"
+    },
+    {
+      "app": "content_factory",
+      "name": "0053_content_island_regions",
+      "file": "content_factory/migrations/0053_content_island_regions.py",
+      "sha256": "bef29fa03ee7faa9d5f426f7ff59cef8e91b7090c524c9ac211b9bd815d7e7c6"
+    },
+    {
+      "app": "contenttypes",
+      "name": "0001_initial",
+      "file": ".venv/Lib/site-packages/django/contrib/contenttypes/migrations/0001_initial.py",
+      "sha256": "35ed8489a147e0b42a15c21b5d4f0e8940de6f73fb326e9d6dea91b4d0b953cc"
+    },
+    {
+      "app": "contenttypes",
+      "name": "0002_remove_content_type_name",
+      "file": ".venv/Lib/site-packages/django/contrib/contenttypes/migrations/0002_remove_content_type_name.py",
+      "sha256": "7d36494075750f0ed3c0f68d0cb1548eba59cc593f52f691f6cc37a043083766"
+    },
+    {
+      "app": "core",
+      "name": "0001_initial",
+      "file": "core/migrations/0001_initial.py",
+      "sha256": "9d5b5b56566c88d5d91d99e3bb53884c699526b7b159d42b0e5ff48b750a646d"
+    },
+    {
+      "app": "core",
+      "name": "0002_hackathon",
+      "file": "core/migrations/0002_hackathon.py",
+      "sha256": "b019e4d55875749abb7f5230fbf829193f21b4f0188fdb701beeaa14d5bb5eba"
+    },
+    {
+      "app": "core",
+      "name": "0003_user_avatar_url",
+      "file": "core/migrations/0003_user_avatar_url.py",
+      "sha256": "cdd2380629f1c5c7abdeb95e94b48cbea95006cdf0b963cfc703c31fa053c3ed"
+    },
+    {
+      "app": "core",
+      "name": "0004_user_about_user_phone",
+      "file": "core/migrations/0004_user_about_user_phone.py",
+      "sha256": "3c3267124739c57bc3a5ab97231a24742ec23ee8fcf8b51dbd0dd6b9406c8d34"
+    },
+    {
+      "app": "core",
+      "name": "0005_user_first_name_user_last_name",
+      "file": "core/migrations/0005_user_first_name_user_last_name.py",
+      "sha256": "b760c09b85d85b0dadfa299878ce4311a13652cf1707043d4da93bb311d6d216"
+    },
+    {
+      "app": "core",
+      "name": "0006_split_full_name",
+      "file": "core/migrations/0006_split_full_name.py",
+      "sha256": "8a76fc1e55406199219c8e3f6e2bb568fb3d9352b53e0d33dda8a764ca01f4e8"
+    },
+    {
+      "app": "core",
+      "name": "0007_remove_user_full_name",
+      "file": "core/migrations/0007_remove_user_full_name.py",
+      "sha256": "1cea8847e9f3f76802a960892ccd653e4e963b657d53c335ad3f1161eeca591d"
+    },
+    {
+      "app": "core",
+      "name": "0008_user_personas",
+      "file": "core/migrations/0008_user_personas.py",
+      "sha256": "febdb2e0674e5e46be3e1adaa41121df8be4f3fff74321ad02d24c0e1c3b678f"
+    },
+    {
+      "app": "core",
+      "name": "0009_globalsettings",
+      "file": "core/migrations/0009_globalsettings.py",
+      "sha256": "f19bcf537475ea55c073b68d355e76d19e8ea959f1e77085fb314f9b13e59866"
+    },
+    {
+      "app": "core",
+      "name": "0010_user_slack_id_alter_globalsettings_is_obscured",
+      "file": "core/migrations/0010_user_slack_id_alter_globalsettings_is_obscured.py",
+      "sha256": "62f3315dd6a7b0cc292592f86b41edcd613f46db862bed4332c425c454b5d253"
+    },
+    {
+      "app": "core",
+      "name": "0011_organization_organizationcontentconfig",
+      "file": "core/migrations/0011_organization_organizationcontentconfig.py",
+      "sha256": "265d3ee53206d3785a450b537ce9f31c9816131fccf1e92a5d24899c2be5d1a5"
+    },
+    {
+      "app": "core",
+      "name": "0012_organizationcontentconfig_scan_summary_and_more",
+      "file": "core/migrations/0012_organizationcontentconfig_scan_summary_and_more.py",
+      "sha256": "6662df343eaeb821daa9f15fc3d684b6f8c431a427657f784b1c418aae1524a1"
+    },
+    {
+      "app": "core",
+      "name": "0013_organizationcontentconfig_resource_prompt",
+      "file": "core/migrations/0013_organizationcontentconfig_resource_prompt.py",
+      "sha256": "cff3cbd15caa7e5e69e6564569fdac42277ba73b066cfee05a039e938ef6143b"
+    },
+    {
+      "app": "core",
+      "name": "0014_add_component_library_storage",
+      "file": "core/migrations/0014_add_component_library_storage.py",
+      "sha256": "c1d224be18ff68f2cf66b782aed569379b802869703df96405a4cc6699989af2"
+    },
+    {
+      "app": "core",
+      "name": "0015_add_company_context",
+      "file": "core/migrations/0015_add_company_context.py",
+      "sha256": "323d54b70e24f1ecc6a65fa7bd7273063e083ff7e4713e514d860ef83087cf88"
+    },
+    {
+      "app": "core",
+      "name": "0016_organization_competitors",
+      "file": "core/migrations/0016_organization_competitors.py",
+      "sha256": "1ea7814c9d3b54f36ed9bb8e1886e7e949f8dfbc7db5eaaea287dbbd7615ef1f"
+    },
+    {
+      "app": "core",
+      "name": "0017_add_seed_keywords_to_organization",
+      "file": "core/migrations/0017_add_seed_keywords_to_organization.py",
+      "sha256": "f2d183e5ea4bd618f0627322d4de7fa8fad96101144001d48c8ff6ec2b5f207b"
+    },
+    {
+      "app": "core",
+      "name": "0018_add_content_factory_job",
+      "file": "core/migrations/0018_add_content_factory_job.py",
+      "sha256": "047444ddb0aff9b2136b9690fa36e76a4f3e0f4c76f6a78e2140e00fc6513cb7"
+    },
+    {
+      "app": "core",
+      "name": "0019_contentfactoryjob_request_meta_and_more",
+      "file": "core/migrations/0019_contentfactoryjob_request_meta_and_more.py",
+      "sha256": "04301f7035cfcedc6758b95b5a3a1a808df068768934bf45dc9f5140e74729dd"
+    },
+    {
+      "app": "core",
+      "name": "0020_add_installed_packages_to_orgconfig",
+      "file": "core/migrations/0020_add_installed_packages_to_orgconfig.py",
+      "sha256": "9df3e79a7b052f883a256d9774d7a69c4fa738570be4b78860ea5448dc7bf81f"
+    },
+    {
+      "app": "core",
+      "name": "0021_add_org_github_credentials",
+      "file": "core/migrations/0021_add_org_github_credentials.py",
+      "sha256": "5d3ae21de60efda8a7818371b6d6f7c91f584429b9890d29340d9ff36143ad2b"
+    },
+    {
+      "app": "core",
+      "name": "0022_add_articles_scaffolded",
+      "file": "core/migrations/0022_add_articles_scaffolded.py",
+      "sha256": "53268d05716cd70d5c409bdb5c77dbbb3347190354586c1fa378e0aaa7f9cda5"
+    },
+    {
+      "app": "core",
+      "name": "0023_add_domain_to_paa_and_aisaturation",
+      "file": "core/migrations/0023_add_domain_to_paa_and_aisaturation.py",
+      "sha256": "1486ffcc7328ae67e474d2f2bfe3d0e75ecba61e318b6b3ff728e9c315c914d9"
+    },
+    {
+      "app": "core",
+      "name": "0024_add_thread_context_to_contentfactoryjob",
+      "file": "core/migrations/0024_add_thread_context_to_contentfactoryjob.py",
+      "sha256": "b0bb1042fa8aad932158219d63b0a326332c11608ee8f257ce697e11bad68453"
+    },
+    {
+      "app": "core",
+      "name": "0025_backfill_domain_on_paa_and_aisaturation",
+      "file": "core/migrations/0025_backfill_domain_on_paa_and_aisaturation.py",
+      "sha256": "06bab6303db0dad0ce728b631358d057ed34d2aeddccd6fa740d644abe743684"
+    },
+    {
+      "app": "core",
+      "name": "0026_add_scaffold_preview_url",
+      "file": "core/migrations/0026_add_scaffold_preview_url.py",
+      "sha256": "534b7e9d336e52aeef9f7dc3790025361a0ef2656a5cb14a5317781d2a9658d7"
+    },
+    {
+      "app": "core",
+      "name": "0027_seed_default_hackathons",
+      "file": "core/migrations/0027_seed_default_hackathons.py",
+      "sha256": "07efd55874d63c378e2671056a76d3ccd7fae662cca171d6c0ee820d80689cf1"
+    },
+    {
+      "app": "core",
+      "name": "0028_update_hospital_hackathon_metadata",
+      "file": "core/migrations/0028_update_hospital_hackathon_metadata.py",
+      "sha256": "d9e615085ea02d6a0ec39f8ca9d182a40b39b8f0e748413fc3127fcbae214caa"
+    },
+    {
+      "app": "core",
+      "name": "0029_add_research_memory_fields",
+      "file": "core/migrations/0029_add_research_memory_fields.py",
+      "sha256": "3d0ec4a9ac37c3e42f6d61dc4db6692cdaf1d3a09074f66ede57ba13848b5de3"
+    },
+    {
+      "app": "core",
+      "name": "0030_add_content_factory_runs",
+      "file": "core/migrations/0030_add_content_factory_runs.py",
+      "sha256": "38148cbc2527ff789da2121e92d35a2d58991e9c39bded485495b39143718089"
+    },
+    {
+      "app": "core",
+      "name": "0031_add_article_system_to_org_config",
+      "file": "core/migrations/0031_add_article_system_to_org_config.py",
+      "sha256": "319fa34c0ddd162fdd0e32e8afd406cc42734c6504af768d76adcca8d36eb989"
+    },
+    {
+      "app": "core",
+      "name": "0032_update_content_factory_status_choices",
+      "file": "core/migrations/0032_update_content_factory_status_choices.py",
+      "sha256": "d104f98d32b5db0c56db36ddd902b31706c057f6cd6a091a3d10f078aacefc44"
+    },
+    {
+      "app": "core",
+      "name": "0033_add_content_factory_progress_tracking",
+      "file": "core/migrations/0033_add_content_factory_progress_tracking.py",
+      "sha256": "6c76b6aa682e70330e5ea574a9ec0a462668df647ac7d2ffb7105e7b26abb261"
+    },
+    {
+      "app": "core",
+      "name": "0034_add_content_factory_billing_fields",
+      "file": "core/migrations/0034_add_content_factory_billing_fields.py",
+      "sha256": "bf654d256629ec1b46023f815a08b0272dfc25d8e18039ba8f5ff6a090cc59da"
+    },
+    {
+      "app": "core",
+      "name": "0035_add_content_factory_progress_message_tracking",
+      "file": "core/migrations/0035_add_content_factory_progress_message_tracking.py",
+      "sha256": "56d524ab915cc03163ad104fc55323c2ebd65a21b15e2cbae41b1e38430399db"
+    },
+    {
+      "app": "core",
+      "name": "0035_add_publish_targets_to_org_config",
+      "file": "core/migrations/0035_add_publish_targets_to_org_config.py",
+      "sha256": "604e6bd4f95d7338384133355f72f3226a30388d5559506de29fe670428b1bfb"
+    },
+    {
+      "app": "core",
+      "name": "0035_rename_cf_run_workflow_status_idx_content_fac_workflo_10aee3_idx_and_more",
+      "file": "core/migrations/0035_rename_cf_run_workflow_status_idx_content_fac_workflo_10aee3_idx_and_more.py",
+      "sha256": "0e08cf578c8b12b18bb99cfdaa62dfcd45ddb714dc8a8d8984a964b94d9bb009"
+    },
+    {
+      "app": "core",
+      "name": "0036_merge_content_factory_progress_and_publish_targets",
+      "file": "core/migrations/0036_merge_content_factory_progress_and_publish_targets.py",
+      "sha256": "e669bdd630cd51a219c71db1f9cd664e330e108796d5c6de3fcf08fa586f3ba6"
+    },
+    {
+      "app": "core",
+      "name": "0037_alter_organizationcontentconfig_article_system",
+      "file": "core/migrations/0037_alter_organizationcontentconfig_article_system.py",
+      "sha256": "e4d32c0afe38657f2387a23f5e78471eb3666d69ec6b7e568437e38d3e1121a3"
+    },
+    {
+      "app": "core",
+      "name": "0038_merge_content_factory_schema_branches",
+      "file": "core/migrations/0038_merge_content_factory_schema_branches.py",
+      "sha256": "8688026846913707d57a8b4246ae57defd9da7fe633455b48cbd45ec28e22e0a"
+    },
+    {
+      "app": "core",
+      "name": "0039_scheduled_discovery_dispatch",
+      "file": "core/migrations/0039_scheduled_discovery_dispatch.py",
+      "sha256": "79d1d700a0d0b38d94b105a6288012c2a3953b5fd06c5c91682f7a935172f36c"
+    },
+    {
+      "app": "core",
+      "name": "0040_alter_contentfactoryjob_status",
+      "file": "core/migrations/0040_alter_contentfactoryjob_status.py",
+      "sha256": "3407bda0daf712b9135f7617df12089ac9f9e39ca09e124aa026a51beb041ab3"
+    },
+    {
+      "app": "core",
+      "name": "0041_organizationcontentconfig_connected_slack_user_id",
+      "file": "core/migrations/0041_organizationcontentconfig_connected_slack_user_id.py",
+      "sha256": "ec9e087da2ee6ca1871e40dca499e9a32472b247ca857ef16d7dc415f383029b"
+    },
+    {
+      "app": "core",
+      "name": "0042_add_article_delivery_mode_to_org_config",
+      "file": "core/migrations/0042_add_article_delivery_mode_to_org_config.py",
+      "sha256": "cdf4a62742d96f2536d712988f3847ad8e015f522431f3b5167230ca90eaee5d"
+    },
+    {
+      "app": "core",
+      "name": "0043_add_content_factory_healing_records",
+      "file": "core/migrations/0043_add_content_factory_healing_records.py",
+      "sha256": "ef39423247fce84c95e354ba5f89c832af4279d0cb8d3d3664976ad1d62cdb32"
+    },
+    {
+      "app": "core",
+      "name": "0044_alter_contentfactoryjob_status_blocked",
+      "file": "core/migrations/0044_alter_contentfactoryjob_status_blocked.py",
+      "sha256": "c3dfa11b46a8e134f24cc55fc431bafa9bd9f1babdfd5fb2f9f3daf77dec6dc6"
+    },
+    {
+      "app": "core",
+      "name": "0045_org_config_repo_execution_contract_and_job_pr_statuses",
+      "file": "core/migrations/0045_org_config_repo_execution_contract_and_job_pr_statuses.py",
+      "sha256": "d8ca1419b209e5774d393634c7ee275b187fd90dca213422482321da250c9e4a"
+    },
+    {
+      "app": "core",
+      "name": "0046_alter_contentfactoryrun_status_and_more",
+      "file": "core/migrations/0046_alter_contentfactoryrun_status_and_more.py",
+      "sha256": "696440af4d3c30233e66c418e2558e3b2baac7a2fe4f871042c701a20c601bc3"
+    },
+    {
+      "app": "core",
+      "name": "0047_organizationcontentconfig_daily_discovery_fields",
+      "file": "core/migrations/0047_organizationcontentconfig_daily_discovery_fields.py",
+      "sha256": "332a1e77b90d06441885a895c8bf143e23c7003c08302185afcedca1918c9a77"
+    },
+    {
+      "app": "core",
+      "name": "0049_viberaisingpendingsignup",
+      "file": "core/migrations/0049_viberaisingpendingsignup.py",
+      "sha256": "1effde764de4b79f9b9cc9180329fdf56feee81fc5e0f57bca181618bafef146"
+    },
+    {
+      "app": "core",
+      "name": "0050_delete_viberaisingpendingsignup",
+      "file": "core/migrations/0050_delete_viberaisingpendingsignup.py",
+      "sha256": "ce078c08834ee5211ff76aff06691bb8abe8d1ab65e81b77e6c57fcd90214762"
+    },
+    {
+      "app": "core",
+      "name": "0051_split_content_factory_apps",
+      "file": "core/migrations/0051_split_content_factory_apps.py",
+      "sha256": "51bb531b962eee3e938cb3f4f788b2b13aa559620a22d7ac356727ee8094d5ee"
+    },
+    {
+      "app": "core",
+      "name": "0052_remove_user_role_has_team",
+      "file": "core/migrations/0052_remove_user_role_has_team.py",
+      "sha256": "1ef8088b03dd2eda67c4e942b912d3353589de55d66eb0097d6654d535bd05f7"
+    },
+    {
+      "app": "core",
+      "name": "0053_user_updated_at",
+      "file": "core/migrations/0053_user_updated_at.py",
+      "sha256": "6f50c983d468d12bc2041aa03b23260e62a74f2967bb52eeee3b30d7d96a040a"
+    },
+    {
+      "app": "core",
+      "name": "0054_rebrand_hospital_as_healthhack",
+      "file": "core/migrations/0054_rebrand_hospital_as_healthhack.py",
+      "sha256": "b9f7ed9a79aa5f089056759bccd83921fc66f0da65b99d795b211dffdb5073a2"
+    },
+    {
+      "app": "core",
+      "name": "0055_passwordresetchallenge_user_auth_version_and_more",
+      "file": "core/migrations/0055_passwordresetchallenge_user_auth_version_and_more.py",
+      "sha256": "6d73f961ebbd1bcb4098e9d662cce6c1abcedf743d5740bbabba71f66d6e7e61"
+    },
+    {
+      "app": "core",
+      "name": "0056_user_community_chat_profile_id",
+      "file": "core/migrations/0056_user_community_chat_profile_id.py",
+      "sha256": "db929d6e2f56b1d22bd2e086b503033e136c7a27983eb50339f14ab00d2f54b4"
+    },
+    {
+      "app": "core",
+      "name": "0057_passwordresetemaildelivery",
+      "file": "core/migrations/0057_passwordresetemaildelivery.py",
+      "sha256": "8ac0f0dd563e523cd3cc01315e7ec466a08a292f51842907e5d4690c51db0b76"
+    },
+    {
+      "app": "core",
+      "name": "0058_drop_orphan_tables_from_removed_apps",
+      "file": "core/migrations/0058_drop_orphan_tables_from_removed_apps.py",
+      "sha256": "409309e043e44aedeb6c20fbe68a4aad9f693388b227149633059b9118c98bae"
+    },
+    {
+      "app": "core",
+      "name": "0058_slackfounderaccountlink_slackfounderlinkrequest",
+      "file": "core/migrations/0058_slackfounderaccountlink_slackfounderlinkrequest.py",
+      "sha256": "7faa6ad01ba1fde4595d468201fc82a0fcff5fb702ebf2e89334929d1d24c3ef"
+    },
+    {
+      "app": "core",
+      "name": "0059_purge_stale_content_types",
+      "file": "core/migrations/0059_purge_stale_content_types.py",
+      "sha256": "acee34651723dce75bcf44b71467dfc9e2b2cbd5620183ebb0f70f57c0132aea"
+    },
+    {
+      "app": "core",
+      "name": "0059_slackfounderaccountlink_distinct_users",
+      "file": "core/migrations/0059_slackfounderaccountlink_distinct_users.py",
+      "sha256": "a469fd4d07e13e12a2fba0087df546abd18feebeafe5cf0e31c264baa9159584"
+    },
+    {
+      "app": "core",
+      "name": "0060_slackfounderlinkrequest_consumed_by_user",
+      "file": "core/migrations/0060_slackfounderlinkrequest_consumed_by_user.py",
+      "sha256": "1e0a5de75532c9e76ea84e2726bb28045c89e7b9525234b7eb941b7ac262a31a"
+    },
+    {
+      "app": "core",
+      "name": "0061_clear_synthetic_web_slack_ids",
+      "file": "core/migrations/0061_clear_synthetic_web_slack_ids.py",
+      "sha256": "569b271ca2f0e1a5fe19cc363ce7072703971934beab7c13b6fbb8fad8d1dd7e"
+    },
+    {
+      "app": "core",
+      "name": "0062_slackfounderlinkrequest_created_index",
+      "file": "core/migrations/0062_slackfounderlinkrequest_created_index.py",
+      "sha256": "83ece8389e778e14436eb81fd6d8ddc054206f06a13552944f1bd1946b29d7fa"
+    },
+    {
+      "app": "core",
+      "name": "0063_canonicalize_legacy_content_factory_actor_ids",
+      "file": "core/migrations/0063_canonicalize_legacy_content_factory_actor_ids.py",
+      "sha256": "706b88aadd570f03d3897521ba3a07fe36c79cbb5ea40fc3544593f71586a796"
+    },
+    {
+      "app": "core",
+      "name": "0064_guard_legacy_actor_migration_history",
+      "file": "core/migrations/0064_guard_legacy_actor_migration_history.py",
+      "sha256": "70de532ed38ce1948f5070e6cf14e5afd4b0cf717367e069951f56f8a6b17f6e"
+    },
+    {
+      "app": "core",
+      "name": "0065_recheck_legacy_actor_migration_attestation",
+      "file": "core/migrations/0065_recheck_legacy_actor_migration_attestation.py",
+      "sha256": "05fa9813e35e7ef816279b78854d333387c9fc885ed0d68f0130f1de90bee8af"
+    },
+    {
+      "app": "core",
+      "name": "0066_guard_orphaned_actor_migration_history",
+      "file": "core/migrations/0066_guard_orphaned_actor_migration_history.py",
+      "sha256": "ed981c6628f49f2e8ebce4dac1368560dc8995ce6b7d84937e1b441668f842d2"
+    },
+    {
+      "app": "core",
+      "name": "0067_merge_0058_drop_orphan_tables_from_removed_apps_0066_guard_orphaned_actor_migration_history",
+      "file": "core/migrations/0067_merge_0058_drop_orphan_tables_from_removed_apps_0066_guard_orphaned_actor_migration_history.py",
+      "sha256": "aed711667dbc57dccb1d46da7a645766ffbac9b232b1dc94ddd086cd1ac54c11"
+    },
+    {
+      "app": "core",
+      "name": "0068_merge_0059_purge_stale_content_types_0067_merge_0058_drop_orphan_tables_from_removed_apps_0066_guard_orphaned_actor_migration_history",
+      "file": "core/migrations/0068_merge_0059_purge_stale_content_types_0067_merge_0058_drop_orphan_tables_from_removed_apps_0066_guard_orphaned_actor_migration_history.py",
+      "sha256": "f7f9f0f5c2310ad42e235e9e139acde7bab7d748539a19cd17553be03dd6894a"
+    },
+    {
+      "app": "core",
+      "name": "0069_account_ban",
+      "file": "core/migrations/0069_account_ban.py",
+      "sha256": "95f7f226ad8ab30528287751ac43a66d816d350abc1397aa20aead9d0db3a970"
+    },
+    {
+      "app": "core",
+      "name": "0070_user_email_alias",
+      "file": "core/migrations/0070_user_email_alias.py",
+      "sha256": "2de6908065a4968f1387c0610cb7c30fad24c4de87b3143c5f5507f05d871293"
+    },
+    {
+      "app": "crm",
+      "name": "0001_initial",
+      "file": "crm/migrations/0001_initial.py",
+      "sha256": "1dafb9fe786670ea2412efae07fe03cb1c53ed0e25b2f2dbb3dbf3ab5a9c7916"
+    },
+    {
+      "app": "crm",
+      "name": "0002_deliverability_foundations",
+      "file": "crm/migrations/0002_deliverability_foundations.py",
+      "sha256": "cfc1af0c3d50b72de010c6ee9f96d4aabe7b108d28f85e272b05531afc559be4"
+    },
+    {
+      "app": "crm",
+      "name": "0003_campaign_waves_and_planner",
+      "file": "crm/migrations/0003_campaign_waves_and_planner.py",
+      "sha256": "f0130dcdbd2f22dc48db7e936f5a4bd4bc86bc80a46b6a69787e9da318e2968a"
+    },
+    {
+      "app": "crm",
+      "name": "0004_preflight_and_lifecycle",
+      "file": "crm/migrations/0004_preflight_and_lifecycle.py",
+      "sha256": "6712184c26584234b441ef41c24f832b75c917eedc2fa803d9c38b40af0de289"
+    },
+    {
+      "app": "esafety",
+      "name": "0001_initial",
+      "file": "esafety/migrations/0001_initial.py",
+      "sha256": "fcf353955dc1543aed8fed8bd2cccae43f6e7ddae93f184b459493392561d544"
+    },
+    {
+      "app": "esafety",
+      "name": "0002_submission",
+      "file": "esafety/migrations/0002_submission.py",
+      "sha256": "3b407c8407b1b724d79e3b594b0996882985413f6ec3cf5d640ca6b411a6e2bc"
+    },
+    {
+      "app": "esafety",
+      "name": "0003_announcement",
+      "file": "esafety/migrations/0003_announcement.py",
+      "sha256": "f83d1f13428f28f9b1067859d1957c8081ecd7b6df8312213e0d1f5728fdbce1"
+    },
+    {
+      "app": "esafety",
+      "name": "0004_team_avatar_url",
+      "file": "esafety/migrations/0004_team_avatar_url.py",
+      "sha256": "9eb0b699500d137b53dccba493eeb367739d94e76ea6e945b5e898b22fec702a"
+    },
+    {
+      "app": "esafety",
+      "name": "0005_alter_announcement_body",
+      "file": "esafety/migrations/0005_alter_announcement_body.py",
+      "sha256": "1fac089af437d363630df47fc2106230b763873afa546316eaec779cbe0e14b6"
+    },
+    {
+      "app": "esafety",
+      "name": "0006_submission_coarse_score_submission_fine_score_and_more",
+      "file": "esafety/migrations/0006_submission_coarse_score_submission_fine_score_and_more.py",
+      "sha256": "4c9c9c4f774cf730dc6b852ff0b03e3a572b8e89437be4915a346ed5b884e04f"
+    },
+    {
+      "app": "esafety",
+      "name": "0007_submission_logs",
+      "file": "esafety/migrations/0007_submission_logs.py",
+      "sha256": "a3d9084b68a3aec9a3e60b7dd696ef0e80d398ab26996134528eff5300b27ffc"
+    },
+    {
+      "app": "esafety",
+      "name": "0008_alter_submission_logs",
+      "file": "esafety/migrations/0008_alter_submission_logs.py",
+      "sha256": "f60f8421f92992baf8880fd085c2cecc7642856b9ebe91b17b77b3ea64b80313"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0001_move_vibe_raising_models",
+      "file": "founder_tools/migrations/0001_move_vibe_raising_models.py",
+      "sha256": "717d4054b0d7d457b9d4c5789d9e243e824a2728f9d1766050bb51dd6dc79ca4"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0002_company_organization",
+      "file": "founder_tools/migrations/0002_company_organization.py",
+      "sha256": "421342db439fe2bb84f3da0e85fb2cee102a03ff7785a310092fe43f7a3e667d"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0003_backfill_company_organizations",
+      "file": "founder_tools/migrations/0003_backfill_company_organizations.py",
+      "sha256": "6e377a198f166648aae887f679bdc3b5a10dd0648389f7acdfa305f739ddb6a1"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0004_move_legacy_contenttypes",
+      "file": "founder_tools/migrations/0004_move_legacy_contenttypes.py",
+      "sha256": "0a1a53315dcab02edea5de0e93bb45ab6eb56794507f529489008aef8051247f"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0005_viberaisingcompany_location",
+      "file": "founder_tools/migrations/0005_viberaisingcompany_location.py",
+      "sha256": "d10c9f989c3226e4ac4b38ae80de1ae89bbcf005021d8c8ba06ced3c7c0da384"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0006_repair_company_organization_column",
+      "file": "founder_tools/migrations/0006_repair_company_organization_column.py",
+      "sha256": "9cc2023874848b0cce737541706862cd9df748391930393bd9f9d7d6f0a579e7"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0007_viberaisingcompany_avatar_url",
+      "file": "founder_tools/migrations/0007_viberaisingcompany_avatar_url.py",
+      "sha256": "57d818268bcf85ee6cbe4ce6c38f84a3c9488398b56bc2271d162f65d452e5e7"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0008_viberaisingcompany_abr_verified_at_and_more",
+      "file": "founder_tools/migrations/0008_viberaisingcompany_abr_verified_at_and_more.py",
+      "sha256": "3b87736dafe265dbcc19376702fb4165a4aee1ffde59cd1dad0622e3e16475ce"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0008_viberaisingcompany_uniq_profile_domain",
+      "file": "founder_tools/migrations/0008_viberaisingcompany_uniq_profile_domain.py",
+      "sha256": "14e241b1041c53e277ca44a28891f4b3afb088b5422075236374cdd492c167ca"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0009_merge_20260701_0348",
+      "file": "founder_tools/migrations/0009_merge_20260701_0348.py",
+      "sha256": "5d30c15752bc48336c251633c926d6b7afab61ba964fb6b554d137f1ca4f8e38"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0010_company_default_audience_visibility",
+      "file": "founder_tools/migrations/0010_company_default_audience_visibility.py",
+      "sha256": "0ccce2206fa947bb788c6cc4304a431b0aa76274672f299ef297e637e74dfca1"
+    },
+    {
+      "app": "founder_tools",
+      "name": "0011_company_avatar_url_length",
+      "file": "founder_tools/migrations/0011_company_avatar_url_length.py",
+      "sha256": "ab49878fee980cdf5b831ffda54f09e71b475c803b9faffbfe3f99f9bea3b1e5"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0001_initial",
+      "file": "generic_hackathons/migrations/0001_initial.py",
+      "sha256": "f9c02ac7ce9de09c29952254d9de153edc8c0008e6a342a0013c1af12cfb5367"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0002_wattthehacksettings",
+      "file": "generic_hackathons/migrations/0002_wattthehacksettings.py",
+      "sha256": "a2d5a4d7b702532a157dd395d7e3428e687ce10b1d26fb52e8614d0b2741032b"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0003_generichackathonteam_leader",
+      "file": "generic_hackathons/migrations/0003_generichackathonteam_leader.py",
+      "sha256": "5a57bc388db5fba3425ce471bf65bc0fb169c9d50783d41f03d5e39da7a62d7f"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0004_generichackathonjoinrequest_and_more",
+      "file": "generic_hackathons/migrations/0004_generichackathonjoinrequest_and_more.py",
+      "sha256": "0ad4eff6cc64fd43ad1a4d9307b0fef5ef5aa58d1b7950a63fc7e6154faf8039"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0005_generichackathonteam_eval_token",
+      "file": "generic_hackathons/migrations/0005_generichackathonteam_eval_token.py",
+      "sha256": "74c0ac959d9f7a19d722c902193b082a0cea22ad122bdbaadfbcf66b69349dfb"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0005_watt_session_cache_table",
+      "file": "generic_hackathons/migrations/0005_watt_session_cache_table.py",
+      "sha256": "831781789d7ed7594a89f8df6504d098b45c0ee1b0ff9d0ac2921106ef97b8c0"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0006_merge_20260604_0238",
+      "file": "generic_hackathons/migrations/0006_merge_20260604_0238.py",
+      "sha256": "be1fdf3539403bf6582c8a0cca9b971cfd91a1d6a618979e29c9babca31d1a15"
+    },
+    {
+      "app": "generic_hackathons",
+      "name": "0007_alter_generichackathonteam_eval_team_uuid_and_more",
+      "file": "generic_hackathons/migrations/0007_alter_generichackathonteam_eval_team_uuid_and_more.py",
+      "sha256": "dc78e13c06d41d15b3b016a39d5e239b292fd2e70f8079dc27f18b2c43e539c1"
+    },
+    {
+      "app": "hospital",
+      "name": "0001_initial",
+      "file": "hospital/migrations/0001_initial.py",
+      "sha256": "666bbad8a9f68d58a4e347e08fb7eb582f27f58f58833e35b9fa3463a627c503"
+    },
+    {
+      "app": "hospital",
+      "name": "0002_alter_team_members",
+      "file": "hospital/migrations/0002_alter_team_members.py",
+      "sha256": "c9c16160cf0f64a941b1d75e29a486388ad1d49b417e917c993f44ecfde23d3f"
+    },
+    {
+      "app": "hospital",
+      "name": "0003_alter_submission_user",
+      "file": "hospital/migrations/0003_alter_submission_user.py",
+      "sha256": "ba7eea2855ddc3de1df5b0952f712a12db8d055164754621b2ed415d39d8a41a"
+    },
+    {
+      "app": "hospital",
+      "name": "0004_announcement",
+      "file": "hospital/migrations/0004_announcement.py",
+      "sha256": "86319c829cadfe0b309d46e1782eb0b433fb00767e034a8d3e200744f2579a74"
+    },
+    {
+      "app": "hospital",
+      "name": "0005_medhack_from_roo",
+      "file": "hospital/migrations/0005_medhack_from_roo.py",
+      "sha256": "68f769e55e2c8bc1a27f6f1df6cfbbbf620463796b85ba187af1336d38fbe767"
+    },
+    {
+      "app": "hospital",
+      "name": "0006_team_avatar_url",
+      "file": "hospital/migrations/0006_team_avatar_url.py",
+      "sha256": "33d5411bd079540d43ca186e43121ff4fad59ff64e89ba75db526f44c8066363"
+    },
+    {
+      "app": "hospital",
+      "name": "0007_add_feedback_to_submission",
+      "file": "hospital/migrations/0007_add_feedback_to_submission.py",
+      "sha256": "bd79312f47faa59e7c8ea32093f4615cc17b506e4060d398e93097a8e5ca42ad"
+    },
+    {
+      "app": "hospital",
+      "name": "0008_simcasewinner_simdiagnosisguess_and_more",
+      "file": "hospital/migrations/0008_simcasewinner_simdiagnosisguess_and_more.py",
+      "sha256": "2d8533575e2bf39cef962e41213a2c24d5771e473ee55951e075d72f0d9b473d"
+    },
+    {
+      "app": "hospital",
+      "name": "0009_sim_observability_and_prizes",
+      "file": "hospital/migrations/0009_sim_observability_and_prizes.py",
+      "sha256": "554d771501fe710ba3a31993a0d387ee9813e1c83aa56491d5669b6733ffeedf"
+    },
+    {
+      "app": "hospital",
+      "name": "0010_sim_ai_npc_tools",
+      "file": "hospital/migrations/0010_sim_ai_npc_tools.py",
+      "sha256": "61e4506a8dc2b6dc0bd03c30caadf15b4aa66e507388f4c95c3e2a3ee623a547"
+    },
+    {
+      "app": "hospital",
+      "name": "0011_sim_prize_registration",
+      "file": "hospital/migrations/0011_sim_prize_registration.py",
+      "sha256": "a14c2db0f298400a7149a6266b7311d9b4a7940ff3da7a5b9e2667e1f5d5a9df"
+    },
+    {
+      "app": "hospital",
+      "name": "0012_sim_turn_idempotency",
+      "file": "hospital/migrations/0012_sim_turn_idempotency.py",
+      "sha256": "b50aceaeab31e43313a89adcb5d5046384575a3bb2b9a4e8d1bb3f7c50eb66b0"
+    },
+    {
+      "app": "hospital",
+      "name": "0013_rebrand_announcements_for_healthhack",
+      "file": "hospital/migrations/0013_rebrand_announcements_for_healthhack.py",
+      "sha256": "a2b3040322b04aba560dd04ccfbb38bc307736fa9d5d362fceab6720208326e2"
+    },
+    {
+      "app": "hospital",
+      "name": "0014_announcement_slack_provenance",
+      "file": "hospital/migrations/0014_announcement_slack_provenance.py",
+      "sha256": "bc4e6918ad9229be5c98e00378a3d2c92bfd90ef09cc37e3b97fbd916a745774"
+    },
+    {
+      "app": "hospital",
+      "name": "0015_hospital_competition_round",
+      "file": "hospital/migrations/0015_hospital_competition_round.py",
+      "sha256": "52b65c207c8961260fe8aafb0ee26dd62bc6428095dea8663fabddd5da33b8dd"
+    },
+    {
+      "app": "hospital",
+      "name": "0016_announcement_round_and_activate_healthhack",
+      "file": "hospital/migrations/0016_announcement_round_and_activate_healthhack.py",
+      "sha256": "d49660c148b59a6ee5f25d6cf3e8d067a7962ce7b096c04e748f600789bba3e4"
+    },
+    {
+      "app": "hospital",
+      "name": "0017_delete_medhack_game_and_prediction",
+      "file": "hospital/migrations/0017_delete_medhack_game_and_prediction.py",
+      "sha256": "32768a2bce723af6a7ff06addd8798afac54f7374c3eeee40a65b3529658b3aa"
+    },
+    {
+      "app": "integrations",
+      "name": "0001_initial",
+      "file": "integrations/migrations/0001_initial.py",
+      "sha256": "b2927b892a63dcdae3d48d1f71b0747370bce0286236f35a76243c698db78d5f"
+    },
+    {
+      "app": "integrations",
+      "name": "0002_userintegration",
+      "file": "integrations/migrations/0002_userintegration.py",
+      "sha256": "889de4de004da7b965ae4f632d97d49068184852bcc6e8f6363288edab53b828"
+    },
+    {
+      "app": "integrations",
+      "name": "0003_add_github_repo_field",
+      "file": "integrations/migrations/0003_add_github_repo_field.py",
+      "sha256": "a09e81ed3c636f2e7849da13834faeac8adcf054596fa03aa4f077a48ff6cabc"
+    },
+    {
+      "app": "integrations",
+      "name": "0004_userintegration_last_scanned_at_and_more",
+      "file": "integrations/migrations/0004_userintegration_last_scanned_at_and_more.py",
+      "sha256": "50cada58f9218eb5dc4f3ef1cac1c4a321b225d6265b885527bccc37c4460bf6"
+    },
+    {
+      "app": "integrations",
+      "name": "0005_add_github_refresh_token_fields",
+      "file": "integrations/migrations/0005_add_github_refresh_token_fields.py",
+      "sha256": "190aff7b41cb88acd2d9a266084e56a2a1a52291f9f8a4b17db50811e04fad9e"
+    },
+    {
+      "app": "integrations",
+      "name": "0006_gmailthreadartifact_startupprofile_gmailsynccursor_and_more",
+      "file": "integrations/migrations/0006_gmailthreadartifact_startupprofile_gmailsynccursor_and_more.py",
+      "sha256": "81d7b0bc5db8d98eac83d69c633d2e1c9a5facd27a0a964aaaf472c74082b3a6"
+    },
+    {
+      "app": "integrations",
+      "name": "0007_startupprofile_stage",
+      "file": "integrations/migrations/0007_startupprofile_stage.py",
+      "sha256": "86572a69d6f1055fd3214cc07f8bb8c32d83b1d8c2140407bd1e091361b656d0"
+    },
+    {
+      "app": "integrations",
+      "name": "0008_alter_gmailattachmentartifact_content_disposition_and_more",
+      "file": "integrations/migrations/0008_alter_gmailattachmentartifact_content_disposition_and_more.py",
+      "sha256": "c3ad8df2fad49b0525d5ba8db3281673ba120f522d46025ef99f31dcb97caf16"
+    },
+    {
+      "app": "integrations",
+      "name": "0009_communitybridgechannel_communitybridgereceipt_and_more",
+      "file": "integrations/migrations/0009_communitybridgechannel_communitybridgereceipt_and_more.py",
+      "sha256": "4afba1ce93fd173c36a6e6f75521590694ce3d2316e0a62a38f91714acc28df4"
+    },
+    {
+      "app": "integrations",
+      "name": "0010_external_service_connection",
+      "file": "integrations/migrations/0010_external_service_connection.py",
+      "sha256": "7c918f1e97850105f34e4970526c82bda6a6cb05d3887ee6df5d740f2a87a90e"
+    },
+    {
+      "app": "integrations",
+      "name": "0011_split_content_factory_apps",
+      "file": "integrations/migrations/0011_split_content_factory_apps.py",
+      "sha256": "5c1342223ef68e738e8f2ca2b012a488904ff9890c53558bc1f2921c103f7677"
+    },
+    {
+      "app": "integrations",
+      "name": "0012_financial_account_external_record",
+      "file": "integrations/migrations/0012_financial_account_external_record.py",
+      "sha256": "e0b068fdb6bfbc6ec04cb58aa74b52ffb7e6ed69552a244b5e5e3c7bbe08b387"
+    },
+    {
+      "app": "integrations",
+      "name": "0013_xero_financial_record_types",
+      "file": "integrations/migrations/0013_xero_financial_record_types.py",
+      "sha256": "695b5f6c3c97290346d71e59e0ad62cb9cec6c3cc971917f7f4f7fad70d68c8e"
+    },
+    {
+      "app": "integrations",
+      "name": "0014_startup_metric_source_provenance",
+      "file": "integrations/migrations/0014_startup_metric_source_provenance.py",
+      "sha256": "f3a5ca1f6941f4815c3e778ab5afb56df98058860c0295c7ac1573a0156e2fe1"
+    },
+    {
+      "app": "integrations",
+      "name": "0015_slack_artifacts",
+      "file": "integrations/migrations/0015_slack_artifacts.py",
+      "sha256": "5af63514704322ed24ee36c6028159488bcf6aadcdb44fbc059027f2fb116717"
+    },
+    {
+      "app": "integrations",
+      "name": "0016_split_startup_updates_app",
+      "file": "integrations/migrations/0016_split_startup_updates_app.py",
+      "sha256": "877208d21745cc1db12d534da4492b820ce5ac066b8f33142a2f87f5b16578a2"
+    },
+    {
+      "app": "integrations",
+      "name": "0017_alter_external_service_provider_choices",
+      "file": "integrations/migrations/0017_alter_external_service_provider_choices.py",
+      "sha256": "9a5273531562d20cf66e83495db22fc96c6ad448b3ff3a0783d45002a77f067e"
+    },
+    {
+      "app": "integrations",
+      "name": "0018_google_analytics_provider_choice",
+      "file": "integrations/migrations/0018_google_analytics_provider_choice.py",
+      "sha256": "439f29d48feecce35c29f697cd0aff26afb446192466b0101f2ced162634e8fe"
+    },
+    {
+      "app": "integrations",
+      "name": "0019_luma_provider_choice",
+      "file": "integrations/migrations/0019_luma_provider_choice.py",
+      "sha256": "82bad10a0d38f7234c8c173f2f2a12e3c0644186c225e972becb355d4d8b2b3f"
+    },
+    {
+      "app": "integrations",
+      "name": "0020_externalserviceconnection_uniq_user_org_provider_account",
+      "file": "integrations/migrations/0020_externalserviceconnection_uniq_user_org_provider_account.py",
+      "sha256": "75f9636e1085dda58b666c49df8677ba8658d48e87bffe23d83e0e2f9b8636ca"
+    },
+    {
+      "app": "integrations",
+      "name": "0021_googleconnection_organization_and_more",
+      "file": "integrations/migrations/0021_googleconnection_organization_and_more.py",
+      "sha256": "cf2193d0808613cf4f5b050624d7709c2bd62b02860e557844aa1ea1da266df6"
+    },
+    {
+      "app": "integrations",
+      "name": "0022_githubinstallation",
+      "file": "integrations/migrations/0022_githubinstallation.py",
+      "sha256": "dd3a60e432be13c802200e6c630f41be679152315a3e4e8992cce411debdd9d3"
+    },
+    {
+      "app": "integrations",
+      "name": "0023_githubinstallation_liveness_checked_at",
+      "file": "integrations/migrations/0023_githubinstallation_liveness_checked_at.py",
+      "sha256": "60f715d5f1f3373b9535b39b91f9919f33e4e84c9b3e4e71a644895484dafffc"
+    },
+    {
+      "app": "integrations",
+      "name": "0024_stripe_xero_reconciliation",
+      "file": "integrations/migrations/0024_stripe_xero_reconciliation.py",
+      "sha256": "35840fe42d248ac09a496978245e1a483458d796ff438986e53e405ace64aad1"
+    },
+    {
+      "app": "integrations",
+      "name": "0025_reconciliation_context_suggestions",
+      "file": "integrations/migrations/0025_reconciliation_context_suggestions.py",
+      "sha256": "55e4e724010812b9e6b9d4c188718b8684bd879889005cf5ddf479e6b1dd0c8f"
+    },
+    {
+      "app": "integrations",
+      "name": "0026_xero_statement_reconciliation",
+      "file": "integrations/migrations/0026_xero_statement_reconciliation.py",
+      "sha256": "411847cb0069be56464c9b8ad478d433f021f51a196b248082da13ec16b88242"
+    },
+    {
+      "app": "integrations",
+      "name": "0027_linear_issue_creation_receipt",
+      "file": "integrations/migrations/0027_linear_issue_creation_receipt.py",
+      "sha256": "36e59400535568c617b42f7ddc815de3dee95d1e335e4ddb3801558270be4c01"
+    },
+    {
+      "app": "integrations",
+      "name": "0028_xero_statement_posting",
+      "file": "integrations/migrations/0028_xero_statement_posting.py",
+      "sha256": "f0594b05f55297f09437b71b6725c4936768056c2ed099d207a68d4a68d02c6b"
+    },
+    {
+      "app": "integrations",
+      "name": "0029_humanitix_reconciliation_foundation",
+      "file": "integrations/migrations/0029_humanitix_reconciliation_foundation.py",
+      "sha256": "c89e8853db4f9510e3dd76669d6881c5e45e7e779e4958817a5e319a2c9f1948"
+    },
+    {
+      "app": "integrations",
+      "name": "0030_xero_statement_scan_and_confidence",
+      "file": "integrations/migrations/0030_xero_statement_scan_and_confidence.py",
+      "sha256": "896cbb5a2794a8c4d1c3a423065ad50651b668cf52adc25b4019b40cce5e29ff"
+    },
+    {
+      "app": "integrations",
+      "name": "0031_reconciliation_rules_and_decisions",
+      "file": "integrations/migrations/0031_reconciliation_rules_and_decisions.py",
+      "sha256": "e5b3ada6eb5984bf5dfa3eab22c3a023019ec32a6dfb929954d56f2e985ae7e9"
+    },
+    {
+      "app": "integrations",
+      "name": "0032_reconciliation_decision_approval_types",
+      "file": "integrations/migrations/0032_reconciliation_decision_approval_types.py",
+      "sha256": "f69a77dfe6c2ac342d2d9c4fda1be9004eba7f402f99ae057b045dfd29da60d2"
+    },
+    {
+      "app": "integrations",
+      "name": "0033_xero_statement_reconciliation_outcomes",
+      "file": "integrations/migrations/0033_xero_statement_reconciliation_outcomes.py",
+      "sha256": "f7b0e4c2fc352238f2ffb0d6b2857d660f5af0ff3952288166902f5b46aa6eb8"
+    },
+    {
+      "app": "integrations",
+      "name": "0034_reconciliation_learning_decisions",
+      "file": "integrations/migrations/0034_reconciliation_learning_decisions.py",
+      "sha256": "faaa232623348d77f1084114803d12f24990b6c76093f196ed4819cd95e049cc"
+    },
+    {
+      "app": "integrations",
+      "name": "0035_event_source_provenance",
+      "file": "integrations/migrations/0035_event_source_provenance.py",
+      "sha256": "fc81f24b4cd31e7f0c9d4e3bd40dd531f79e9e0e01f3def5c0547fe8df22b3c2"
+    },
+    {
+      "app": "integrations",
+      "name": "0035_generic_community_bridge_destination",
+      "file": "integrations/migrations/0035_generic_community_bridge_destination.py",
+      "sha256": "e51cb1f5b650df5836975c6c34ee777f47a50b48e823cd8c1b1ed97c67f15177"
+    },
+    {
+      "app": "integrations",
+      "name": "0036_community_bridge_identity_links",
+      "file": "integrations/migrations/0036_community_bridge_identity_links.py",
+      "sha256": "55dc2c646a7bd11e664f1b14cedbe04b4dc95bc3026c4ba670cdfa00fc4adbaf"
+    },
+    {
+      "app": "integrations",
+      "name": "0036_xero_statement_scan_capture_metadata",
+      "file": "integrations/migrations/0036_xero_statement_scan_capture_metadata.py",
+      "sha256": "e0c7b66691ca6fb2c8963a38e8b4c979256d865ad576064e3ba18e111aec6236"
+    },
+    {
+      "app": "integrations",
+      "name": "0037_community_bridge_reaction_delivery_types",
+      "file": "integrations/migrations/0037_community_bridge_reaction_delivery_types.py",
+      "sha256": "7df14227f6a0022993bfa239b53dd08cc6ab4782ff0b9f9b679fae882f038b5a"
+    },
+    {
+      "app": "integrations",
+      "name": "0037_reconciliation_profitability_policy",
+      "file": "integrations/migrations/0037_reconciliation_profitability_policy.py",
+      "sha256": "987ecf84fba7dded890aad02fda1de9ef164be0d4133d7abe6abe6333585b8f5"
+    },
+    {
+      "app": "integrations",
+      "name": "0038_account_backed_bridge_identity",
+      "file": "integrations/migrations/0038_account_backed_bridge_identity.py",
+      "sha256": "7d8734fb8d3576c87a6914c8e94bbac55beb187af8c81172eedd0e6059fc44e6"
+    },
+    {
+      "app": "integrations",
+      "name": "0039_merge_20260802_1530",
+      "file": "integrations/migrations/0039_merge_20260802_1530.py",
+      "sha256": "03a1ef1cdc65c65446803246fd563b9c9870604f32cee7cc92902ca1c41fb542"
+    },
+    {
+      "app": "integrations",
+      "name": "0040_mandatory_reconciliation_tracking",
+      "file": "integrations/migrations/0040_mandatory_reconciliation_tracking.py",
+      "sha256": "ca7e2db4b80ce9fb952110f45b3e42efbb2e2204d73f138a34e93724a95b1f05"
+    },
+    {
+      "app": "integrations",
+      "name": "0041_linear_project_sizing_runs",
+      "file": "integrations/migrations/0041_linear_project_sizing_runs.py",
+      "sha256": "b4e546c74999d2e28cc09f5498912e5c4f2cb0715908e606826b1d451d4ba45e"
+    },
+    {
+      "app": "integrations",
+      "name": "0042_linear_meeting_action_batches",
+      "file": "integrations/migrations/0042_linear_meeting_action_batches.py",
+      "sha256": "d4168b750f918ef6cd9150a0d44ce45f0591500a5134a85f45b2e8ec06327710"
+    },
+    {
+      "app": "integrations",
+      "name": "0043_slack_dm_mirroring",
+      "file": "integrations/migrations/0043_slack_dm_mirroring.py",
+      "sha256": "a04b65dd0ff481970bec99bfea4638c23722a3d637c2a1e6f62e1ca344c6f620"
+    },
+    {
+      "app": "integrations",
+      "name": "0044_slack_dm_group_history_backfill",
+      "file": "integrations/migrations/0044_slack_dm_group_history_backfill.py",
+      "sha256": "5dcd42bf3fd6f6c8b589d6a0f24672170c1cb13291c2207f569e19355b7250dd"
+    },
+    {
+      "app": "integrations",
+      "name": "0045_communitybridgedelivery_parent_dependency",
+      "file": "integrations/migrations/0045_communitybridgedelivery_parent_dependency.py",
+      "sha256": "479e7bc7112987c04b03e9db68e4b6e85b2feca9428aa83e8eaccc768712730a"
+    },
+    {
+      "app": "integrations",
+      "name": "0046_communitybridgedeletionrequest",
+      "file": "integrations/migrations/0046_communitybridgedeletionrequest.py",
+      "sha256": "72372e33ebe14b3e3fbca78e761b7c50c92a0af66a4c81ebb451d43d973dd15f"
+    },
+    {
+      "app": "integrations",
+      "name": "0047_message_sync_reliability",
+      "file": "integrations/migrations/0047_message_sync_reliability.py",
+      "sha256": "2b070147d9ea0f282185060cb3b0056124bb60b7bef006c1bca92b4e89085fa2"
+    },
+    {
+      "app": "integrations",
+      "name": "0048_owner_slack_conversation_inventory",
+      "file": "integrations/migrations/0048_owner_slack_conversation_inventory.py",
+      "sha256": "ee4d640d5309ea51fdff8ebff73d3d570136b8c8e3b553f1e003eacc5ec2522d"
+    },
+    {
+      "app": "integrations",
+      "name": "0049_community_bridge_channel_lifecycle",
+      "file": "integrations/migrations/0049_community_bridge_channel_lifecycle.py",
+      "sha256": "69917520c83a681476ad4855f813b07501812eaaddd10a3a6be8df560bcaf84f"
+    },
+    {
+      "app": "integrations",
+      "name": "0050_slack_member_channels",
+      "file": "integrations/migrations/0050_slack_member_channels.py",
+      "sha256": "bf87051a422284dd1a17ca59df05f2cd3e12d4c285405732ee5776160bd09b79"
+    },
+    {
+      "app": "integrations",
+      "name": "0051_google_connection_accounts",
+      "file": "integrations/migrations/0051_google_connection_accounts.py",
+      "sha256": "5835f00032b9baa8f67c13494daeb2a0be3446a73d843c042c92b57a1cf85342"
+    },
+    {
+      "app": "jobs",
+      "name": "0001_initial",
+      "file": "jobs/migrations/0001_initial.py",
+      "sha256": "9f0a0d747068c7c964241407192fc0012817a634ab2428003121323f6b0cba84"
+    },
+    {
+      "app": "jobs",
+      "name": "0002_jobrun_execution_config",
+      "file": "jobs/migrations/0002_jobrun_execution_config.py",
+      "sha256": "b08d3027a621bff9ff40593ec0901248b3bdcddbefd5958618e3de734516a5d9"
+    },
+    {
+      "app": "mentoring",
+      "name": "0001_initial",
+      "file": "mentoring/migrations/0001_initial.py",
+      "sha256": "971334fa6c81d79a92c9cfdc3fa7f7de4fbe31812c4727f1313e497e3db34404"
+    },
+    {
+      "app": "mentoring",
+      "name": "0002_invites_brief_questions_followup",
+      "file": "mentoring/migrations/0002_invites_brief_questions_followup.py",
+      "sha256": "00a2f1f0b64f13e8b06b7b908ecca8b0fa7df136f710e8b938911b737ca5ef08"
+    },
+    {
+      "app": "mentoring",
+      "name": "0003_instant_bookings",
+      "file": "mentoring/migrations/0003_instant_bookings.py",
+      "sha256": "65585c0543ef96307d4395716f67db1a25c0a0751a56324bd45bcd05412c302d"
+    },
+    {
+      "app": "mentoring",
+      "name": "0004_meeting_capture",
+      "file": "mentoring/migrations/0004_meeting_capture.py",
+      "sha256": "c0d4caa94fb661045156c9a3d5f8a6779f74ee04b9bf77720402cd4bd8049475"
+    },
+    {
+      "app": "mlai_studio",
+      "name": "0001_initial",
+      "file": "mlai_studio/migrations/0001_initial.py",
+      "sha256": "125d8179d4df6a696cce7dd7c5c431d0571b3a83948b2461512d9e5a33b1975b"
+    },
+    {
+      "app": "org_memory",
+      "name": "0001_service_identity",
+      "file": "org_memory/migrations/0001_service_identity.py",
+      "sha256": "8393b35cdaa55e0395daeff363030fc6d1ad6fccb88d06bb4bc60872ff490451"
+    },
+    {
+      "app": "org_memory",
+      "name": "0002_organization_authorization",
+      "file": "org_memory/migrations/0002_organization_authorization.py",
+      "sha256": "a299853a3bfa9cf2475d289c774071845c536ffe4a4459e8f19a54c0dc3cacbe"
+    },
+    {
+      "app": "org_memory",
+      "name": "0003_source_control_plane",
+      "file": "org_memory/migrations/0003_source_control_plane.py",
+      "sha256": "aa49f8ff60c6d61cc10f80f0b323ed8aaad3b92de4f73e3a626e94a01ad4a5a3"
+    },
+    {
+      "app": "org_memory",
+      "name": "0004_evidence_kernel",
+      "file": "org_memory/migrations/0004_evidence_kernel.py",
+      "sha256": "0fe667d20adfe11b3aea729a0469f25112f09509d16636c2b1dde49e91f9fdef"
+    },
+    {
+      "app": "org_memory",
+      "name": "0005_memoryconnectionconfiguration_next_scheduled_sync_at_and_more",
+      "file": "org_memory/migrations/0005_memoryconnectionconfiguration_next_scheduled_sync_at_and_more.py",
+      "sha256": "597d1642be5c0833da2e39d5604ea7f817235014f14e9c699a87db46e9828996"
+    },
+    {
+      "app": "org_memory",
+      "name": "0006_memorychunkembedding_memorychunk_search_vector_and_more",
+      "file": "org_memory/migrations/0006_memorychunkembedding_memorychunk_search_vector_and_more.py",
+      "sha256": "ae45cfca424a437f741fb37ed176685de701571639b0103f36eb26768770918a"
+    },
+    {
+      "app": "org_memory",
+      "name": "0007_drivedocumentartifact_drivedocumentartifactversion_and_more",
+      "file": "org_memory/migrations/0007_drivedocumentartifact_drivedocumentartifactversion_and_more.py",
+      "sha256": "736f0f432217216a5ccb7a20a564a5380244e00b0367911995b61e56eb066ac1"
+    },
+    {
+      "app": "org_memory",
+      "name": "0008_drivemeeting_and_more",
+      "file": "org_memory/migrations/0008_drivemeeting_and_more.py",
+      "sha256": "e58d26333df1db02b99d171f4195d263214b83aa550b72e2c1d9b350523a5a6e"
+    },
+    {
+      "app": "org_memory",
+      "name": "0009_alter_driveinventorymanifest_counts_and_more",
+      "file": "org_memory/migrations/0009_alter_driveinventorymanifest_counts_and_more.py",
+      "sha256": "5ad691bac7393c9aeca2f7dba007a99fd509d69c7da23de3bee977312b4d19d1"
+    },
+    {
+      "app": "org_memory",
+      "name": "0010_memoryclaim_memoryextractionrun_memoryevidence_and_more",
+      "file": "org_memory/migrations/0010_memoryclaim_memoryextractionrun_memoryevidence_and_more.py",
+      "sha256": "75df311fa8689c4562219a4c9077be240f3594d10230eb7c9c3bd5a4e9d4d208"
+    },
+    {
+      "app": "org_memory",
+      "name": "0011_memoryentity_merged_at_memoryentity_merged_into_and_more",
+      "file": "org_memory/migrations/0011_memoryentity_merged_at_memoryentity_merged_into_and_more.py",
+      "sha256": "36059ea738546339f479e2a8ef46e0e7c37afa02a33b2af9b0c0a81d7210f920"
+    },
+    {
+      "app": "org_memory",
+      "name": "0012_memoryquerylog_memoryfeedback_and_more",
+      "file": "org_memory/migrations/0012_memoryquerylog_memoryfeedback_and_more.py",
+      "sha256": "1523722524d19ae1e71c7541eac8f7ccb40150495952f713b3b1a0516972afed"
+    },
+    {
+      "app": "org_memory",
+      "name": "0013_provider_event_receipts",
+      "file": "org_memory/migrations/0013_provider_event_receipts.py",
+      "sha256": "c720fe73bc4ffc6b666046a55fdd86bee233ae4b0ce5ec67d19580ecd57dadf0"
+    },
+    {
+      "app": "org_memory",
+      "name": "0014_notion_artifacts",
+      "file": "org_memory/migrations/0014_notion_artifacts.py",
+      "sha256": "9ee49679c42c2fba7f300aed6e8e4d3ef37ce40ecbb75edb6c70c42e2eea0fa0"
+    },
+    {
+      "app": "org_memory",
+      "name": "0015_gmail_scoped_artifacts",
+      "file": "org_memory/migrations/0015_gmail_scoped_artifacts.py",
+      "sha256": "09026edcdd02fcdd642cd7eb5170a4d377d452422c35b3c528445ef34a253cbc"
+    },
+    {
+      "app": "org_memory",
+      "name": "0016_structured_aggregate_artifact",
+      "file": "org_memory/migrations/0016_structured_aggregate_artifact.py",
+      "sha256": "ec2afe347aa47d5e7352ff6d9d36b06b27e1ff8f84b11a93efa7c27e1dbc4903"
+    },
+    {
+      "app": "org_memory",
+      "name": "0017_memorydailyreconciliationreport_and_more",
+      "file": "org_memory/migrations/0017_memorydailyreconciliationreport_and_more.py",
+      "sha256": "cb5cc6265b8639aeb42f68317e114c7b6c722ff95c4b7fce6b74827b8f18fb80"
+    },
+    {
+      "app": "org_memory",
+      "name": "0018_review_summaries_digests",
+      "file": "org_memory/migrations/0018_review_summaries_digests.py",
+      "sha256": "e845d10681904a0d2ac827ebfc6c133ef5494aebdc54af3d7fa0199120ba534a"
+    },
+    {
+      "app": "org_memory",
+      "name": "0019_memorypublication_publicknowledgeitem_and_more",
+      "file": "org_memory/migrations/0019_memorypublication_publicknowledgeitem_and_more.py",
+      "sha256": "683bd474ac33e9e31d70e6e38b1c2222851e16782a69db5072504bf69e32ebf2"
+    },
+    {
+      "app": "org_memory",
+      "name": "0020_agentactionproposal_agentactionevent_and_more",
+      "file": "org_memory/migrations/0020_agentactionproposal_agentactionevent_and_more.py",
+      "sha256": "ea4bfc31c08055d5406a790cb993dd96301036964ac90601463aa5352c38610b"
+    },
+    {
+      "app": "org_memory",
+      "name": "0021_memory_selector_shadow",
+      "file": "org_memory/migrations/0021_memory_selector_shadow.py",
+      "sha256": "d884e2826e8332eb82f08f58d6199e6ebbc81f8a3b3ad4e8d8b81d02f4ad31ad"
+    },
+    {
+      "app": "org_memory",
+      "name": "0022_memory_pilot_query_audit",
+      "file": "org_memory/migrations/0022_memory_pilot_query_audit.py",
+      "sha256": "640ed650441e51dd81e779f2767949a74ff677779c36e4377a807d3106a38799"
+    },
+    {
+      "app": "org_memory",
+      "name": "0023_memory_pilot_deployment",
+      "file": "org_memory/migrations/0023_memory_pilot_deployment.py",
+      "sha256": "c8c71f4bb61d8d0d9403da9df90aa52a45dc37a242d57824ea8cd1af26df6eb9"
+    },
+    {
+      "app": "org_memory",
+      "name": "0024_alter_memoryoutboxevent_event_type",
+      "file": "org_memory/migrations/0024_alter_memoryoutboxevent_event_type.py",
+      "sha256": "3855baa5a40fa69d89a8d4721500eadff0e775096b6367cd6d2b5ab62b686c76"
+    },
+    {
+      "app": "org_memory",
+      "name": "0025_delete_selector_shadow",
+      "file": "org_memory/migrations/0025_delete_selector_shadow.py",
+      "sha256": "d2ec27d43988dabe5505332fb9be6e64375514ea9fa1361cfe489475b704c3d4"
+    },
+    {
+      "app": "organizations",
+      "name": "0001_split_content_factory_apps",
+      "file": "organizations/migrations/0001_split_content_factory_apps.py",
+      "sha256": "1aedda6845f3f03c7fa2b5713bdade2277fe7e0d24f2abc7fa0ccff173133fbc"
+    },
+    {
+      "app": "organizations",
+      "name": "0002_organization_company_linkedin_url",
+      "file": "organizations/migrations/0002_organization_company_linkedin_url.py",
+      "sha256": "3ceb0fc0c634a8523e30715b9b600e78e9eac6cf63a9eb59f7ed8136650eb636"
+    },
+    {
+      "app": "organizations",
+      "name": "0003_organization_billing_user",
+      "file": "organizations/migrations/0003_organization_billing_user.py",
+      "sha256": "f51f69d9d1fe3c05e0a1eae1285a387438be53090a63a540758814f47bbb767e"
+    },
+    {
+      "app": "roo",
+      "name": "0001_initial",
+      "file": "roo/migrations/0001_initial.py",
+      "sha256": "fb414c6db8058c08cb7b9631d1f96a5a33e673e15658a9c97e554b16708c260e"
+    },
+    {
+      "app": "roo",
+      "name": "0002_points_system_v2",
+      "file": "roo/migrations/0002_points_system_v2.py",
+      "sha256": "14e1b794609c1a8051dace4661bce34150a8637d345a9c14397d59f87c6a1c9e"
+    },
+    {
+      "app": "roo",
+      "name": "0003_remove_pointsadmin_name",
+      "file": "roo/migrations/0003_remove_pointsadmin_name.py",
+      "sha256": "e6d7ed642fec6d9f8d7616c5aa2697195aa65007a0cdc08fab5cc9903df0f61d"
+    },
+    {
+      "app": "roo",
+      "name": "0004_seed_rewards",
+      "file": "roo/migrations/0004_seed_rewards.py",
+      "sha256": "58941578518bb935600724a34476f4e2e42b9aaca8570789d65bf82a92dc41eb"
+    },
+    {
+      "app": "roo",
+      "name": "0005_tasktemplate",
+      "file": "roo/migrations/0005_tasktemplate.py",
+      "sha256": "102a8c70ee66590610248aab6e1974c14664e6f168e9bc1cefa2d9275c07665b"
+    },
+    {
+      "app": "roo",
+      "name": "0006_rewardscatalog_stock_remaining",
+      "file": "roo/migrations/0006_rewardscatalog_stock_remaining.py",
+      "sha256": "506c45e5da1a658a9cefb130fe0438a7a093f3c40f6b6b82ab966b4436db2d26"
+    },
+    {
+      "app": "roo",
+      "name": "0007_populate_pilot_rules",
+      "file": "roo/migrations/0007_populate_pilot_rules.py",
+      "sha256": "06a6c3c46cbdaabc45fad37a9e73fe7e2eda63746c92d4984c9a551a5d6b1e1f"
+    },
+    {
+      "app": "roo",
+      "name": "0008_populate_comprehensive_rate_card",
+      "file": "roo/migrations/0008_populate_comprehensive_rate_card.py",
+      "sha256": "468e88ef9b7e5fcba23933e1779e5acfbc65b5b121da6ff4d2c084893fd34b14"
+    },
+    {
+      "app": "roo",
+      "name": "0009_add_weekly_allowance",
+      "file": "roo/migrations/0009_add_weekly_allowance.py",
+      "sha256": "5ad7d3c40ba376f7f630c1f8d56f95ea8f386ff7343906f50e63e9ec1107b269"
+    },
+    {
+      "app": "roo",
+      "name": "0010_channelfirstpost",
+      "file": "roo/migrations/0010_channelfirstpost.py",
+      "sha256": "7d9748e548f78ecf2d39f18bb0487125bd4f1d3911994c386f9101ce14e2867e"
+    },
+    {
+      "app": "roo",
+      "name": "0011_questprogress",
+      "file": "roo/migrations/0011_questprogress.py",
+      "sha256": "4892c81423e981b21e26fec39fa94469d8ebaee01f87b1d422940c2dff9c9224"
+    },
+    {
+      "app": "roo",
+      "name": "0012_medhack_game_models",
+      "file": "roo/migrations/0012_medhack_game_models.py",
+      "sha256": "ecf596d0658fe2a6ac1e4d675400be9d0aa7708ed0da62a86fe8fa62b66cc19c"
+    },
+    {
+      "app": "roo",
+      "name": "0013_move_medhack_to_hospital",
+      "file": "roo/migrations/0013_move_medhack_to_hospital.py",
+      "sha256": "d475eb664813cf874c8e9a4143da65c2ee2908c8592580a5cf98f727e3a4c4f9"
+    },
+    {
+      "app": "roo",
+      "name": "0014_add_content_factory_ledger_source",
+      "file": "roo/migrations/0014_add_content_factory_ledger_source.py",
+      "sha256": "a69ef4d0cc8a3e3e6023c3693fd85ef3d82902cff00b3b3e77b6dc2925f51366"
+    },
+    {
+      "app": "roo",
+      "name": "0015_pointsrequest",
+      "file": "roo/migrations/0015_pointsrequest.py",
+      "sha256": "33dd9f8a51f6fd02957bd514e7599f5a1e74799960faabc4930cb9c0696a835b"
+    },
+    {
+      "app": "roo",
+      "name": "0016_rename_roo_pointsr_status_8f1eab_idx_roo_pointsr_status_1880e1_idx_and_more",
+      "file": "roo/migrations/0016_rename_roo_pointsr_status_8f1eab_idx_roo_pointsr_status_1880e1_idx_and_more.py",
+      "sha256": "808443865a6f94452daf3bb0e8300637778bee05346289f686314ad9d0538115"
+    },
+    {
+      "app": "roo",
+      "name": "0017_points_health_indexes",
+      "file": "roo/migrations/0017_points_health_indexes.py",
+      "sha256": "f9119218eb890c7cfeb3a5c01c4d7db47b382edcef9f673cea4d559cea62e248"
+    },
+    {
+      "app": "roo",
+      "name": "0018_ensure_coworking_unique_active_booking",
+      "file": "roo/migrations/0018_ensure_coworking_unique_active_booking.py",
+      "sha256": "8f9251e1693cd1cb685e690d5183b364c73e7620f23e5d8678aa7cfa4829f8b8"
+    },
+    {
+      "app": "roo",
+      "name": "0019_structured_task_engine",
+      "file": "roo/migrations/0019_structured_task_engine.py",
+      "sha256": "d797e61eb33881eb63bd2d6ff5ef8223ea51ebf611312c7a5142bdb76b332168"
+    },
+    {
+      "app": "roo",
+      "name": "0020_taskassignment_claimed_points_snapshot",
+      "file": "roo/migrations/0020_taskassignment_claimed_points_snapshot.py",
+      "sha256": "c19677a1a5a8f9e3d39ae00cb6252a6006e4010183cd8208424a10eec3f1cacd"
+    },
+    {
+      "app": "roo",
+      "name": "0021_alter_taskactivity_event_type",
+      "file": "roo/migrations/0021_alter_taskactivity_event_type.py",
+      "sha256": "cf375d7150b75aeb06a6e6c7126b5f8ee3df14355b170fc5ac1a9fc6991bffe9"
+    },
+    {
+      "app": "roo",
+      "name": "0022_add_partner_points_admin_role",
+      "file": "roo/migrations/0022_add_partner_points_admin_role.py",
+      "sha256": "825bb86f8e5950848ef7b9d6785d5cfcf1e767b649a6a3aedc98cd4f1a70bbdb"
+    },
+    {
+      "app": "roo",
+      "name": "0023_pointsaccount_earned_balance_and_more",
+      "file": "roo/migrations/0023_pointsaccount_earned_balance_and_more.py",
+      "sha256": "a04c0fa2dc316d233545d5712c65322bc71d94d173c34b1262157f0be446ecca"
+    },
+    {
+      "app": "roo",
+      "name": "0024_pointspurchase",
+      "file": "roo/migrations/0024_pointspurchase.py",
+      "sha256": "6aa1fb7b91cc0976e70f0a4b3ef00785603c71cd51869b68b78b1aa03d1a527b"
+    },
+    {
+      "app": "roo",
+      "name": "0025_update_rewards_pricing_and_hide_coffee",
+      "file": "roo/migrations/0025_update_rewards_pricing_and_hide_coffee.py",
+      "sha256": "aa9e52bb8266af86e5a1c24143a9d4b7987eca62ed1d847e9dfad6e3da452f3f"
+    },
+    {
+      "app": "roo",
+      "name": "0026_coworking_day_cost_eight",
+      "file": "roo/migrations/0026_coworking_day_cost_eight.py",
+      "sha256": "99292bb5f21c41f08b8989ed07e2eb2aacfb08587da566e16a8bf2eb4a05b786"
+    },
+    {
+      "app": "roo",
+      "name": "0027_alter_ledger_source",
+      "file": "roo/migrations/0027_alter_ledger_source.py",
+      "sha256": "9b7c0fa64a2a89ab5978d86feb7b672813783874789f44fb00156ca3446cd64d"
+    },
+    {
+      "app": "roo",
+      "name": "0028_pointspurchase_checkout_sessions",
+      "file": "roo/migrations/0028_pointspurchase_checkout_sessions.py",
+      "sha256": "7d7d7ae8b972aad073651135381d282057b357f01143fa70dd3f112dddc899d9"
+    },
+    {
+      "app": "roo",
+      "name": "0029_boostpostadmission_and_more",
+      "file": "roo/migrations/0029_boostpostadmission_and_more.py",
+      "sha256": "9bf62ff7a5dc308582ae26b0d8c706ae87795fa209dc3a742831977a61106aa8"
+    },
+    {
+      "app": "roo",
+      "name": "0030_microroo_and_coding_billing",
+      "file": "roo/migrations/0030_microroo_and_coding_billing.py",
+      "sha256": "1fd030203fa103b12ff6dcd62cc9a1be6c39f1b275d46c6333b246ac3bda677f"
+    },
+    {
+      "app": "roo",
+      "name": "0031_meeting_room_booking",
+      "file": "roo/migrations/0031_meeting_room_booking.py",
+      "sha256": "a41f1e7afdcb47857ceac145d11094d4ff4985dec18ffad14699b68023cd9299"
+    },
+    {
+      "app": "roo",
+      "name": "0032_small_and_big_meeting_rooms",
+      "file": "roo/migrations/0032_small_and_big_meeting_rooms.py",
+      "sha256": "bfd0c50a23d4632bfb12f6199fdffd7957e1a11cd8af2be8c3f5e5656715f3e1"
+    },
+    {
+      "app": "roo",
+      "name": "0033_meeting_room_purchased_cost_microroo",
+      "file": "roo/migrations/0033_meeting_room_purchased_cost_microroo.py",
+      "sha256": "6571bd327d4bc4d59816d3d8c5008ae6c265bebadd19371b6ac069dea60f2501"
+    },
+    {
+      "app": "roo",
+      "name": "0034_coworkingbookingoperation",
+      "file": "roo/migrations/0034_coworkingbookingoperation.py",
+      "sha256": "4a1b9a0f41a3fb008881e82434a92cc7e288ddf29d875d18e7952cec47fb278e"
+    },
+    {
+      "app": "roo",
+      "name": "0034_officemanagerday_coworkingbooking_booking_source_and_more",
+      "file": "roo/migrations/0034_officemanagerday_coworkingbooking_booking_source_and_more.py",
+      "sha256": "a3ce40f2b311f15d47311461a35826203cf6a82e3d0e69f5ccd9dff1204a9e44"
+    },
+    {
+      "app": "roo",
+      "name": "0035_coworkingbookingoperation_subjects",
+      "file": "roo/migrations/0035_coworkingbookingoperation_subjects.py",
+      "sha256": "20fc3a8946dc907c984c3552c9f1321f3467cc7b5d9da14c5155681098b6b146"
+    },
+    {
+      "app": "roo",
+      "name": "0035_protect_office_manager_assignment_day",
+      "file": "roo/migrations/0035_protect_office_manager_assignment_day.py",
+      "sha256": "d7d76e8978776c7b4475580308b8957300f23c123eabc5a1521ed93bc78511e4"
+    },
+    {
+      "app": "roo",
+      "name": "0036_office_manager_attempts_and_provenance",
+      "file": "roo/migrations/0036_office_manager_attempts_and_provenance.py",
+      "sha256": "deb1932801c22fcebbcd90bb3b0f5a9223311cf89eb8dc2473bedcf02b488ba5"
+    },
+    {
+      "app": "roo",
+      "name": "0036_sanitize_coworking_operation_receipts",
+      "file": "roo/migrations/0036_sanitize_coworking_operation_receipts.py",
+      "sha256": "142b17e1cbdf027236863a0b53c2696a45bf62e87a5b9c409c8fd65ef2b1f04b"
+    },
+    {
+      "app": "roo",
+      "name": "0037_quarantine_legacy_office_manager_provenance",
+      "file": "roo/migrations/0037_quarantine_legacy_office_manager_provenance.py",
+      "sha256": "d6a6ea57458395de253490e92f60c5bf80061bb8fcce0de67c93d3030c5366d2"
+    },
+    {
+      "app": "roo",
+      "name": "0038_office_manager_claim_generation",
+      "file": "roo/migrations/0038_office_manager_claim_generation.py",
+      "sha256": "3a45b1d4c02de5f66d35e0f94630d2e629c30b93bb8c6a05c95155cf175c36d4"
+    },
+    {
+      "app": "roo",
+      "name": "0039_supersede_reopened_office_manager_attempts",
+      "file": "roo/migrations/0039_supersede_reopened_office_manager_attempts.py",
+      "sha256": "341223251def825737a71d9779290163672554f9b0e82c3b1c844144883f4595"
+    },
+    {
+      "app": "roo",
+      "name": "0040_merge_coworking_operations_office_manager",
+      "file": "roo/migrations/0040_merge_coworking_operations_office_manager.py",
+      "sha256": "0df252edc809adc76a345d0afa5659b52da7d8fa955a6632df1ad5b78577ed13"
+    },
+    {
+      "app": "roo",
+      "name": "0041_apple_iap_digital_credits",
+      "file": "roo/migrations/0041_apple_iap_digital_credits.py",
+      "sha256": "baa6821d0b897cf1f4724b1ff1e15af709080a03b6953b119cf30a6f3ffe235d"
+    },
+    {
+      "app": "roo",
+      "name": "0042_event_discount_redemptions",
+      "file": "roo/migrations/0042_event_discount_redemptions.py",
+      "sha256": "4cd8c34a7309b64f167b183db0795342d3fb110592b944b29a69836f68e31823"
+    },
+    {
+      "app": "roo",
+      "name": "0043_rename_meeting_rooms",
+      "file": "roo/migrations/0043_rename_meeting_rooms.py",
+      "sha256": "1dc0f35fa1d9e3e45da4b6b1bafe49d2e8ff067aa35530ba646752cc5900f813"
+    },
+    {
+      "app": "roo",
+      "name": "0044_cybertestcheckout",
+      "file": "roo/migrations/0044_cybertestcheckout.py",
+      "sha256": "54b5d58b82d58fda965310c08edd9d564c399608265c985ac329e7704a3f3579"
+    },
+    {
+      "app": "roo",
+      "name": "0045_cybertest_failed_settlement",
+      "file": "roo/migrations/0045_cybertest_failed_settlement.py",
+      "sha256": "6cb3929148fc4492db7e0d22aa6c4fd26255fc66b1d5bbf9efe636b1e90920ac"
+    },
+    {
+      "app": "roo",
+      "name": "0046_cybertest_company_binding",
+      "file": "roo/migrations/0046_cybertest_company_binding.py",
+      "sha256": "7b5bd159b16e9292b27089cfd807ea9ab9b6d0bea8254141f92e7ac76f63e1da"
+    },
+    {
+      "app": "roo",
+      "name": "0047_cybertest_phase_contract",
+      "file": "roo/migrations/0047_cybertest_phase_contract.py",
+      "sha256": "72c9abad774d53242ba4d2697c15614ab45355a30009b2d2682b1fa485ee3d44"
+    },
+    {
+      "app": "sessions",
+      "name": "0001_initial",
+      "file": ".venv/Lib/site-packages/django/contrib/sessions/migrations/0001_initial.py",
+      "sha256": "2aa438e2393ee5135c4dda94bfde65fd49e8300f1c3f93bed25ae3a09f2f69b9"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0001_split_startup_updates_app",
+      "file": "startup_updates/migrations/0001_split_startup_updates_app.py",
+      "sha256": "e9c0630118b8727614c38f8d672133d17d0d61ea001ea2e57853532f39c2d5c2"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0002_move_legacy_contenttypes",
+      "file": "startup_updates/migrations/0002_move_legacy_contenttypes.py",
+      "sha256": "fc810ab7bdda52efc2a173f608fc4efe967c3441ce124e7240b1b53b340882c8"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0003_gmailattachmentartifact_last_error",
+      "file": "startup_updates/migrations/0003_gmailattachmentartifact_last_error.py",
+      "sha256": "0500e230f086416e8256db79e3ea876ef62dc291ef2cb094c34481a1b62e0792"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0003_slackthreadartifact_relevance_fields",
+      "file": "startup_updates/migrations/0003_slackthreadartifact_relevance_fields.py",
+      "sha256": "451f339883cefa3f6efd995ffd3afe9e144657507453cc00e2f3c0eb1b67fe50"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0004_linear_artifacts",
+      "file": "startup_updates/migrations/0004_linear_artifacts.py",
+      "sha256": "6395cf48824255e604b7155f33296894bb324c474bc450cfce3b4bbca8b36e54"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0005_merge_linear_gmail_attachment",
+      "file": "startup_updates/migrations/0005_merge_linear_gmail_attachment.py",
+      "sha256": "62ce54da97ddde3f3f1dd879fb723cf52f3a5e498f1ffa9ebecd5f0983a01530"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0006_repair_slack_thread_relevance_columns",
+      "file": "startup_updates/migrations/0006_repair_slack_thread_relevance_columns.py",
+      "sha256": "4be60e6ac604bb5a5fcfb3f60bf39340f0f00b8d6d3e0f72fb4a77fd4f4a415e"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0007_startupprofile_organization_kind",
+      "file": "startup_updates/migrations/0007_startupprofile_organization_kind.py",
+      "sha256": "840f58a64959f685fb9ece9fb7e70987a1902d32fbd0c16dff5239ddb06af9a0"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0008_alter_gmailmessageartifact_relevance_label_and_more",
+      "file": "startup_updates/migrations/0008_alter_gmailmessageartifact_relevance_label_and_more.py",
+      "sha256": "2453a4520330114bca8f80ea52a08cf3696774583ce443742f65c463e8875bdd"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0009_startup_data_deletion_request",
+      "file": "startup_updates/migrations/0009_startup_data_deletion_request.py",
+      "sha256": "f44c1393cbff016b740e11f20e008a4156af6bc95f3ed3ccd69f7a0343d3369c"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0010_startup_manual_document",
+      "file": "startup_updates/migrations/0010_startup_manual_document.py",
+      "sha256": "33b09d1713f5956369b604ec68fa8160566a558dffbbf9c2ff6eababb7582294"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0011_startupprofile_company_detail_fields",
+      "file": "startup_updates/migrations/0011_startupprofile_company_detail_fields.py",
+      "sha256": "52fc3d89f32c90ab8b485a293f37bacaa9a113fa98fd29365d9a64e417d39264"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0012_googleanalyticspropertyselection_and_more",
+      "file": "startup_updates/migrations/0012_googleanalyticspropertyselection_and_more.py",
+      "sha256": "0a078ed248e8aeadd87d53fdc4bc7fe94bd8259f7cbedbef9d0527c0d37b0879"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0013_luma_event_selection",
+      "file": "startup_updates/migrations/0013_luma_event_selection.py",
+      "sha256": "b908cd73408ea1aa323dca811ecb9a3df3365f1f53a85e9c5e4dd9c63820cdc8"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0014_monthlyupdatedraft_ready_at",
+      "file": "startup_updates/migrations/0014_monthlyupdatedraft_ready_at.py",
+      "sha256": "90d70841c20efd32b0313d6d1a75fd9ffe6ab9bbf7c34dc1cc3844fde18857ba"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0015_backfill_monthly_update_ready_at",
+      "file": "startup_updates/migrations/0015_backfill_monthly_update_ready_at.py",
+      "sha256": "0b14eb217f5e69a1a055fe781a9f6c1af2932ff0bd0dc72153ae02b107e9083b"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0016_userstartupbinding_monthly_updates_enabled",
+      "file": "startup_updates/migrations/0016_userstartupbinding_monthly_updates_enabled.py",
+      "sha256": "13a8ecf94454d0a0e99844e20dfbe95af09db641d53f2d14736dc1862af12acf"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0017_monthly_update_visibility_publish_state",
+      "file": "startup_updates/migrations/0017_monthly_update_visibility_publish_state.py",
+      "sha256": "830ad83278c0d244ec5d540861d74eb9badffbb17265e8be1914038005da3958"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0017_userstartupbinding_coworking_discount_eligible",
+      "file": "startup_updates/migrations/0017_userstartupbinding_coworking_discount_eligible.py",
+      "sha256": "99bf0fe144bc7fdd540b054e9a45c15fa313326c939b1bba7ccd99cc94bee86f"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0018_monthlyupdatereminderdelivery",
+      "file": "startup_updates/migrations/0018_monthlyupdatereminderdelivery.py",
+      "sha256": "5a6bd983d219aec29912e7b339bcbad973876ccc24ea012876788d741fc9b0e7"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0019_merge_20260723_0335",
+      "file": "startup_updates/migrations/0019_merge_20260723_0335.py",
+      "sha256": "9c837da8e41424acd37200680d8a9252f4219036cc4b3bcb4015cc98970c3353"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0020_luma_event_attendance_counts",
+      "file": "startup_updates/migrations/0020_luma_event_attendance_counts.py",
+      "sha256": "01fa3b800344cc24fc40144cf5e9bb26a88938d4541f018c94436e06a9e130d5"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0021_linear_project_member_artifact",
+      "file": "startup_updates/migrations/0021_linear_project_member_artifact.py",
+      "sha256": "f4a5cd8108734cd5c410924d0a3c0d18f8c89dbdf64d9bc6bcebc54cbfa0b761"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0022_reporting_evidence_revisions",
+      "file": "startup_updates/migrations/0022_reporting_evidence_revisions.py",
+      "sha256": "6dfd24e27aa8b4a42a7c57a2e62f1272f95f32757d0c93ee59e1faafd94e600e"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0023_independent_update_identity",
+      "file": "startup_updates/migrations/0023_independent_update_identity.py",
+      "sha256": "28feef6e30f4166708aac7070531ba4e96f39e37fb91abb2d472d06c760decee"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0024_startupprofile_progress_configuration",
+      "file": "startup_updates/migrations/0024_startupprofile_progress_configuration.py",
+      "sha256": "fa14acad5f475ebeaf0f6239416c81ca5eadfbc38484768042763166b0220dc5"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0025_sourceextractionreceipt",
+      "file": "startup_updates/migrations/0025_sourceextractionreceipt.py",
+      "sha256": "2c75d53cc89d1af394b59d2ed46d5f7941336fc3ca4ef0797c683eff3f13e3e8"
+    },
+    {
+      "app": "startup_updates",
+      "name": "0026_shared_update_benefits",
+      "file": "startup_updates/migrations/0026_shared_update_benefits.py",
+      "sha256": "a4153312bb1ca14673272a901fa1cc420a4d8e68fa684c749dea9482ce9ab4cb"
+    },
+    {
+      "app": "system_email",
+      "name": "0001_initial",
+      "file": "system_email/migrations/0001_initial.py",
+      "sha256": "33e76c9231c65638b133948a1afeb6d5adfef511ce02a6280d98a3fabce9e427"
+    },
+    {
+      "app": "vibe_raising",
+      "name": "0001_initial",
+      "file": "vibe_raising/migrations/0001_initial.py",
+      "sha256": "a20cacbd494e8ef1d4c534ad1e930c2b67741f0ec24d7480e7b24b52923f18f3"
+    },
+    {
+      "app": "vibe_raising",
+      "name": "0002_move_founder_tools_models",
+      "file": "vibe_raising/migrations/0002_move_founder_tools_models.py",
+      "sha256": "df1602568ae403c3ba486680cf1510d72985a4e590ec38a7be316caccb64933e"
+    },
+    {
+      "app": "victor_ai",
+      "name": "0001_initial",
+      "file": "victor_ai/migrations/0001_initial.py",
+      "sha256": "8a862b454e29c3b05a03af1c36947e5e03ac3a68d4c04ef51134285f1a00ca48"
+    },
+    {
+      "app": "victor_ai",
+      "name": "0002_victorapplication_revenue_last_3_months_and_more",
+      "file": "victor_ai/migrations/0002_victorapplication_revenue_last_3_months_and_more.py",
+      "sha256": "4187087cd93679c6a7d3ee2e365b19ac5de557ac6837ef34bb209f146f074d04"
+    },
+    {
+      "app": "victor_ai",
+      "name": "0003_victorapplication_linkedin",
+      "file": "victor_ai/migrations/0003_victorapplication_linkedin.py",
+      "sha256": "fa493ffc42a24c458877eb662433a3d6a0a704ee6103a7bbbbeb2625d6e1ac8e"
+    },
+    {
+      "app": "victor_ai",
+      "name": "0004_victor_roo_access",
+      "file": "victor_ai/migrations/0004_victor_roo_access.py",
+      "sha256": "6f4a2fc6bbc279e11e24fab643c17ff3deec76c56f5c018442e03de1df7cd78e"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0001_split_content_factory_apps",
+      "file": "workflow_runs/migrations/0001_split_content_factory_apps.py",
+      "sha256": "9d60a161510860a18d5941e02780135c86d80241864fb97af6f074516a1e911a"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0002_contentfactoryrun_cf_run_domain_wf_updated_idx",
+      "file": "workflow_runs/migrations/0002_contentfactoryrun_cf_run_domain_wf_updated_idx.py",
+      "sha256": "ecb5a867d19c7df6752acec57994c4a1d90fc7e781549cebe23c01959e40c615"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0003_contentfactoryrun_last_event_emitted_at",
+      "file": "workflow_runs/migrations/0003_contentfactoryrun_last_event_emitted_at.py",
+      "sha256": "67314e32ffef5f8d91853ecc8933e92ea8dffbe456035b620814844c84dfcc0b"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0004_contentfactoryrun_organization_and_more",
+      "file": "workflow_runs/migrations/0004_contentfactoryrun_organization_and_more.py",
+      "sha256": "cdbebac35f76ffdf96f5422174a109889e6692c72af2f0d9b96bf82c71e384f4"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0005_contentfactoryrun_reconciled_at",
+      "file": "workflow_runs/migrations/0005_contentfactoryrun_reconciled_at.py",
+      "sha256": "ef56523236a946143f2b8dbf20b45e0e9618c1a806769495f4d6890a859a32d9"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0006_contentfactoryrun_job_fields",
+      "file": "workflow_runs/migrations/0006_contentfactoryrun_job_fields.py",
+      "sha256": "4c6c0758443f357dbab358585f947ef450c3e8d6dec6edd8e8d27789a12b5952"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0007_contentfactoryrun_slack_thread_indexes",
+      "file": "workflow_runs/migrations/0007_contentfactoryrun_slack_thread_indexes.py",
+      "sha256": "f18a337750b53f033132212d5036d166fda83872b74c741d8141d9b91b69a852"
+    },
+    {
+      "app": "workflow_runs",
+      "name": "0008_contentfactoryrun_job_identity",
+      "file": "workflow_runs/migrations/0008_contentfactoryrun_job_identity.py",
+      "sha256": "0be6eba9b96b4d91543498757537d3e7e06c5d8e13a09fa069e48d88dface93b"
+    }
+  ]
+}

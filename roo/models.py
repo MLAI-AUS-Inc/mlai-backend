@@ -7,6 +7,8 @@ from django.db import models, transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from .cybertest_models import CybertestCheckout, CybertestCompanyBinding  # noqa: F401
+
 from .apple_models import AppleIapNotification, AppleIapTransaction  # noqa: F401
 from .event_discount_models import EventDiscountOffer, EventDiscountQuote, EventDiscountRedemption  # noqa: F401
 
