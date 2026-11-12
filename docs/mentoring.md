@@ -259,7 +259,7 @@ PostgreSQL CI lane. Migration execution requires approval for that environment.
 ## Becoming a mentor (invite only)
 
 Nobody can apply without an invite. Staff issue an invite through Mentoring admin or add a Mentor invite in Django admin for an
-existing user; the single-use link (`<chat url>/mentoring/apply?invite=<token>`) is
+existing user; the single-use link (`<chat url>/mentoring/apply?mentor_invite=<token>`) is
 shown once and only its SHA-256 is stored. It expires after 14 days by default and can
 be revoked from the list. The invited user, signed in as that user, fills the form
 (headline, bio, topics, price 1 to 1000 Roo default 40, session length, location,
