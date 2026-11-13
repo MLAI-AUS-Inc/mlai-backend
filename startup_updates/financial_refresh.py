@@ -207,7 +207,7 @@ def submit_refresh(refresh_id):
     def work():
         close_old_connections()
         try:
-            # Enough for the six reports plus bounded invoice pages. A later
+            # Enough for the 13 Xero reads plus bounded Stripe pages. A later
             # poll resumes a long collection without repeating completed reads.
             for _ in range(64):
                 if not advance_refresh(refresh_id):

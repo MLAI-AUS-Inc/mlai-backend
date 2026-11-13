@@ -67,7 +67,7 @@ class FinancialRefreshDatabaseTests(TestCase):
 
     def complete(self, run, provider=None):
         with patch("startup_updates.financial_refresh.fetch_stage", side_effect=provider or self.provider) as fetch:
-            for _ in range(12):
+            for _ in range(32):  # 13 Xero reads (currency, 6 P&L, 6 cash) plus Stripe pages
                 if not refresh.advance_refresh(run.run_id):
                     break
         run.refresh_from_db()
