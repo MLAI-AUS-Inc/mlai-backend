@@ -690,3 +690,31 @@ class SlackDmStartView(SlackDmMirrorApiView):
         except (SlackClientError, DatabaseError) as exc:
             return _slack_endpoint_error_response(exc)
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class SlackAgentBotsView(SlackDmMirrorApiView):
+    """List the caller's own personal agent bots reachable through their Slack mirror.
+
+    Bots are operator-configured (``SLACK_AGENT_BOTS``) and owner-scoped; other
+    owners' bots are never listed. Open a DM with one through ``slack/dms/``.
+    """
+
+    def get(self, request):
+        from integrations.services.slack_agent_bots import enabled, owner_payload
+
+        if not enabled():
+            return Response({"enabled": False, "agents": []}, headers={"Cache-Control": "private, no-store"})
+        grant = (
+            SlackDmMirrorGrant.objects.filter(user=request.user, revoked_at__isnull=True)
+            .order_by("-updated_at")
+            .first()
+        )
+        workspace = grant.slack_workspace_id if grant is not None else ""
+        return Response(
+            {
+                "enabled": True,
+                "slack_connected": grant is not None and grant.status == "active",
+                "agents": owner_payload(request.user.pk, workspace) if workspace else [],
+            },
+            headers={"Cache-Control": "private, no-store"},
+        )
