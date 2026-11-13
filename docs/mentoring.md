@@ -18,7 +18,7 @@ HTTP layer is `community_chat/mentoring_views.py`.
   `is_active` through Mentoring admin or Django admin ("Vibe Mentoring"). Mentors cannot activate
   themselves. An admin can also change a mentor's price.
 - Mentors set their own weekly availability (windows per weekday in their own
-  timezone), their own session length (30 to 60 minutes, multiples of 5; an existing mentor can keep a saved length), their
+  timezone), their own session length (15 to 60 minutes, multiples of 5; an existing mentor can keep a saved length), their
   price, bio, topics and location.
 - Each mentor sets one location, "MLAI space" or "Video"; the founder does not
   choose. For video there is no mentor-supplied link: when the mentor accepts, MLAI
