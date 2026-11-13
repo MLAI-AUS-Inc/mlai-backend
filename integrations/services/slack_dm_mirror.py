@@ -6549,7 +6549,12 @@ def _with_agent_author(conversation, message):
     """Attribute a configured agent bot's user-less history message to its member ID."""
     from integrations.services.slack_agent_bots import with_agent_author
 
-    return with_agent_author(message, workspace_id=conversation.slack_workspace_id)
+    # Some history callers pass a minimal conversation; without a workspace
+    # no configured bot can match, so the message is returned unchanged.
+    workspace_id = str(getattr(conversation, "slack_workspace_id", "") or "")
+    if not workspace_id:
+        return message
+    return with_agent_author(message, workspace_id=workspace_id)
 
 
 def _history_message_author_allowed(conversation, message):
