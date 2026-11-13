@@ -1851,6 +1851,12 @@ def _store_slack_connection(
                 catalog = (connection.provider_metadata or {}).get(CATALOG_KEY)
                 if catalog is not None:
                     provider_metadata[CATALOG_KEY] = catalog
+                # The owner's registered dot is bound to this same owner and
+                # workspace; slack_personal_dot rechecks both on every read.
+                from integrations.services.slack_personal_dot import PERSONAL_DOT_KEY
+                personal_dot = (connection.provider_metadata or {}).get(PERSONAL_DOT_KEY)
+                if personal_dot is not None:
+                    provider_metadata[PERSONAL_DOT_KEY] = personal_dot
                 connection.provider_metadata = provider_metadata
                 connection.last_error = ""
                 connection.save()

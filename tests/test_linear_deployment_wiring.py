@@ -263,6 +263,8 @@ class LinearDeploymentWiringTests(unittest.TestCase):
             "COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED": "false",
             "SLACK_MEMBER_CHANNEL_ALLOWED_IDS": "",
             "SLACK_OWNER_INVENTORY_ENABLED": "false",
+            "COMMUNITY_CHAT_PERSONAL_DOT_SLACK_ENABLED": "false",
+            "COMMUNITY_CHAT_DOT_SLACK_APP_IDS": "ACHATGPT,AOTHER",
             "MESSAGE_SYNC_SLACK_APP_ID": "ATEST",
             "MESSAGE_SYNC_SLACK_USER_APP_ID": "APRIVATE",
             "MESSAGE_SYNC_SLACK_BOT_WORKSPACE_ID": "TTEST",

@@ -2441,6 +2441,12 @@ COMMUNITY_CHAT_DELETION_CONTACT = os.getenv("COMMUNITY_CHAT_DELETION_CONTACT", "
 COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
 ROO_LINK_LOVE_SLACK_CHANNEL_ID = os.getenv("ROO_LINK_LOVE_SLACK_CHANNEL_ID", "C09BQAWJ66R")
 COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID", "U090FV0GTT4")
+# An owner's own OpenAI dot through their private Slack mirror (default off).
+# COMMUNITY_CHAT_DOT_SLACK_APP_IDS lists the Slack app IDs whose bot users may be
+# registered as a dot (comma-separated, e.g. OpenAI's ChatGPT Slack app). With
+# no app ID the feature stays off even when the switch is true.
+COMMUNITY_CHAT_PERSONAL_DOT_SLACK_ENABLED = _env_is_true("COMMUNITY_CHAT_PERSONAL_DOT_SLACK_ENABLED", False)
+COMMUNITY_CHAT_DOT_SLACK_APP_IDS = os.getenv("COMMUNITY_CHAT_DOT_SLACK_APP_IDS", "")
 
 # Optional startup-update editorial covers; all generation runs server-side.
 STARTUP_UPDATE_COVER_IMAGE_MODEL = os.getenv("STARTUP_UPDATE_COVER_IMAGE_MODEL", "gpt-image-2.5-flare")

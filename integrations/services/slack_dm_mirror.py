@@ -937,7 +937,15 @@ def open_slack_dm(
         )
         if is_roo_dm:
             _require_roo_ai_consent(grant.user_id)
-        if not is_roo_dm and not _is_eligible_slack_user(
+        from integrations.services.slack_personal_dot import is_personal_dot_user
+
+        is_dot_dm = (
+            not is_roo_dm
+            and len(requested_ids) == 1
+            and slack_user_id == raw_user.get("id")
+            and is_personal_dot_user(raw_user, grant=grant)
+        )
+        if not is_roo_dm and not is_dot_dm and not _is_eligible_slack_user(
             raw_user,
             workspace_id=grant.slack_workspace_id,
             owner_slack_user_id=grant.slack_user_id,
@@ -3282,15 +3290,47 @@ def _normalize_private_slack_event(
     *,
     allow_roo_channels: bool = False,
 ) -> dict[str, Any] | None:
+    """Normalize one private Slack event, marking messages a personal dot wrote."""
+    dot_authors: set[str] = set()
+    normalized = _normalize_private_slack_event_body(
+        payload,
+        event,
+        allow_roo_channels=allow_roo_channels,
+        dot_authors=dot_authors,
+    )
+    if normalized is not None and dot_authors:
+        # Only one author is ever inspected per event.
+        normalized["personal_dot_author"] = sorted(dot_authors)[0]
+    return normalized
+
+
+def _normalize_private_slack_event_body(
+    payload: dict[str, Any],
+    event: dict[str, Any],
+    *,
+    allow_roo_channels: bool,
+    dot_authors: set[str],
+) -> dict[str, Any] | None:
     from integrations.services.slack_roo import is_public_roo_reply
+    from integrations.services.slack_personal_dot import workspace_personal_dot_author
 
     def roo_reply(message):
-        return is_public_roo_reply(
+        if is_public_roo_reply(
             message,
             workspace_id=str(payload.get("team_id") or ""),
             conversation_id=str(event.get("channel") or ""),
             allow_channels=allow_roo_channels,
-        )
+        ):
+            return True
+        # A registered personal dot, in a one-to-one conversation only. The
+        # owning mirror is not known yet; routing re-checks the exact owner.
+        author = str(message.get("user") or "")
+        if str(event.get("channel") or "").startswith("D") and workspace_personal_dot_author(
+            str(payload.get("team_id") or ""), author
+        ):
+            dot_authors.add(author)
+            return True
+        return False
 
     event_type = str(event.get("type") or "message").strip()
     if event_type in {"reaction_added", "reaction_removed"}:
@@ -3878,6 +3918,19 @@ def _drain_staged_events_for_conversation(
     return routed
 
 
+def _personal_dot_conversations(conversations, workspace_id: str, dot_author: str) -> list:
+    """Keep only the owner IMs whose owner registered this exact dot."""
+    from integrations.services.slack_personal_dot import personal_dot_target
+
+    return [
+        conversation
+        for conversation in conversations
+        if personal_dot_target(conversation.grant) == (workspace_id, dot_author)
+        and set(conversation.participant_slack_ids or [])
+        == {conversation.grant.slack_user_id, dot_author}
+    ]
+
+
 def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     if str(payload.get("type") or "").strip() == "app_rate_limited":
         workspace_id = str(payload.get("team_id") or "").strip()
@@ -3992,6 +4045,11 @@ def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
         raise SlackDmMirrorError(
             "Slack event recipient authority is ambiguous; retry the webhook."
         )
+    if not conversations and normalized.get("personal_dot_author"):
+        # Staged discovery routes by participant set only, which cannot prove
+        # which owner registered the dot. A dot DM opened from MLAI Chat is
+        # always live; history import recovers anything missed.
+        return {"status": "ignored"}
     if not conversations:
         recoverable_unavailable_private = SlackDmMirrorConversation.objects.filter(
             slack_workspace_id=workspace_id,
@@ -4029,6 +4087,11 @@ def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
             authorized_user_ids=_slack_event_authorized_user_ids(payload),
         )
         return {"status": "discovery_queued", "staged": staged}
+    dot_author = str(normalized.pop("personal_dot_author", "") or "")
+    if dot_author:
+        conversations = _personal_dot_conversations(conversations, workspace_id, dot_author)
+        if not conversations:
+            return {"status": "ignored"}
     enqueued: list[str] = []
     duplicates = 0
     echoes = 0
@@ -6526,7 +6589,7 @@ def _history_delivery_author_pubkey(delivery: SlackDmMirrorDelivery) -> str:
 
 
 def _history_message_author_allowed(conversation, message):
-    """Preserve verified Roo replies in owner IMs and authorized private channels."""
+    """Preserve verified Roo replies, and the owner's own dot in its owner IM."""
     from integrations.services.slack_roo import is_public_roo_reply
 
     if _all_history_group_import(conversation):
@@ -6539,6 +6602,18 @@ def _history_message_author_allowed(conversation, message):
     )
     required = {conversation.grant.slack_user_id, str(message.get("user") or "")}
     participants = set(conversation.participant_slack_ids or [])
+    from integrations.services.slack_personal_dot import is_personal_dot_reply
+
+    if (
+        not private_channel
+        and participants == required
+        and is_personal_dot_reply(
+            message,
+            grant=conversation.grant,
+            conversation_id=conversation.slack_conversation_id,
+        )
+    ):
+        return True
     return is_public_roo_reply(
         message,
         workspace_id=conversation.slack_workspace_id,

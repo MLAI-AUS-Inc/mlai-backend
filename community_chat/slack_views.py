@@ -690,3 +690,80 @@ class SlackDmStartView(SlackDmMirrorApiView):
         except (SlackClientError, DatabaseError) as exc:
             return _slack_endpoint_error_response(exc)
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class SlackPersonalDotView(SlackDmMirrorApiView):
+    """The owner's own OpenAI dot, reached through their private Slack mirror."""
+
+    def _grant(self, request):
+        from integrations.services.slack_personal_dot import personal_dot_enabled
+
+        if not personal_dot_enabled():
+            return None, Response(
+                {"enabled": False, "dot": None},
+                headers={"Cache-Control": "private, no-store"},
+            )
+        try:
+            return active_grant_for_user(request.user), None
+        except SlackDmMirrorError:
+            return None, Response(
+                {"enabled": True, "slack_connected": False, "dot": None},
+                headers={"Cache-Control": "private, no-store"},
+            )
+
+    def get(self, request):
+        from integrations.services.slack_personal_dot import personal_dot_summary
+
+        grant, early = self._grant(request)
+        if early is not None:
+            return early
+        return Response(
+            {"enabled": True, "slack_connected": True, "dot": personal_dot_summary(grant)},
+            headers={"Cache-Control": "private, no-store"},
+        )
+
+    def put(self, request):
+        from integrations.services.slack_personal_dot import (
+            PersonalDotError,
+            register_personal_dot,
+        )
+
+        grant, early = self._grant(request)
+        if early is not None:
+            raise ValidationError(
+                {"code": "personal_dot_unavailable", "slack": "Connect Slack first."}
+            )
+        try:
+            dot = register_personal_dot(
+                grant, slack_user_id=str(request.data.get("slack_user_id") or "")
+            )
+        except PersonalDotError as exc:
+            raise ValidationError({"code": exc.code, "slack": str(exc)}) from exc
+        except (SlackDmMirrorCredentialError, SlackDmMirrorUpstreamError) as exc:
+            return _slack_endpoint_error_response(exc)
+        except SlackDmMirrorError as exc:
+            raise ValidationError({"slack": str(exc)}) from exc
+        except (SlackClientError, DatabaseError) as exc:
+            return _slack_endpoint_error_response(exc)
+        return Response(
+            {"enabled": True, "slack_connected": True, "dot": dot},
+            headers={"Cache-Control": "private, no-store"},
+        )
+
+    def delete(self, request):
+        from integrations.services.slack_personal_dot import (
+            PersonalDotError,
+            clear_personal_dot,
+        )
+
+        try:
+            grant = active_grant_for_user(request.user)
+        except SlackDmMirrorError:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        try:
+            clear_personal_dot(grant)
+        except PersonalDotError:
+            pass
+        except DatabaseError as exc:
+            return _slack_endpoint_error_response(exc)
+        return Response(status=status.HTTP_204_NO_CONTENT)
