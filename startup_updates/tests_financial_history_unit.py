@@ -201,7 +201,7 @@ class FinancialHistoryUnitTests(unittest.TestCase):
         self.assertNotIn("financialHistorySelection", shared)
 
     def test_malformed_frozen_contract_is_not_shared(self):
-        changes = (("schemaVersion", 2), ("reportingMonth", "2026-08-02"), ("cutoff", "2026-09-01"),
+        changes = (("schemaVersion", 3), ("reportingMonth", "2026-08-02"), ("cutoff", "2026-09-01"),
             ("rangeStart", "2026-01-01"), ("currency", "XYZ"), ("capturedAt", "2026-01-01"), ("points", []))
         for key, value in changes:
             history = frozen()

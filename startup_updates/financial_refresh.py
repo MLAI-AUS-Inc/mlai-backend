@@ -17,7 +17,7 @@ from rest_framework.exceptions import NotFound, ValidationError
 from founder_tools.models import VibeRaisingCompany
 from integrations.models import ExternalServiceConnection
 from startup_updates.evidence_contract import content_hash, reporting_period
-from startup_updates.financial_history import build_snapshot, history_payload
+from startup_updates.financial_history import build_snapshot, financial_display, history_payload
 from startup_updates.financial_refresh_sources import (
     apply_stage, build_candidate_evidence, connection_identity, failure_details,
     fetch_stage, local_time, month_slots, next_stage,
@@ -61,8 +61,6 @@ def request_scope(company, user, data, profile, *, now=None):
     sources = data.get("inputSources")
     if not isinstance(sources, list) or any(type(source) is not str for source in sources) or not sources or set(sources) - {"stripe", "xero"}:
         raise ValidationError({"inputSources": "Choose Stripe and/or Xero financial sources."})
-    if "xero" not in sources:
-        raise ValidationError({"inputSources": "Connect and select Xero for the accounting chart. Stripe payment data stays separate."})
     update_id = _positive(data.get("updateId"), "updateId")
     expected = _positive(data.get("expectedRevision"), "expectedRevision")
     creation_key = _uuid(data.get("creationKey"), "creationKey") if not update_id else None
@@ -231,11 +229,13 @@ def submit_refresh(refresh_id):
 
 def _finish(run, progress):
     request = run.run_request
-    xero = progress["sources"]["xero"]
-    if xero["status"] != "ready":
+    # With Xero selected the chart is the accounting chart, so it must refresh.
+    # Without Xero, Stripe alone supplies it.
+    primary = progress["sources"].get("xero") or progress["sources"].get("stripe")
+    if primary["status"] != "ready":
         run.status = "failed"
-        progress["detail"] = (xero["detail"] if xero.get("reason") == "rate_limited" else
-            "The accounting chart could not refresh. Your saved chart and writing are unchanged.")
+        progress["detail"] = (primary["detail"] if primary.get("reason") == "rate_limited" else
+            "The financial chart could not refresh. Your saved chart and writing are unchanged.")
         return
     captured = timezone.now()
     payload = build_candidate_evidence(request, progress)
@@ -245,9 +245,10 @@ def _finish(run, progress):
         content_hash=content_hash(payload), defaults={"month": request["targetMonth"], "payload": payload})
     progress["snapshotId"], progress["snapshotHash"] = snapshot.pk, snapshot.content_hash
     progress["chart"] = chart
+    display = financial_display(request["organizationId"])
     progress["candidate"] = {"id": run.run_id, "expiresAt": (captured + CANDIDATE_TTL).isoformat(),
-        "ownerPreview": history_payload({"enabled": True, "shareAmounts": True, "snapshot": chart}),
-        "audiencePreview": history_payload({"enabled": True, "shareAmounts": False, "snapshot": chart})}
+        "ownerPreview": history_payload({"enabled": True, "shareAmounts": True, "snapshot": chart, "display": display}),
+        "audiencePreview": history_payload({"enabled": True, "shareAmounts": False, "snapshot": chart, "display": display})}
     run.status = "completed"
 
 
@@ -277,7 +278,13 @@ def advance_refresh(refresh_id):
             return False
         stage = next_stage(progress, run.run_request["inputSources"])
         if progress["sources"].get("xero", {}).get("status") in {"failed", "reconnect_required"}:
-            # The chart needs Xero; reading Stripe now would only delay the answer.
+            # The accounting chart needs Xero, so no chart can be saved from this
+            # refresh. Say why on Stripe rather than leaving a bare "Waiting"
+            # (the status stays one that every client version understands).
+            stripe = progress["sources"].get("stripe")
+            if stripe and stripe.get("status") not in {"ready", "failed", "reconnect_required"}:
+                progress["sources"]["stripe"] = {"provider": "stripe", "status": "pending",
+                    "detail": "Stripe refreshes together with Xero. Try again once Xero is available."}
             stage = None
         if stage is None:
             try:

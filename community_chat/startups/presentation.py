@@ -21,8 +21,12 @@ def update_payload(draft, *, published=False, community=False, user=None):
             evidence = value.setdefault("metricEvidence", {}).setdefault(metric.get("metric_key"), {})
             evidence.update({"label": metric.get("label"), "unit": metric.get("unit")})
     if community:
-        value = shared_update(value, metric_items=memo.get("kpi_snapshot"),
-            financial_history=memo.get("financial_history"))
+        history = memo.get("financial_history")
+        if isinstance(history, dict):
+            # Community readers see the founder's current cash/accrual choice too.
+            from startup_updates.financial_history import reader_history
+            history = reader_history(history, organization_id=draft.organization_id, month=draft.month)
+        value = shared_update(value, metric_items=memo.get("kpi_snapshot"), financial_history=history)
         value = {key: copy.deepcopy(value.get(key)) for key in PUBLIC_FIELDS
             if key != "startupOverview" or key in value}
     else:

@@ -61,7 +61,7 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
     definitions = [REVENUE_DEFINITION, *[item for item in profile.kpi_definitions if isinstance(item, dict) and item.get("key") != "revenue"]]
     keys = {"revenue", "monthlyCosts"}
     keys.update(StartupMetricObservation.objects.filter(organization=organization, period_month=month).values_list("metric_key", flat=True))
-    keys.difference_update({"mrr", "arr", "burnRate", "runway", "invoiceRevenue", "cashCollected"})
+    keys.difference_update({"mrr", "arr", "burnRate", "runway", "invoiceRevenue", "cashCollected", "cashIn", "cashOut"})
     keys.update(str(item.get("key") or item.get("metric_key")) for item in definitions)
     observations = StartupMetricObservation.objects.filter(
         organization=organization, period_month=month, metric_key__in=keys,
@@ -283,7 +283,13 @@ def worker_revision_payload(revision, *, version=1):
 
 def frozen_memo(draft, *, published=False):
     revision = draft.published_revision if published else draft.current_revision
-    return copy.deepcopy(revision.structured_memo if revision else draft.structured_memo or {})
+    memo = copy.deepcopy(revision.structured_memo if revision else draft.structured_memo or {})
+    if isinstance(memo.get("financial_history"), dict):
+        # Charts follow the startup's current cash/accrual and Stripe settings.
+        from startup_updates.financial_history import reader_history
+        memo["financial_history"] = reader_history(memo["financial_history"],
+            organization_id=draft.organization_id, month=draft.month)
+    return memo
 
 
 @transaction.atomic
@@ -371,7 +377,9 @@ def save_revision(draft, memo, *, snapshot, audience="private", expected_revisio
     memo["evidence_snapshot_id"] = snapshot.pk
     memo["evidence_snapshot_hash"] = snapshot.content_hash
     from startup_updates.services import render_monthly_update_markdown
-    rendered = render_monthly_update_markdown(memo)
+    from startup_updates.financial_history import reader_history
+    rendered = render_monthly_update_markdown({**memo, "financial_history": reader_history(
+        memo.get("financial_history"), organization_id=draft.organization_id, month=draft.month)})
     digest = content_hash({"memo": memo, "snapshot": snapshot.content_hash, "audience": audience})
     if current and current.content_hash == digest:
         return current
