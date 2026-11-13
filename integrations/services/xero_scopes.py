@@ -6,6 +6,9 @@ XERO_REPORT_SCOPE = "accounting.reports.read"
 XERO_LEGACY_REPORT_SCOPE = "accounting.reports"
 XERO_PROFIT_AND_LOSS_REPORT_SCOPE = "accounting.reports.profitandloss.read"
 XERO_BALANCE_SHEET_REPORT_SCOPE = "accounting.reports.balancesheet.read"
+# Optional: Bank Summary backs Pulse's default cash-basis chart. Connections
+# without it keep the accrual chart and are asked to reconnect for cash.
+XERO_BANK_SUMMARY_REPORT_SCOPE = "accounting.reports.banksummary.read"
 XERO_PAYMENT_WRITE_SCOPE = "accounting.payments"
 XERO_INVOICE_WRITE_SCOPE = "accounting.transactions"
 XERO_GRANULAR_INVOICE_WRITE_SCOPE = "accounting.invoices"
@@ -62,6 +65,12 @@ def xero_has_report_scope(value: Any) -> bool:
         or XERO_LEGACY_REPORT_SCOPE in scopes
         or all(scope in scopes for scope in XERO_REQUIRED_REPORT_SCOPES)
     )
+
+
+def xero_has_cash_report_scope(value: Any) -> bool:
+    """Whether the connection may read the Bank Summary (cash in and out) report."""
+    scopes = normalize_xero_scopes(value)
+    return bool(scopes & {XERO_REPORT_SCOPE, XERO_LEGACY_REPORT_SCOPE, XERO_BANK_SUMMARY_REPORT_SCOPE})
 
 
 def xero_missing_report_scopes(value: Any) -> tuple[str, ...]:

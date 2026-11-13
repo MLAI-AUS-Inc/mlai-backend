@@ -216,6 +216,7 @@ jobs:
           startup_updates.tests_draft_disclosure_unit \
           startup_updates.tests_financial_history_unit \
           startup_updates.tests_financial_refresh_unit \
+          startup_updates.tests_financial_basis_unit \
           startup_updates.tests_dispatch_timing_unit \
           startup_updates.tests_update_identity.GenerationDateCompatibilityTests
 

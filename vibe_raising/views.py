@@ -3458,8 +3458,14 @@ class VibeRaisingBusinessHealthView(APIView):
             health = health_assessment(snapshot.payload)
         else:
             health = {"summary": "Create an update to capture your first evidence snapshot.", "metrics": [], "attention": [], "period": None}
+        from startup_updates.financial_history import DISPLAY_KEY, normalize_display
+        display = normalize_display((profile.progress_configuration or {}).get(DISPLAY_KEY))
+        charted = MonthlyUpdateDraft.objects.filter(organization=organization, published_revision__isnull=False,
+            published_revision__structured_memo__financial_history__enabled=True).count()
         return Response({**health, "configuration": {"timezone": profile.reporting_timezone,
-            "currency": profile.default_currency, "version": profile.reporting_config_version, "metricDefinitions": profile.kpi_definitions}})
+            "currency": profile.default_currency, "version": profile.reporting_config_version, "metricDefinitions": profile.kpi_definitions,
+            "financialBasis": display["basis"], "stripeInXero": display["stripeInXero"],
+            "publishedUpdatesWithFinancials": charted}})
 
     @transaction.atomic
     def post(self, request):
@@ -3469,6 +3475,24 @@ class VibeRaisingBusinessHealthView(APIView):
             return error
         organization, profile, _ = _ensure_binding_for_company(user=request.user, company=context["company"])
         profile = StartupProfile.objects.select_for_update().get(pk=profile.pk)
+        from startup_updates.financial_history import BASES, DISPLAY_KEY, normalize_display
+        display = normalize_display((profile.progress_configuration or {}).get(DISPLAY_KEY))
+        if "financialBasis" in request.data:
+            if request.data["financialBasis"] not in BASES:
+                return Response({"detail": "Choose cash or accrual for financial charts."}, status=400)
+            display["basis"] = request.data["financialBasis"]
+        if "stripeInXero" in request.data:
+            if type(request.data["stripeInXero"]) is not bool:
+                return Response({"detail": "Say whether Stripe payouts are recorded in Xero."}, status=400)
+            display["stripeInXero"] = request.data["stripeInXero"]
+        if "financialBasis" in request.data or "stripeInXero" in request.data:
+            # Chart settings apply when each chart is read, so they never
+            # invalidate an in-flight refresh or bump the reporting version.
+            profile.progress_configuration = {**(profile.progress_configuration or {}), DISPLAY_KEY: display}
+            profile.save(update_fields=["progress_configuration", "updated_at"])
+            if not {"timezone", "currency", "metricDefinitions", "metricLabel"} & set(request.data):
+                return Response({"saved": True, "version": profile.reporting_config_version,
+                    "financialBasis": display["basis"], "stripeInXero": display["stripeInXero"]})
         timezone_name = str(request.data.get("timezone", profile.reporting_timezone))
         currency = str(request.data.get("currency", profile.default_currency)).upper()
         try:
