@@ -76,6 +76,50 @@ class ProductionEntryViewTests(SimpleTestCase):
                 views.authorize('session', COMPANY)
             self.assertEqual(caught.exception.code, 'COMPANY_UNAVAILABLE')
 
+    @override_settings(CYBERTEST_PRODUCTION_ALL_COMPANIES=True, CYBERTEST_PRODUCTION_COMPANY_IDS=[])
+    def test_general_access_keeps_owner_checks_before_workspace_creation(self):
+        self.assertEqual(views.local_origin(), 'https://chat.mlai.au')
+        user = SimpleNamespace(pk='owner')
+        session = SimpleNamespace(user=user, user_id=user.pk)
+        company = SimpleNamespace(pk=COMPANY, name='New company', organization_id=None)
+        with patch.object(views.CommunityChatAccountSession.objects, 'select_related') as sessions, \
+             patch.object(views.VibeRaisingCompany.objects, 'select_related') as companies, \
+             patch.object(views, '_valid_session', return_value=True), \
+             patch.object(views, '_validate_device_owner'), \
+             patch.object(views, 'require_community_access'), \
+             patch.object(views, 'workspace_for_company', return_value=WORKSPACE) as workspace:
+            sessions.return_value.filter.return_value.first.return_value = session
+            companies.return_value.filter.return_value.first.return_value = None
+            with self.assertRaises(EntryError): views.authorize('session', COMPANY)
+            workspace.assert_not_called()
+            companies.return_value.filter.return_value.first.return_value = company
+            result = views.authorize('session', COMPANY)
+            self.assertTrue(result['workspace_provisioning'])
+            companies.return_value.filter.assert_called_with(pk=COMPANY, profile__user=user)
+            workspace.assert_called_once_with(company)
+
+    @override_settings(CYBERTEST_PRODUCTION_ALL_COMPANIES=True)
+    def test_existing_workspace_lookup_preserves_revocation_without_reprovisioning(self):
+        company = SimpleNamespace(pk=COMPANY)
+        row = SimpleNamespace(workspace_id=WORKSPACE, is_active=True, verified_at='verified')
+        with patch.object(views.CybertestCompanyBinding.objects, 'filter') as rows, \
+             patch.object(views.CybertestCompanyBinding.objects, 'get_or_create') as create:
+            rows.return_value.first.return_value = row
+            self.assertEqual(views.workspace_for_company(company), WORKSPACE)
+            row.is_active = False
+            with self.assertRaises(EntryError): views.workspace_for_company(company)
+            create.assert_not_called()
+
+    @override_settings(CYBERTEST_PRODUCTION_ALL_COMPANIES=True)
+    def test_concurrent_existing_revoked_binding_wins_over_new_defaults(self):
+        company = SimpleNamespace(pk=COMPANY, profile=SimpleNamespace(user_id='owner'))
+        row = SimpleNamespace(workspace_id=WORKSPACE, is_active=False, verified_at='verified')
+        with patch.object(views.CybertestCompanyBinding.objects, 'filter') as rows, \
+             patch.object(views.CybertestCompanyBinding.objects, 'get_or_create', return_value=(row, False)) as create:
+            rows.return_value.first.return_value = None
+            with self.assertRaises(EntryError): views.workspace_for_company(company)
+            self.assertEqual(create.call_args.kwargs['defaults']['created_by_id'], 'owner')
+
 
 @override_settings(DEBUG=True, CYBERTEST_ENTRY_LOCAL_ENABLED=True,
     CYBERTEST_APP_ORIGIN='http://localhost:8787', CYBERTEST_BILLING_MODE='test',

@@ -2,7 +2,7 @@
 import hashlib
 import re
 from urllib.parse import urlencode, urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from django.conf import settings
 from django.core.cache import cache
@@ -56,18 +56,25 @@ def local_origin():
 def production_companies():
     values = getattr(settings, 'CYBERTEST_PRODUCTION_COMPANY_IDS', [])
     try:
-        if not isinstance(values, (list, tuple)) or not 1 <= len(values) <= 100:
+        minimum = 0 if general_access() else 1
+        if not isinstance(values, (list, tuple)) or not minimum <= len(values) <= 100:
             raise ValueError()
         return {str(UUID(str(value))) for value in values}
     except (ValueError, TypeError, AttributeError) as exc:
         raise EntryError('ENTRY_UNAVAILABLE', 'Configure the enabled audit companies.', 503) from exc
 
 
+def general_access():
+    """Only explicit production activation enables automatic company enrollment."""
+    return (getattr(settings, 'CYBERTEST_ENTRY_PRODUCTION_ENABLED', False) is True
+            and getattr(settings, 'CYBERTEST_PRODUCTION_ALL_COMPANIES', False) is True)
+
+
 def production_origin():
     """Defend the effective runtime settings as well as startup environment."""
     flags = ('CYBERTEST_ENTRY_PRODUCTION_ENABLED', 'CYBERTEST_ENTRY_LOCAL_ENABLED',
              'CYBERTEST_ENTRY_STAGING_ENABLED', 'CYBERTEST_LIVE_BILLING_ENABLED',
-             'CYBERTEST_PHASED_SCANS_ENABLED', 'DEBUG')
+             'CYBERTEST_PHASED_SCANS_ENABLED', 'CYBERTEST_PRODUCTION_ALL_COMPANIES', 'DEBUG')
     values = {name: str(getattr(settings, name, False)).lower() for name in flags}
     values.update({name: getattr(settings, name, '') for name in (
         'APP_ENV', 'CYBERTEST_APP_ORIGIN', 'CYBERTEST_BASE_PATH',
@@ -103,9 +110,16 @@ def entry_metadata():
 
 def workspace_for_company(company):
     if getattr(settings, 'CYBERTEST_PERSISTENT_BINDINGS_ENABLED', False):
-        binding = CybertestCompanyBinding.objects.filter(
-            company_id=company.pk, is_active=True, verified_at__isnull=False).first()
-        if binding is None:
+        binding = CybertestCompanyBinding.objects.filter(company_id=company.pk).first()
+        if binding is None and general_access():
+            # Caller has already checked current company ownership. OneToOne
+            # makes concurrent first visits converge. Never reactivate an
+            # existing pending/revoked row or change its workspace/creator.
+            binding, _ = CybertestCompanyBinding.objects.get_or_create(company=company, defaults={
+                'workspace_id': uuid4(), 'created_by_id': company.profile.user_id,
+                'is_active': True, 'verified_at': timezone.now(),
+            })
+        if binding is None or not binding.is_active or binding.verified_at is None:
             raise EntryError('COMPANY_UNMAPPED', 'This company has no active audit workspace.', 409)
         return str(binding.workspace_id)
     if not settings.DEBUG or not getattr(settings, 'CYBERTEST_ENTRY_LOCAL_ENABLED', False):
@@ -119,7 +133,7 @@ def workspace_for_company(company):
 
 def authorize(session_id, company_id):
     local_origin()
-    if getattr(settings, 'CYBERTEST_ENTRY_PRODUCTION_ENABLED', False) and company_id not in production_companies():
+    if getattr(settings, 'CYBERTEST_ENTRY_PRODUCTION_ENABLED', False) and not general_access() and company_id not in production_companies():
         raise EntryError('COMPANY_UNAVAILABLE', 'This company is not enabled for security scans.', 403)
     if getattr(settings, 'CYBERTEST_ENTRY_STAGING_ENABLED', False) and company_id not in staging_companies():
         raise EntryError('COMPANY_UNAVAILABLE', 'This company is not enabled for the test workspace.', 403)
@@ -133,8 +147,10 @@ def authorize(session_id, company_id):
     if not company or (company.organization_id and not user_may_use_organization(session.user, company.organization)):
         raise EntryError('COMPANY_UNAVAILABLE', 'This company is unavailable.', 403)
     workspace_id = workspace_for_company(company)
-    return dict(user_id=str(session.user_id), company_id=str(company.pk),
-                workspace_id=workspace_id, company_name=company.name)
+    result = dict(user_id=str(session.user_id), company_id=str(company.pk),
+                  workspace_id=workspace_id, company_name=company.name)
+    if general_access(): result['workspace_provisioning'] = True
+    return result
 
 
 def authority():

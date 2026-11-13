@@ -20,6 +20,7 @@ class ProductionEntryConfigurationTests(unittest.TestCase):
     def test_default_does_not_activate_production_or_override_local_settings(self):
         self.assertEqual(production_entry_settings({}), {
             'CYBERTEST_ENTRY_PRODUCTION_ENABLED': False,
+            'CYBERTEST_PRODUCTION_ALL_COMPANIES': False,
             'CYBERTEST_PRODUCTION_COMPANY_IDS': [],
         })
 
@@ -75,6 +76,15 @@ class ProductionEntryConfigurationTests(unittest.TestCase):
         for value in ['', '*', 'not-a-uuid', ','.join(['10000000-0000-4000-8000-000000000001'] * 101)]:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 production_entry_settings(self.configured(CYBERTEST_PRODUCTION_COMPANY_IDS=value))
+
+    def test_general_access_is_explicit_and_does_not_need_a_pilot_list(self):
+        result = production_entry_settings(self.configured(
+            CYBERTEST_PRODUCTION_ALL_COMPANIES='true', CYBERTEST_PRODUCTION_COMPANY_IDS=''))
+        self.assertTrue(result['CYBERTEST_PRODUCTION_ALL_COMPANIES'])
+        self.assertEqual(result['CYBERTEST_PRODUCTION_COMPANY_IDS'], [])
+        for value in ['1', 'yes', 'True']:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                production_entry_settings(self.configured(CYBERTEST_PRODUCTION_ALL_COMPANIES=value))
 
     def test_bad_or_reused_service_keys_are_rejected_without_echo(self):
         key = self.configured()['CYBERTEST_BILLING_API_KEY']

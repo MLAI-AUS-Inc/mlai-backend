@@ -49,6 +49,13 @@ class EntryTests(unittest.TestCase):
         self.assertEqual(self.authority.inspect(result['grant'])['workspace_id'], self.identity['workspace_id'])
         with self.assertRaises(EntryError): self.redeem(code)
 
+    def test_provisioning_authority_comes_from_current_server_identity(self):
+        self.identity['workspace_provisioning'] = True
+        result = self.redeem(self.issue())
+        self.assertIs(result.get('workspace_provisioning'), True)
+        self.identity.pop('workspace_provisioning')
+        self.assertNotIn('workspace_provisioning', self.authority.inspect(result['grant']))
+
     def test_wrong_state_or_verifier_does_not_consume_valid_code(self):
         code = self.issue()
         for state, verifier in [('x'*43, self.verifier), (self.state, 'x'*43)]:

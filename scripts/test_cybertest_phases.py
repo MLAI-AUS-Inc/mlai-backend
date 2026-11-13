@@ -17,6 +17,7 @@ APPROVED = '7b0e11050cc25c68fe060d8c1444e1c9d9bf92a968c3660fe787125200feca3f'
 env = {'DJANGO_SETTINGS_MODULE': 'mlai.settings', 'APP_ENV': 'test', 'DEBUG': 'True',
        'SECRET_KEY': 'synthetic-two-phase-tests-only', 'DATABASE_URL': 'sqlite:///:memory:', 'REDIS_URL': ''}
 service_only = '--service-only' in sys.argv
+bindings_only = '--bindings-only' in sys.argv
 sys.argv = [sys.argv[0], 'test']
 with patch.dict(os.environ, env, clear=True), patch('dotenv.load_dotenv', return_value=False), \
         patch('socket.socket.connect', side_effect=AssertionError('External network forbidden in local billing tests')):
@@ -40,7 +41,7 @@ with patch.dict(os.environ, env, clear=True), patch('dotenv.load_dotenv', return
     if settings.DATABASES['default']['ENGINE'] != 'django.db.backends.sqlite3' or settings.DATABASES['default']['NAME'] != ':memory:':
         raise RuntimeError('Tests require a fresh in-memory SQLite database.')
     settings.DATABASES['default'].setdefault('TEST', {})['NAME'] = ':memory:'
-    labels = ['roo.test_cybertest_phase_api'] if service_only else [
+    labels = ['roo.tests_cybertest_company_binding'] if bindings_only else ['roo.test_cybertest_phase_api'] if service_only else [
         'roo.tests_cybertest_phases', 'roo.tests_cybertest_checkout',
         'roo.test_cybertest_policy', 'roo.test_cybertest_delivery', 'roo.test_cybertest_plan', 'roo.test_cybertest_phase_api']
     failed = DiscoverRunner(verbosity=1, interactive=False).run_tests(labels)

@@ -67,3 +67,29 @@ class CompanyBindingTests(TestCase):
     def test_persistent_mode_never_falls_back_to_fixture(self):
         with override_settings(CYBERTEST_LOCAL_COMPANY_WORKSPACES={str(self.company.pk): str(self.workspace)}):
             with self.assertRaises(EntryError): workspace_for_company(self.company)
+
+    @override_settings(CYBERTEST_PERSISTENT_BINDINGS_ENABLED=True,
+        CYBERTEST_ENTRY_PRODUCTION_ENABLED=True, CYBERTEST_PRODUCTION_ALL_COMPANIES=True)
+    def test_general_access_creates_one_company_owned_binding_and_never_reactivates(self):
+        first = workspace_for_company(self.company)
+        self.assertEqual(workspace_for_company(self.company), first)
+        row = CybertestCompanyBinding.objects.get(company=self.company)
+        self.assertEqual(row.created_by, self.user)
+        self.assertTrue(row.is_active)
+        self.assertIsNotNone(row.verified_at)
+        other = VibeRaisingCompany.objects.create(profile=self.profile, name='Separate company')
+        self.assertNotEqual(workspace_for_company(other), first)
+        row.is_active = False
+        row.save(update_fields=['is_active'])
+        with self.assertRaises(EntryError): workspace_for_company(self.company)
+        row.refresh_from_db()
+        self.assertFalse(row.is_active)
+
+    @override_settings(CYBERTEST_PERSISTENT_BINDINGS_ENABLED=True,
+        CYBERTEST_ENTRY_PRODUCTION_ENABLED=True, CYBERTEST_PRODUCTION_ALL_COMPANIES=True)
+    def test_general_access_never_replaces_existing_pending_binding(self):
+        row = self.create()
+        with self.assertRaises(EntryError): workspace_for_company(self.company)
+        row.refresh_from_db()
+        self.assertFalse(row.is_active)
+        self.assertEqual(row.workspace_id, self.workspace)

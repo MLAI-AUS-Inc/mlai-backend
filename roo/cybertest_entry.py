@@ -26,8 +26,10 @@ def _key(kind, token):
 
 def _identity(value):
     try:
-        return dict(user_id=str(value['user_id']), company_id=str(UUID(value['company_id'])),
+        result = dict(user_id=str(value['user_id']), company_id=str(UUID(value['company_id'])),
                     workspace_id=str(UUID(value['workspace_id'])), company_name=str(value['company_name'])[:120])
+        if value.get('workspace_provisioning') is True: result['workspace_provisioning'] = True
+        return result
     except (KeyError, TypeError, ValueError) as exc:
         raise EntryError('ENTRY_UNAVAILABLE', 'Company access is unavailable.', 503) from exc
 

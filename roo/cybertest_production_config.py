@@ -21,6 +21,7 @@ def production_entry_settings(values):
     Receipt recovery keeps its existing independent settlement authorization.
     """
     result = {'CYBERTEST_ENTRY_PRODUCTION_ENABLED': False,
+              'CYBERTEST_PRODUCTION_ALL_COMPANIES': False,
               'CYBERTEST_PRODUCTION_COMPANY_IDS': []}
     if not _flag(values, 'CYBERTEST_ENTRY_PRODUCTION_ENABLED'):
         return result
@@ -44,9 +45,11 @@ def production_entry_settings(values):
                 and any(word in name for word in ('SECRET', 'PASSWORD', 'TOKEN', 'API_KEY'))
                 and value == key):
             _refuse()
+    general = _flag(values, 'CYBERTEST_PRODUCTION_ALL_COMPANIES')
     try:
-        companies = values.get('CYBERTEST_PRODUCTION_COMPANY_IDS', '').split(',')
-        if not 1 <= len(companies) <= 100:
+        raw_companies = values.get('CYBERTEST_PRODUCTION_COMPANY_IDS', '')
+        companies = [] if general and raw_companies == '' else raw_companies.split(',')
+        if not (0 if general else 1) <= len(companies) <= 100:
             _refuse()
         companies = sorted({str(UUID(value.strip())) for value in companies})
     except (ValueError, TypeError, AttributeError):
@@ -63,5 +66,6 @@ def production_entry_settings(values):
         CYBERTEST_APP_ORIGIN='https://chat.mlai.au',
         CYBERTEST_BASE_PATH='/cybertest',
         CYBERTEST_PRODUCTION_COMPANY_IDS=companies,
+        CYBERTEST_PRODUCTION_ALL_COMPANIES=general,
     )
     return result
