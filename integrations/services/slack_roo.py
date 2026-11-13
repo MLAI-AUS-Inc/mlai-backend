@@ -52,3 +52,30 @@ def is_public_roo_reply(
             str(conversation_id or ""),
         )
     )
+
+
+def is_accepted_agent_reply(message, *, workspace_id, conversation_id, allow_channels=False):
+    """Public Roo or an owner-configured Slack agent bot (``slack_agent_bots``).
+
+    Both keep the caller's owner-grant and participant-boundary checks.
+    """
+    from integrations.services.slack_agent_bots import is_agent_bot_reply
+
+    return is_public_roo_reply(
+        message, workspace_id=workspace_id, conversation_id=conversation_id,
+        allow_channels=allow_channels,
+    ) or is_agent_bot_reply(
+        message, workspace_id=workspace_id, conversation_id=conversation_id,
+        allow_channels=allow_channels,
+    )
+
+
+def ai_recipient_user_ids(workspace_id):
+    """Every AI bot member ID whose presence in a conversation requires AI consent."""
+    from integrations.services.slack_agent_bots import workspace_bot_user_ids
+
+    target = public_roo_target()
+    ids = set(workspace_bot_user_ids(workspace_id))
+    if target and target[0] == workspace_id:
+        ids.add(target[1])
+    return ids

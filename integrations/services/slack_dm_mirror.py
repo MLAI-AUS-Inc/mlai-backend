@@ -928,12 +928,21 @@ def open_slack_dm(
         raw_user = (
             response.get("user") if isinstance(response.get("user"), dict) else {}
         )
+        from integrations.services.slack_agent_bots import is_agent_bot_user
         from integrations.services.slack_roo import is_public_roo_user
 
         is_roo_dm = (
             len(requested_ids) == 1
             and slack_user_id == raw_user.get("id")
-            and is_public_roo_user(raw_user, workspace_id=grant.slack_workspace_id)
+            and (
+                is_public_roo_user(raw_user, workspace_id=grant.slack_workspace_id)
+                # An owner's own configured agent bot (for example an OpenAI dot).
+                or is_agent_bot_user(
+                    raw_user,
+                    workspace_id=grant.slack_workspace_id,
+                    owner_user_id=grant.user_id,
+                )
+            )
         )
         if is_roo_dm:
             _require_roo_ai_consent(grant.user_id)
@@ -943,7 +952,8 @@ def open_slack_dm(
             owner_slack_user_id=grant.slack_user_id,
         ):
             raise SlackDmMirrorError(
-                "Slack DMs can only be started with internal members or Public Roo."
+                "Slack DMs can only be started with internal members, Public Roo "
+                "or your own connected agent."
             )
         profile_cache[slack_user_id] = _profile_from_slack_user(raw_user)
     open_response = _call_slack_with_grant_authority(
@@ -3282,12 +3292,21 @@ def _normalize_private_slack_event(
     *,
     allow_roo_channels: bool = False,
 ) -> dict[str, Any] | None:
-    from integrations.services.slack_roo import is_public_roo_reply
+    from integrations.services.slack_agent_bots import with_agent_author
+    from integrations.services.slack_roo import is_accepted_agent_reply
+
+    workspace_id = str(payload.get("team_id") or "")
+    event = with_agent_author(event, workspace_id=workspace_id)
+    if isinstance(event.get("message"), dict):
+        event = {
+            **event,
+            "message": with_agent_author(event["message"], workspace_id=workspace_id),
+        }
 
     def roo_reply(message):
-        return is_public_roo_reply(
+        return is_accepted_agent_reply(
             message,
-            workspace_id=str(payload.get("team_id") or ""),
+            workspace_id=workspace_id,
             conversation_id=str(event.get("channel") or ""),
             allow_channels=allow_roo_channels,
         )
@@ -6249,6 +6268,7 @@ def _persist_history_page_locked(
                 continue
         except SlackDmMirrorError:
             continue
+        message = _with_agent_author(conversation, message)
         if not _history_message_author_allowed(conversation, message):
             continue
         message = _normalize_history_author(conversation, message)
@@ -6525,9 +6545,16 @@ def _history_delivery_author_pubkey(delivery: SlackDmMirrorDelivery) -> str:
     )
 
 
+def _with_agent_author(conversation, message):
+    """Attribute a configured agent bot's user-less history message to its member ID."""
+    from integrations.services.slack_agent_bots import with_agent_author
+
+    return with_agent_author(message, workspace_id=conversation.slack_workspace_id)
+
+
 def _history_message_author_allowed(conversation, message):
-    """Preserve verified Roo replies in owner IMs and authorized private channels."""
-    from integrations.services.slack_roo import is_public_roo_reply
+    """Preserve verified Roo/agent replies in owner IMs and authorized private channels."""
+    from integrations.services.slack_roo import is_accepted_agent_reply as is_public_roo_reply
 
     if _all_history_group_import(conversation):
         return True
@@ -6563,6 +6590,8 @@ def _persist_reply_page_locked(
     source_cutoff = max(consent_cutoff, int(Decimal(scan_authority.oldest or "0")))
     messages = []
     for message in response.get("messages") or []:
+        if isinstance(message, dict):
+            message = _with_agent_author(conversation, message)
         if not isinstance(message, dict) or not _history_message_author_allowed(
             conversation, message
         ):
@@ -7965,7 +7994,7 @@ def _require_roo_ai_consent(user_id):
 def _verify_ai_recipients_before_send(delivery, client):
     """Gate every write to a Roo-visible conversation, not just tagged mentions."""
     from community_chat.privacy import has_ai_consent
-    from integrations.services.slack_roo import public_roo_target
+    from integrations.services.slack_roo import ai_recipient_user_ids
 
     if not getattr(settings, "COMMUNITY_CHAT_AI_CONSENT_REQUIRED", True):
         return
@@ -7973,8 +8002,8 @@ def _verify_ai_recipients_before_send(delivery, client):
     if delivery.operation == CommunityBridgeDeliveryType.DELETE:
         return
     grant = delivery.conversation.grant
-    target = public_roo_target()
-    if not target or target[0] != grant.slack_workspace_id or has_ai_consent(grant.user_id):
+    ai_ids = ai_recipient_user_ids(grant.slack_workspace_id)
+    if not ai_ids or has_ai_consent(grant.user_id):
         return
     # Refresh membership instead of trusting a cached participant set: Roo may
     # have joined since the mirror was created. Threads and media use this same
@@ -7988,7 +8017,7 @@ def _verify_ai_recipients_before_send(delivery, client):
         members = response.get("members")
         if not isinstance(members, list):
             raise SlackDmMirrorAuthorizationError("Could not verify AI recipients.")
-        if target[1] in members:
+        if ai_ids.intersection(members):
             _require_roo_ai_consent(grant.user_id)
         cursor = str((response.get("response_metadata") or {}).get("next_cursor") or "")
         if not cursor:

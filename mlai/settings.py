@@ -2441,6 +2441,16 @@ COMMUNITY_CHAT_DELETION_CONTACT = os.getenv("COMMUNITY_CHAT_DELETION_CONTACT", "
 COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
 ROO_LINK_LOVE_SLACK_CHANNEL_ID = os.getenv("ROO_LINK_LOVE_SLACK_CHANNEL_ID", "C09BQAWJ66R")
 COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID", "U090FV0GTT4")
+# Personal agent bots (for example an OpenAI dot installed through OpenAI's own
+# Slack app) reached through the owner's private Slack mirror. Off by default.
+# SLACK_AGENT_BOTS is a JSON list of {"workspace_id", "bot_user_id",
+# "owner_user_id", "name", optional "bot_id", "app_id", "kind"}; see
+# integrations/services/slack_agent_bots.py and docs/slack-agent-bots.md.
+SLACK_AGENT_BOTS_ENABLED = _env_is_true("SLACK_AGENT_BOTS_ENABLED", False)
+try:
+    SLACK_AGENT_BOTS = json.loads(os.getenv("SLACK_AGENT_BOTS", "[]") or "[]")
+except ValueError:
+    SLACK_AGENT_BOTS = []
 
 # Optional startup-update editorial covers; all generation runs server-side.
 STARTUP_UPDATE_COVER_IMAGE_MODEL = os.getenv("STARTUP_UPDATE_COVER_IMAGE_MODEL", "gpt-image-2.5-flare")
