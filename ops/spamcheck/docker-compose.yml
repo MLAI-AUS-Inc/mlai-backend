@@ -19,7 +19,8 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:11333/ping"]
+      # The official image ships neither curl nor wget; perl is always there.
+      test: ["CMD", "perl", "-MIO::Socket::INET", "-e", "$$s = IO::Socket::INET->new(PeerAddr => q(127.0.0.1:11333), Timeout => 3) or exit 1; print $$s qq(GET /ping HTTP/1.0\r\n\r\n); exit((join q(), <$$s>) =~ /pong/ ? 0 : 1)"]
       interval: 30s
       timeout: 5s
       retries: 3

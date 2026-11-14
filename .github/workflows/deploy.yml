@@ -132,7 +132,7 @@ jobs:
       run: python scripts/test_without_database.py crm.tests.test_api_unit crm.tests.test_segments_unit crm.tests.test_audience_contract_unit crm.tests.test_segment_trees_unit crm.tests.test_audience_profiles_unit crm.tests.test_audience_rules_unit crm.tests.test_admin_gate_unit
 
     - name: Check CRM blasts, sending domains and the listmonk client without database access
-      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit crm.tests.test_deliverability_unit crm.tests.test_deliverability_monitors_unit crm.tests.test_transactional_unit crm.tests.test_deliverability_planner_unit crm.tests.test_preflight_content_unit crm.tests.test_preflight_seed_unit crm.tests.test_campaign_copy_unit
+      run: python scripts/test_without_database.py crm.tests.test_blasts_unit crm.tests.test_sending_domains_unit crm.tests.test_listmonk_unit crm.tests.test_resend_warmup_unit crm.tests.test_deliverability_unit crm.tests.test_deliverability_monitors_unit crm.tests.test_transactional_unit crm.tests.test_deliverability_planner_unit crm.tests.test_preflight_content_unit crm.tests.test_preflight_seed_unit crm.tests.test_campaign_copy_unit crm.tests.test_org_streams_unit
 
     - name: Check system email rendering, Resend transport, routing and webhook parsing without database access
       run: python scripts/test_without_database.py system_email.tests.test_system_email_unit startup_updates.tests_reminder_admin_permissions_unit
