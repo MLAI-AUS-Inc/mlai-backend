@@ -4,7 +4,7 @@
 
 The private Roo worker can request `mode: "latest"` for its daily refresh and
 on-demand views. The default remains `strict`; scheduled Friday deliveries keep
-that mode. Latest permits only `hours_coverage_missing` and
+that mode. Without an optional submissions policy, latest permits only `hours_coverage_missing` and
 `new_invoices_require_review` as explicitly labelled partial data. All finance,
 mail discovery, scope, unresolved allocation and cutoff errors still withhold
 the snapshot. Both modes are signed and use separate preparation identities.
@@ -150,3 +150,30 @@ Synthetic checks:
 ```sh
 python scripts/test_without_database.py integrations.tests_studio_report_source
 ```
+
+
+### Submitted work and shared finance reads
+
+Set an optional `submissions` object in the private owner scope. Its `projects`
+maps every authorized project UUID to its invoice heading, excluding the
+`[Studio]` prefix. Its `builders` map is keyed by verified Linear assignee UUID,
+with the canonical reviewed `supplier` and an array of authenticated mailbox
+`senders`. Its `since` timestamp starts the Linear change scan. Include all
+mapped builders for Linear. Suppliers without verified email addresses use an
+empty sender array. Add the configured senders to the mailbox search.
+
+Latest prepares read completed Linear issues with explicit logged or allocated
+durations and work dates. They also read supported hour-total and ticket-item
+PDF invoices from matched senders. A recognized invoice supersedes matching
+Linear entries. Reviewed records supersede both. Unrecognized mail and
+conflicting identities or quantities remain review items. Source inputs are
+re-evaluated on each request. No submission advances the manual review date.
+A work period spanning multiple dates retains an estimated daily allocation.
+
+The finance projection is scoped to owner, tenant, client and credit policy.
+Latest requests share verified payments for 15 minutes. During a genuine
+provider cooldown they can display verified cash up to seven days old alongside
+current submissions, with the original finance timestamp and rate-limit status.
+A first deployment may seed the private cache from a validated previous latest
+preparation with the same finance scope and cutoff. Strict Friday requests
+waiting on work skip Xero and recheck the work gate hourly.
