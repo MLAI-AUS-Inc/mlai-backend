@@ -653,6 +653,14 @@ printf '%s' "$REDIS_URL" | ssh "$DEPLOY_SSH_TARGET" '
 # accounting.attachments for the reconciliation agent's draft bills — survive
 # redeploys instead of living in hand-edited .env lines that the next deploy
 # races against. Empty/unset keeps whatever the droplet already has.
+# Pulse's cash charts read Xero's Bank Summary report. Keep that scope even when
+# the repository variable predates it, so founders grant it when they reconnect.
+if [ -n "${XERO_OAUTH_SCOPES:-}" ]; then
+    case " $(printf '%s' "$XERO_OAUTH_SCOPES" | tr ',' ' ') " in
+        *" accounting.reports.banksummary.read "*) ;;
+        *) XERO_OAUTH_SCOPES="$XERO_OAUTH_SCOPES accounting.reports.banksummary.read" ;;
+    esac
+fi
 if [ -n "${XERO_OAUTH_SCOPES:-}" ]; then
     echo "🔧 Updating Xero OAuth scope list..."
     printf '%s' "$XERO_OAUTH_SCOPES" | ssh "$DEPLOY_SSH_TARGET" '
@@ -934,7 +942,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF | tee "$remote_deploy_log"
     # below at heredoc construction). The default grants the reconciliation
     # agent's write path: granular accounting.invoices + accounting.payments
     # (draft bills / bill payments) and accounting.attachments (source PDFs).
-    upsert_env_value XERO_OAUTH_SCOPES "${XERO_OAUTH_SCOPES:-offline_access accounting.invoices accounting.invoices.read accounting.payments accounting.payments.read accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.banktransactions accounting.attachments}"
+    upsert_env_value XERO_OAUTH_SCOPES "${XERO_OAUTH_SCOPES:-offline_access accounting.invoices accounting.invoices.read accounting.payments accounting.payments.read accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.reports.banksummary.read accounting.banktransactions accounting.attachments}"
     upsert_env_value RECONCILIATION_DEFAULT_DOMAIN "mlai.au"
     upsert_env_value RECONCILIATION_SCHEDULER_ENABLED "true"
     upsert_env_value NOTION_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/notion"
