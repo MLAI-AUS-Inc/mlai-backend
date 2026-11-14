@@ -24,6 +24,9 @@ NUMBER = r"\d+(?:\.\d+)?"
 def period(text, year=None):
     text = re.sub(r"(?<=\d)(st|nd|rd|th)\b", "", text.strip(), flags=re.I)
     text = re.sub(r"\s*\(exact date not supplied\)$", "", text)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        day = date.fromisoformat(text).isoformat()
+        return day, day
     parts = re.split(r"\s*(?:[–—-]|\bto\b)\s*", text)
     if len(parts) > 2 or not all(re.fullmatch(DAY, part) for part in parts):
         raise ValueError("invalid_work_period")
@@ -33,6 +36,8 @@ def period(text, year=None):
     def make(parts, month, year):
         return date(int(parts[2] or year), datetime.strptime(month[:3], "%b").month, int(parts[0]))
 
+    if not last[1]:
+        raise ValueError("missing_work_month")
     end = make(last, last[1], year)
     start = make(first, first[1] or last[1], year)
     if start > end or (end - start).days > 366:
@@ -85,7 +90,10 @@ def invoice_rows(text, projects):
     headers = set(re.findall(r"^INVOICE\s+#\s*([\w-]+)$", text, re.M | re.I))
     if len(headers) != 1 or not re.search(r"^\[Studio\] ", text, re.M):
         raise ValueError("unknown_invoice_layout")
-    issued = datetime.strptime(re.search(r"Bill To: Date: (\w+ \d+, \d{4})", text)[1], "%b %d, %Y").date()
+    date_line = re.search(r"Bill To: Date: (\w+ \d+, \d{4})", text)
+    if not date_line:
+        raise ValueError("missing_invoice_date")
+    issued = datetime.strptime(date_line[1], "%b %d, %Y").date()
     rows = []
     for item in re.split(rf"^(?={ISSUE}\s+-\s+)", text, flags=re.M)[1:]:
         line = re.match(rf"^({ISSUE})\s+-\s+[^\n]+?\s+({NUMBER}) \$[\d,.]+ \$[\d,.]+", item)
@@ -140,16 +148,16 @@ def linear_issues(scope, since):
 
 
 def work_from_issue(issue):
-    body = issue.get("description") or ""
+    body = (issue.get("description") or "").replace("**", "")
     hours = re.search(
-        r"^\*\*(?:Actual time(?: reported by [^:\n]+)?|Retrospective time allocation|Logged time):\*\*\s*([\d.]+) (minutes?|hours?)\b",
+        r"^(?:Actual time(?: reported by [^:\n]+)?|Retrospective time allocation|Logged time|Time spent):\s*([\d.]+) (minutes?|hours?)\b",
         body,
         re.M | re.I,
     )
     if not hours:
         return None
     number = re.search(r"^## Invoice\s+#?([\w-]+)\b", body, re.M | re.I)
-    dates = re.search(r"^\*\*(?:Work date|Billing period):\*\* *([^\n]+)", body, re.M | re.I)
+    dates = re.search(r"^(?:Work date|Billing period): *([^\n]+)", body, re.M | re.I)
     if not dates:
         raise ValueError("missing_work_date")
     amount = Decimal(hours[1])
@@ -203,7 +211,7 @@ def collect(scope, snapshot, owner, unknown, cutoff, mailbox):
         raise SourceIncomplete("submission_project_scope")
     builders = policy["builders"]
     data = snapshot["clients"][owner]
-    known = {(r["supplier"].casefold(), r["number"].casefold()) for r in data["contractor_invoices"]}
+    known = {(r["supplier"].casefold(), r["number"].casefold()): r for r in data["contractor_invoices"]}
     historical = set()
     for row in data["hours"]:
         historical.update(re.findall(r"\b" + ISSUE + r"\b", row["id"] + " " + row["description"]))
@@ -214,7 +222,14 @@ def collect(scope, snapshot, owner, unknown, cutoff, mailbox):
     messages_by_key = defaultdict(set)
     pending_issues = 0
     last = cutoff.astimezone(TZ).date().isoformat()
+    seen = {}
     for issue in linear_issues(scope, policy["since"]):
+        ident = issue["identifier"]
+        if ident in seen:
+            if seen[ident] != issue:
+                raise SourceIncomplete("linear_changed_during_read")
+            continue
+        seen[ident] = issue
         builder = (issue.get("assignee") or {}).get("id")
         project = (issue.get("project") or {}).get("id")
         if (
@@ -238,7 +253,6 @@ def collect(scope, snapshot, owner, unknown, cutoff, mailbox):
                     (project, issue["identifier"], start, end, quantity)
                 )
     invoices = {}
-    unreadable_builders = set()
     for mid in sorted(unknown):
         msg = mailbox.users().messages().get(userId="me", id=mid).execute()
         if int(msg["internalDate"]) / 1000 > cutoff.timestamp():
@@ -251,7 +265,6 @@ def collect(scope, snapshot, owner, unknown, cutoff, mailbox):
         try:
             number, issued, lines = invoice_rows(pdf_attachment(mailbox, msg), projects)
         except (ValueError, TypeError, AttributeError, IndexError, ArithmeticError, PdfReadError):
-            unreadable_builders.add(builder)
             continue
         key = builder, number.casefold()
         if issued > last or any(row[3] > last for row in lines):
@@ -270,13 +283,13 @@ def collect(scope, snapshot, owner, unknown, cutoff, mailbox):
             if ticket:
                 all_tickets[ticket].add(key)
             for other, items in groups.items():
-                if other == key or other[0] != key[0]:
+                if other == key:
                     continue
                 for pr, ident, a, b, _ in items:
                     if (ticket and ticket == ident) or (
-                        not ticket and pr == project and start <= b and a <= end
+                        not ticket and other[0] == key[0] and pr == project and start <= b and a <= end
                     ):
-                        if other[1] == ident.casefold():
+                        if other[0] == key[0] and other[1] == ident.casefold():
                             superseded.add(other)
                         else:
                             conflict.update((key, other))
@@ -300,9 +313,15 @@ def collect(scope, snapshot, owner, unknown, cutoff, mailbox):
         supplier = builders[builder]["supplier"]
         if key in superseded:
             continue
-        if builder in unreadable_builders:
-            conflict.add(key)
-        if (supplier.casefold(), number) in known:
+        reviewed = known.get((supplier.casefold(), number))
+        if reviewed:
+            if key in invoices and (
+                sum(line[-1] for line in invoices[key][1]) != reviewed["hour_units"]
+                or invoices[key][0] != reviewed["date"]
+                or key in conflict
+            ):
+                pending_issues += 1
+                handled.difference_update(messages_by_key[key])
             continue
         submitted = groups.get(key, [])
         issued, rows = invoices.get(key, (None, submitted))
@@ -310,8 +329,16 @@ def collect(scope, snapshot, owner, unknown, cutoff, mailbox):
             continue
         if issued and any(r[1] in historical for r in rows if r[1]):
             conflict.add(key)
-        if issued and submitted and any(r not in rows for r in submitted) and any(r[1] for r in rows):
-            conflict.add(key)
+        if issued and submitted:
+            if any(r[1] for r in rows):
+                if any(r not in rows for r in submitted):
+                    conflict.add(key)
+            else:
+                project, _, start, end, total = rows[0]
+                if sum(r[-1] for r in submitted) > total or any(
+                    r[0] != project or r[2] < start or r[3] > end for r in submitted
+                ):
+                    conflict.add(key)
         # An aggregate submission overlapping a reviewed interval cannot be added safely.
         if any(
             old.get("builder_id") == builder
