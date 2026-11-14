@@ -35,31 +35,47 @@ def _mask_code(text):
 
 
 def roo_channel_targets(conversation):
-    """Advertise only the configured Roo already in this owner's private channel."""
+    """Advertise configured AI bots (Roo, agent bots) already in this owner's private channel."""
     from integrations.services.slack_chat_catalog import (
         conversation_kind,
         conversation_metadata,
     )
 
+    from integrations.services.slack_agent_bots import configured_bots
+
+    workspace = getattr(conversation, "slack_workspace_id", "")
+    participants = getattr(conversation, "participant_slack_ids", None) or []
+    # Public Roo first, then configured personal agent bots (for example an
+    # OpenAI dot) that are already members of this owner's private channel.
+    candidates = []
     target = public_roo_target()
+    if target and target[0] == workspace:
+        candidates.append((target[1], "Roo"))
+    candidates.extend(
+        (bot.bot_user_id, bot.name) for bot in configured_bots()
+        if bot.workspace_id == workspace
+    )
     if (
-        not target
-        or target[0] != getattr(conversation, "slack_workspace_id", "")
+        not any(slack_user_id in participants for slack_user_id, _ in candidates)
         or conversation_kind(conversation) != "private_channel"
         or conversation_metadata(conversation).get("source_archived")
-        or target[1] not in (getattr(conversation, "participant_slack_ids", None) or [])
-        or conversation.grant.slack_user_id not in conversation.participant_slack_ids
+        or conversation.grant.slack_user_id not in participants
     ):
         return []
-    profile = (conversation.participant_profiles or {}).get(target[1]) or {}
-    return [
-        {
-            "slack_user_id": target[1],
-            "display_name": str(profile.get("display_name") or "Roo")[:80],
+    result = []
+    for slack_user_id, fallback_name in candidates:
+        if slack_user_id not in participants or any(
+            item["slack_user_id"] == slack_user_id for item in result
+        ):
+            continue
+        profile = (conversation.participant_profiles or {}).get(slack_user_id) or {}
+        result.append({
+            "slack_user_id": slack_user_id,
+            "display_name": str(profile.get("display_name") or fallback_name)[:80],
             "avatar_url": str(profile.get("avatar_url") or "")[:2000],
             "is_bot": True,
-        }
-    ]
+        })
+    return result
 
 
 def render_outgoing_roo_mentions(text, tags, conversation):
