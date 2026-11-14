@@ -1,0 +1,147 @@
+{
+  "algorithm": "incremental-upgrade-v1",
+  "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sourceManifestSha256": "0c48db4e5e110b98023d36d2c0f4dede6916bcd44768c06244941eb049e56e0a",
+  "scope": "all",
+  "route": "supabase",
+  "model": "kimi-k3",
+  "pricing": {
+    "input": 3,
+    "cachedInput": 0.3,
+    "output": 15
+  },
+  "parentAuditId": "00000000-0000-4000-8000-000000000001",
+  "baseEvidenceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "baseReportSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "policy": {
+    "version": 1,
+    "runtimeTargetTokenAllowance": 131072,
+    "runtimeTargetReserveUsd": 3,
+    "standard": {
+      "maxSourceBytes": 1000000,
+      "maxFiles": 100,
+      "maxRuntimeTargets": 10,
+      "maxSourceChecks": 10,
+      "maxCheckChars": 64000,
+      "maxWorkTokens": 1000000,
+      "maxDurationMs": 60000,
+      "maxParallelRuntime": 2,
+      "maxModelUsd": 20,
+      "reportReserveUsd": 2
+    },
+    "large": {
+      "maxSourceBytes": 1000000,
+      "maxFiles": 100,
+      "maxRuntimeTargets": 10,
+      "maxSourceChecks": 10,
+      "maxCheckChars": 64000,
+      "maxWorkTokens": 1000000,
+      "maxDurationMs": 60000,
+      "maxParallelRuntime": 2,
+      "maxModelUsd": 40,
+      "reportReserveUsd": 2
+    }
+  },
+  "execution": {
+    "maxSourceBytes": 1000000,
+    "maxFiles": 100,
+    "maxRuntimeTargets": 10,
+    "maxSourceChecks": 10,
+    "maxCheckChars": 64000,
+    "maxWorkTokens": 1000000,
+    "maxDurationMs": 60000,
+    "maxParallelRuntime": 2,
+    "maxModelUsd": 20,
+    "reportReserveUsd": 2
+  },
+  "workload": {
+    "files": 3,
+    "sourceBytes": 148,
+    "runtimeTargets": 1,
+    "sourceChecks": 2,
+    "largestSourceCheckChars": 116,
+    "estimatedTokenAllowance": 222274,
+    "requestReserveUsd": 4.056966
+  },
+  "runtimeTargets": [
+    {
+      "checkId": "upgrade:runtime:1",
+      "name": "hello"
+    }
+  ],
+  "sourceChecks": [
+    {
+      "checkId": "upgrade:cross:1",
+      "kind": "cross_module",
+      "files": [
+        "supabase/functions/_shared/auth.ts",
+        "supabase/functions/hello/index.ts"
+      ]
+    },
+    {
+      "checkId": "upgrade:policy:1",
+      "kind": "database_policy",
+      "files": [
+        "supabase/migrations/001.sql"
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "id": "upgrade:runtime:1",
+      "kind": "runtime_target",
+      "required": true
+    },
+    {
+      "id": "upgrade:cross:1",
+      "kind": "cross_module",
+      "required": true
+    },
+    {
+      "id": "upgrade:policy:1",
+      "kind": "database_policy",
+      "required": true
+    },
+    {
+      "id": "upgrade:review",
+      "kind": "evidence_review",
+      "required": false
+    }
+  ],
+  "coverage": [
+    "Additional source checks cover only the declared database-policy set and resolved local JavaScript/TypeScript dependency pairs. Other relationships and external services are not verified."
+  ],
+  "contract": {
+    "version": 1,
+    "phase": "upgrade",
+    "tier": "standard",
+    "parentCheckoutId": "00000000-0000-4000-8000-000000000002",
+    "planId": "617bb3cea3050e57fbc20c26668eb0064fe3d8bf03d4f00a89e45d9c89a452c9",
+    "checks": [
+      {
+        "id": "upgrade:cross:1",
+        "kind": "cross_module",
+        "required": true
+      },
+      {
+        "id": "upgrade:policy:1",
+        "kind": "database_policy",
+        "required": true
+      },
+      {
+        "id": "upgrade:review",
+        "kind": "evidence_review",
+        "required": false
+      },
+      {
+        "id": "upgrade:runtime:1",
+        "kind": "runtime_target",
+        "required": true
+      }
+    ],
+    "totalPoints": 48,
+    "duePoints": 24,
+    "commitSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sourceManifestSha256": "0c48db4e5e110b98023d36d2c0f4dede6916bcd44768c06244941eb049e56e0a"
+  }
+}

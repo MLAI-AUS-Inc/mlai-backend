@@ -33,6 +33,7 @@ urlpatterns = [
     path('api/v1/hackathons/hospital/', include('hospital.urls')),
     path('api/v1/founder-tools/', include('founder_tools.urls')),
     path('api/v1/my-startup/', include('community_chat.my_startup_urls')),
+    path('api/v1/my-startup/cybertest/', include('roo.cybertest_account_urls')),
     path('api/v1/my-startup/', include('founder_tools.my_startup.urls')),
     path('api/v1/vibe-raising/', include('vibe_raising.urls')),
     path('api/v1/vibe-marketing/', include('content_factory.urls_vibe_marketing')),
