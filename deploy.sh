@@ -653,6 +653,14 @@ printf '%s' "$REDIS_URL" | ssh "$DEPLOY_SSH_TARGET" '
 # accounting.attachments for the reconciliation agent's draft bills — survive
 # redeploys instead of living in hand-edited .env lines that the next deploy
 # races against. Empty/unset keeps whatever the droplet already has.
+# Pulse's cash charts read Xero's Bank Summary report. Keep that scope even when
+# the repository variable predates it, so founders grant it when they reconnect.
+if [ -n "${XERO_OAUTH_SCOPES:-}" ]; then
+    case " $(printf '%s' "$XERO_OAUTH_SCOPES" | tr ',' ' ') " in
+        *" accounting.reports.banksummary.read "*) ;;
+        *) XERO_OAUTH_SCOPES="$XERO_OAUTH_SCOPES accounting.reports.banksummary.read" ;;
+    esac
+fi
 if [ -n "${XERO_OAUTH_SCOPES:-}" ]; then
     echo "🔧 Updating Xero OAuth scope list..."
     printf '%s' "$XERO_OAUTH_SCOPES" | ssh "$DEPLOY_SSH_TARGET" '
