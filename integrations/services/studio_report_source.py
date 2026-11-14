@@ -214,7 +214,7 @@ def refresh_finance(snapshot, owner, invoices, get, cutoff, legacy_invoice_ids=(
     return value
 
 
-def mailbox_ids(credentials_path, query):
+def open_mailbox(credentials_path):
     """Full bounded query on each pass; a lost/expired cursor cannot hide mail."""
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
@@ -229,6 +229,11 @@ def mailbox_ids(credentials_path, query):
     profile = service.users().getProfile(userId="me").execute()
     if profile["emailAddress"].lower() != credentials["email"].lower():
         raise SourceIncomplete("mailbox_identity_mismatch")
+    return service
+
+
+def mailbox_ids(credentials_path, query):
+    service = open_mailbox(credentials_path)
     token, ids = None, set()
     deadline = time.monotonic() + 60
     for _ in range(100):
@@ -315,6 +320,31 @@ def finance_cooldown(scope, now, *, until=None):
     return until
 
 
+def finance_cache_path(scope, request):
+    binding = {key: scope.get(key) for key in ('organization_id', 'linear_organization', 'project_ids',
+               'xero_connection_id', 'xero_contact_id', 'legacy_invoice_ids', 'credit_description_prefix')}
+    binding.update(owner=request['owner'], team=request['team'])
+    return Path(scope['review_directory']) / 'finance-cache' / (digest(binding) + '.json')
+
+
+def store_finance(path, snapshot, owner, checked, cutoff, count):
+    data = snapshot['clients'][owner]
+    rows = data['invoices'] + data['payments']
+    evidence = {key: snapshot['evidence'][key] for row in rows for key in row['evidence_ids']}
+    cache = {'checked_at': checked, 'cutoff': cutoff, 'count': count, 'invoices': data['invoices'],
+             'payments': data['payments'], 'evidence': evidence}
+    path.parent.mkdir(exist_ok=True, parents=True, mode=0o700)
+    fd, tmp = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as handle:
+            json.dump(cache, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
 def prepare(scope, request, *, get, mail, now=None):
     now = now or datetime.now(timezone.utc)
     started = time.monotonic()
@@ -338,27 +368,67 @@ def prepare(scope, request, *, get, mail, now=None):
         missing.append("hours_coverage_missing")
     if data.get("pending_work") or any(row["unresolved_hour_units"] for row in data["contractor_invoices"]):
         missing.append("work_allocation_requires_review")
+    latest = request.get('mode') == 'latest'
+    enabled = bool(scope.get('submissions'))
+    pending_issues = 0
     try:
         ids = mail(scope["gmail_credentials"], scope["gmail_query"])
         unknown = ids - set(manifest.get("reviewed_gmail_ids", []))
+        if enabled and latest:
+            from .studio_submissions import collect
+            handled, pending_issues = collect(scope, snapshot, owner, unknown, cutoff,
+                                              open_mailbox(scope['gmail_credentials']) if unknown else None)
+            unknown -= handled
+            if pending_issues:
+                missing.append('submitted_work_requires_review')
+            checks['hours']['submission_exceptions'] = pending_issues
         checks["contractor_invoices"] = {"checked_at": now.isoformat(), "unreviewed_count": len(unknown),
                                         "message_set_digest": digest(sorted(ids))}
         if unknown:
             missing.append("new_invoices_require_review")
     except Exception:
         missing.append("contractor_invoice_sync_failed")
+    if enabled and not latest and missing:
+        # Finance cannot resolve missing work. Historical cutoffs keep their strict gate.
+        response = {'version': 1, 'owner': owner, 'team': request['team'], 'organization': scope['linear_organization'],
+                    'project_ids': sorted(scope['project_ids']), 'cutoff': request['cutoff'], 'nonce': request['nonce'],
+                    'checked_at': now.isoformat(), 'checks': checks, 'missing': sorted(set(missing)), 'status': 'waiting_data',
+                    'retry_at': (now + timedelta(hours=1)).isoformat()}
+        save_candidate(scope, request, response, snapshot, unknown)
+        return response
     retry_at = finance_cooldown(scope, now)
+    cache_path = finance_cache_path(scope, request) if enabled and latest else None
+    cached = None
+    if cache_path and cache_path.exists():
+        candidate = json.loads(cache_path.read_text())
+        age = now - instant(candidate['checked_at'])
+        if (timedelta(0) <= age <= timedelta(days=7) and instant(candidate['cutoff']) <= cutoff
+                and instant(candidate['checked_at']) <= cutoff):
+            cached = candidate
+    finance_checked = now.isoformat()
     try:
-        if retry_at:
-            raise SourceIncomplete('finance_rate_limited')
-        invoices = all_invoices(get, scope["xero_contact_id"])
-        snapshot = refresh_finance(snapshot, owner, invoices, get, request["cutoff"],
-                                   scope.get("legacy_invoice_ids", []), scope["xero_contact_id"],
-                                   scope.get('credit_description_prefix'))
-        if digest(invoices) != digest(all_invoices(get, scope["xero_contact_id"])):
-            raise SourceIncomplete("finance_changed_during_refresh")
-        checks["client_invoices"] = {"checked_at": now.isoformat(), "count": len(invoices)}
-        checks["payments"] = {"checked_at": now.isoformat(), "count": len(snapshot["clients"][owner]["payments"])}
+        if cached and (retry_at or now - instant(cached['checked_at']) <= timedelta(minutes=15)):
+            count = cached['count']
+            finance_checked = cached['checked_at']
+            if retry_at:
+                missing.append('finance_rate_limited')
+            data.update(invoices=cached['invoices'], payments=cached['payments'])
+            snapshot['evidence'].update(cached['evidence'])
+        else:
+            if retry_at:
+                raise SourceIncomplete('finance_rate_limited')
+            invoices = all_invoices(get, scope["xero_contact_id"])
+            snapshot = refresh_finance(snapshot, owner, invoices, get, request["cutoff"],
+                                       scope.get("legacy_invoice_ids", []), scope["xero_contact_id"],
+                                       scope.get('credit_description_prefix'))
+            if digest(invoices) != digest(all_invoices(get, scope["xero_contact_id"])):
+                raise SourceIncomplete("finance_changed_during_refresh")
+            count = len(invoices)
+            # A delayed request for an older cutoff can exclude newer receipts.
+            if cache_path and timedelta(0) <= now - cutoff <= timedelta(minutes=1):
+                store_finance(cache_path, snapshot, owner, finance_checked, request['cutoff'], count)
+        checks['client_invoices'] = {'checked_at': finance_checked, 'count': count}
+        checks['payments'] = {'checked_at': finance_checked, 'count': len(snapshot['clients'][owner]['payments'])}
     except Exception as exc:
         # Retry-After starts when the provider failed, not before mailbox and
         # finance reads that may already have consumed most of the deadline.
@@ -368,6 +438,12 @@ def prepare(scope, request, *, get, mail, now=None):
             retry_at = limited_until
             finance_cooldown(scope, now, until=retry_at)
             missing.append('finance_rate_limited')
+            if cached:
+                finance_checked = cached['checked_at']
+                data.update(invoices=cached['invoices'], payments=cached['payments'])
+                snapshot['evidence'].update(cached['evidence'])
+                checks['client_invoices'] = {'checked_at': finance_checked, 'count': cached['count']}
+                checks['payments'] = {'checked_at': finance_checked, 'count': len(data['payments'])}
         else:
             missing.append(str(exc) if isinstance(exc, SourceIncomplete) else "finance_sync_failed")
     if now < cutoff:
@@ -378,8 +454,11 @@ def prepare(scope, request, *, get, mail, now=None):
         "status": "waiting_data" if missing else "ready"}
     if retry_at:
         response['retry_at'] = retry_at.isoformat()
-    latest = request.get('mode') == 'latest'
     partial_allowed = {'hours_coverage_missing', 'new_invoices_require_review'}
+    if enabled and latest:
+        partial_allowed.add('submitted_work_requires_review')
+        if cached and 'payments' in checks:
+            partial_allowed.add('finance_rate_limited')
     usable = not missing or (latest and set(missing) <= partial_allowed)
     if latest:
         response['mode'] = 'latest'
@@ -392,12 +471,15 @@ def prepare(scope, request, *, get, mail, now=None):
         if latest:
             response['status'] = 'partial' if missing else 'ready'
             dataset['source_freshness'] = {
-                'finance_checked_at': now.isoformat(), 'hours_reviewed_at': reviewed.isoformat(),
+                'finance_checked_at': finance_checked, 'hours_reviewed_at': reviewed.isoformat(),
                 'hours_complete_through': hours_complete.isoformat(),
                 'latest_work_date': max((row['work_end'] for row in dataset['hours']), default=None),
                 'unreviewed_invoice_count': len(unknown), 'missing': response['missing']}
+            if enabled:
+                dataset['source_freshness']['submissions_checked_at'] = now.isoformat()
+                dataset['source_freshness']['submission_exceptions'] = pending_issues
             dataset.setdefault('limitations', []).append(
-                f"Xero checked {now.isoformat()}; work reviewed {reviewed.isoformat()}. "
+                f"Xero checked {finance_checked}; work reviewed {reviewed.isoformat()}. "
                 f"{len(unknown)} invoice emails await review. Later unsubmitted work is unknown.")
         else:
             dataset.pop('source_freshness', None)

@@ -349,3 +349,77 @@ class MailboxTests(SimpleTestCase):
                 with self.assertRaisesRegex(SourceIncomplete, 'mailbox_identity_mismatch'):
                     mailbox_ids(str(path), 'scoped-query')
 
+
+
+class SubmittedWorkTests(SimpleTestCase):
+    def setUp(self):
+        self.scope = {'project_ids':['project'], 'submissions':{
+            'projects':{'project':'Example'}, 'since':CUTOFF,
+            'builders':{'builder':{'supplier':'Person', 'senders':['person@example.org']}}}}
+        self.issue = {'identifier':'TEST-17','project':{'id':'project'},'assignee':{'id':'builder'},
+            'state':{'type':'completed'},'updatedAt':CUTOFF,'completedAt':CUTOFF,
+            'description':'## Invoice 17 — work\n**Work date:** 19–20 October 2026\n**Logged time:** 90 minutes'}
+        self.invoice = ('INVOICE # 17\nBill To: Date: Oct 21, 2026\n[Studio] Example - completed work\n'
+                        'TEST-17 - Updated form 1.5 $30.00 $45.00\n19-20 October 2026\nTotal hours: 1h 30m')
+
+    def run_collection(self, texts, data=None):
+        from .services.studio_submissions import collect
+        data = data or snapshot()
+        service = Mock()
+        service.users.return_value.messages.return_value.get.side_effect = lambda **kw: Mock(
+            execute=lambda: {'id':kw['id'],'internalDate':'1000'})
+        with patch('integrations.services.studio_submissions.linear_issues',return_value=[self.issue]), \
+             patch('integrations.services.studio_submissions.sender_of',return_value='person@example.org'), \
+             patch('integrations.services.studio_submissions.pdf_attachment',side_effect=lambda _,m:texts[m['id']]):
+            result = collect(self.scope,data,'UMARK',set(texts),NOW,service)
+        return data,result
+
+    def test_linear_then_duplicated_invoice_then_review(self):
+        data,_=self.run_collection({})
+        self.assertEqual(data['clients']['UMARK']['hours'][0]['submission_source'],'linear')
+        data,(handled,errors)=self.run_collection({'a':self.invoice,'b':self.invoice})
+        rows=data['clients']['UMARK']['hours']
+        self.assertEqual((len(rows),rows[0]['hour_units'],rows[0]['submission_source']),(1,1500000,'invoice'))
+        self.assertEqual((handled,errors),({'a','b'},0))
+        self.run_collection({'a':self.invoice},data)
+        self.assertEqual(len(rows),1)
+
+    def test_conflict_is_not_added(self):
+        data,(_,errors)=self.run_collection({'a':self.invoice.replace('1.5 $','2 $').replace('1h 30m','2h')})
+        self.assertEqual((data['clients']['UMARK']['hours'],errors),([],1))
+
+    def test_aggregate_invoice_layout_and_scope(self):
+        from .services.studio_submissions import invoice_rows
+        text='no. web12 – 6th November 2026\nMLAI Studio - Example $120\n2 hours @ $60/hour (30 Oct – 6 Nov)'
+        self.assertEqual(invoice_rows(text,{'p':'Example'})[2],[('p',None,'2026-10-30','2026-11-06',2000000)])
+        with self.assertRaises(ValueError):
+            invoice_rows(text+'\nMLAI Studio - Elsewhere $50',{'p':'Example'})
+
+    def test_strict_backlog_skips_xero_and_latest_shares_cache(self):
+        with TemporaryDirectory() as d:
+            path=Path(d)/'work.json'
+            path.write_text(json.dumps({'snapshot':snapshot(),'reviewed_at':CUTOFF,'hours_complete_through':CUTOFF,
+                                        'reviewed_gmail_ids':[]}))
+            self.scope.update(work_manifest=str(path),linear_organization='linear-org',gmail_credentials='unused',
+                              gmail_query='test',xero_contact_id='contact',review_directory=d)
+            req={'owner':'UMARK','team':'T123','cutoff':NOW.isoformat(),'nonce':'a'*64}
+            get=Mock(return_value={'Invoices':[]})
+            mail=Mock(return_value=set())
+            result=prepare(self.scope,req,get=get,mail=mail,now=NOW)
+            self.assertEqual(result['missing'],['hours_coverage_missing'])
+            get.assert_not_called()
+            req['mode']='latest'
+            with patch('integrations.services.studio_submissions.linear_issues',return_value=[]):
+                prepare(self.scope,req,get=get,mail=mail,now=NOW)
+                get.reset_mock()
+                later=NOW+timedelta(minutes=2)
+                result=prepare(self.scope,{**req,'cutoff':later.isoformat()},get=get,mail=mail,now=later)
+                get.assert_not_called()
+                self.assertEqual(result['checks']['payments']['checked_at'],NOW.isoformat())
+                response=requests.Response()
+                response.status_code=429
+                get.side_effect=requests.HTTPError(response=response)
+                later+=timedelta(minutes=20)
+                result=prepare(self.scope,{**req,'cutoff':later.isoformat()},get=get,mail=mail,now=later)
+                self.assertIn('finance_rate_limited',result['missing'])
+                self.assertEqual(result['snapshot']['clients']['UMARK']['source_freshness']['finance_checked_at'],NOW.isoformat())
