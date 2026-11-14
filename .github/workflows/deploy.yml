@@ -104,6 +104,9 @@ jobs:
     - name: Check test-module assignment
       run: python scripts/check_test_assignment.py
 
+    - name: Check Cybertest authority and phase contracts without database access
+      run: python scripts/test_without_database.py roo.test_cybertest_entry roo.tests_cybertest_entry_views roo.test_cybertest_phase_api roo.test_cybertest_policy roo.test_cybertest_delivery roo.test_cybertest_plan roo.test_cybertest_production_config roo.test_cybertest_staging_config
+
     - name: Validate selected test labels without database access
       run: python scripts/test_without_database.py --collect-ci-selection
 
@@ -485,6 +488,9 @@ jobs:
           tests.test_vibe_marketing_autofill \
           founder_tools.my_startup.test_database \
           roo.tests_rate_card \
+          roo.tests_cybertest_checkout \
+          roo.tests_cybertest_company_binding \
+          roo.tests_cybertest_phases \
           roo.tests_legacy_office_manager \
           tests.test_periodic_command \
           tests.test_retired_runtime_packaging \
@@ -927,6 +933,9 @@ jobs:
 
     - name: Run meeting-room PostgreSQL tests
       run: python manage.py test roo.tests_meeting_rooms --verbosity 2
+
+    - name: Run Cybertest PostgreSQL payment concurrency tests
+      run: python manage.py test roo.tests_cybertest_concurrency --verbosity 2
 
     - name: Run privacy-boundary PostgreSQL tests
       run: |

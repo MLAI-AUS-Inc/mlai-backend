@@ -285,3 +285,6 @@ medhack_backend/hospital/Eval_Labels.csv
 # Maintained Roo purchase tax contract.
 !/docs/roo-points-gst.md
 !/docs/shared-update-benefits.md
+
+# Maintained Vibe Security phased purchase and settlement contract.
+!/docs/cybertest-two-phase.md
