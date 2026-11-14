@@ -2441,6 +2441,16 @@ COMMUNITY_CHAT_DELETION_CONTACT = os.getenv("COMMUNITY_CHAT_DELETION_CONTACT", "
 COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
 ROO_LINK_LOVE_SLACK_CHANNEL_ID = os.getenv("ROO_LINK_LOVE_SLACK_CHANNEL_ID", "C09BQAWJ66R")
 COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID", "U090FV0GTT4")
+# Personal agent bots (for example an OpenAI dot installed through OpenAI's own
+# Slack app) reached through the owner's private Slack mirror. Off by default.
+# SLACK_AGENT_BOTS is a JSON list of {"workspace_id", "bot_user_id",
+# "owner_user_id", "name", optional "bot_id", "app_id", "kind"}; see
+# integrations/services/slack_agent_bots.py and docs/slack-agent-bots.md.
+SLACK_AGENT_BOTS_ENABLED = _env_is_true("SLACK_AGENT_BOTS_ENABLED", False)
+try:
+    SLACK_AGENT_BOTS = json.loads(os.getenv("SLACK_AGENT_BOTS", "[]") or "[]")
+except ValueError:
+    SLACK_AGENT_BOTS = []
 
 # Optional startup-update editorial covers; all generation runs server-side.
 STARTUP_UPDATE_COVER_IMAGE_MODEL = os.getenv("STARTUP_UPDATE_COVER_IMAGE_MODEL", "gpt-image-2.5-flare")
@@ -2701,3 +2711,27 @@ MY_STARTUP_TEAM_DOMAIN_DENYLIST = os.getenv("MY_STARTUP_TEAM_DOMAIN_DENYLIST", "
 MIDDLEWARE.append("content_factory.staff_signals.ThrottleSignalMiddleware")
 if "idempotency-key" not in CORS_ALLOW_HEADERS:
     CORS_ALLOW_HEADERS = (*CORS_ALLOW_HEADERS, "idempotency-key")
+
+# Vibe Security remains opt-in; production and staging authority are separate.
+CYBERTEST_BILLING_MODE = os.getenv('CYBERTEST_BILLING_MODE', 'disabled').strip()
+CYBERTEST_PHASED_SCANS_ENABLED = _env_is_true('CYBERTEST_PHASED_SCANS_ENABLED', False)
+CYBERTEST_LIVE_BILLING_ENABLED = False
+CYBERTEST_BILLING_API_KEY = os.getenv('CYBERTEST_BILLING_API_KEY', '').strip()
+CYBERTEST_APP_ORIGIN = os.getenv('CYBERTEST_APP_ORIGIN', '').strip()
+CYBERTEST_BASE_PATH = os.getenv('CYBERTEST_BASE_PATH', '')
+CYBERTEST_ENTRY_LOCAL_ENABLED = _env_is_true('CYBERTEST_ENTRY_LOCAL_ENABLED', False)
+CYBERTEST_ENTRY_STAGING_ENABLED = False
+CYBERTEST_STAGING_COMPANY_IDS = []
+CYBERTEST_LOCAL_COMPANY_WORKSPACES = json.loads(os.getenv('CYBERTEST_LOCAL_COMPANY_WORKSPACES', '{}')) if DEBUG and CYBERTEST_ENTRY_LOCAL_ENABLED else {}
+CYBERTEST_AUDIT_POINTS = int(os.getenv('CYBERTEST_AUDIT_POINTS', '10'))
+CYBERTEST_TEST_BALANCE_POINTS = int(os.getenv('CYBERTEST_TEST_BALANCE_POINTS', '100'))
+CYBERTEST_USD_PER_AUD = os.getenv('CYBERTEST_USD_PER_AUD', '0.697')
+CYBERTEST_AUD_PER_POINT = os.getenv('CYBERTEST_AUD_PER_POINT', '1.2798')
+CYBERTEST_PERSISTENT_BINDINGS_ENABLED = False
+
+# Validate effective environment/debug values; do not load a second dotenv or
+# quietly turn staging credentials into live authority. Default is unchanged.
+from roo.cybertest_production_config import production_entry_settings
+globals().update(production_entry_settings({
+    **os.environ, 'APP_ENV': APP_ENV, 'DEBUG': str(DEBUG).lower(),
+}))

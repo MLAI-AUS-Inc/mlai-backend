@@ -1,0 +1,58 @@
+{
+  "contract": {
+    "version": 1,
+    "phase": "basic",
+    "tier": "basic",
+    "planId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "checks": [
+      {
+        "id": "basic:source:1",
+        "kind": "source_batch",
+        "required": true
+      },
+      {
+        "id": "basic:credentials",
+        "kind": "credential_patterns",
+        "required": true
+      },
+      {
+        "id": "basic:review",
+        "kind": "evidence_review",
+        "required": false
+      }
+    ]
+  },
+  "evidence": {
+    "auditId": "00000000-0000-4000-8000-000000000001",
+    "planId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "checks": [
+      {
+        "id": "basic:source:1",
+        "status": "completed"
+      },
+      {
+        "id": "basic:credentials",
+        "status": "completed"
+      },
+      {
+        "id": "basic:review",
+        "status": "error"
+      }
+    ],
+    "report": {
+      "persisted": true,
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "expected": {
+    "status": "partial",
+    "minimumMet": true,
+    "plannedChecks": 3,
+    "completedChecks": 2,
+    "requiredChecks": 2,
+    "requiredCompleted": 2,
+    "incompleteCheckIds": [
+      "basic:review"
+    ]
+  }
+}

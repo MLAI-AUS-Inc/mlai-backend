@@ -42,7 +42,7 @@ class FinancialRefreshUnitTests(TestCase):
     def test_rejects_bad_month_identity_revision_and_sources(self):
         for changes in ({"targetMonth": "2026-12-01"}, {"targetMonth": "2026-08-02"},
                 {"requestId": "bad"}, {"creationKey": None}, {"updateId": True},
-                {"expectedRevision": 8}, {"inputSources": ["stripe"]}, {"inputSources": ["xero", "gmail"]},
+                {"expectedRevision": 8}, {"inputSources": []}, {"inputSources": ["xero", "gmail"]},
                 {"inputSources": [None]}, {"inputSources": "xero"}):
             with self.subTest(changes=changes), self.assertRaises(ValidationError):
                 self.scope(**changes)
@@ -73,12 +73,14 @@ class FinancialRefreshUnitTests(TestCase):
         response = Mock()
         response.json.return_value = {"data": [{"id": "in_same"}], "has_more": True}
         with patch("startup_updates.financial_refresh_sources.requests.get", return_value=response), self.assertRaises(ValueError):
-            fetch_stage("stripe", "invoices", connection, self.scope(), {"months": ["2026-03-01"], "stripe": {"cursor": "in_same"}})
+            fetch_stage("stripe", "balance", connection, self.scope(), {"months": ["2026-03-01"], "stripe": {"cursor": "in_same"}})
 
     def test_stripe_receipts_do_not_retain_invoice_customer_data(self):
         progress = {"sources": {"stripe": {"status": "pending"}}}
-        updated = apply_stage(progress, "stripe", "invoices", {"count": 2, "hash": "receipt-hash", "cursor": "in_next", "more": False}, now=self.now)
-        self.assertEqual(updated["stripe"], {"count": 2, "pages": 1, "cursor": "in_next", "pageHashes": ["receipt-hash"]})
+        updated = apply_stage(progress, "stripe", "balance", {"count": 2, "hash": "receipt-hash", "cursor": "txn_next", "more": False,
+            "months": {"2026-08-01": {"sales": "10.00", "refunds": "0", "fees": "0.50", "payouts": "0"}}, "otherCurrency": 0}, now=self.now)
+        self.assertEqual(updated["stripe"], {"count": 2, "pages": 1, "cursor": "txn_next", "pageHashes": ["receipt-hash"],
+            "months": {"2026-08-01": {"sales": "10.00", "refunds": "0", "fees": "0.50", "payouts": "0"}}, "otherCurrency": 0})
         self.assertEqual(updated["sources"]["stripe"]["status"], "ready")
         self.assertEqual(progress, {"sources": {"stripe": {"status": "pending"}}})
 

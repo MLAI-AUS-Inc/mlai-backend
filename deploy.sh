@@ -24,6 +24,8 @@ COMMUNITY_CHAT_INBOX_ERASURE_ENABLED="${COMMUNITY_CHAT_INBOX_ERASURE_ENABLED:-fa
 MESSAGE_SYNC_TARGETED_READ_POLLING="${MESSAGE_SYNC_TARGETED_READ_POLLING:-false}"
 MESSAGE_SYNC_RECENT_HISTORY_ENABLED="${MESSAGE_SYNC_RECENT_HISTORY_ENABLED:-false}"
 SLACK_MEMBER_CHANNEL_ALLOWED_IDS="${SLACK_MEMBER_CHANNEL_ALLOWED_IDS:-}"
+SLACK_AGENT_BOTS_ENABLED="${SLACK_AGENT_BOTS_ENABLED:-false}"
+SLACK_AGENT_BOTS="${SLACK_AGENT_BOTS:-}"
 MESSAGE_SYNC_OPEN_PRIORITY_ENABLED="${MESSAGE_SYNC_OPEN_PRIORITY_ENABLED:-true}"
 MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED="${MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED:-false}"
 MESSAGE_SYNC_TARGETED_STAGED_ROUTING="${MESSAGE_SYNC_TARGETED_STAGED_ROUTING:-false}"
@@ -169,6 +171,12 @@ for responsiveness_flag in MESSAGE_SYNC_OPEN_PRIORITY_ENABLED MESSAGE_SYNC_UNREA
     export "$responsiveness_flag"
 done
 export SLACK_MEMBER_CHANNEL_ALLOWED_IDS
+case "$SLACK_AGENT_BOTS_ENABLED" in
+    true|TRUE|True|1|yes|YES|Yes|on|ON|On) SLACK_AGENT_BOTS_ENABLED=true ;;
+    false|FALSE|False|0|no|NO|No|off|OFF|Off|"") SLACK_AGENT_BOTS_ENABLED=false ;;
+    *) echo "❌ SLACK_AGENT_BOTS_ENABLED must be true or false." >&2; exit 1 ;;
+esac
+export SLACK_AGENT_BOTS_ENABLED SLACK_AGENT_BOTS
 if ! [[ "$MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR" =~ ^[1-9][0-9]{0,2}$ ]] || [ "$MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR" -gt 256 ]; then
     echo "MESSAGE_SYNC_UNREAD_PREFETCH_PER_HOUR must be an integer from 1 to 256." >&2
     exit 1
@@ -553,6 +561,8 @@ fi
 install_remote_env_value MESSAGE_SYNC_ENABLED "$MESSAGE_SYNC_ENABLED"
 install_remote_env_value MESSAGE_SYNC_RECENT_HISTORY_ENABLED "$MESSAGE_SYNC_RECENT_HISTORY_ENABLED"
 install_remote_env_value SLACK_MEMBER_CHANNEL_ALLOWED_IDS "$SLACK_MEMBER_CHANNEL_ALLOWED_IDS"
+install_remote_env_value SLACK_AGENT_BOTS_ENABLED "$SLACK_AGENT_BOTS_ENABLED"
+install_remote_env_value SLACK_AGENT_BOTS "$SLACK_AGENT_BOTS"
 install_remote_env_value COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED "$COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED"
 install_remote_env_value MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED "$MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED"
 install_remote_env_value MESSAGE_SYNC_OPEN_PRIORITY_ENABLED "$MESSAGE_SYNC_OPEN_PRIORITY_ENABLED"
@@ -643,6 +653,14 @@ printf '%s' "$REDIS_URL" | ssh "$DEPLOY_SSH_TARGET" '
 # accounting.attachments for the reconciliation agent's draft bills — survive
 # redeploys instead of living in hand-edited .env lines that the next deploy
 # races against. Empty/unset keeps whatever the droplet already has.
+# Pulse's cash charts read Xero's Bank Summary report. Keep that scope even when
+# the repository variable predates it, so founders grant it when they reconnect.
+if [ -n "${XERO_OAUTH_SCOPES:-}" ]; then
+    case " $(printf '%s' "$XERO_OAUTH_SCOPES" | tr ',' ' ') " in
+        *" accounting.reports.banksummary.read "*) ;;
+        *) XERO_OAUTH_SCOPES="$XERO_OAUTH_SCOPES accounting.reports.banksummary.read" ;;
+    esac
+fi
 if [ -n "${XERO_OAUTH_SCOPES:-}" ]; then
     echo "🔧 Updating Xero OAuth scope list..."
     printf '%s' "$XERO_OAUTH_SCOPES" | ssh "$DEPLOY_SSH_TARGET" '
@@ -924,7 +942,7 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF | tee "$remote_deploy_log"
     # below at heredoc construction). The default grants the reconciliation
     # agent's write path: granular accounting.invoices + accounting.payments
     # (draft bills / bill payments) and accounting.attachments (source PDFs).
-    upsert_env_value XERO_OAUTH_SCOPES "${XERO_OAUTH_SCOPES:-offline_access accounting.invoices accounting.invoices.read accounting.payments accounting.payments.read accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.banktransactions accounting.attachments}"
+    upsert_env_value XERO_OAUTH_SCOPES "${XERO_OAUTH_SCOPES:-offline_access accounting.invoices accounting.invoices.read accounting.payments accounting.payments.read accounting.settings.read accounting.settings accounting.contacts.read accounting.reports.balancesheet.read accounting.reports.profitandloss.read accounting.reports.banksummary.read accounting.banktransactions accounting.attachments}"
     upsert_env_value RECONCILIATION_DEFAULT_DOMAIN "mlai.au"
     upsert_env_value RECONCILIATION_SCHEDULER_ENABLED "true"
     upsert_env_value NOTION_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/notion"
