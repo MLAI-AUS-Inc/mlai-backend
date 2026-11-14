@@ -16609,16 +16609,25 @@ class VibeMarketingTopicFeedbackView(APIView):
         if not keyword:
             return Response({"detail": "keyword is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        feedback, created = record_topic_feedback(
-            context.organization,
-            keyword=keyword,
-            feedback_type=str(request.data.get("feedback_type") or request.data.get("feedbackType") or "declined"),
-            reason_code=str(request.data.get("reason_code") or request.data.get("reasonCode") or "not_appropriate"),
-            reason_text=request.data.get("reason_text") or request.data.get("reasonText") or None,
-            decline_scope=str(request.data.get("decline_scope") or request.data.get("declineScope") or "similar"),
-            source=str(request.data.get("source") or "homepage_topic_card"),
-            session_id=request.data.get("session_id") or request.data.get("sessionId") or None,
-        )
+        from .research_workspace import accepts_research_write, research_config
+        session_id = request.data.get("session_id") or request.data.get("sessionId") or None
+        with transaction.atomic():
+            Organization.objects.select_for_update().get(pk=context.organization.pk)
+            if not accepts_research_write(research_config(context.organization), session_id):
+                return Response(
+                    {"detail": "This result belongs to a previous research workspace.", "retryable": False},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            feedback, created = record_topic_feedback(
+                context.organization,
+                keyword=keyword,
+                feedback_type=str(request.data.get("feedback_type") or request.data.get("feedbackType") or "declined"),
+                reason_code=str(request.data.get("reason_code") or request.data.get("reasonCode") or "not_appropriate"),
+                reason_text=request.data.get("reason_text") or request.data.get("reasonText") or None,
+                decline_scope=str(request.data.get("decline_scope") or request.data.get("declineScope") or "similar"),
+                source=str(request.data.get("source") or "homepage_topic_card"),
+                session_id=session_id,
+            )
         return Response(
             {**serialize_topic_feedback(feedback), "created": created},
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,

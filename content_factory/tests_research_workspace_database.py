@@ -1,7 +1,8 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from organizations.models import Organization
@@ -15,6 +16,26 @@ from .research_workspace import RESET_KEY, ResearchWorkspaceConflict, current_re
 from .run_ownership import reserve_admitted_run, user_principal
 from .service_views import SEOClusterBulkUpsertView, SEOContentIslandBulkSyncView, SEOKeywordBulkUpsertView
 from .services.island_refresh_scheduler import dispatch_island_refresh
+
+
+class FounderFeedbackFenceTests(SimpleTestCase):
+    def test_retired_feedback_stops_before_engagement_or_persistence(self):
+        from .vibe_marketing_views import VibeMarketingTopicFeedbackView
+        organization = SimpleNamespace(pk=7)
+        context = SimpleNamespace(organization=organization)
+        request = SimpleNamespace(data={"keyword": "Stale idea", "sessionId": "old-run"})
+        with patch("content_factory.vibe_marketing_views._resolve_context_or_response", return_value=(context, None)), \
+                patch("content_factory.founder_library_commands.applies", return_value=False), \
+                patch("content_factory.vibe_marketing_views.transaction.atomic"), \
+                patch("content_factory.vibe_marketing_views.Organization.objects") as organizations, \
+                patch("content_factory.research_workspace.research_config", return_value="locked-config"), \
+                patch("content_factory.research_workspace.accepts_research_write", return_value=False) as accepts, \
+                patch("content_factory.vibe_marketing_views.record_topic_feedback") as write:
+            response = VibeMarketingTopicFeedbackView().post(request)
+        self.assertEqual(response.status_code, 409)
+        organizations.select_for_update.return_value.get.assert_called_once_with(pk=7)
+        accepts.assert_called_once_with("locked-config", "old-run")
+        write.assert_not_called()
 
 
 @override_settings(ARTICLES_RUN_OWNERSHIP_ENABLED=True)
@@ -104,6 +125,27 @@ class ResearchWorkspaceResetTests(TestCase):
         with self.assertRaisesRegex(ValueError, "Stop and reconcile"):
             self.transition("clear")
         self.assertTrue(ResearchedKeyword.objects.filter(pk=self.keyword.pk).exists())
+
+    def test_founder_feedback_rejects_retired_and_missing_sessions_after_reset(self):
+        from .vibe_marketing_views import VibeMarketingTopicFeedbackView
+        self.transition("freeze")
+        self.transition("clear")
+        context = SimpleNamespace(organization=self.org)
+
+        def feedback(session_id):
+            request = SimpleNamespace(data={"keyword": "Old idea", "sessionId": session_id})
+            with patch("content_factory.vibe_marketing_views._resolve_context_or_response", return_value=(context, None)), \
+                    patch("content_factory.founder_library_commands.applies", return_value=False):
+                return VibeMarketingTopicFeedbackView().post(request)
+
+        self.assertEqual(feedback(self.old_run.run_id).status_code, 409)
+        self.transition("resume")
+        self.assertEqual(feedback(self.old_run.run_id).status_code, 409)
+        self.assertEqual(feedback(None).status_code, 409)
+        self.assertFalse(TopicFeedback.objects.filter(organization=self.org).exists())
+        fresh = self.admit()
+        self.assertEqual(feedback(fresh.run_id).status_code, 201)
+        self.assertEqual(TopicFeedback.objects.get(organization=self.org).session_id, fresh.run_id)
 
     def test_cross_company_cascade_is_refused(self):
         other_island = ContentIsland.objects.create(organization=self.other, slug="other", name="Other research")
