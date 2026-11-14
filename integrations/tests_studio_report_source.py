@@ -405,12 +405,18 @@ class SubmittedWorkTests(SimpleTestCase):
     def test_aggregate_invoice_must_reconcile_unnumbered_work(self):
         self.issue['description'] = self.issue['description'].replace('## Invoice 17 — work\n', '')
         template = 'no. web12 – 21st October 2026\nMLAI Studio - Example $120\n{} hours @ $60/hour (19–20 Oct)'
-        data, (handled, errors) = self.run_collection({'a': template.format('2')})
+        data, (handled, errors) = self.run_collection({'a': template.format('1')})
         self.assertEqual(data['clients']['UMARK']['hours'], [])
         self.assertEqual(handled, set())
         self.assertGreater(errors, 0)
-        data, (handled, errors) = self.run_collection({'a': template.format('1.5')})
-        self.assertEqual((len(data['clients']['UMARK']['hours']), handled, errors), (1, {'a'}, 0))
+        for quantity in ('1.5', '2'):
+            with self.subTest(quantity=quantity):
+                data, (handled, errors) = self.run_collection({'a': template.format(quantity)})
+                self.assertEqual((len(data['clients']['UMARK']['hours']), handled, errors), (1, {'a'}, 0))
+        data, (handled, errors) = self.run_collection({'a': template.format('2').replace('19–20 Oct', '20 Oct')})
+        self.assertEqual(data['clients']['UMARK']['hours'], [])
+        self.assertEqual(handled, set())
+        self.assertGreater(errors, 0)
 
     def test_aggregate_invoice_layout_and_scope(self):
         from .services.studio_submissions import invoice_rows

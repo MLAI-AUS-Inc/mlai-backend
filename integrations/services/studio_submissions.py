@@ -300,7 +300,7 @@ def collect(scope, snapshot, owner, unknown, cutoff, mailbox):
                         else:
                             conflict.update((key, other))
             if aggregate_work and (
-                sum(row[-1] for _, row in aggregate_work) != quantity
+                sum(row[-1] for _, row in aggregate_work) > quantity
                 or any(row[0] != project or row[2] < start or row[3] > end for _, row in aggregate_work)
             ):
                 conflict.add(key)
