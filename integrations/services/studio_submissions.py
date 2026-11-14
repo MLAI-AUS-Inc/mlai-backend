@@ -276,23 +276,34 @@ def collect(scope, snapshot, owner, unknown, cutoff, mailbox):
         invoices[key] = record
         handled.add(mid)
     # An explicit ticket can acquire an invoice number after the initial submission.
-    # Aggregate invoices replace matching builder/project period records without IDs.
+    # Replacement requires matching quantities and work dates, even before a
+    # ticket has been annotated with its invoice number.
     all_tickets = defaultdict(set)
     for key, (_, lines) in invoices.items():
-        for project, ticket, start, end, _ in lines:
+        for project, ticket, start, end, quantity in lines:
+            aggregate_work = [(key, row) for row in groups.get(key, [])] if not ticket else []
             if ticket:
                 all_tickets[ticket].add(key)
             for other, items in groups.items():
                 if other == key:
                     continue
-                for pr, ident, a, b, _ in items:
+                for pr, ident, a, b, amount in items:
                     if (ticket and ticket == ident) or (
                         not ticket and other[0] == key[0] and pr == project and start <= b and a <= end
                     ):
                         if other[0] == key[0] and other[1] == ident.casefold():
                             superseded.add(other)
+                            if ticket and (pr, ident, a, b, amount) != (project, ticket, start, end, quantity):
+                                conflict.add(key)
+                            if not ticket:
+                                aggregate_work.append((other, (pr, ident, a, b, amount)))
                         else:
                             conflict.update((key, other))
+            if aggregate_work and (
+                sum(row[-1] for _, row in aggregate_work) != quantity
+                or any(row[0] != project or row[2] < start or row[3] > end for _, row in aggregate_work)
+            ):
+                conflict.add(key)
     for owners in all_tickets.values():
         if len(owners) > 1:
             conflict.update(owners)

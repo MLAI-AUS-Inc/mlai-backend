@@ -388,6 +388,30 @@ class SubmittedWorkTests(SimpleTestCase):
         data,(_,errors)=self.run_collection({'a':self.invoice.replace('1.5 $','2 $').replace('1h 30m','2h')})
         self.assertEqual((data['clients']['UMARK']['hours'],errors),([],1))
 
+    def test_unnumbered_ticket_must_match_invoice_hours_and_dates(self):
+        self.issue['description'] = self.issue['description'].replace('## Invoice 17 — work\n', '')
+        for invoice in (
+            self.invoice.replace('1.5 $', '2 $').replace('1h 30m', '2h'),
+            self.invoice.replace('19-20 October', '18-20 October'),
+        ):
+            with self.subTest(invoice=invoice):
+                data, (handled, errors) = self.run_collection({'a': invoice})
+                self.assertEqual(data['clients']['UMARK']['hours'], [])
+                self.assertEqual(handled, set())
+                self.assertGreater(errors, 0)
+        data, (handled, errors) = self.run_collection({'a': self.invoice})
+        self.assertEqual((len(data['clients']['UMARK']['hours']), handled, errors), (1, {'a'}, 0))
+
+    def test_aggregate_invoice_must_reconcile_unnumbered_work(self):
+        self.issue['description'] = self.issue['description'].replace('## Invoice 17 — work\n', '')
+        template = 'no. web12 – 21st October 2026\nMLAI Studio - Example $120\n{} hours @ $60/hour (19–20 Oct)'
+        data, (handled, errors) = self.run_collection({'a': template.format('2')})
+        self.assertEqual(data['clients']['UMARK']['hours'], [])
+        self.assertEqual(handled, set())
+        self.assertGreater(errors, 0)
+        data, (handled, errors) = self.run_collection({'a': template.format('1.5')})
+        self.assertEqual((len(data['clients']['UMARK']['hours']), handled, errors), (1, {'a'}, 0))
+
     def test_aggregate_invoice_layout_and_scope(self):
         from .services.studio_submissions import invoice_rows
         text='no. web12 – 6th November 2026\nMLAI Studio - Example $120\n2 hours @ $60/hour (30 Oct – 6 Nov)'
