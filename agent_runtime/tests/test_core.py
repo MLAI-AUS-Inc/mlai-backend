@@ -398,6 +398,16 @@ class RegistrationTests(SimpleTestCase):
         self.assertFalse(view.has_view_permission(request))
         request.user.has_perm.assert_not_called()
 
+    def test_production_mount_serves_personal_context_mentions(self):
+        # mlai/urls.py mounts only native_setup_urls; desktop/web/iOS post here.
+        from django.urls import resolve
+        from agent_runtime.native_views import NativePersonalMentionView
+        match = resolve(f"/api/v1/agent-runtime/installations/{uuid4()}/mentions/")
+        self.assertIs(match.func.view_class, NativePersonalMentionView)
+        from agent_runtime.native_views import NativeInstallationPictureView
+        match = resolve(f"/api/v1/agent-runtime/installations/{uuid4()}/picture/")
+        self.assertIs(match.func.view_class, NativeInstallationPictureView)
+
     @override_settings(AGENT_RUNTIME_ENABLED=False)
     def test_every_registered_runtime_route_stops_before_database_access(self):
         from rest_framework.test import APIRequestFactory

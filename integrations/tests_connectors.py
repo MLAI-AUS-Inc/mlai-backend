@@ -2210,7 +2210,7 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(metrics["monthlyCosts"].source_metadata["report_name"], "ProfitAndLoss")
         self.assertEqual(
             metrics["monthlyCosts"].source_metadata["calculation_basis"],
-            "cost_of_sales_plus_operating_expenses_when_available_otherwise_total_expenses",
+            "total_income_minus_net_profit",
         )
         self.assertEqual(
             metrics["monthlyCosts"].source_metadata["component_labels"],

@@ -89,6 +89,11 @@ class InstallationStateSerializer(StrictSerializer):
     state = serializers.ChoiceField(choices=("paused", "active"))
 
 
+class PictureSerializer(StrictSerializer):
+    # null clears the avatar; the format is checked by native_installations.
+    picture = serializers.CharField(max_length=512, allow_null=True)
+
+
 class PersonalMentionSerializer(StrictSerializer):
     community_id = serializers.UUIDField()
     channel_id = serializers.UUIDField()

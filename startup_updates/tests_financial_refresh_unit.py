@@ -42,7 +42,7 @@ class FinancialRefreshUnitTests(TestCase):
     def test_rejects_bad_month_identity_revision_and_sources(self):
         for changes in ({"targetMonth": "2026-12-01"}, {"targetMonth": "2026-08-02"},
                 {"requestId": "bad"}, {"creationKey": None}, {"updateId": True},
-                {"expectedRevision": 8}, {"inputSources": ["stripe"]}, {"inputSources": ["xero", "gmail"]},
+                {"expectedRevision": 8}, {"inputSources": []}, {"inputSources": ["xero", "gmail"]},
                 {"inputSources": [None]}, {"inputSources": "xero"}):
             with self.subTest(changes=changes), self.assertRaises(ValidationError):
                 self.scope(**changes)
@@ -73,12 +73,14 @@ class FinancialRefreshUnitTests(TestCase):
         response = Mock()
         response.json.return_value = {"data": [{"id": "in_same"}], "has_more": True}
         with patch("startup_updates.financial_refresh_sources.requests.get", return_value=response), self.assertRaises(ValueError):
-            fetch_stage("stripe", "invoices", connection, self.scope(), {"months": ["2026-03-01"], "stripe": {"cursor": "in_same"}})
+            fetch_stage("stripe", "balance", connection, self.scope(), {"months": ["2026-03-01"], "stripe": {"cursor": "in_same"}})
 
     def test_stripe_receipts_do_not_retain_invoice_customer_data(self):
         progress = {"sources": {"stripe": {"status": "pending"}}}
-        updated = apply_stage(progress, "stripe", "invoices", {"count": 2, "hash": "receipt-hash", "cursor": "in_next", "more": False}, now=self.now)
-        self.assertEqual(updated["stripe"], {"count": 2, "pages": 1, "cursor": "in_next", "pageHashes": ["receipt-hash"]})
+        updated = apply_stage(progress, "stripe", "balance", {"count": 2, "hash": "receipt-hash", "cursor": "txn_next", "more": False,
+            "months": {"2026-08-01": {"sales": "10.00", "refunds": "0", "fees": "0.50", "payouts": "0"}}, "otherCurrency": 0}, now=self.now)
+        self.assertEqual(updated["stripe"], {"count": 2, "pages": 1, "cursor": "txn_next", "pageHashes": ["receipt-hash"],
+            "months": {"2026-08-01": {"sales": "10.00", "refunds": "0", "fees": "0.50", "payouts": "0"}}, "otherCurrency": 0})
         self.assertEqual(updated["sources"]["stripe"]["status"], "ready")
         self.assertEqual(progress, {"sources": {"stripe": {"status": "pending"}}})
 
@@ -132,3 +134,37 @@ class FinancialRefreshUnitTests(TestCase):
             self.assertNotIn("Reconnect", failure["detail"])
             if isinstance(error, ConnectorRateLimitError):
                 self.assertEqual(delay, 120)
+
+    def test_daily_quota_fails_fast_with_local_deadline(self):
+        from integrations.services.external_connectors import ConnectorRateLimitError
+        now = datetime(2026, 11, 6, 10, 46, tzinfo=timezone.utc)
+        with patch("startup_updates.financial_refresh_sources.timezone.now", return_value=now):
+            failure, retryable, wait = failure_details(
+                ConnectorRateLimitError(8000), "xero", tz_name="Australia/Sydney", now=now)
+        self.assertFalse(retryable)
+        self.assertEqual(wait, 8000)
+        self.assertEqual(failure["reason"], "rate_limited")
+        self.assertEqual(failure["retryAt"], "2026-11-06T12:59:20+00:00")
+        self.assertIn("daily API limit", failure["detail"])
+        self.assertIn("Try again after 11:59 pm.", failure["detail"])
+
+    def test_quota_429_response_uses_retry_after_and_names_next_day(self):
+        response = Mock(status_code=429, headers={"Retry-After": "7200"})
+        now = datetime(2026, 11, 6, 12, 30, tzinfo=timezone.utc)
+        with patch("startup_updates.financial_refresh_sources.timezone.now", return_value=now):
+            failure, retryable, _wait = failure_details(
+                requests_error(response), "xero", tz_name="Australia/Sydney", now=now)
+        self.assertFalse(retryable)
+        self.assertIn("Try again after 1:30 am on Sat 7 Nov.", failure["detail"])
+
+    def test_short_quota_still_retries(self):
+        response = Mock(status_code=429, headers={"Retry-After": "45"})
+        failure, retryable, delay = failure_details(requests_error(response), "xero")
+        self.assertTrue(retryable)
+        self.assertEqual(delay, 45)
+        self.assertNotIn("reason", failure)
+
+
+def requests_error(response):
+    from integrations import http_client
+    return http_client.HTTPError(response=response)

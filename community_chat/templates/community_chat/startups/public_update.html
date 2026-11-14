@@ -53,16 +53,16 @@
     {% if metrics %}<dl>{% for metric in metrics %}<div><dt>{{ metric.label }}</dt><dd>{{ metric.value }}</dd></div>{% endfor %}</dl>{% endif %}
     {% if financial_history %}{% for section in sections %}{% if section.label == "Summary" %}<section><h2>{{ section.label }}</h2><ul>{% for point in section.points %}<li>{{ point }}</li>{% endfor %}</ul></section>{% endif %}{% endfor %}{% endif %}
     {% if financial_history %}
-      <section class="financial-history" aria-label="Frozen revenue and costs history">
-        <h2>Revenue and costs</h2>
-        <p>Six-month snapshot · {{ financial_history.reportingMonth }} · {{ financial_history.unit }}</p>
+      <section class="financial-history" aria-label="{{ financial_history.title }} history">
+        <h2>{{ financial_history.title }}</h2>
+        <p>Six-month snapshot · {{ financial_history.reportingMonth }} · {{ financial_history.unit }} · {{ financial_history.sourceLabel }}</p>
         {% if financial_history.partial %}<p>Partial reporting month, through {{ financial_history.cutoff }}.</p>{% endif %}
         <p class="month-focus"><strong>{{ financial_history.reportingMonth }} · This update</strong></p>
         <div class="chart-layout">
           <div class="y-axis" aria-hidden="true">{% for tick in financial_history.ticks %}<span style="top: {{ tick.top }}%">{{ tick.label }}</span>{% endfor %}</div>
           <div class="plot"><svg viewBox="25 0 600 220" preserveAspectRatio="none" role="img" aria-labelledby="financial-chart-title financial-chart-description">
-          <title id="financial-chart-title">Revenue and costs through {{ financial_history.reportingMonth }}</title>
-          <desc id="financial-chart-description">The shaded final month is the period this update covers. Green circles show revenue and orange squares show costs. Missing values remain gaps. The data table follows.</desc>
+          <title id="financial-chart-title">{{ financial_history.title }} through {{ financial_history.reportingMonth }}</title>
+          <desc id="financial-chart-description">The shaded final month is the period this update covers. Green circles show {{ financial_history.inLabel|lower }} and orange squares show {{ financial_history.outLabel|lower }}. Missing values remain gaps. The data table follows.</desc>
           <rect class="highlight" x="525" y="0" width="100" height="220" rx="8" />
           {% for tick in financial_history.ticks %}<line class="grid" x1="25" x2="625" y1="{{ tick.y }}" y2="{{ tick.y }}" />{% endfor %}
           {% for segment in financial_history.segments %}<polyline class="{{ segment.field }}{% if segment.partial %} partial{% endif %}" points="{{ segment.coordinates }}" />{% endfor %}
@@ -72,9 +72,9 @@
           {% endfor %}
           </svg><div class="months" aria-hidden="true">{% for point in financial_history.points %}<span>{% if point.highlighted %}<strong>{{ point.label }}</strong>{% else %}{{ point.label }}{% endif %}</span>{% endfor %}</div></div>
         </div>
-        <p>● Revenue &nbsp; ■ Costs</p>
+        <p>● {{ financial_history.inLabel }} &nbsp; ■ {{ financial_history.outLabel }}</p>
         <details><summary>View financial data</summary>
-          <div class="table-viewport"><table><caption>{{ financial_history.unit }} · Frozen with this update</caption><thead><tr><th>Month</th><th>Revenue</th><th>Costs</th></tr></thead><tbody>
+          <div class="table-viewport"><table><caption>{{ financial_history.unit }} · Frozen with this update</caption><thead><tr><th>Month</th><th>{{ financial_history.inLabel }}</th><th>{{ financial_history.outLabel }}</th></tr></thead><tbody>
           {% for point in financial_history.points %}<tr{% if point.highlighted %} class="current"{% endif %}><th scope="row">{{ point.monthLabel }}{% if point.highlighted %} · This update{% endif %}{% if point.partial %}<br>Partial, through {{ point.periodEnd }}{% endif %}</th><td>{{ point.revenueLabel }}</td><td>{{ point.costsLabel }}</td></tr>{% endfor %}
           </tbody></table></div>
         </details>

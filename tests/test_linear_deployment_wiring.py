@@ -262,6 +262,8 @@ class LinearDeploymentWiringTests(unittest.TestCase):
             "MESSAGE_SYNC_TARGETED_STAGED_ROUTING": "false",
             "COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED": "false",
             "SLACK_MEMBER_CHANNEL_ALLOWED_IDS": "",
+            "SLACK_AGENT_BOTS_ENABLED": "false",
+            "SLACK_AGENT_BOTS": '[{"workspace_id": "TTEST", "bot_user_id": "UDOT", "owner_user_id": 7, "name": "Maek"}]',
             "SLACK_OWNER_INVENTORY_ENABLED": "false",
             "MESSAGE_SYNC_SLACK_APP_ID": "ATEST",
             "MESSAGE_SYNC_SLACK_USER_APP_ID": "APRIVATE",
@@ -291,7 +293,8 @@ class LinearDeploymentWiringTests(unittest.TestCase):
                 (root / "scripts").mkdir()
                 for name in ("upsert_env_value_from_stdin.sh", "validate_linear_channel_issue_deploy_config.py",
                              "validate_valley_mcp_deploy_config.py", "validate_website_deploy_config.py",
-                             "validate_message_sync_deploy_config.py"):
+                             "validate_message_sync_deploy_config.py",
+                             "validate_slack_agent_bots_config.py"):
                     shutil.copy(REPO_ROOT / "scripts" / name, root / "scripts")
                 (root / ".env").write_text("KEEP_ME=yes\n")
                 result = subprocess.run(

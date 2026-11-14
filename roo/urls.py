@@ -39,6 +39,7 @@ router.register(r'requests', PointsRequestViewSet, basename='points-request')
 router.register(r'purchases', PointsPurchaseViewSet, basename='points-purchase')
 
 urlpatterns = [
+    path('cybertest/', include('roo.cybertest_service_urls')),
     path('event-discounts/quote/', EventDiscountQuoteView.as_view(), name='event-discount-quote'),
     path('event-discounts/redeem/', EventDiscountRedeemView.as_view(), name='event-discount-redeem'),
     path('event-discounts/redemptions/', EventDiscountRedemptionsView.as_view(), name='event-discount-redemptions'),

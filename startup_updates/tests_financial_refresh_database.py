@@ -2,7 +2,7 @@
 import calendar
 import copy
 from datetime import date, timedelta
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from django.contrib.auth import get_user_model
@@ -18,6 +18,7 @@ from startup_updates import financial_refresh as refresh
 from startup_updates.evidence_contract import content_hash
 from startup_updates.models import MonthlyEvidenceSnapshot, MonthlyUpdateDraft, StartupProfile, UserStartupBinding, StartupDataDeletionRequest
 from startup_updates.revisions import RevisionConflict, save_revision
+from startup_updates.tests_financial_basis_unit import bank_summary
 from startup_updates.tests_financial_history_unit import evidence_payload, report_payload
 from vibe_raising.financial_refresh_views import FinancialRefreshView, FinancialRefreshStatusView
 from vibe_raising.views import VibeRaisingMonthlyUpdateView
@@ -56,13 +57,17 @@ class FinancialRefreshDatabaseTests(TestCase):
             return {"count": 2, "hash": "synthetic-stripe-page", "cursor": "in_synthetic", "more": False}
         if step == "currency":
             return {"currency": "AUD"}
+        if step.startswith("cash:"):
+            month = date.fromisoformat(step[len("cash:"):])
+            return {"month": month.isoformat(), "end": month.replace(day=calendar.monthrange(month.year, month.month)[1]).isoformat(),
+                "report": bank_summary(("Business", 5000, 1200, 450, 5750))}
         month = date.fromisoformat(step)
         return {"month": step, "end": month.replace(day=calendar.monthrange(month.year, month.month)[1]).isoformat(),
             "report": report_payload(1000, 400)}
 
     def complete(self, run, provider=None):
         with patch("startup_updates.financial_refresh.fetch_stage", side_effect=provider or self.provider) as fetch:
-            for _ in range(12):
+            for _ in range(32):  # 13 Xero reads (currency, 6 P&L, 6 cash) plus Stripe pages
                 if not refresh.advance_refresh(run.run_id):
                     break
         run.refresh_from_db()
@@ -139,15 +144,19 @@ class FinancialRefreshDatabaseTests(TestCase):
         draft, revision = self.draft()
         run = self.start(updateId=draft.pk, expectedRevision=revision.pk)
         fetch = self.complete(run)
-        reports = [call.args[1] for call in fetch.call_args_list if call.args[0] == "xero" and call.args[1] != "currency"]
-        self.assertEqual(reports, [f"2026-{month:02d}-01" for month in range(3, 9)])
+        stages = [call.args[1] for call in fetch.call_args_list if call.args[0] == "xero" and call.args[1] != "currency"]
+        months = [f"2026-{month:02d}-01" for month in range(3, 9)]
+        self.assertEqual([stage for stage in stages if not stage.startswith("cash:")], months)
+        self.assertEqual([stage for stage in stages if stage.startswith("cash:")], [f"cash:{month}" for month in months])
         draft.refresh_from_db()
         self.assertEqual(draft.current_revision_id, revision.pk)
         self.assertEqual(draft.current_revision.structured_memo["summary"], "Existing carefully written story")
         self.assertEqual(draft.revisions.count(), 1)
         value = refresh.serialize_refresh(run)
         self.assertEqual(value["status"], "ready")
-        self.assertEqual(value["candidate"]["ownerPreview"]["points"][-1]["revenue"], 1000)
+        # Cash is the default basis: the chart shows Bank Summary cash in.
+        self.assertEqual(value["candidate"]["ownerPreview"]["basis"], "cash")
+        self.assertEqual(value["candidate"]["ownerPreview"]["points"][-1]["revenue"], 1200)
         self.assertEqual(value["candidate"]["audiencePreview"]["points"][-1]["revenue"], 100)
         self.assertNotIn("report_payload", str(value))
         self.assertNotIn("tenant-synthetic", str(value))
@@ -161,7 +170,7 @@ class FinancialRefreshDatabaseTests(TestCase):
         self.complete(run, provider)
         value = refresh.serialize_refresh(run)
         self.assertEqual(value["status"], "partial")
-        self.assertEqual(value["candidate"]["ownerPreview"]["points"][-1]["revenue"], 1000)
+        self.assertEqual(value["candidate"]["ownerPreview"]["points"][-1]["revenue"], 1200)
         self.assertNotIn("private provider", str(value))
 
     def test_xero_failure_does_not_substitute_stripe_or_cached_chart(self):
@@ -239,6 +248,43 @@ class FinancialRefreshDatabaseTests(TestCase):
                     run.save(update_fields=["result"])
         run.refresh_from_db()
         self.assertEqual(run.result["sources"]["xero"]["status"], "failed")
+
+    def test_xero_daily_quota_fails_fast_with_deadline_and_skips_stripe(self):
+        from integrations.services.external_connectors import ConnectorRateLimitError
+        run = self.start()
+        fetch = self.complete(run, Mock(side_effect=ConnectorRateLimitError(7200)))
+        value = refresh.serialize_refresh(run)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(value["status"], "failed")
+        self.assertNotIn("retryAfterSeconds", value)
+        self.assertIn("daily API limit", value["detail"])
+        self.assertIn("Try again after", value["detail"])
+        self.assertEqual(run.result["sources"]["xero"]["reason"], "rate_limited")
+        self.assertEqual(run.result["sources"]["stripe"]["status"], "pending")
+
+    def test_recovered_retry_clears_deadline_and_keeps_working(self):
+        run = self.start()
+        failures = iter([TimeoutError()])
+        def provider(*args):
+            error = next(failures, None)
+            if error:
+                raise error
+            return self.provider(*args)
+        with patch("startup_updates.financial_refresh.fetch_stage", side_effect=provider):
+            refresh.advance_refresh(run.run_id)
+            run.refresh_from_db()
+            self.assertIn("Waiting to retry Xero at", run.result["sources"]["xero"]["detail"])
+            run.result["retryAt"] = (timezone.now() - timedelta(seconds=1)).isoformat()
+            run.save(update_fields=["result"])
+            # One worker pass must run every remaining read, not stop after one.
+            passes = 0
+            while refresh.advance_refresh(run.run_id):
+                passes += 1
+        run.refresh_from_db()
+        self.assertEqual(run.status, "completed")
+        self.assertNotIn("retryAt", run.result)
+        self.assertNotIn("attempts", run.result)
+        self.assertGreater(passes, 5)
 
     def test_candidate_is_scoped_to_company_user_month_revision_and_settings(self):
         draft, revision = self.draft()

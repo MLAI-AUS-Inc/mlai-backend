@@ -26,7 +26,8 @@ active-company selection cannot change that target. Responses use
 ```
 
 An unsaved editor supplies its stable normal-save `creationKey` UUID instead of
-`updateId`/`expectedRevision`. Xero must be selected for the accounting chart.
+`updateId`/`expectedRevision`. With Xero selected the chart is the accounting
+chart and Xero must refresh; a Stripe-only startup may select Stripe alone.
 The endpoint performs no provider reads and returns HTTP 202 with:
 
 ```text
@@ -40,7 +41,9 @@ The endpoint performs no provider reads and returns HTTP 202 with:
 ```
 
 `GET financial-refresh/<refreshId>/` returns the same shape. Source states are
-`pending`, `refreshing`, `ready`, `failed`, or `reconnect_required`. The two
+`pending`, `refreshing`, `ready`, `failed`, or `reconnect_required`. Stripe is
+not read once Xero has failed, because no chart can be saved; it stays `pending`
+with a `detail` saying so. The two
 previews use the existing `financialHistory` DTO: `ownerPreview` contains dollar
 amounts; `audiencePreview` always contains normalized relative values. A partial
 result has a valid Xero chart plus an unsuccessful optional Stripe refresh.
@@ -84,18 +87,57 @@ capacity exhaustion. Completed stages are retained, transient reads retry at mos
 three times with provider backoff, and jobs expire after 24 hours. If the user
 closes the editor and a process stops, work resumes when the editor polls again.
 
-The accounting source fetches the exact six calendar-month Xero Profit and Loss
-reports ending at the selected reporting month, using accrual accounting. Current
-months use the pinned local reporting cutoff; prior months use month end. Base
-currency must match the startup's reporting currency. Canonical parsing includes
-direct costs, preserves missing values as gaps, and validates report hashes and
-scope through `financial_history.build_snapshot`.
+The accounting source fetches, for the six calendar months ending at the selected
+reporting month, the Xero Profit and Loss (accrual) and Bank Summary (cash)
+reports: thirteen Xero calls including the base-currency check. Current months
+use the pinned local reporting cutoff; prior months use month end. Base currency
+must match the startup's reporting currency. Parsing preserves missing values as
+gaps and validates report hashes and scope through `financial_history.build_snapshot`.
 
-Stripe reads bounded invoice pages created within the same window. The job keeps
-page hashes/counts and status, without customer details or raw invoices. This is
-separate payment-source evidence, not complete company revenue or cash collected.
-Stripe amounts are never added to or substituted for Xero accounting totals.
+- Accrual revenue is Total Income plus Total Other Income. Accrual costs are
+  revenue minus Net Profit, so every expense section counts and revenue - costs
+  always equals Xero's Net Profit.
+- Cash in and cash out are the Bank Summary totals across all bank accounts, the
+  report behind Xero's dashboard "Cash in and out" chart. Each account must
+  reconcile (opening + received - spent = closing) or the month is a gap.
+- A connection without `accounting.reports.read` or
+  `accounting.reports.banksummary.read` still refreshes accrual and reports
+  `cashUnavailable: "scope"`, asking the founder to reconnect for cash.
+
+Stripe reads bounded `/v1/balance_transactions` pages in the same window and
+keeps only monthly sales, refunds, fees and payouts in the reporting currency,
+plus page hashes and counts. No customer details or raw transactions are kept.
 Refreshing does not republish global financial observations or change their cache.
+
+## Cash and accrual bases
+
+Each saved chart stores accrual, cash and Stripe series side by side (snapshot
+`schemaVersion: 2`). Readers choose the series when the chart is read, from the
+startup's `StartupProfile.progress_configuration["financial_display"]`:
+`{"basis": "cash" | "accrual", "stripeInXero": bool}`, defaulting to cash and
+`true`. `GET/POST business-health/` reads and writes `financialBasis` and
+`stripeInXero`; changing them does not bump the reporting version, so in-flight
+refreshes stay valid. Every reader (editor, saved and published updates, the
+community feed, the public page and rendered markdown) applies the current
+setting, so a change updates every report at once with no provider call.
+
+Stripe merge rule: when Stripe payouts land in a Xero bank account
+(`stripeInXero`, the default) Xero already counts that money, so totals are
+Xero's and the DTO's per-point `stripe` value shows the Stripe share. Otherwise
+Stripe is added once: payouts to cash in, or net sales to revenue and fees to
+costs. A startup with no Xero figures charts Stripe alone and never reports
+costs from it. The `financialHistory` DTO keeps `schemaVersion: 1` and adds
+`basis`, `basisFallback` (`legacy`, `scope` or `unavailable` when cash was asked
+for but is missing) and `stripe` (`withinXero`, `added`, `only` or null).
+
+Charts saved before this change are never rewritten (revisions are immutable).
+`upgrade_legacy_history` recomputes them at read time from their own source
+snapshot, which applies today's accrual definition with no provider call. For
+cash, `python manage.py backfill_pulse_cash_basis` (dry run by default; `--apply`,
+`--max-calls`, `--pause`) fetches the Bank Summary for each old chart's months
+from the same Xero account and stores a content-addressed cash supplement
+snapshot that readers merge in. It is an operational command: run it only when
+asked, and mind the shared Xero daily API limit.
 
 The candidate owns a separate immutable evidence snapshot and capture timestamp.
 `save_revision(financial_history_snapshot=...)` updates only the financial-history
@@ -107,8 +149,9 @@ and fences in-flight workers before deleting candidate evidence.
 
 ## Validation
 
-Database-free tests: `startup_updates.tests_financial_refresh_unit` and
-`startup_updates.tests_financial_history_unit` through
+Database-free tests: `startup_updates.tests_financial_refresh_unit`,
+`startup_updates.tests_financial_history_unit` and
+`startup_updates.tests_financial_basis_unit` through
 `scripts/test_without_database.py`. Integration tests cover scoped admission,
 deduplication, fresh six-month requests, source errors, leases/retries, deletion
 and revocation, candidate expiry, unsaved drafts, real save behavior and frozen

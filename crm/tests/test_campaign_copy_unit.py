@@ -46,10 +46,13 @@ class CampaignStatusCopyTests(SimpleTestCase):
         blast = self.blast()
         blast.stream.state = 'held'; self.assertIn('restart by itself', self.text(blast)['text'])
         blast.stream.state = 'slowed'; self.assertIn('more slowly', self.text(blast)['text'])
-        blast.stream.state = 'warming'; blast.stream.state_detail = {'providers': {'microsoft': {'state': 'throttled'}}}
-        self.assertIn('Outlook asked', self.text(blast)['text'])
-        blast.stream.state_detail = {}; blast.stats = {'email': {'frequency_deferred': 8}}
-        self.assertIn('8 people were emailed recently', self.text(blast)['text'])
+        blast.stream.state = 'warming'
+        self.assertIn('Outlook asked', self.text(blast, providers={'microsoft': 'throttled'})['text'])
+        self.assertIn('8 people were emailed recently', self.text(blast, providers={}, deferred=8)['text'])
+
+    def test_unsaved_blast_has_no_provider_or_frequency_status(self):
+        blast = self.blast(plan={})
+        self.assertIn('most active members first', self.text(blast)['text'])
 
     def test_next_slot_and_outside_hours_and_default_progress(self):
         blast = self.blast(plan={'estimate': {'slots': [{'at': (NOW + timedelta(hours=1)).isoformat(), 'count': 50}]}})

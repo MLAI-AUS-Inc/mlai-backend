@@ -39,6 +39,14 @@ class NativeAgentDeployConfigTests(unittest.TestCase):
         self.assertIn('AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED="${AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED:-false}"', deploy)
         self.assertIn("export AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED", deploy)
 
+    def test_guest_replies_need_personal_conversation_access(self):
+        key = "AGENT_RUNTIME_NATIVE_GUEST_REPLY_ENABLED"
+        validate({**active(), key: "false"})
+        validate({**active(), "AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED": "true", key: "true"})
+        for environment in ({key: "true"}, {**active(), key: "true"}):
+            with self.assertRaises(ValueError):
+                validate(environment)
+
     def test_dormant_configuration_and_complete_explicit_activation(self):
         validate({})
         validate({"AGENT_RUNTIME_NATIVE_COMMUNITIES": "{}"})
@@ -149,6 +157,7 @@ class MaekSafetyConfigTests(unittest.TestCase):
         "AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY": "false",
         "AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY": "24h",
         "AGENT_RUNTIME_NATIVE_DURABLE_WATCH": "false",
+        "AGENT_RUNTIME_NATIVE_GUEST_REPLY_ENABLED": "false",
         "AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS": "600",
         "AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS": "86400",
         "AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED": "false",

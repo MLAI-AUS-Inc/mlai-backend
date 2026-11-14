@@ -17,10 +17,10 @@ from rest_framework.exceptions import NotFound, ValidationError
 from founder_tools.models import VibeRaisingCompany
 from integrations.models import ExternalServiceConnection
 from startup_updates.evidence_contract import content_hash, reporting_period
-from startup_updates.financial_history import build_snapshot, history_payload
+from startup_updates.financial_history import build_snapshot, financial_display, history_payload
 from startup_updates.financial_refresh_sources import (
     apply_stage, build_candidate_evidence, connection_identity, failure_details,
-    fetch_stage, month_slots, next_stage,
+    fetch_stage, local_time, month_slots, next_stage,
 )
 from startup_updates.models import MonthlyEvidenceSnapshot, MonthlyUpdateDraft, StartupProfile, StartupDataDeletionRequest
 from startup_updates.revisions import RevisionConflict
@@ -61,8 +61,6 @@ def request_scope(company, user, data, profile, *, now=None):
     sources = data.get("inputSources")
     if not isinstance(sources, list) or any(type(source) is not str for source in sources) or not sources or set(sources) - {"stripe", "xero"}:
         raise ValidationError({"inputSources": "Choose Stripe and/or Xero financial sources."})
-    if "xero" not in sources:
-        raise ValidationError({"inputSources": "Connect and select Xero for the accounting chart. Stripe payment data stays separate."})
     update_id = _positive(data.get("updateId"), "updateId")
     expected = _positive(data.get("expectedRevision"), "expectedRevision")
     creation_key = _uuid(data.get("creationKey"), "creationKey") if not update_id else None
@@ -209,7 +207,7 @@ def submit_refresh(refresh_id):
     def work():
         close_old_connections()
         try:
-            # Enough for the six reports plus bounded invoice pages. A later
+            # Enough for the 13 Xero reads plus bounded Stripe pages. A later
             # poll resumes a long collection without repeating completed reads.
             for _ in range(64):
                 if not advance_refresh(refresh_id):
@@ -231,9 +229,13 @@ def submit_refresh(refresh_id):
 
 def _finish(run, progress):
     request = run.run_request
-    if progress["sources"]["xero"]["status"] != "ready":
+    # With Xero selected the chart is the accounting chart, so it must refresh.
+    # Without Xero, Stripe alone supplies it.
+    primary = progress["sources"].get("xero") or progress["sources"].get("stripe")
+    if primary["status"] != "ready":
         run.status = "failed"
-        progress["detail"] = "The accounting chart could not refresh. Your saved chart and writing are unchanged."
+        progress["detail"] = (primary["detail"] if primary.get("reason") == "rate_limited" else
+            "The financial chart could not refresh. Your saved chart and writing are unchanged.")
         return
     captured = timezone.now()
     payload = build_candidate_evidence(request, progress)
@@ -243,9 +245,10 @@ def _finish(run, progress):
         content_hash=content_hash(payload), defaults={"month": request["targetMonth"], "payload": payload})
     progress["snapshotId"], progress["snapshotHash"] = snapshot.pk, snapshot.content_hash
     progress["chart"] = chart
+    display = financial_display(request["organizationId"])
     progress["candidate"] = {"id": run.run_id, "expiresAt": (captured + CANDIDATE_TTL).isoformat(),
-        "ownerPreview": history_payload({"enabled": True, "shareAmounts": True, "snapshot": chart}),
-        "audiencePreview": history_payload({"enabled": True, "shareAmounts": False, "snapshot": chart})}
+        "ownerPreview": history_payload({"enabled": True, "shareAmounts": True, "snapshot": chart, "display": display}),
+        "audiencePreview": history_payload({"enabled": True, "shareAmounts": False, "snapshot": chart, "display": display})}
     run.status = "completed"
 
 
@@ -274,6 +277,15 @@ def advance_refresh(refresh_id):
             run.save(update_fields=["status", "result", "updated_at"])
             return False
         stage = next_stage(progress, run.run_request["inputSources"])
+        if progress["sources"].get("xero", {}).get("status") in {"failed", "reconnect_required"}:
+            # The accounting chart needs Xero, so no chart can be saved from this
+            # refresh. Say why on Stripe rather than leaving a bare "Waiting"
+            # (the status stays one that every client version understands).
+            stripe = progress["sources"].get("stripe")
+            if stripe and stripe.get("status") not in {"ready", "failed", "reconnect_required"}:
+                progress["sources"]["stripe"] = {"provider": "stripe", "status": "pending",
+                    "detail": "Stripe refreshes together with Xero. Try again once Xero is available."}
+            stage = None
         if stage is None:
             try:
                 _finish(run, progress)
@@ -306,13 +318,21 @@ def advance_refresh(refresh_id):
             run.status, progress["detail"] = "failed", "A financial connection changed. Reconnect it and refresh again."
         else:
             if error is None:
+                # Retries are per read: a recovered read must not leave a stale
+                # deadline (which stopped the worker after every later stage) or
+                # spend the next read's attempts.
+                progress.pop("attempts", None)
+                progress.pop("retryAt", None)
                 progress = apply_stage(progress, provider, step, receipt)
             else:
-                failure, retryable, delay = failure_details(error, provider)
+                failure, retryable, delay = failure_details(error, provider, tz_name=request.get("timezone"))
                 attempts = int(progress.get("attempts", 0)) + 1
                 if retryable and attempts < 3:
-                    progress.update(attempts=attempts, retryAt=(timezone.now() + timedelta(seconds=delay)).isoformat())
-                    progress["sources"][provider]["detail"] = f"Waiting to retry {provider.title()}. Your writing is safe."
+                    retry_at = timezone.now() + timedelta(seconds=delay)
+                    progress.update(attempts=attempts, retryAt=retry_at.isoformat())
+                    progress["sources"][provider]["detail"] = (
+                        f"Waiting to retry {provider.title()} at {local_time(retry_at, request.get('timezone'))}. "
+                        "Your writing is safe.")
                 else:
                     progress["sources"][provider] = failure
                     progress.pop("attempts", None)

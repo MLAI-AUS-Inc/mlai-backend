@@ -5843,8 +5843,8 @@
     {
       "path": "content_factory/founder_journey_contract.py",
       "function": "enrich_journey",
-      "function_sha256": "65b9c1122a67246267f7e21ad046b6070cccbe2f6f6d47e8a83fdaa9b583e2dd",
-      "reason": "Canonical current article DTO calls the read-only rights, verified review/resume and stop-control projections; no local lifecycle or monetary effects. Retired hosted delivery maps to contentOnly and emits no hosting capabilities.",
+      "function_sha256": "27658d82b3e2d57eff2e1cd30c156aa187e8010fd22dbda28ee55386a94f1773",
+      "reason": "Canonical current article DTO calls the read-only rights, verified review/resume and stop-control projections; no local lifecycle or monetary effects. Retired hosted delivery maps to contentOnly and emits no hosting capabilities. The website step reads has_connected_website (read-only) to stay pending until the site is connected when ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE is on.",
       "test_refs": [
         "content_factory.tests_founder_article_contract",
         "content_factory.tests_founder_article_controls"
@@ -5920,8 +5920,8 @@
     {
       "path": "content_factory/content_first_article.py",
       "function": "start_first_article",
-      "function_sha256": "b26f06417b1db8d3493f39ebfefd24b9f9d9e126d0ec99537b318792a3ee155b",
-      "reason": "Optional stable HTTP header selects the durable scoped command; unkeyed legacy path remains unchanged and replay never dispatches a second article.",
+      "function_sha256": "3f6a0418d0e46babde51391feb6667d620ca5bbc3cb0f292f11027af7f2493ec",
+      "reason": "Optional stable HTTP header selects the durable scoped command; unkeyed legacy path remains unchanged and replay never dispatches a second article. require_connected_website runs right after require_owner and refuses with 409 before any run, entitlement or command is created.",
       "test_refs": [
         "content_factory.tests_first_article_commands",
         "content_factory.tests_content_first_article"

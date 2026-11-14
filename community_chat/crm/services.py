@@ -425,7 +425,10 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
                 raise
             blast.stream = None
     else:
-        assign_stream(blast, actor=actor, mailbox=blast.mailbox if is_owner(actor) else None)
+        # Honour an owner's mailbox only when chosen in this save; an older draft's
+        # pre-stream (e.g. root mlai.au) mailbox moves to the stream's mailbox.
+        owner_choice = blast.mailbox if is_owner(actor) and "mailbox_id" in email and blast.mailbox_id else None
+        assign_stream(blast, actor=actor, mailbox=owner_choice)
     with transaction.atomic():
         from crm.models import SendingStream
         stream_ids = {original_stream_id, blast.stream_id}

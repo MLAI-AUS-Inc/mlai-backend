@@ -24,6 +24,8 @@ from .views import (
     DeviceView,
     InviteView,
     LinkPreviewImageView,
+    LinkPreviewFileView,
+    link_preview_file_stream,
     LinkPreviewView,
     PasswordAuthView,
     PublicProfileBatchView,
@@ -93,7 +95,7 @@ from .meeting_room_views import (
     MyMeetingRoomBookingsView,
 )
 from .slack_action_views import SlackMessageActionView
-from .slack_views import SlackDmMirrorView, SlackDmStartView, SlackOwnerConversationOpenView, SlackOwnerConversationView, SlackUserDirectoryView
+from .slack_views import SlackAgentBotsView, SlackDmMirrorView, SlackDmStartView, SlackOwnerConversationOpenView, SlackOwnerConversationView, SlackUserDirectoryView
 from .usage_views import (
     TokenUsageHistoryView,
     TokenUsageIngestView,
@@ -184,6 +186,7 @@ urlpatterns = [
         SlackDmStartView.as_view(),
         name="community_chat_slack_dms",
     ),
+    path("slack/agents/", SlackAgentBotsView.as_view(), name="community_chat_slack_agents"),
     path("coding/jwks/", CodingJwksView.as_view(), name="community_chat_coding_jwks"),
     path(
         "coding/entitlement/",
@@ -223,6 +226,16 @@ urlpatterns = [
         "link-preview/image/",
         LinkPreviewImageView.as_view(),
         name="community_chat_link_preview_image",
+    ),
+    path(
+        "link-preview/file/",
+        LinkPreviewFileView.as_view(),
+        name="community_chat_link_preview_file",
+    ),
+    path(
+        "link-preview/file/stream/",
+        link_preview_file_stream,
+        name="community_chat_link_preview_file_stream",
     ),
     path("auth/session/refresh/", AccountSessionRefreshView.as_view(), name="community_chat_session_refresh"),
     path("auth/session/logout/", AccountSessionLogoutView.as_view(), name="community_chat_session_logout"),

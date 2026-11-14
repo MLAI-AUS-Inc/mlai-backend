@@ -103,7 +103,7 @@ INVITE_TTL_DAYS = 14
 
 def invite_link(token):
     base = str(getattr(settings, 'COMMUNITY_CHAT_FRONTEND_URL', '')).rstrip('/')
-    return f'{base}/mentoring/apply?invite={token}'
+    return f'{base}/mentoring/apply?mentor_invite={token}'
 
 
 def hash_invite_token(token):

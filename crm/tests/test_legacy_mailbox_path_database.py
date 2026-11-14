@@ -148,6 +148,16 @@ class StreamPathStaysStrictTests(BlastFixtures, TestCase):
         self.assertEqual(blast.stream_id, self.stream.pk)
         self.assertEqual(blast_email.email_block(blast), "guardian_disabled")
 
+    def test_owner_saving_an_old_root_draft_after_cutover_moves_to_the_stream_mailbox(self):
+        blast = self.root_blast()
+        with override_settings(CRM_LEGACY_MAILBOX_PATH_ENABLED=False, CRM_DELIVERABILITY_OWNERS=(self.admin.email.lower(),)):
+            save_blast_draft(blast, {"email": {"subject": "Community news, updated"}}, actor=self.admin, now=self.now)
+            blast.refresh_from_db()
+            self.assertEqual((blast.stream_id, blast.mailbox_id), (self.stream.pk, self.mailbox.pk))
+            with self.assertRaises(BlastError) as caught:
+                save_blast_draft(blast, {"email": {"mailbox_id": str(self.root.pk)}}, actor=self.admin, now=self.now)
+            self.assertEqual(caught.exception.code, "protected_domain")
+
     def test_staff_cannot_pick_a_stream_identity_mailbox(self):
         other = SenderMailbox.objects.create(email="other@news.mlai.au", domain="news.mlai.au",
             route=SenderMailbox.Route.RESEND, daily_limit=30, enabled=True)

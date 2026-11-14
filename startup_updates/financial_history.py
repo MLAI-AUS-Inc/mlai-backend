@@ -69,12 +69,31 @@ def _coverage(period, month):
     return min(final, _month_end(month))
 
 
+# Each chart field: (accounting basis, source metric, row evidence key).
+_FIELDS = {
+    "revenue": ("accrual", "xero_profit_and_loss_revenue"),
+    "costs": ("accrual", "xero_profit_and_loss_monthly_costs"),
+    "cashIn": ("cash", "xero_bank_summary_cash_in"),
+    "cashOut": ("cash", "xero_bank_summary_cash_out"),
+}
+
+
+def _verified_amount(field, report):
+    """Recompute a field from its source report with the canonical parsers."""
+    from startup_updates.services import _parse_xero_bank_summary_report, _parse_xero_profit_and_loss_report
+    if field in {"cashIn", "cashOut"}:
+        return _parse_xero_bank_summary_report(report).get("cash_in" if field == "cashIn" else "cash_out")
+    aggregate = _parse_xero_profit_and_loss_report(report).get("revenue" if field == "revenue" else "monthly_costs")
+    return aggregate.get("amount") if aggregate else None
+
+
 def _entry(value, evidence, *, field, month, currency, coverage, reports, timezone_name):
     """Use canonical verified accounting totals with the same explicit scope."""
     number = _number(value)
     if number is None or not isinstance(evidence, dict) or evidence.get("unit") != currency:
         return None
-    if evidence.get("source_provider") != "xero" or evidence.get("accounting_basis") != "accrual":
+    basis, expected_source = _FIELDS[field]
+    if evidence.get("source_provider") != "xero" or evidence.get("accounting_basis") != basis:
         return None
     account = evidence.get("connection_id")
     if not isinstance(account, (str, int)) or isinstance(account, bool) or not str(account):
@@ -83,15 +102,12 @@ def _entry(value, evidence, *, field, month, currency, coverage, reports, timezo
     report = reports.get(report_hash) if isinstance(report_hash, str) else None
     if not isinstance(report, dict) or content_hash(report) != report_hash:
         return None
-    expected_source = {"revenue": "xero_profit_and_loss_revenue", "costs": "xero_profit_and_loss_monthly_costs"}[field]
     if evidence.get("source_metric") != expected_source:
         return None
     # A hash proves integrity, not that a displayed number is the correct total.
-    # Reuse the connector's canonical report parser, including direct costs.
-    from startup_updates.services import _parse_xero_profit_and_loss_report
-    parsed = _parse_xero_profit_and_loss_report(report)
-    aggregate = parsed.get("revenue" if field == "revenue" else "monthly_costs")
-    if not aggregate or Decimal(str(value)) != aggregate.get("amount"):
+    # Reuse the connector's canonical report parsers, including direct costs.
+    amount = _verified_amount(field, report)
+    if amount is None or Decimal(str(value)) != amount:
         return None
     try:
         start = date.fromisoformat(evidence.get("report_start_date", ""))
@@ -100,26 +116,96 @@ def _entry(value, evidence, *, field, month, currency, coverage, reports, timezo
         return None
     if start != month or not month <= end <= min(_month_end(month), coverage):
         return None
-    scope = ("xero", currency, "accrual", str(account), evidence.get("timezone") or timezone_name)
+    scope = ("xero", currency, basis, str(account), evidence.get("timezone") or timezone_name)
     return {"value": number, "scope": scope, "end": end}
 
 
+def _series(rows, month, *, fields, coverage, currency, reports, timezone_name):
+    """Six verified calendar slots for one pair of fields, or None when empty."""
+    by_month = {}
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("month") not in by_month:
+            by_month[row.get("month")] = row
+    candidates = []
+    for offset in range(-5, 1):
+        point_month = _month_shift(month, offset)
+        row = by_month.get(point_month.isoformat(), {})
+        evidence = row.get("metric_evidence") or {}
+        entries = {name: _entry(row.get(column), evidence.get(column), month=point_month,
+            field=name, currency=currency, coverage=coverage, reports=reports, timezone_name=timezone_name)
+            for name, column in fields}
+        available = [entry for entry in entries.values() if entry is not None]
+        # A same-month pair with different account/basis/coverage is ambiguous.
+        if len(available) == 2 and (available[0]["scope"] != available[1]["scope"] or available[0]["end"] != available[1]["end"]):
+            entries = {name: None for name, _ in fields}
+        candidates.append((point_month, entries))
+    scope = next((entry["scope"] for _, entries in reversed(candidates)
+        for entry in entries.values() if entry is not None), None)
+    if scope is None:
+        return None
+    points = []
+    for point_month, entries in candidates:
+        matching = {key: entry if entry and entry["scope"] == scope else None for key, entry in entries.items()}
+        ends = [entry["end"] for entry in matching.values() if entry is not None]
+        end = min(ends) if ends else None
+        points.append({"month": point_month.isoformat(),
+            **{key: entry["value"] if entry else None for key, entry in matching.items()},
+            "partial": bool(end and end < _month_end(point_month)),
+            "periodEnd": end.isoformat() if end else None})
+    return points
+
+
+_STRIPE_KEYS = ("sales", "refunds", "fees", "payouts")
+
+
+def _stripe_series(stripe, month, *, coverage, currency):
+    """Monthly Stripe balance totals collected by the same refresh, or None."""
+    if not isinstance(stripe, dict) or stripe.get("unit") != currency or not isinstance(stripe.get("months"), dict):
+        return None
+    try:
+        stripe_end = min(date.fromisoformat(stripe["coverage_end"]), coverage)
+    except (KeyError, TypeError, ValueError):
+        return None
+    points = []
+    for offset in range(-5, 1):
+        point_month = _month_shift(month, offset)
+        values = stripe["months"].get(point_month.isoformat())
+        numbers = {key: _number((values or {}).get(key)) for key in _STRIPE_KEYS} if isinstance(values, dict) else None
+        if not numbers or any(value is None for value in numbers.values()) or stripe_end < point_month:
+            points.append({"month": point_month.isoformat(), **{key: None for key in _STRIPE_KEYS},
+                "partial": False, "periodEnd": None})
+            continue
+        end = min(_month_end(point_month), stripe_end)
+        points.append({"month": point_month.isoformat(), **numbers,
+            "partial": end < _month_end(point_month), "periodEnd": end.isoformat()})
+    return points if any(point["periodEnd"] for point in points) else None
+
+
 def build_snapshot(payload, month, *, captured_at):
-    """Freeze exactly six calendar slots from one immutable evidence payload."""
+    """Freeze six calendar slots for every basis from one immutable evidence payload.
+
+    Accrual (Profit and Loss), cash (Bank Summary) and Stripe totals are stored
+    side by side; which one a reader sees is chosen at read time from the
+    startup's reporting settings, so changing them needs no provider call.
+    """
     coverage = _coverage(payload.get("period"), month)
     charts = payload.get("charts") or {}
     currency = charts.get("currency")
     if charts.get("schema_version") != 2 or currency not in CURRENCIES or charts.get("target_month") != month.isoformat():
         raise FinancialHistoryError("Refresh verified accounting evidence before including financial history.")
-    rows = charts.get("performance") or []
+    rows = copy.deepcopy(charts.get("performance") or [])
+    rows = rows if isinstance(rows, list) else []
     by_month = {}
-    for row in rows if isinstance(rows, list) else []:
+    for row in rows:
         if isinstance(row, dict) and row.get("month") not in by_month:
-            by_month[row.get("month")] = copy.deepcopy(row)
+            by_month[row.get("month")] = row
     # Capture can override its final chart point with private metrics. Those
     # values must retain the same source quality and provenance as the cards.
     current_metrics = {item.get("key"): item for item in payload.get("metrics", []) if isinstance(item, dict)}
-    target = by_month.setdefault(month.isoformat(), {"month": month.isoformat()})
+    target = by_month.get(month.isoformat())
+    if target is None:
+        target = {"month": month.isoformat()}
+        rows.append(target)
     reports = dict(charts.get("source_reports") or {})
     for key, field in (("revenue", "income"), ("monthlyCosts", "expenses")):
         metric = current_metrics.get(key)
@@ -131,44 +217,129 @@ def build_snapshot(payload, month, *, captured_at):
             }
             if metadata.get("report_hash") and isinstance(metadata.get("report_payload"), dict):
                 reports[metadata["report_hash"]] = metadata["report_payload"]
-    candidates = []
-    for offset in range(-5, 1):
-        point_month = _month_shift(month, offset)
-        row = by_month.get(point_month.isoformat(), {})
-        evidence = row.get("metric_evidence") or {}
-        entries = {name: _entry(row.get(field), evidence.get(field), month=point_month,
-            field=name, currency=currency, coverage=coverage, reports=reports, timezone_name=payload["period"]["timezone"])
-            for name, field in (("revenue", "income"), ("costs", "expenses"))}
-        available = [entry for entry in entries.values() if entry is not None]
-        # A same-month pair with different account/basis/coverage is ambiguous.
-        if len(available) == 2 and (available[0]["scope"] != available[1]["scope"] or available[0]["end"] != available[1]["end"]):
-            entries = {"revenue": None, "costs": None}
-        candidates.append((point_month, entries))
-    scope = next((entry["scope"] for _, entries in reversed(candidates)
-        for entry in entries.values() if entry is not None), None)
-    points = []
-    for point_month, entries in candidates:
-        matching = {key: entry if entry and entry["scope"] == scope else None for key, entry in entries.items()}
-        ends = [entry["end"] for entry in matching.values() if entry is not None]
-        end = min(ends) if ends else None
-        points.append({"month": point_month.isoformat(),
-            **{key: entry["value"] if entry else None for key, entry in matching.items()},
-            "partial": bool(end and end < _month_end(point_month)),
-            "periodEnd": end.isoformat() if end else None})
-    if not any(point[key] is not None for point in points for key in ("revenue", "costs")):
+    common = {"coverage": coverage, "currency": currency, "reports": reports, "timezone_name": payload["period"]["timezone"]}
+    accrual = _series(rows, month, fields=(("revenue", "income"), ("costs", "expenses")), **common)
+    cash = _series(charts.get("cash"), month, fields=(("cashIn", "cash_in"), ("cashOut", "cash_out")), **common)
+    stripe = _stripe_series(charts.get("stripe"), month, coverage=coverage, currency=currency)
+    if accrual is None and cash is None and stripe is None:
         raise FinancialHistoryError("No compatible verified financial figures are available. Refresh the update's accounting evidence, then review it again.")
+    if accrual is None:
+        accrual = [{"month": _month_shift(month, offset).isoformat(), "revenue": None, "costs": None,
+            "partial": False, "periodEnd": None} for offset in range(-5, 1)]
     # A cached source may end earlier than a newly captured reporting window.
     # Label the actual final-month evidence, not today's refresh timestamp.
-    if points[-1]["periodEnd"]:
-        coverage = min(coverage, date.fromisoformat(points[-1]["periodEnd"]))
-    return {"schemaVersion": 1, "reportingMonth": month.isoformat(),
+    ends = [date.fromisoformat(series[-1]["periodEnd"]) for series in (accrual, cash, stripe)
+        if series and series[-1]["periodEnd"]]
+    if ends:
+        coverage = min(coverage, max(ends))
+    unavailable = charts.get("cash_unavailable")
+    return {"schemaVersion": 2, "reportingMonth": month.isoformat(),
         "rangeStart": _month_shift(month, -5).isoformat(), "rangeEnd": _month_end(month).isoformat(),
-        "cutoff": coverage.isoformat(), "capturedAt": captured_at, "currency": currency, "points": points}
+        "cutoff": coverage.isoformat(), "capturedAt": captured_at, "currency": currency, "points": accrual,
+        "cash": {"points": cash} if cash else None,
+        "cashUnavailable": unavailable if unavailable in {"scope"} else None,
+        "stripe": {"points": stripe} if stripe else None}
+
+
+CASH_SUPPLEMENT_KIND = "pulse_cash_supplement"
+_LEGACY_CACHE: dict = {}
+_LEGACY_CACHE_LIMIT = 512
+
+
+def recompute_report_values(payload):
+    """Recalculate stored Xero totals from their own reports with today's parsers.
+
+    Charts saved before Other Income and every expense section were counted
+    hold totals the current parser no longer produces. The reports themselves
+    are unchanged and hash-verified, so their totals can be recomputed without
+    any provider call.
+    """
+    result = copy.deepcopy(payload)
+    charts = result.get("charts") if isinstance(result.get("charts"), dict) else {}
+    reports = charts.get("source_reports") or {}
+    for row in charts.get("performance") or []:
+        if not isinstance(row, dict):
+            continue
+        for column, field in (("income", "revenue"), ("expenses", "costs")):
+            evidence = (row.get("metric_evidence") or {}).get(column) or {}
+            report = reports.get(evidence.get("report_hash"))
+            if isinstance(report, dict) and content_hash(report) == evidence.get("report_hash"):
+                amount = _verified_amount(field, report)
+                row[column] = str(amount) if amount is not None else None
+    for metric in result.get("metrics") or []:
+        field = {"revenue": "revenue", "monthlyCosts": "costs"}.get((metric or {}).get("key"))
+        metadata = (metric or {}).get("metadata") or {}
+        report = metadata.get("report_payload")
+        if field and isinstance(report, dict) and content_hash(report) == metadata.get("report_hash"):
+            amount = _verified_amount(field, report)
+            metric["value"] = str(amount) if amount is not None else None
+    return result
+
+
+def _cash_supplement(organization_id, month, source_hash):
+    """Cash rows fetched later for a chart saved before cash was collected."""
+    from startup_updates.models import MonthlyEvidenceSnapshot
+    return MonthlyEvidenceSnapshot.objects.filter(organization_id=organization_id, month=month,
+        payload__kind=CASH_SUPPLEMENT_KIND, payload__source_snapshot_hash=source_hash).order_by("-pk").first()
+
+
+def upgrade_legacy_history(history, *, organization_id, month):
+    """Read a pre-cash chart as today's chart, from its own saved evidence.
+
+    Revisions stay immutable: the upgrade is recomputed at read time from the
+    chart's source snapshot plus any backfilled Bank Summary supplement, and is
+    never written back. Anything that cannot be verified keeps the saved chart.
+    """
+    if not isinstance(history, dict):
+        return history
+    frozen, source = history.get("snapshot"), history.get("_source")
+    if (not isinstance(frozen, dict) or frozen.get("schemaVersion") != 1 or not isinstance(source, dict)
+            or type(source.get("snapshotId")) is not int or not isinstance(source.get("snapshotHash"), str)):
+        return history
+    from startup_updates.models import MonthlyEvidenceSnapshot
+    supplement = _cash_supplement(organization_id, month, source["snapshotHash"])
+    key = (organization_id, source["snapshotId"], source["snapshotHash"], frozen.get("capturedAt"),
+        supplement.content_hash if supplement else None)
+    if key not in _LEGACY_CACHE:
+        rebuilt = None
+        snapshot = MonthlyEvidenceSnapshot.objects.filter(pk=source["snapshotId"], content_hash=source["snapshotHash"],
+            organization_id=organization_id, month=month).first()
+        payload = snapshot.payload if snapshot else None
+        if isinstance(payload, dict) and isinstance(frozen.get("capturedAt"), str):
+            payload = recompute_report_values(payload)
+            if supplement and isinstance(supplement.payload.get("charts"), dict):
+                charts = payload.setdefault("charts", {})
+                extra = supplement.payload["charts"]
+                charts["cash"] = copy.deepcopy(extra.get("cash") or [])
+                charts["source_reports"] = {**(charts.get("source_reports") or {}),
+                    **copy.deepcopy(extra.get("source_reports") or {})}
+            try:
+                rebuilt = build_snapshot(payload, month, captured_at=frozen["capturedAt"])
+            except (FinancialHistoryError, KeyError, TypeError, ValueError):
+                rebuilt = None
+        if len(_LEGACY_CACHE) >= _LEGACY_CACHE_LIMIT:
+            _LEGACY_CACHE.pop(next(iter(_LEGACY_CACHE)))
+        _LEGACY_CACHE[key] = rebuilt
+    rebuilt = _LEGACY_CACHE[key]
+    if rebuilt is None:
+        return history
+    return {**history, "snapshot": copy.deepcopy(rebuilt)}
+
+
+def reader_history(history, *, organization_id, month, display=None):
+    """What every reader of a saved update projects: upgraded, with current settings."""
+    if not isinstance(history, dict):
+        return history
+    upgraded = upgrade_legacy_history(history, organization_id=organization_id, month=month)
+    return {**upgraded, "display": normalize_display(display if display is not None else financial_display(organization_id))}
 
 
 def history_for_revision(draft, memo, current, snapshot, *, captured_at, financial_history_snapshot=None):
     """Ignore numerical memo payloads; retain snapshots until an explicit refresh."""
-    prior = (current.structured_memo if current else {}).get("financial_history")
+    prior = copy.deepcopy((current.structured_memo if current else {}).get("financial_history"))
+    if isinstance(prior, dict):
+        # Read-time settings are never persisted with a revision.
+        prior.pop("display", None)
     requested = memo.pop("_financial_history_selection", None)
     memo.pop("financial_history", None)
     if requested is None and financial_history_snapshot is not None:
@@ -277,25 +448,37 @@ def history_owner_preview(history, *, share_amounts=True):
     return history_payload({**history, "enabled": True, "shareAmounts": share_amounts})
 
 
-def history_payload(history):
-    """Allowlist the approved disclosure; relative mode reveals no raw amounts."""
-    selection = history_selection(history)
-    if not selection or not selection["enabled"]:
-        return None
-    frozen = history.get("snapshot")
-    if not isinstance(frozen, dict) or frozen.get("schemaVersion") != 1:
-        return None
-    try:
-        month = date.fromisoformat(frozen["reportingMonth"])
-        cutoff = date.fromisoformat(frozen["cutoff"])
-        captured = datetime.fromisoformat(frozen["capturedAt"].replace("Z", "+00:00"))
-    except (KeyError, TypeError, ValueError):
-        return None
-    if (month.day != 1 or not month <= cutoff <= _month_end(month) or captured.tzinfo is None
-            or frozen.get("currency") not in CURRENCIES or frozen.get("rangeStart") != _month_shift(month, -5).isoformat()
-            or frozen.get("rangeEnd") != _month_end(month).isoformat()):
-        return None
-    rows = frozen.get("points")
+BASES = ("cash", "accrual")
+DISPLAY_KEY = "financial_display"
+_SERIES_FIELDS = {"accrual": ("revenue", "costs"), "cash": ("cashIn", "cashOut"), "stripe": _STRIPE_KEYS}
+
+
+def normalize_display(value):
+    """Founder reporting choices for charts; cash basis and Stripe-in-Xero by default."""
+    value = value if isinstance(value, dict) else {}
+    return {"basis": value["basis"] if value.get("basis") in BASES else "cash",
+        "stripeInXero": value["stripeInXero"] if type(value.get("stripeInXero")) is bool else True}
+
+
+def financial_display(organization_id):
+    """Read the startup's current chart settings; every saved chart follows them."""
+    from startup_updates.models import StartupProfile
+    config = StartupProfile.objects.filter(organization_id=organization_id).values_list(
+        "progress_configuration", flat=True).first()
+    return normalize_display((config or {}).get(DISPLAY_KEY))
+
+
+def with_display(memo, organization_id, *, display=None):
+    """Attach read-time chart settings to a memo copy; never persisted."""
+    history = memo.get("financial_history") if isinstance(memo, dict) else None
+    if isinstance(history, dict):
+        memo["financial_history"] = {**history, "display": normalize_display(
+            display if display is not None else financial_display(organization_id))}
+    return memo
+
+
+def _validated_points(rows, month, cutoff, keys):
+    """Exactly six ordered calendar slots whose coverage agrees with the cutoff."""
     if not isinstance(rows, list) or len(rows) != 6:
         return None
     points = []
@@ -303,8 +486,8 @@ def history_payload(history):
         point_month = _month_shift(month, index - 5)
         if not isinstance(row, dict) or row.get("month") != point_month.isoformat() or type(row.get("partial")) is not bool:
             return None
-        values = {key: _number(row.get(key)) for key in ("revenue", "costs")}
-        if any(row.get(key) is not None and values[key] is None for key in values):
+        values = {key: _number(row.get(key)) for key in keys}
+        if any(row.get(key) is not None and values[key] is None for key in keys):
             return None
         try:
             end = date.fromisoformat(row["periodEnd"]) if row.get("periodEnd") else None
@@ -317,18 +500,126 @@ def history_payload(history):
             return None
         points.append({"month": point_month.isoformat(), **values,
             "partial": row["partial"], "periodEnd": end.isoformat() if end else None})
-    maximum = max((abs(point[key]) for point in points for key in ("revenue", "costs") if point[key] is not None), default=0)
+    return points
+
+
+def _has_values(points, keys):
+    return bool(points) and any(point[key] is not None for point in points for key in keys)
+
+
+def _display_points(frozen, version, month, cutoff, display):
+    """Choose the founder's basis and apply the Stripe merge rule.
+
+    Returns (points, basis, fallback, stripe_mode) or None for a malformed chart.
+    Stripe is never added to Xero when its payouts already land in a Xero bank
+    account (the default), because Xero then already counts that money.
+    """
+    accrual = _validated_points(frozen.get("points"), month, cutoff, _SERIES_FIELDS["accrual"])
+    if accrual is None:
+        return None
+    series = {"accrual": accrual}
+    for name in ("cash", "stripe"):
+        stored = frozen.get(name) if version == 2 else None
+        if stored is None:
+            series[name] = None
+            continue
+        if not isinstance(stored, dict):
+            return None
+        series[name] = _validated_points(stored.get("points"), month, cutoff, _SERIES_FIELDS[name])
+        if series[name] is None:
+            return None
+    basis, fallback = display["basis"], None
+    if basis == "cash" and not _has_values(series["cash"], _SERIES_FIELDS["cash"]):
+        reason = frozen.get("cashUnavailable") if version == 2 else None
+        fallback = reason if reason in {"scope"} else ("legacy" if version == 1 else "unavailable")
+        basis = "accrual"
+    primary = series[basis]
+    money_in, money_out = _SERIES_FIELDS[basis]
+    stripe = series["stripe"] if _has_values(series["stripe"], _STRIPE_KEYS) else None
+    xero_present = _has_values(primary, (money_in, money_out))
+    if stripe is not None and not xero_present and not _has_values(series["accrual"], _SERIES_FIELDS["accrual"]):
+        mode = "only"
+    elif stripe is not None and xero_present:
+        mode = "withinXero" if display["stripeInXero"] else "added"
+    else:
+        mode, stripe = None, None
+    if mode == "only":
+        # Stripe alone is not a fallback for a missing Xero basis: it follows the
+        # founder's basis directly (payouts for cash, net sales for accrual).
+        basis, fallback = display["basis"], None
+    points = []
+    for index, point in enumerate(primary):
+        revenue, costs = point[money_in], point[money_out]
+        partial, end = point["partial"], point["periodEnd"]
+        share = None
+        stripe_point = stripe[index] if stripe else None
+        if stripe_point and stripe_point["periodEnd"]:
+            share = stripe_point["payouts"] if basis == "cash" else stripe_point["sales"] - stripe_point["refunds"]
+            if mode == "only":
+                # Stripe cannot see the rest of the business, so it never supplies costs.
+                revenue, costs = share, None
+                partial, end = stripe_point["partial"], stripe_point["periodEnd"]
+            elif mode == "added" and revenue is not None:
+                revenue += share
+                if basis == "accrual" and costs is not None:
+                    costs += stripe_point["fees"]
+            elif mode == "added":
+                share = None
+        if revenue is None and costs is None:
+            share, end, partial = None, None, False
+        points.append({"month": point["month"], "revenue": revenue, "costs": costs,
+            "stripe": share, "partial": partial, "periodEnd": end})
+    return points, basis, fallback, mode
+
+
+def history_payload(history):
+    """Allowlist the approved disclosure; relative mode reveals no raw amounts."""
+    selection = history_selection(history)
+    if not selection or not selection["enabled"]:
+        return None
+    frozen = history.get("snapshot")
+    if not isinstance(frozen, dict) or frozen.get("schemaVersion") not in (1, 2):
+        return None
+    version = frozen["schemaVersion"]
+    try:
+        month = date.fromisoformat(frozen["reportingMonth"])
+        cutoff = date.fromisoformat(frozen["cutoff"])
+        captured = datetime.fromisoformat(frozen["capturedAt"].replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+    if (month.day != 1 or not month <= cutoff <= _month_end(month) or captured.tzinfo is None
+            or frozen.get("currency") not in CURRENCIES or frozen.get("rangeStart") != _month_shift(month, -5).isoformat()
+            or frozen.get("rangeEnd") != _month_end(month).isoformat()):
+        return None
+    chosen = _display_points(frozen, version, month, cutoff, normalize_display(history.get("display")))
+    if chosen is None:
+        return None
+    points, basis, fallback, stripe_mode = chosen
     if not any(point[key] is not None for point in points for key in ("revenue", "costs")):
         return None
+    maximum = max((abs(point[key]) for point in points for key in ("revenue", "costs", "stripe") if point[key] is not None), default=0)
     if not selection["shareAmounts"]:
         for point in points:
-            for key in ("revenue", "costs"):
+            for key in ("revenue", "costs", "stripe"):
                 if point[key] is not None:
                     point[key] = point[key] / maximum * 100 if maximum else 0.0
+    final_end = points[-1]["periodEnd"]
+    if final_end and final_end < cutoff.isoformat():
+        cutoff = date.fromisoformat(final_end)
     return {"schemaVersion": 1, "reportingMonth": month.isoformat(),
         "rangeStart": frozen["rangeStart"], "rangeEnd": frozen["rangeEnd"], "cutoff": cutoff.isoformat(),
         "capturedAt": frozen["capturedAt"], "shareAmounts": selection["shareAmounts"],
-        "currency": frozen["currency"] if selection["shareAmounts"] else None, "points": points}
+        "currency": frozen["currency"] if selection["shareAmounts"] else None,
+        "basis": basis, "basisFallback": fallback, "stripe": stripe_mode, "points": points}
+
+
+def history_labels(chart):
+    """Plain names for the two series and the chart, for any reader."""
+    cash = (chart or {}).get("basis") == "cash"
+    return {"in": "Cash in" if cash else "Revenue", "out": "Cash out" if cash else "Costs",
+        "title": "Cash in and out" if cash else "Revenue and costs",
+        "source": ("Xero Bank Summary (cash basis)" if cash else "Xero Profit and Loss (accrual basis)")
+            if (chart or {}).get("stripe") != "only" else "Stripe balance (Stripe sales only)"}
 
 
 def history_chart_context(chart):
@@ -368,7 +659,9 @@ def history_chart_context(chart):
                 segments.append({"field": field,
                     "coordinates": f"{previous['x']},{previous[field + 'Y']} {point['x']},{point[field + 'Y']}",
                     "partial": previous["partial"] or point["partial"]})
+    labels = history_labels(chart)
     return {"reportingMonth": month.strftime("%B %Y"), "points": points, "segments": segments,
+        "inLabel": labels["in"], "outLabel": labels["out"], "title": labels["title"], "sourceLabel": labels["source"],
         "unit": chart["currency"] if chart["shareAmounts"] else "Relative scale · peak = 100",
         "cutoff": chart["cutoff"], "partial": chart["cutoff"] < chart["rangeEnd"],
         "ticks": [{"y": position(low + (high - low) * index / 4),

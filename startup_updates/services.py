@@ -37,6 +37,7 @@ from integrations.models import (
 )
 from integrations.services.xero_scopes import (
     XERO_REPORT_SCOPE,
+    xero_has_cash_report_scope,
     xero_has_report_scope,
 )
 from integrations.services.gmail_scopes import (
@@ -1156,10 +1157,65 @@ def _xero_monthly_cost_entry(
     return total_expenses or operating_expenses or cost_of_sales
 
 
+def _xero_revenue_entry(
+    income: Optional[dict[str, Any]],
+    other_income: Optional[dict[str, Any]],
+    net: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Whole-report revenue: trading income plus Other Income (grants, interest).
+
+    A report with a Net Profit row but no income rows has zero revenue, not an
+    unknown one: Xero omits empty sections rather than printing a zero total.
+    """
+    parts = [entry for entry in (income, other_income) if entry]
+    if not parts:
+        if not net:
+            return None
+        return {"label": "Total Income", "normalized_label": "total income", "amount": Decimal("0"),
+            "section": "", "normalized_section": "", "row_type": "calculated",
+            "component_labels": [], "component_amounts": []}
+    if len(parts) == 1 and parts[0] is income:
+        return income
+    return {
+        "label": " + ".join(part["label"] for part in parts),
+        "normalized_label": " + ".join(part["normalized_label"] for part in parts),
+        "amount": sum((part["amount"] for part in parts), Decimal("0")),
+        "section": "", "normalized_section": "", "row_type": "calculated",
+        "component_labels": [part["label"] for part in parts],
+        "component_amounts": [str(part["amount"]) for part in parts],
+    }
+
+
+def _xero_reconciled_cost_entry(revenue, net, explicit):
+    """Costs are everything the P&L subtracts from revenue to reach Net Profit.
+
+    Deriving them from the report's own totals includes every expense section
+    (direct costs, overheads, depreciation, other expenses) whatever a
+    founder's chart of accounts calls them, so revenue - costs always equals
+    Xero's Net Profit.
+    """
+    if not revenue or not net:
+        return explicit
+    amount = revenue["amount"] - _signed_xero_net_amount(net)
+    return {
+        "label": "Total Income - Net Profit",
+        "normalized_label": "total income - net profit",
+        "amount": amount,
+        "section": "",
+        "normalized_section": "",
+        "row_type": "calculated",
+        "component_labels": (explicit or {}).get("component_labels") or ([explicit["label"]] if explicit else []),
+        "component_amounts": (explicit or {}).get("component_amounts") or ([str(explicit["amount"])] if explicit else []),
+        "reconciled_to_net_profit": True,
+    }
+
+
 def _parse_xero_profit_and_loss_report(payload: dict[str, Any]) -> dict[str, Any]:
     entries = _xero_report_entries(payload)
-    revenue = next((entry for label in ("total income", "total revenue") for entry in entries if entry["normalized_label"] == label), None)
+    income = next((entry for label in ("total income", "total trading income", "total revenue") for entry in entries if entry["normalized_label"] == label), None)
+    other_income = _find_xero_report_amount(entries, ["Total Other Income", "Total Non-operating Income", "Total Other Revenue"])
     net = _find_xero_report_amount(entries, ["Net Profit", "Net Loss", "Net Profit/(Loss)", "Net Profit / (Loss)"])
+    revenue = _xero_revenue_entry(income, other_income, net)
     cost_of_sales = _find_xero_report_amount(
         entries,
         [
@@ -1185,17 +1241,96 @@ def _parse_xero_profit_and_loss_report(payload: dict[str, Any]) -> dict[str, Any
             "Total Expense",
         ],
     )
+    explicit_costs = _xero_monthly_cost_entry(
+        cost_of_sales=cost_of_sales,
+        operating_expenses=operating_expenses,
+        total_expenses=total_expenses,
+    )
     return {
         "entries": entries,
         "revenue": revenue,
+        "income": income,
+        "other_income": other_income,
         "net": net,
         "cost_of_sales": _xero_report_amount_entry(cost_of_sales),
         "operating_expenses": _xero_report_amount_entry(operating_expenses or total_expenses),
-        "monthly_costs": _xero_monthly_cost_entry(
-            cost_of_sales=cost_of_sales,
-            operating_expenses=operating_expenses,
-            total_expenses=total_expenses,
-        ),
+        "monthly_costs": _xero_reconciled_cost_entry(revenue, net, explicit_costs),
+    }
+
+
+_BANK_SUMMARY_COLUMNS = {
+    "opening balance": "opening",
+    "cash received": "received",
+    "cash spent": "spent",
+    "closing balance": "closing",
+}
+
+
+def _parse_xero_bank_summary_report(payload: dict[str, Any]) -> dict[str, Any]:
+    """Cash in and out across every bank account, as Xero's Bank Summary prints it.
+
+    This is the report behind Xero's dashboard "Cash in and out" chart. Each
+    account must reconcile (opening + received - spent = closing); a report that
+    does not is returned without totals so the chart shows a gap, never a guess.
+    """
+    reports = payload.get("Reports") or payload.get("reports") or [] if isinstance(payload, dict) else []
+    report = reports[0] if reports and isinstance(reports[0], dict) else {}
+    columns: dict[str, int] = {}
+    accounts: list[dict[str, Any]] = []
+    total: Optional[dict[str, Decimal]] = None
+
+    def cells_of(row):
+        return [str((cell or {}).get("Value") or (cell or {}).get("value") or "").strip()
+            for cell in (row.get("Cells") or row.get("cells") or []) if isinstance(cell, dict)]
+
+    def read(values):
+        result = {}
+        for key, index in columns.items():
+            amount = _report_decimal(values[index]) if index < len(values) else None
+            if amount is None:
+                return None
+            result[key] = amount
+        return result
+
+    def visit(rows):
+        nonlocal total
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            row_type = str(row.get("RowType") or row.get("row_type") or "").strip().lower()
+            values = cells_of(row)
+            if row_type == "header":
+                for index, value in enumerate(values):
+                    key = _BANK_SUMMARY_COLUMNS.get(_normalize_report_label(value))
+                    if key:
+                        columns[key] = index
+            elif row_type in {"row", "summaryrow"} and len(columns) == 4 and values:
+                amounts = read(values)
+                if amounts is None:
+                    continue
+                if row_type == "summaryrow" or _normalize_report_label(values[0]) == "total":
+                    total = amounts
+                else:
+                    accounts.append({"label": values[0], **amounts})
+            visit(row.get("Rows") or row.get("rows"))
+
+    visit(report.get("Rows") or report.get("rows") or [])
+    if len(columns) != 4 or (not accounts and total is None):
+        return {"cash_in": None, "cash_out": None, "accounts": [], "reconciled": False}
+
+    def reconciles(item):
+        return abs(item["opening"] + item["received"] - abs(item["spent"]) - item["closing"]) <= Decimal("0.01")
+
+    if total is None:
+        total = {key: sum((item[key] for item in accounts), Decimal("0")) for key in ("opening", "received", "spent", "closing")}
+    reconciled = all(reconciles(item) for item in accounts) and reconciles(total)
+    return {
+        "cash_in": total["received"] if reconciled else None,
+        "cash_out": abs(total["spent"]) if reconciled else None,
+        "opening": total["opening"],
+        "closing": total["closing"],
+        "accounts": [item["label"] for item in accounts],
+        "reconciled": reconciled,
     }
 
 
@@ -1644,6 +1779,38 @@ def publish_xero_metric_observations(
                 warnings.append("Xero Balance Sheet reporting date does not match the source cutoff; cash and runway are unavailable for that cutoff.")
         except Exception as exc:
             warnings.append(f"Xero Balance Sheet unavailable: {type(exc).__name__}.")
+        cash_by_month: dict[date, tuple[dict[str, Any], dict[str, Any]]] = {}
+        if xero_has_cash_report_scope(connection.scopes):
+            for month in report_months:
+                cutoff = min(end_date, _month_end(month))
+                try:
+                    cash_payload = fetch_xero_accounting_report(connection, "BankSummary",
+                        params={"fromDate": month.isoformat(), "toDate": cutoff.isoformat()})
+                    cash_by_month[month] = (_parse_xero_bank_summary_report(cash_payload), {
+                        "report_hash": content_hash(cash_payload), "report_payload": cash_payload,
+                        "accounting_basis": "cash", "fetched_at": timezone.now().isoformat()})
+                except Exception as exc:
+                    warnings.append(f"Xero Bank Summary unavailable for {month.isoformat()}: {type(exc).__name__}.")
+        else:
+            warnings.append("Reconnect Xero to allow the Bank Summary report for cash in and out.")
+        for report_month, (cash, evidence) in cash_by_month.items():
+            for key, name, field, metric in (("cashIn", "Cash in", "cash_in", "xero_bank_summary_cash_in"),
+                    ("cashOut", "Cash out", "cash_out", "xero_bank_summary_cash_out")):
+                if cash.get(field) is None:
+                    continue
+                save_metric(
+                    month=report_month, key=key, name=name,
+                    value_text=_format_money(cash[field], currency), value_number=cash[field], unit=currency,
+                    records_for_metric=[],
+                    summary=f"{name} across all bank accounts from the Xero Bank Summary report.",
+                    metadata=_xero_report_metadata(
+                        source_metric=metric, warnings=warnings, report_name="BankSummary",
+                        start_date=report_month, end_date=min(end_date, _month_end(report_month)),
+                        extra={**evidence, "connection_id": connection.id, "source_currency": currency,
+                            "bank_accounts": cash.get("accounts", []),
+                            "calculation_basis": f"bank_summary_total_{field}"},
+                    ),
+                )
         report_metrics_available = report_metrics_available or bool(profit_and_loss_by_month)
         current_report = profit_and_loss_by_month.get(current_month) or {}
         previous_report = profit_and_loss_by_month.get(_previous_month_start(current_month)) or {}
@@ -1692,7 +1859,7 @@ def publish_xero_metric_observations(
                     value_number=revenue["amount"],
                     unit=currency,
                     records_for_metric=[],
-                    summary="Revenue calculated from Xero Profit and Loss total income.",
+                    summary="Revenue calculated from Xero Profit and Loss total income plus other income.",
                     metadata=_xero_report_metadata(
                         source_metric="xero_profit_and_loss_revenue",
                         warnings=warnings,
@@ -1700,7 +1867,9 @@ def publish_xero_metric_observations(
                         start_date=report_month,
                         end_date=min(end_date, _month_end(report_month)),
                         entry=revenue,
-                        extra={**shared_detail, "calculation_basis": "profit_and_loss_total_income"},
+                        extra={**shared_detail, "calculation_basis": "profit_and_loss_total_income_plus_other_income",
+                            "component_labels": revenue.get("component_labels", []),
+                            "component_amounts": revenue.get("component_amounts", [])},
                     ),
                 )
             if report_monthly_costs:
@@ -1722,7 +1891,8 @@ def publish_xero_metric_observations(
                         entry=report_monthly_costs,
                         extra={
                             **shared_detail,
-                            "calculation_basis": "cost_of_sales_plus_operating_expenses_when_available_otherwise_total_expenses",
+                            "calculation_basis": "total_income_minus_net_profit" if report_monthly_costs.get("reconciled_to_net_profit")
+                                else "cost_of_sales_plus_operating_expenses_when_available_otherwise_total_expenses",
                             "component_labels": report_monthly_costs.get("component_labels", []),
                             "component_amounts": report_monthly_costs.get("component_amounts", []),
                         },
@@ -2065,25 +2235,36 @@ def _financial_revenue_rows_from_metric(metric: Optional[StartupMetricObservatio
     return parsed
 
 
-def _verified_chart_observation(metric):
-    """Legacy observations cannot become verified history just by being frozen."""
+def _verified_chart_amount(metric) -> Optional[Decimal]:
+    """The amount a verified observation's own source report supports, else None.
+
+    Xero amounts are recomputed from the hash-verified report with today's
+    parsers, so an observation saved before a parser fix still charts the
+    report's correct total instead of disappearing.
+    """
     metadata = metric.source_metadata or {}
     if metric.source_provider == "financial":
-        return (metric.metric_key == "revenue" and metadata.get("definition_version") == 2
+        valid = (metric.metric_key == "revenue" and metadata.get("definition_version") == 2
             and metadata.get("basis") == "paid_stripe_invoice_sales_excluding_tax")
+        return metric.value_number if valid else None
     if metric.source_provider != "xero":
-        return False
+        return None
     from startup_updates.evidence_contract import content_hash
     payload = metadata.get("report_payload")
-    if not payload or content_hash(payload) != metadata.get("report_hash") or metadata.get("accounting_basis") != "accrual":
-        return False
+    cash_key = {"cashIn": ("cash_in", "xero_bank_summary_cash_in"), "cashOut": ("cash_out", "xero_bank_summary_cash_out")}.get(metric.metric_key)
+    if not payload or content_hash(payload) != metadata.get("report_hash") or metadata.get("accounting_basis") != ("cash" if cash_key else "accrual"):
+        return None
     try:
         start = date.fromisoformat(metadata.get("report_start_date", ""))
         end = date.fromisoformat(metadata.get("report_end_date", ""))
     except (TypeError, ValueError):
-        return False
+        return None
     if start != metric.period_month or not start <= end <= _month_end(start):
-        return False
+        return None
+    if cash_key:
+        field, source_metric = cash_key
+        amount = _parse_xero_bank_summary_report(payload).get(field)
+        return amount if amount is not None and metadata.get("source_metric") == source_metric else None
     parsed = _parse_xero_profit_and_loss_report(payload)
     key, source_metric = {
         "revenue": ("revenue", "xero_profit_and_loss_revenue"),
@@ -2092,7 +2273,13 @@ def _verified_chart_observation(metric):
     }.get(metric.metric_key, (None, None))
     entry = parsed.get(key)
     amount = _signed_xero_net_amount(entry) if key == "net" and entry else entry.get("amount") if entry else None
-    return bool(entry and metadata.get("source_metric") == source_metric and metric.value_number == amount)
+    return amount if entry and metadata.get("source_metric") == source_metric else None
+
+
+def _verified_chart_observation(metric):
+    """Legacy observations cannot become verified history just by being frozen."""
+    amount = _verified_chart_amount(metric)
+    return amount is not None and metric.value_number == amount
 
 
 def build_monthly_financial_snapshot(
@@ -2115,11 +2302,13 @@ def build_monthly_financial_snapshot(
     observations = list(StartupMetricObservation.objects.filter(
         organization=organization, period_month__in=months, unit=currency,
         source_provider__in=source_providers if source_providers is not None else ("xero", "financial"),
-        metric_key__in=("revenue", "monthlyCosts", "netProfitLoss"),
+        metric_key__in=("revenue", "monthlyCosts", "netProfitLoss", "cashIn", "cashOut"),
     ).order_by("-observed_at", "-id"))
     from startup_updates.connection_scope import metric_in_scope
-    observations = [metric for metric in observations if _verified_chart_observation(metric) and metric_in_scope(metric, connection_pins)]
+    verified = {metric.pk: _verified_chart_amount(metric) for metric in observations}
+    observations = [metric for metric in observations if verified[metric.pk] is not None and metric_in_scope(metric, connection_pins)]
     performance = []
+    cash_rows = []
     source_reports = {}
     for month in months:
         values = {}
@@ -2133,7 +2322,7 @@ def build_monthly_financial_snapshot(
                 ) or (m.source_provider == "financial" and (m.source_metadata or {}).get("basis") == "paid_stripe_invoice_sales_excluding_tax")]
             accounting = [m for m in candidates if m.source_provider == "xero"]
             chosen = next(iter(accounting or candidates), None)
-            values[output] = float(chosen.value_number) if chosen and chosen.value_number is not None else None
+            values[output] = float(verified[chosen.pk]) if chosen else None
             if chosen:
                 metadata = chosen.source_metadata or {}
                 evidence[output] = {"observation_id": chosen.pk, "source_provider": chosen.source_provider,
@@ -2147,12 +2336,27 @@ def build_monthly_financial_snapshot(
             "is_partial": partial or (month == target_month and (as_of_date or timezone.localdate()) < _month_end(month)),
             "metric_evidence": evidence,
             "basis": "recorded_metrics"})
-    if not any(point[field] is not None for point in performance for field in ("income", "expenses", "net")):
+        # Cash in and out (Xero Bank Summary) travel beside the accrual rows so
+        # one saved chart can show either basis without another provider call.
+        cash_row = {"month": month.isoformat(), "metric_evidence": {}}
+        for key, output in (("cashIn", "cash_in"), ("cashOut", "cash_out")):
+            chosen = next((m for m in observations if m.period_month == month and m.metric_key == key), None)
+            cash_row[output] = str(verified[chosen.pk]) if chosen else None
+            if chosen:
+                metadata = chosen.source_metadata or {}
+                cash_row["metric_evidence"][output] = {"source_provider": chosen.source_provider, "unit": chosen.unit,
+                    "timezone": metadata.get("timezone") or profile.reporting_timezone,
+                    **{key: metadata[key] for key in ("connection_id", "source_metric", "report_hash", "report_start_date", "report_end_date", "accounting_basis") if key in metadata}}
+                source_reports[metadata["report_hash"]] = metadata["report_payload"]
+        if cash_row["metric_evidence"]:
+            cash_rows.append(cash_row)
+    if not any(point[field] is not None for point in performance for field in ("income", "expenses", "net")) and not cash_rows:
         return None
     return {
         "schema_version": 2, "target_month": target_month.isoformat(),
         "as_of_date": (as_of_date or timezone.localdate()).isoformat(), "currency": currency,
         "generated_at": timezone.now().isoformat(), "performance": performance,
+        "cash": cash_rows,
         "source_reports": source_reports,
         "revenue_mix": [], "event_contribution": [], "overhead": [],
         "data_quality": {"warnings": ["Missing or unverified historical periods remain unknown. Category allocations are not inferred."],
@@ -5562,17 +5766,18 @@ def render_monthly_update_markdown(structured_memo: dict) -> str:
         lines.append(topline)
         lines.append("")
 
-    from startup_updates.financial_history import history_payload
+    from startup_updates.financial_history import history_labels, history_payload
     financial_history = history_payload(memo.get("financial_history"))
     if financial_history:
+        labels = history_labels(financial_history)
         unit = financial_history["currency"] if financial_history["shareAmounts"] else "Relative scale (peak = 100; amounts hidden)"
-        lines.extend(["## Revenue and costs", f"Six-month snapshot for {financial_history['reportingMonth'][:7]} · {unit}", ""])
+        lines.extend([f"## {labels['title']}", f"Six-month snapshot for {financial_history['reportingMonth'][:7]} · {unit} · {labels['source']}", ""])
         for point in financial_history["points"]:
             revenue = "Unavailable" if point["revenue"] is None else f"{point['revenue']:,.2f}"
             costs = "Unavailable" if point["costs"] is None else f"{point['costs']:,.2f}"
             current = " · This update" if point["month"] == financial_history["reportingMonth"] else ""
             coverage = f" · Partial, through {point['periodEnd']}" if point["partial"] else ""
-            lines.append(f"- {point['month'][:7]}{current}: Revenue {revenue}; costs {costs}{coverage}")
+            lines.append(f"- {point['month'][:7]}{current}: {labels['in']} {revenue}; {labels['out'].lower()} {costs}{coverage}")
         lines.append("")
 
     for heading, items in sections:

@@ -1,0 +1,86 @@
+{
+  "algorithm": "basic-source-v1",
+  "commitSha": "cccccccccccccccccccccccccccccccccccccccc",
+  "sourceManifestSha256": "78a3d591ed17d40a1a4bf0f2e4e0bc1edb19bc2b6c4a40e58dbf9f00c997ec5f",
+  "scope": [
+    "get-client-referrals"
+  ],
+  "route": "supabase",
+  "model": "kimi-k3",
+  "pricing": {
+    "input": 3,
+    "cachedInput": 0.3,
+    "output": 15
+  },
+  "contextSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "execution": {
+    "maxSourceBytes": 1000000,
+    "maxFiles": 100,
+    "maxSourceBatches": 10,
+    "maxDurationMs": 60000,
+    "maxModelUsd": 5,
+    "reportReserveUsd": 1
+  },
+  "workload": {
+    "files": 1,
+    "sourceBytes": 37,
+    "sourceBatches": 1,
+    "inputTokenUpperBound": 6387,
+    "outputTokenLimit": 16384,
+    "sourceReserveUsd": 0.264921001
+  },
+  "checks": [
+    {
+      "id": "basic:source:1",
+      "kind": "source_batch",
+      "required": true
+    },
+    {
+      "id": "basic:credentials",
+      "kind": "credential_patterns",
+      "required": true
+    },
+    {
+      "id": "basic:review",
+      "kind": "evidence_review",
+      "required": false
+    }
+  ],
+  "batchRanges": [
+    [
+      {
+        "file": "supabase/functions/get-client-referrals/index.ts",
+        "start": 0,
+        "end": 37
+      }
+    ]
+  ],
+  "contract": {
+    "version": 1,
+    "phase": "basic",
+    "tier": "basic",
+    "parentCheckoutId": null,
+    "planId": "40961b6f65a0e524ba485f752e97075ac1cc63f6287f7d9dd730aa5d9a534e2b",
+    "checks": [
+      {
+        "id": "basic:credentials",
+        "kind": "credential_patterns",
+        "required": true
+      },
+      {
+        "id": "basic:review",
+        "kind": "evidence_review",
+        "required": false
+      },
+      {
+        "id": "basic:source:1",
+        "kind": "source_batch",
+        "required": true
+      }
+    ],
+    "totalPoints": 24,
+    "duePoints": 24,
+    "commitSha": "cccccccccccccccccccccccccccccccccccccccc",
+    "sourceManifestSha256": "78a3d591ed17d40a1a4bf0f2e4e0bc1edb19bc2b6c4a40e58dbf9f00c997ec5f"
+  }
+}

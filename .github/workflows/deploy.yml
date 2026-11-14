@@ -104,6 +104,9 @@ jobs:
     - name: Check test-module assignment
       run: python scripts/check_test_assignment.py
 
+    - name: Check Cybertest authority and phase contracts without database access
+      run: python scripts/test_without_database.py roo.test_cybertest_entry roo.tests_cybertest_entry_views roo.test_cybertest_phase_api roo.test_cybertest_policy roo.test_cybertest_delivery roo.test_cybertest_plan roo.test_cybertest_production_config roo.test_cybertest_staging_config
+
     - name: Validate selected test labels without database access
       run: python scripts/test_without_database.py --collect-ci-selection
 
@@ -142,7 +145,7 @@ jobs:
 
     - name: Check personal agent gateway without database access
       # SQL suites skip here; they require the separately reviewed disposable runner.
-      run: python scripts/test_without_database.py agent_runtime.tests.test_personal_context agent_runtime.tests.test_community agent_runtime.tests.test_core agent_runtime.tests.test_interface agent_runtime.tests.test_event_webhooks agent_runtime.tests.test_dot_protocol agent_runtime.tests.test_native_pilot agent_runtime.tests.test_native_safety agent_runtime.tests.test_native_queue agent_runtime.tests.test_native_watch agent_runtime.tests.test_model_budget agent_runtime.tests.test_model_proxy agent_runtime.tests.test_model_transport agent_runtime.tests.test_native_database agent_runtime.tests.test_unified_bridge_database
+      run: python scripts/test_without_database.py agent_runtime.tests.test_personal_context agent_runtime.tests.test_native_guest agent_runtime.tests.test_community agent_runtime.tests.test_core agent_runtime.tests.test_interface agent_runtime.tests.test_event_webhooks agent_runtime.tests.test_dot_protocol agent_runtime.tests.test_native_pilot agent_runtime.tests.test_native_safety agent_runtime.tests.test_native_queue agent_runtime.tests.test_native_watch agent_runtime.tests.test_model_budget agent_runtime.tests.test_model_proxy agent_runtime.tests.test_model_transport agent_runtime.tests.test_native_database agent_runtime.tests.test_unified_bridge_database
 
     - name: Check inbox account bindings without database access
       run: python scripts/test_without_database.py community_chat.tests.test_inbox_accounts community_chat.tests.test_inbox_erasure integrations.tests_inbox_activity integrations.tests_inbox_targeted_selection integrations.tests_inbox_own_hints integrations.tests_inbox_coverage integrations.tests_read_coverage integrations.tests_inbox_exports integrations.tests_inbox_observations integrations.tests_inbox_mentions integrations.tests_inbox_relay_counts community_chat.tests.test_adapter
@@ -216,6 +219,7 @@ jobs:
           startup_updates.tests_draft_disclosure_unit \
           startup_updates.tests_financial_history_unit \
           startup_updates.tests_financial_refresh_unit \
+          startup_updates.tests_financial_basis_unit \
           startup_updates.tests_dispatch_timing_unit \
           startup_updates.tests_update_identity.GenerationDateCompatibilityTests
 
@@ -484,6 +488,9 @@ jobs:
           tests.test_vibe_marketing_autofill \
           founder_tools.my_startup.test_database \
           roo.tests_rate_card \
+          roo.tests_cybertest_checkout \
+          roo.tests_cybertest_company_binding \
+          roo.tests_cybertest_phases \
           roo.tests_legacy_office_manager \
           tests.test_periodic_command \
           tests.test_retired_runtime_packaging \
@@ -593,6 +600,7 @@ jobs:
           community_chat.tests.test_tokenmaxer_federation \
           community_chat.tests.test_home \
           community_chat.tests.test_roo_slack_dm \
+          community_chat.tests.test_slack_agent_bots \
           community_chat.tests.test_roo_channel_mentions \
           community_chat.tests.test_slack_mentions \
           community_chat.tests.test_workspace_mentions_unit \
@@ -925,6 +933,9 @@ jobs:
 
     - name: Run meeting-room PostgreSQL tests
       run: python manage.py test roo.tests_meeting_rooms --verbosity 2
+
+    - name: Run Cybertest PostgreSQL payment concurrency tests
+      run: python manage.py test roo.tests_cybertest_concurrency --verbosity 2
 
     - name: Run privacy-boundary PostgreSQL tests
       run: |
@@ -1597,6 +1608,7 @@ jobs:
         AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY: ${{ vars.AGENT_RUNTIME_NATIVE_BACKLOG_REPLAY || 'false' }}
         AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY: ${{ vars.AGENT_RUNTIME_MCP_EVENTS_LEASE_POLICY || '24h' }}
         AGENT_RUNTIME_NATIVE_DURABLE_WATCH: ${{ vars.AGENT_RUNTIME_NATIVE_DURABLE_WATCH || 'false' }}
+        AGENT_RUNTIME_NATIVE_GUEST_REPLY_ENABLED: ${{ vars.AGENT_RUNTIME_NATIVE_GUEST_REPLY_ENABLED || 'false' }}
         AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS: ${{ vars.AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS || '600' }}
         AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS: ${{ vars.AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS || '86400' }}
         AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED: ${{ vars.AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED || 'false' }}
@@ -1611,6 +1623,8 @@ jobs:
         MESSAGE_SYNC_ENABLED: ${{ vars.MESSAGE_SYNC_ENABLED || 'false' }}
         MESSAGE_SYNC_RECENT_HISTORY_ENABLED: ${{ vars.MESSAGE_SYNC_RECENT_HISTORY_ENABLED || 'false' }}
         SLACK_MEMBER_CHANNEL_ALLOWED_IDS: ${{ vars.SLACK_MEMBER_CHANNEL_ALLOWED_IDS || '' }}
+        SLACK_AGENT_BOTS_ENABLED: ${{ vars.SLACK_AGENT_BOTS_ENABLED || 'false' }}
+        SLACK_AGENT_BOTS: ${{ vars.SLACK_AGENT_BOTS || '' }}
         MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED: ${{ vars.MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED || 'false' }}
         COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED: ${{ vars.COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED || 'false' }}
         COMMUNITY_CHAT_INBOX_ERASURE_ENABLED: ${{ vars.COMMUNITY_CHAT_INBOX_ERASURE_ENABLED || 'false' }}
