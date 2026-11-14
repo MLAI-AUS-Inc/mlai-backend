@@ -684,14 +684,15 @@
         "island"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "ec1c4ddd36f7c81450549f48147696171d660b52bcf76e3b8fe683c94d4f509b",
+      "function_sha256": "9690ad8ff798b52a8451345333eaf53d06b47bb9f1b453d7bdbd5ade7518e881",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_island_research_unit.py",
+        "content_factory/tests_research_workspace_database.py",
         "tests/test_content_islands.py"
       ],
       "reason": "Saved island receiver is ContentIsland, not the input Run; metric/keyword adoption and region refresh write separate island-domain models only.",
-      "guard": "Explicit ContentIsland query/constructor and island row saves; region rebuild writes ContentIslandRegion/ContentIsland under the organization lock without Run writes.",
+      "guard": "Explicit ContentIsland query/constructor and island row saves; region rebuild writes ContentIslandRegion/ContentIsland under the organization lock without Run writes. The organization lock serializes adoption with reset. Retired research cannot create island-domain rows.",
       "pending_owner": null
     },
     {
@@ -708,14 +709,15 @@
         "island"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "ec1c4ddd36f7c81450549f48147696171d660b52bcf76e3b8fe683c94d4f509b",
+      "function_sha256": "9690ad8ff798b52a8451345333eaf53d06b47bb9f1b453d7bdbd5ade7518e881",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_island_research_unit.py",
+        "content_factory/tests_research_workspace_database.py",
         "tests/test_content_islands.py"
       ],
       "reason": "Saved island receiver is ContentIsland, not the input Run; metric/keyword adoption and region refresh write separate island-domain models only.",
-      "guard": "Explicit ContentIsland query/constructor and island row saves; region rebuild writes ContentIslandRegion/ContentIsland under the organization lock without Run writes.",
+      "guard": "Explicit ContentIsland query/constructor and island row saves; region rebuild writes ContentIslandRegion/ContentIsland under the organization lock without Run writes. The organization lock serializes adoption with reset. Retired research cannot create island-domain rows.",
       "pending_owner": null
     },
     {
@@ -815,13 +817,14 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "24597c6250f1b8a1e12abeb447fe4c1921d7747963ebd8da06f5d0b252e6ebfc",
+      "function_sha256": "2baa8290e07faa032ece3cdc999d69546e70cf27c5a87b96c8e4d9753232f15b",
       "classification": "owned_backend_observation",
       "test_refs": [
+        "content_factory/tests_research_workspace_database.py",
         "tests/test_content_islands.py"
       ],
       "reason": "Backend-owned selection/evolution metadata saves omit Run clocks for event owners; ContentIsland writes are not execution status.",
-      "guard": "event_owned(run) result-only branches at all three Run save sites.",
+      "guard": "event_owned(run) result-only branches at all three Run save sites. The organization and run locks are retained. Validate the research cutoff before changing selection state.",
       "pending_owner": null
     },
     {
@@ -863,13 +866,14 @@
         "island"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "24597c6250f1b8a1e12abeb447fe4c1921d7747963ebd8da06f5d0b252e6ebfc",
+      "function_sha256": "2baa8290e07faa032ece3cdc999d69546e70cf27c5a87b96c8e4d9753232f15b",
       "classification": "owned_backend_observation",
       "test_refs": [
+        "content_factory/tests_research_workspace_database.py",
         "tests/test_content_islands.py"
       ],
       "reason": "Backend-owned selection/evolution metadata saves omit Run clocks for event owners; ContentIsland writes are not execution status.",
-      "guard": "event_owned(run) result-only branches at all three Run save sites.",
+      "guard": "event_owned(run) result-only branches at all three Run save sites. The organization and run locks are retained. Validate the research cutoff before changing selection state.",
       "pending_owner": null
     },
     {
@@ -1440,7 +1444,7 @@
       "identity": "content_factory/run_ownership.py:reserve_admitted_run:6d456f927b6ca4618878d69efe45c83b07714799f1258c7c4d1c62105c2b3fde:1",
       "path": "content_factory/run_ownership.py",
       "function": "reserve_admitted_run",
-      "line": 381,
+      "line": 370,
       "kind": "model_get_or_create",
       "fields": [],
       "statement_sha256": "6d456f927b6ca4618878d69efe45c83b07714799f1258c7c4d1c62105c2b3fde",
@@ -1448,13 +1452,14 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "adda0cbaab66ad17e738ec40292d75833be0ebf9fd8f9d1e20151c5d04dee334",
+      "function_sha256": "0eb37a174c838d00f384722e150d51d52219457f825090139922a23269cdce7f",
       "classification": "new_admission",
       "test_refs": [
+        "content_factory/tests_research_workspace_database.py",
         "content_factory/tests_run_ownership.py"
       ],
       "reason": "Backend-owned original admission creates/seals a new canonical identity before dispatch, freezes original inputs and ticket; does not retrofit historical execution.",
-      "guard": "Explicit new-admission flags plus verified organization/principal/scope; immutable exact-key replay.",
+      "guard": "Explicit new-admission flags plus verified organization/principal/scope; immutable exact-key replay. Use the existing authenticated admission and exact-key checks. Scope reservation-only opt-in to reset research and reject retired keys under the organization lock.",
       "pending_owner": null
     },
     {
@@ -1868,15 +1873,16 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "9b1eb1cd1544bc67c934a933ac89b91b08b92f93e5c42e6a8cf2b80fe2255a0b",
+      "function_sha256": "07de3594b43c54d6877146a02bb39085b76eb012a38a0990ea331e32ed708585",
       "classification": "upstream_legacy_fenced",
       "test_refs": [
+        "content_factory/tests_r3_event_callback.py",
+        "content_factory/tests_research_workspace_database.py",
         "content_factory/tests_run_retired_writers.py",
-        "content_factory/tests_run_verified_delivery.py",
-        "content_factory/tests_r3_event_callback.py"
+        "content_factory/tests_run_verified_delivery.py"
       ],
       "reason": "Old callback handlers are reached only after authoritative observation routing; ordered callback dispatcher refuses current/validated owner before any handler writes. Binding target collision is separately fenced.",
-      "guard": "ContentFactoryCallbackView observation ingress then _dispatch_ordered_callback authoritative_run checks;09af binder target guard.",
+      "guard": "ContentFactoryCallbackView observation ingress then _dispatch_ordered_callback authoritative_run checks;09af binder target guard. Retain the legacy execution checks. Ignore retired research progress and topic choices before they reach writers or delivery.",
       "pending_owner": null
     },
     {
@@ -1895,15 +1901,16 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "9b1eb1cd1544bc67c934a933ac89b91b08b92f93e5c42e6a8cf2b80fe2255a0b",
+      "function_sha256": "07de3594b43c54d6877146a02bb39085b76eb012a38a0990ea331e32ed708585",
       "classification": "upstream_legacy_fenced",
       "test_refs": [
+        "content_factory/tests_r3_event_callback.py",
+        "content_factory/tests_research_workspace_database.py",
         "content_factory/tests_run_retired_writers.py",
-        "content_factory/tests_run_verified_delivery.py",
-        "content_factory/tests_r3_event_callback.py"
+        "content_factory/tests_run_verified_delivery.py"
       ],
       "reason": "Old callback handlers are reached only after authoritative observation routing; ordered callback dispatcher refuses current/validated owner before any handler writes. Binding target collision is separately fenced.",
-      "guard": "ContentFactoryCallbackView observation ingress then _dispatch_ordered_callback authoritative_run checks;09af binder target guard.",
+      "guard": "ContentFactoryCallbackView observation ingress then _dispatch_ordered_callback authoritative_run checks;09af binder target guard. Retain the legacy execution checks. Ignore retired research progress and topic choices before they reach writers or delivery.",
       "pending_owner": null
     },
     {
@@ -3082,7 +3089,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:6a7c9391187a262de03d7c2cb786c5c72bbdf212a8f9913b0b15ea15ce44683d:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15381,
+      "line": 15456,
       "kind": "inferred_run_save",
       "fields": [
         "run_request",
@@ -3095,13 +3102,14 @@
         "portable_reservation"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "99368f9b4fbf5813c1727594f2b55bd5e6d556d4dd3ea44ed94410222e10a1f9",
+      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
       "classification": "legacy_fenced",
       "test_refs": [
+        "content_factory/tests_research_workspace_database.py",
         "content_factory/tests_run_ownership.py"
       ],
       "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation.",
-      "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback.",
+      "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback. Retain dispatch-key lookup and refund reconciliation. Reserve fresh research for reset companies and stop new dispatch on a changed workspace.",
       "pending_owner": null
     },
     {
@@ -3386,7 +3394,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15414,
+      "line": 15489,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3398,13 +3406,14 @@
         "run"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "99368f9b4fbf5813c1727594f2b55bd5e6d556d4dd3ea44ed94410222e10a1f9",
+      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
       "classification": "legacy_fenced",
       "test_refs": [
+        "content_factory/tests_research_workspace_database.py",
         "content_factory/tests_run_ownership.py"
       ],
       "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation.",
-      "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback.",
+      "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback. Retain dispatch-key lookup and refund reconciliation. Reserve fresh research for reset companies and stop new dispatch on a changed workspace.",
       "pending_owner": null
     },
     {
@@ -3471,7 +3480,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:f40fe594d02b001537d58480ad7cc8611166a2e9c9572bc73dbde6978a15712e:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15278,
+      "line": 15353,
       "kind": "model_update",
       "fields": [
         "status"
@@ -3483,20 +3492,21 @@
         "remote_data"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "99368f9b4fbf5813c1727594f2b55bd5e6d556d4dd3ea44ed94410222e10a1f9",
+      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
       "classification": "legacy_fenced",
       "test_refs": [
+        "content_factory/tests_research_workspace_database.py",
         "content_factory/tests_run_ownership.py"
       ],
       "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation.",
-      "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback.",
+      "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback. Retain dispatch-key lookup and refund reconciliation. Reserve fresh research for reset companies and stop new dispatch on a changed workspace.",
       "pending_owner": null
     },
     {
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:669eb9f79164a269775fb125857f46dd8931706566e619e175a0bbd750be355e:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15220,
+      "line": 15295,
       "kind": "model_update",
       "fields": [
         "run_request"
@@ -3508,13 +3518,14 @@
         "acknowledged"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "99368f9b4fbf5813c1727594f2b55bd5e6d556d4dd3ea44ed94410222e10a1f9",
+      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
       "classification": "legacy_fenced",
       "test_refs": [
+        "content_factory/tests_research_workspace_database.py",
         "content_factory/tests_run_ownership.py"
       ],
       "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation.",
-      "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback.",
+      "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback. Retain dispatch-key lookup and refund reconciliation. Reserve fresh research for reset companies and stop new dispatch on a changed workspace.",
       "pending_owner": null
     },
     {
@@ -5608,13 +5619,14 @@
       "direct_model_chain": false,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "7a490334cb4dbe15a20f8b82f612b200b1399f5575dd8d6caef4bef324f5c68f",
+      "function_sha256": "44993c3aad1d5e4488eb70dfaaf70e581977f781fcf6e96dd7a0b9067b9a023f",
       "classification": "non_cf_model",
       "test_refs": [
+        "content_factory/tests_research_automation_billing_unit.py",
         "tests/test_research_automations.py"
       ],
       "reason": "Saved run is AutomationRun, not CF execution. Dispatch child admission is separately audited at actual CF callers.",
-      "guard": "AutomationRun constructor/query/type and status enum.",
+      "guard": "AutomationRun constructor/query/type and status enum. The AutomationRun remains the schedule authority. Check the workspace freeze under the organization lock before charging or dispatching.",
       "pending_owner": null
     },
     {

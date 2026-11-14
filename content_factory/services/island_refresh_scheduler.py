@@ -38,6 +38,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from content_factory.p2_foundation import P2_PRIVATE_STRATEGY_KEYS
+from content_factory.research_workspace import research_config, research_paused
 from content_factory.models import (
     ContentIsland,
     ContentIslandRefreshDispatch,
@@ -170,6 +171,7 @@ def _partition_configs() -> tuple[list, list]:
         config
         for config in configs
         if config.organization_id
+        and not research_paused(config)
         and _seedable(config, island_org_ids=island_org_ids, cluster_org_ids=cluster_org_ids)
     ]
     keyword_org_ids = set(
@@ -285,15 +287,19 @@ def dispatch_island_refresh(organization, *, local_date, include_expansion=True)
         return {"status": "failed", "error": "A valid organization domain is required."}
 
     idempotency_key = build_island_refresh_idempotency_key(domain, local_date)
-    dispatch, _created = ContentIslandRefreshDispatch.objects.update_or_create(
-        organization=organization,
-        local_date=local_date,
-        defaults={
-            "status": ContentIslandRefreshDispatchStatus.QUEUED,
-            "idempotency_key": idempotency_key,
-            "last_error": "",
-        },
-    )
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=organization.pk)
+        if research_paused(research_config(organization)):
+            return {"status": "skipped", "reason": "research_workspace_reset", "domain": domain}
+        dispatch, _created = ContentIslandRefreshDispatch.objects.update_or_create(
+            organization=organization,
+            local_date=local_date,
+            defaults={
+                "status": ContentIslandRefreshDispatchStatus.QUEUED,
+                "idempotency_key": idempotency_key,
+                "last_error": "",
+            },
+        )
 
     payload = {
         "domain": domain,

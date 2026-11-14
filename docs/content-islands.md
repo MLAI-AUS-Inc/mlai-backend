@@ -169,6 +169,30 @@ match a removed island the same way. Adding the theme again through research
 adoption or the custom island endpoint clears `removed_at` and makes it visible.
 Declined-topic history is unchanged.
 
+## Operator research workspace reset
+
+The website lifecycle does not clear research. For an approved full research
+reset, use `manage.py reset_research_workspace` with the exact company ID,
+organization ID and domain. The `plan` action lists the rows in scope and
+returns their digest. Export the scoped data before proceeding. Each mutation
+requires the digest of a current plan.
+
+1. `freeze` pauses research, cancels unstarted scheduled slots and fences
+   worker writes to this company's research workspace.
+2. Stop and reconcile every active run and dispatch through its normal
+   cancellation controls. Keep the original refund and run receipts.
+3. `clear` removes the reviewed keyword, island, cluster and feedback rows
+   and generated pillars. It refuses active work or a changed inventory.
+4. Verify the workspace is empty, then `resume` to allow explicit new research.
+   Recurring research remains paused until separately enabled.
+
+Old choices and island selections remain in run history but cannot be used as
+current research. Bulk worker writes for a reset workspace must identify a fresh
+backend-admitted run or a current scheduled refresh. The backend uses existing
+run reservation metadata for new interactive research in the reset company,
+without changing the ownership rollout for other companies. Published articles,
+editorial policy, account permissions and the billing ledger are preserved.
+
 ## Existing manual islands and older clients
 
 The legacy `POST /api/v1/vibe-marketing/islands/custom` endpoint remains compatible

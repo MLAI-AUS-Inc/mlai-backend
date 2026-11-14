@@ -1,4 +1,5 @@
 """Reject malformed organization research scope before any dispatch effects."""
+from contextlib import nullcontext
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -25,10 +26,16 @@ class IslandRefreshDomainTests(SimpleTestCase):
         lookup.assert_not_called()
 
     def test_organization_research_has_no_website_dependency(self):
-        organization = SimpleNamespace(domain="research.example.com", website_connection=None)
+        organization = SimpleNamespace(pk=7, domain="research.example.com", website_connection=None)
         dispatch = SimpleNamespace(save=Mock())
         response = SimpleNamespace(status_code=202, json=lambda: {"run_id": "research-run"})
-        with patch.object(scheduler.ContentIslandRefreshDispatch.objects, "update_or_create", return_value=(dispatch, True)), patch.object(scheduler, "_post_content_factory_queue_request", return_value=response) as post:
+        with (
+            patch.object(scheduler.transaction, "atomic", return_value=nullcontext()),
+            patch.object(scheduler.Organization.objects, "select_for_update"),
+            patch.object(scheduler, "research_config", return_value=None),
+            patch.object(scheduler.ContentIslandRefreshDispatch.objects, "update_or_create", return_value=(dispatch, True)),
+            patch.object(scheduler, "_post_content_factory_queue_request", return_value=response) as post,
+        ):
             result = scheduler.dispatch_island_refresh(organization, local_date=date(2026, 10, 18))
         self.assertEqual(result["status"], "dispatched")
         self.assertEqual(set(post.call_args.kwargs["payload"]), {"domain", "client_request_id", "request_source", "include_expansion"})

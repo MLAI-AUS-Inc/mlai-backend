@@ -249,11 +249,14 @@ def _discovery_payload_for_run(run: AutomationRun) -> dict[str, Any]:
 
 def dispatch_automation_run(run_id: str) -> dict[str, Any]:
     from .daily_research_policy import pause_if_unanswered
+    from content_factory.research_workspace import research_config, research_paused
     candidate = AutomationRun.objects.select_related("automation__organization").get(id=run_id)
     if candidate.slot_index < MANUAL_SLOT_BASE and pause_if_unanswered(candidate.automation.organization):
         return {"status": "skipped", "reason": "three_unanswered_days", "automation_run_id": str(candidate.id)}
     with transaction.atomic():
         Organization.objects.select_for_update().get(pk=candidate.automation.organization_id)
+        if research_paused(research_config(candidate.automation.organization)):
+            return {"status": "skipped", "reason": "research_workspace_reset", "automation_run_id": str(candidate.pk)}
         # of=("self",) locks only the AutomationRun row. The nullable
         # select_related hops (automation.user, notification_channel.user)
         # render as LEFT OUTER JOINs, and Postgres rejects FOR UPDATE on the

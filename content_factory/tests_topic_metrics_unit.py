@@ -274,10 +274,12 @@ class TopicMetricsAPIUnitTests(unittest.TestCase):
     def test_bulk_upsert_accepts_null_and_only_updates_verified_measurements(self):
         from rest_framework.test import APIRequestFactory
         payload = {"domain": "example.test", "keywords": [{"keyword": "Example", "difficulty": None, "difficulty_source": "missing", "monthly_searches": [], "velocity_data": {"daily_volumes": []}}]}
-        organization = SimpleNamespace(domain="example.test")
+        organization = SimpleNamespace(pk=7, domain="example.test")
         manager = Mock()
         manager.update_or_create.return_value = (SimpleNamespace(), False)
         with patch.object(self.service.Organization.objects, "get", return_value=organization), \
+             patch.object(self.service.Organization.objects, "select_for_update"), \
+             patch("content_factory.research_workspace.research_config", return_value=None), \
              patch.object(self.service.ResearchedKeyword, "objects", manager), \
              patch.object(self.service.KeywordVelocity.objects, "create") as create_snapshot, \
              patch.object(self.service.transaction, "atomic", return_value=nullcontext()):
