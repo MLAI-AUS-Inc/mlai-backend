@@ -39,7 +39,7 @@ class NativeInstallationsView(NativeOwnerView):
         community, _ = native_sources.community_config(request.query_params.get("community"))
         if not getattr(settings, "AGENT_RUNTIME_ENABLED", False):
             return Response({"community_id": community, "installations": [],
-                "limits": {"personal_limit": max(0, getattr(settings, "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT", 1)),
+                "limits": {"personal_limit": native_installations.personal_limit(),
                            "personal_used": 0}})
         rows = AgentInstallation.objects.filter(owner=request.user, community_id=community,
             app_id__in=("openai-dot", "mlai-community")).select_related("owner_device").order_by("-created_at")

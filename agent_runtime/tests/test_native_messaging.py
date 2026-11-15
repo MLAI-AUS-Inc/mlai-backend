@@ -195,3 +195,31 @@ class WelcomeTests(SimpleTestCase):
             with override_settings(AGENT_RUNTIME_DOT_MEMBERS_ENABLED=False):
                 self.assertFalse(nm.welcome(self.native.grant.installation, self.native.grant))
         request.assert_not_called()
+
+
+class AddMeTests(SimpleTestCase):
+    def principal(self):
+        return SimpleNamespace(grant={"id": "g", "user_id": 7})
+
+    def test_offered_only_when_dots_are_members(self):
+        from startup_updates.mcp import native_agents
+        with patch.object(native_agents, "enabled", return_value=True):
+            with override_settings(AGENT_RUNTIME_DOT_MEMBERS_ENABLED=False):
+                self.assertEqual(native_agents.available_tools(self.principal()), [])
+            with override_settings(AGENT_RUNTIME_DOT_MEMBERS_ENABLED=True):
+                names = [tool["name"] for tool in native_agents.available_tools(self.principal())]
+        self.assertEqual(names, ["add_me_to_mlai_chat"])
+
+    @override_settings(AGENT_RUNTIME_DOT_MEMBERS_ENABLED=True, COMMUNITY_CHAT_FRONTEND_URL="https://chat.mlai.au")
+    def test_returns_link_steps_and_existing_dots(self):
+        from startup_updates.mcp import native_agents
+        rows = MagicMock()
+        rows.exclude.return_value.order_by.return_value = [SimpleNamespace(name="Maek", handle="sam-donegan-maek@chat.mlai.au", state="active")]
+        with patch.object(native_agents, "enabled", return_value=True), \
+                patch.object(native_agents, "get_user_model") as users, \
+                patch.object(native_agents.AgentInstallation.objects, "filter", return_value=rows):
+            users.return_value.objects.get.return_value = SimpleNamespace(pk=7)
+            result = native_agents.add_me(self.principal())
+        self.assertEqual(result["setup_url"], "https://chat.mlai.au/apps")
+        self.assertEqual(result["limit"], 3)
+        self.assertEqual(result["dots"][0]["handle"], "sam-donegan-maek@chat.mlai.au")

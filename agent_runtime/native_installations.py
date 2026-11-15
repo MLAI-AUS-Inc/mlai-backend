@@ -96,9 +96,20 @@ def dot_available():
         and getattr(settings, "AGENT_RUNTIME_MCP_EVENTS_ENABLED", False) and registered and setup_url())
 
 
+MEMBER_DOT_LIMIT = 3
+
+
+def personal_limit():
+    """Up to 3 Dots per member once Dots are members; the setting can raise it."""
+    configured = max(0, min(100, getattr(settings, "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT", 1)))
+    if getattr(settings, "AGENT_RUNTIME_DOT_MEMBERS_ENABLED", False):
+        return max(configured, MEMBER_DOT_LIMIT)
+    return configured
+
+
 def limits(owner, community, *, now=None):
     now = now or timezone.now()
-    limit = max(0, min(100, getattr(settings, "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT", 1)))
+    limit = personal_limit()
     rows = AgentInstallation.objects.filter(owner=owner, community_id=community, app_id="openai-dot", is_active=True).exclude(
         state="revoked").exclude(state="awaiting_owner_proof", enrollments__expires_at__lte=now).distinct()
     if renewal_enabled():
@@ -122,7 +133,7 @@ def catalog(owner, *, relay_url):
             "status": "available" if enabled else "setup_required", "setup_url": setup_url(),
             "instructions": SETUP_INSTRUCTIONS}],
         "limits": limits(owner, community) if getattr(settings, "AGENT_RUNTIME_ENABLED", False) else
-                  {"personal_limit": max(0, getattr(settings, "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT", 1)), "personal_used": 0},
+                  {"personal_limit": personal_limit(), "personal_used": 0},
         "channels": native_sources.eligible_channels(owner, community) if enabled or shared_enabled else []}
     if shared.enabled():
         result["apps"].append({"id": shared.APP_ID, "name": "Maek · community", "provider": "MLAI",
