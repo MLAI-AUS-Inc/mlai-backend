@@ -296,15 +296,19 @@ def finance_cooldown(scope, now, *, until=None):
     if not scope.get('review_directory'):
         return None
     root = Path(scope['review_directory'])
-    key = digest({'connection': scope.get('xero_connection_id'),
-                  'contact': scope.get('xero_contact_id')})
-    path = root / ('finance-cooldown-' + key + '.json')
+    # Xero limits the connection across clients. Honor pre-existing per-contact receipts too.
+    connection = scope.get('xero_connection_id')
+    def receipt(contact):
+        return root / ('finance-cooldown-' + digest({'connection': connection, 'contact': contact}) + '.json')
+    path = receipt(None)
     if until is None:
-        try:
-            value = instant(json.loads(path.read_text())['retry_at'])
-            return value if value > now else None
-        except (OSError, ValueError, KeyError, TypeError):
-            return None
+        values = []
+        for source in {path, receipt(scope.get('xero_contact_id'))}:
+            try:
+                values.append(instant(json.loads(source.read_text())['retry_at']))
+            except FileNotFoundError:
+                continue
+        return max((v for v in values if v > now), default=None)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temporary = tempfile.mkstemp(dir=root, prefix='.finance-cooldown-')
     try:
