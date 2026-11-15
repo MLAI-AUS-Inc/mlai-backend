@@ -226,7 +226,7 @@ class LinkedRepositoryRebindTests(WebsiteDatabaseFixture, TestCase):
                       return_value=SimpleNamespace(installation_id="45")), \
                 patch("content_factory.website_connections._read_repository_by_id", return_value=response) as read:
             metadata = verify_repository_access(user=None, repo="example/site", repository_id=123)
-        read.assert_called_once_with("45", "example/site", 123)
+        read.assert_called_once_with("45", "example/site", 123, organization=None)
         self.assertEqual((metadata["repository_id"], metadata["github_repo"]), (123, "example/site-renamed"))
 
     def test_access_check_prefers_the_installation_that_sees_the_id(self):
@@ -240,7 +240,7 @@ class LinkedRepositoryRebindTests(WebsiteDatabaseFixture, TestCase):
                       return_value=SimpleNamespace(installation_id="99")), \
                 patch("content_factory.website_connections._read_repository_by_id", return_value=response) as read:
             metadata = verify_repository_access(user=None, repo="example/site", repository_id=123)
-        read.assert_called_once_with("99", "example/site", 123)
+        read.assert_called_once_with("99", "example/site", 123, organization=None)
         self.assertEqual(metadata["installation_id"], "99")
 
     def test_access_check_by_id_refuses_a_different_repository(self):
@@ -272,3 +272,81 @@ class LinkedRepositoryRebindTests(WebsiteDatabaseFixture, TestCase):
             with self.assertRaises(WebsiteAuthorityError) as raised:
                 verify_repository_native_target(self.website)
         self.assertEqual(raised.exception.code, "website_repository_changed")
+
+
+class PausingBlockerEnforcementTests(WebsiteDatabaseFixture, TestCase):
+    """An archived repository, or one MLAI can't see, holds repository work on the server too."""
+
+    def block(self, entry):
+        identity.set_blocker(self.website, entry, True)
+        self.website.capabilities = {**(self.website.capabilities or {}), "publishingReady": True}
+        self.website.save(update_fields=["capabilities"])
+
+    def test_write_actions_are_refused_while_held_and_allowed_after(self):
+        from .website_contract import WebsiteAuthorityError, validate_authority
+        for entry in (identity.ARCHIVED_ENTRY, identity.ACCESS_ENTRY):
+            with self.subTest(entry["code"]):
+                self.block(entry)
+                for action in ("setup", "preview", "publish", "merge"):
+                    with self.assertRaises(WebsiteAuthorityError) as raised:
+                        validate_authority(self.website, self.binding, action=action)
+                    self.assertEqual(raised.exception.code, "website_publishing_paused")
+                validate_authority(self.website, self.binding, action="read")
+                identity.set_blocker(self.website, entry, False)
+                validate_authority(self.website, self.binding, action="setup")
+
+    def test_automatic_publishing_holds_while_archived(self):
+        from . import publish_reviewed_draft
+        from django.utils import timezone
+        from .website_models import WebsiteConnectionTarget
+        self.website.verified_sha = "a" * 40
+        self.website.capabilities = {"publishingReady": True}
+        self.website.save(update_fields=["verified_sha", "capabilities"])
+        WebsiteConnectionTarget.objects.create(connection=self.website, target_key="native",
+            generation=self.website.generation, source_sha="a" * 40, verified_at=timezone.now(),
+            capabilities={"publishingReady": True})
+        self.config.default_publish_target_id = "native"
+        self.config.save(update_fields=["default_publish_target_id"])
+        marker = {"publishAutomatically": {"enabledAt": "2026-11-01T00:00:00+00:00"}}
+        with patch.object(publish_reviewed_draft, "read_marker", return_value=marker):
+            self.assertIsNotNone(publish_reviewed_draft._destination(self.org))
+            self.block(identity.ARCHIVED_ENTRY)
+            self.assertIsNone(publish_reviewed_draft._destination(self.org))
+
+    def test_activation_names_the_archived_state(self):
+        from .activation import durable_integration_evidence
+        self.block(identity.ARCHIVED_ENTRY)
+        self.config.refresh_from_db()
+        self.assertEqual(durable_integration_evidence(self.config, self.website)["reasonCode"], "CONNECTION_READ_ONLY")
+
+
+class RepositoryByIdReadTests(TestCase):
+    """Reading a linked repository by id keeps the P2 provider rules."""
+
+    def run_read(self, statuses, *, p2):
+        from types import SimpleNamespace
+        from .website_connections import _read_repository_by_id
+        responses = [SimpleNamespace(status_code=status) for status in statuses]
+        organization = SimpleNamespace(pk=1)
+        with override_settings(ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED=True), \
+                patch("content_factory.p2_foundation.p2_applies", return_value=p2), \
+                patch("content_factory.website_connections.require_unlocked_remote_call") as guard, \
+                patch("integrations.services.github_app.create_installation_access_token",
+                      return_value=SimpleNamespace(token="t")) as mint, \
+                patch("integrations.http_client.get", side_effect=responses) as get:
+            response = _read_repository_by_id("45", "example/site", 123, organization=organization)
+        return response, guard, mint, get
+
+    def test_p2_checks_the_boundary_and_retries_a_stale_token_once(self):
+        response, guard, mint, get = self.run_read([401, 200], p2=True)
+        self.assertEqual(response.status_code, 200)
+        guard.assert_called_once()
+        self.assertEqual(mint.call_count, 2)
+        self.assertFalse(mint.call_args_list[1].kwargs.get("use_cache", True))
+        self.assertEqual(get.call_count, 2)
+
+    def test_other_organisations_keep_a_single_read(self):
+        response, guard, mint, get = self.run_read([401], p2=False)
+        self.assertEqual(response.status_code, 401)
+        guard.assert_not_called()
+        self.assertEqual(mint.call_count, 1)

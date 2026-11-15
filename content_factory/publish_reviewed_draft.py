@@ -66,6 +66,10 @@ def _destination(organization):
             or connection.state != 'connected' or not connection.verified_sha
             or not (connection.capabilities or {}).get('publishingReady')):
         return None
+    from .website_repository_identity import has_pausing_blocker
+    if has_pausing_blocker(connection):
+        # Archived, or moved where MLAI can't see it: hold automatic publishing.
+        return None
     target = connection.targets.filter(target_key=config.default_publish_target_id, generation=connection.generation,
         source_sha=connection.verified_sha, verified_at__isnull=False).first()
     if target is None or not _mapping(target.capabilities).get('publishingReady'):

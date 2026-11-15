@@ -790,14 +790,32 @@ def invalidate_repository_config(config, *, archive_templates=True):
     WebsiteDesignSnapshot.objects.filter(organization=config.organization, is_active=True).update(is_active=False, status="superseded")
 
 
-def _read_repository_by_id(installation_id, repo, repository_id):
-    """GitHub's current metadata for a repository found by its permanent id."""
+def _read_repository_by_id(installation_id, repo, repository_id, *, organization=None):
+    """GitHub's current metadata for a repository found by its permanent id.
+
+    For a P2 organisation this keeps ``read_bound_repository``'s rules: the
+    provider boundary must be unlocked, and a 401 from a stale cached token
+    is retried once with a freshly minted one.
+    """
+    from django.conf import settings
     from integrations import http_client
     from integrations.services.github_app import create_installation_access_token
-    credential = create_installation_access_token(installation_id=installation_id, repository=repo,
-        repository_id=repository_id, permission_mode="read")
-    return http_client.get(f"https://api.github.com/repositories/{repository_id}", headers={
-        "Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
+    from .p2_foundation import p2_applies
+    refresh_enabled = (organization is not None
+                       and getattr(settings, "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
+                       and p2_applies(organization))
+    if refresh_enabled:
+        require_unlocked_remote_call()
+    arguments = dict(installation_id=installation_id, repository=repo,
+                     repository_id=repository_id, permission_mode="read")
+
+    def send(credential):
+        return http_client.get(f"https://api.github.com/repositories/{repository_id}", headers={
+            "Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
+    response = send(create_installation_access_token(**arguments))
+    if response.status_code == 401 and refresh_enabled:
+        response = send(create_installation_access_token(**arguments, use_cache=False))
+    return response
 
 
 def verify_repository_access(*, user, repo, organization=None, repository_id=None):
@@ -822,7 +840,8 @@ def verify_repository_access(*, user, repo, organization=None, repository_id=Non
         raise WebsiteAuthorityError("github_authorization_required", "Authorize the GitHub App for this repository first.")
     try:
         if repository_id is not None:
-            response = _read_repository_by_id(str(inst.installation_id), repo, repository_id)
+            response = _read_repository_by_id(str(inst.installation_id), repo, repository_id,
+                                              organization=organization)
         elif organization is not None:
             from types import SimpleNamespace
             from integrations.services.github_connections import read_bound_repository
