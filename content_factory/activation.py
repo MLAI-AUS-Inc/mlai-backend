@@ -224,7 +224,15 @@ def durable_integration_evidence(config, connection, *, now=None):
             return {**base, "reasonCode": "verification_required"}
     contract = mapping(target.contract)
     route = str(contract.get("route_path") or contract.get("public_path") or str(contract.get("route_template") or "").split("{")[0] or "/articles")
-    return {**base, "verified": True, "publishingVerified": live_deployment_verified(connection, target, now=now), "routePath": "/" + route.strip("/"), "verifiedAt": verified_at.isoformat(), "reasonCode": ""}
+    live = live_deployment_verified(connection, target, now=now)
+    # MLAI's own build and render proof of the merged source is what publishing
+    # needs; the founder's host deploying it is a background status
+    # (website_live_status) unless ARTICLES_READY_ON_MERGE_ENABLED is off.
+    # A target that needs sealed execution proof keeps its live check.
+    from .website_live_status import enabled as ready_on_merge
+    proven = ready_on_merge() and not required(connection, target)
+    return {**base, "verified": True, "publishingVerified": live or proven, "liveVerified": live,
+            "routePath": "/" + route.strip("/"), "verifiedAt": verified_at.isoformat(), "reasonCode": ""}
 
 
 def first_article_capability(state):

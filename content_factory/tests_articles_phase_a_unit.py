@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from django.utils import timezone
 
 from . import website_prepare as prepare, tests_prepare_journey_unit as journey_fixtures
@@ -104,6 +104,8 @@ class RetryIdentityTests(SimpleTestCase):
         self.assertEqual(request.data, replay.data)
 
 
+# The founder's host as a lock (the ARTICLES_READY_ON_MERGE_ENABLED kill switch off); tests_website_live_status covers it on.
+@override_settings(ARTICLES_READY_ON_MERGE_ENABLED=False)
 class DeploymentPolicyTests(SimpleTestCase):
     def test_real_prepare_rejects_wrong_marker_without_saving_live_receipt(self):
         fixture = verification_fixtures.PrepareVerificationRuntimeTests()

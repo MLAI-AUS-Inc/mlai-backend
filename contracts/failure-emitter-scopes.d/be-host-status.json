@@ -1,0 +1,28 @@
+{
+  "dynamic_adapters": [
+    {
+      "path": "content_factory/website_live_status.py",
+      "function": "raise_staff_alert",
+      "field": "reason_code",
+      "expression": "code",
+      "site_sha256": "ed807bb7bd807433ff02a36d6cf8814114ae7a3acfbb3d9c040fa7faf53045f4",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.website_live_status",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Copies a deployment wait code that prepare_failure already resolved through the failure contract (or the registered live_route_unavailable) onto the live-status watch receipt, so the stuck-founder alert and staff console can name why the founder's live site has not updated after 24 hours; never founder-facing authority and never a stop.",
+      "test": "content_factory.tests_website_live_status.PrepareDeadlineTests.test_a_deployment_wait_past_24_hours_keeps_waiting_and_alerts_staff"
+    },
+    {
+      "path": "content_factory/website_prepare.py",
+      "function": "prepare_failure",
+      "field": "code",
+      "expression": "code",
+      "site_sha256": "d8b98a28ab7ef7c4df460510b6355e4318fd883049b065a7856d4755d04c7114",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.website_live_status",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Copies a deployment wait code that prepare_failure already resolved through the failure contract (or the registered live_route_unavailable) onto the live-status watch receipt, so the stuck-founder alert and staff console can name why the founder's live site has not updated after 24 hours; never founder-facing authority and never a stop.",
+      "test": "content_factory.tests_website_live_status.PrepareDeadlineTests.test_a_deployment_wait_past_24_hours_keeps_waiting_and_alerts_staff"
+    }
+  ]
+}

@@ -58,11 +58,21 @@ FLAG_KEYS = (
     # Every other founder Articles, My startup and Content Factory switch, so a
     # release can set any of them and none can only be changed by hand on the
     # host. Empty keeps the host value; no default changes. The stuck-founder
-    # alert and the three GitHub linking kill switches below it are on by default.
+    # alert, the three GitHub linking kill switches below it, the stand-in
+    # preview approval switch, the ready-on-merge and no-workflow kill
+    # switches and ARTICLES_SOURCE_FOLLOW_ENABLED are on by default.
     "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED",
     "ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED",
     "MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED",
     "ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED",
+    "ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED",
+    "ARTICLES_READY_ON_MERGE_ENABLED",
+    # Cross-repo dependency: with ARTICLES_LIVE_URL_VERIFICATION_ENABLED on,
+    # this switch sends verification_mode=hosted for every cohort, which needs
+    # Content Factory's CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED=true
+    # (check with CF's articles_rollout_inspection before a release). This repo
+    # cannot read CF's value, so turn this off if CF's is false.
+    "ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED",
     "ARTICLES_STAFF_ALERT_RULES_ENABLED",
     "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE",
     "ARTICLES_FAILURE_POLICY_V2_ENABLED",
@@ -73,6 +83,7 @@ FLAG_KEYS = (
     "ARTICLES_REGISTRY_REFUNDS_ENABLED",
     "ARTICLES_CHANNEL_SWITCH_ENABLED",
     "ARTICLES_SOURCE_REPIN_ENABLED",
+    "ARTICLES_SOURCE_FOLLOW_ENABLED",
     "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED",
     "ARTICLES_MERGE_WORKER_ENABLED",
     "ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED",

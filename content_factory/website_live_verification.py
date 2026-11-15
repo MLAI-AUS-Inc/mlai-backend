@@ -9,8 +9,12 @@ Checks or Statuses permission is asked for, so new GitHub App installations
 need contents and pull requests only. The App's own permissions never change.
 
 Everything here applies only while ``ARTICLES_LIVE_URL_VERIFICATION_ENABLED``
-is on and the organisation is new-journey (``founder_journey_cohort``). Legacy
-organisations keep exact-commit CI proof byte for byte.
+is on. With ``ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED`` (a kill switch, on by
+default) it applies to every organisation, legacy ones included (plan step 7),
+so a new setup never writes a workflow into a founder's repository. With that
+switch off only new-journey organisations (``founder_journey_cohort``) are
+selected and legacy ones keep exact-commit CI proof. Workflow files already in
+a legacy repository are left alone and stay writable (:func:`new_journey_selected`).
 """
 from __future__ import annotations
 
@@ -34,17 +38,30 @@ def flag_enabled() -> bool:
     return getattr(settings, "ARTICLES_LIVE_URL_VERIFICATION_ENABLED", False) is True
 
 
-def selected(organization) -> bool:
-    """Whether this organisation verifies its website by live URL instead of CI proof.
+def all_cohorts() -> bool:
+    """True unless ``ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED`` is switched off (code default on)."""
+    return getattr(settings, "ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED", True) is not False
 
-    True only with the flag on and a new-journey organisation. Legacy
-    organisations, and every organisation while V2 is off or the org is in the
-    per-org kill switch, keep CI proof.
-    """
+
+def new_journey_selected(organization) -> bool:
+    """The original P1.13 selection: the flag on and a new-journey organisation."""
     if organization is None or not flag_enabled():
         return False
     from .founder_journey_cohort import is_new_journey
     return is_new_journey(organization)
+
+
+def selected(organization) -> bool:
+    """Whether this organisation verifies its website by live URL instead of CI proof.
+
+    True with the flag on for every organisation while
+    ``ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED`` is on (MLAI's own build proof
+    plus the live page, no workflow in the founder's repository). With that
+    switch off, only new-journey organisations (:func:`new_journey_selected`).
+    """
+    if organization is None or not flag_enabled():
+        return False
+    return all_cohorts() or new_journey_selected(organization)
 
 
 def applicable(target) -> bool:

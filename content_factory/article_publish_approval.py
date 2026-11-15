@@ -67,22 +67,63 @@ def article_review_identity(run):
     }
 
 
+STAND_IN_FLAG = "ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED"
+APPROVAL_BASIS_STAND_IN = "stand_in_preview"
+APPROVAL_BASIS_ARTICLE_TEXT = "article_text"
+STAND_IN_RUNGS = frozenset({"snapshot", "template"})
+
+
+def _stand_in_approval_enabled():
+    from django.conf import settings
+    return bool(getattr(settings, STAND_IN_FLAG, True))
+
+
+def approval_basis(run):
+    """The non-exact basis Content Factory offered for approval, or "".
+
+    Content Factory approves a website-bound article whose own site build
+    could not be previewed from its stand-in preview (a snapshot or template
+    rendering of the site, still reviewed in a browser) or, with no rendering
+    at all, from its text. It re-checks the basis on approve; this only lets
+    the founder's approval reach it. ``ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED``
+    (default on) is the kill switch.
+    """
+    if not _stand_in_approval_enabled():
+        return ""
+    result = _mapping(getattr(run, "result", None))
+    basis = str(result.get("approval_basis") or "").strip()
+    if basis == APPROVAL_BASIS_STAND_IN:
+        live = _mapping(result.get("livePreview") or result.get("live_preview"))
+        proof = _mapping(live.get("proof"))
+        if proof.get("repoBoundSnapshot") is True and str(proof.get("previewRung") or "") in STAND_IN_RUNGS:
+            return basis
+        return ""
+    if basis == APPROVAL_BASIS_ARTICLE_TEXT:
+        return basis
+    return ""
+
+
 def article_review_identity_is_complete(run):
-    """Require the exact hosted render and current quality for this attempt."""
+    """Require the exact hosted render (or its stand-in, or the article text) and current quality."""
     from .run_reconciliation import authoritative_run
     if authoritative_run(run):
         from .run_review_quality import current_review_verified
         if not current_review_verified(run):
             return False
     identity = article_review_identity(run)
-    if not identity["run_id"] or not identity["preview_url"]:
-        return False
+    basis = approval_basis(run)
     result = _mapping(getattr(run, "result", None))
-    live = _mapping(result.get("livePreview") or result.get("live_preview"))
-    quality = _mapping(result.get("article_preview_quality"))
     if "generation" in result and identity["run_generation"] is None:
         return False
-    if _first_present(live, "exactRender", "exact_render") is not True:
+    if basis == APPROVAL_BASIS_ARTICLE_TEXT:
+        # No rendering of the site could be produced; Content Factory checks
+        # the saved article itself before it opens the pull request.
+        return bool(identity["run_id"])
+    if not identity["run_id"] or not identity["preview_url"]:
+        return False
+    live = _mapping(result.get("livePreview") or result.get("live_preview"))
+    quality = _mapping(result.get("article_preview_quality"))
+    if _first_present(live, "exactRender", "exact_render") is not True and basis != APPROVAL_BASIS_STAND_IN:
         return False
     if not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", identity["commit_sha"]):
         return False
@@ -134,7 +175,7 @@ def article_publish_approval_receipt_matches(run):
     from .run_reconciliation import authoritative_run
     if not authoritative_run(run) and str(getattr(run, "approval_state", "") or "").strip() != "approved":
         return False
-    if _quality_status(run) not in ACCEPTED_QUALITY_STATUSES:
+    if _quality_status(run) not in ACCEPTED_QUALITY_STATUSES and approval_basis(run) != APPROVAL_BASIS_ARTICLE_TEXT:
         return False
     receipt = article_publish_approval_receipt(run)
     if receipt.get("action") != "approve" or not receipt.get("actor_id") or not receipt.get("approved_at"):

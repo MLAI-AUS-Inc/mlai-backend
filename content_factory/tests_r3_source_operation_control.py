@@ -186,6 +186,7 @@ class SourceOperationControlTests(TransactionTestCase):
         self.assertNotIn("re_pin_v1", self.run.result)
         self.assertEqual(self.run.result["points_v1"], {"state": "released"})
 
+    @override_settings(ARTICLES_SOURCE_FOLLOW_ENABLED=False)
     def test_non_sdk_article_retains_the_two_repin_limit(self):
         self.make_run("article_generation", suffix="-article")
         get, native, head = self.guards()

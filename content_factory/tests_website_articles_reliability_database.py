@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.db import close_old_connections, transaction
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 
 from .tests_website_connections import WebsiteDatabaseFixture
 from .website_connections import authority_guard, contract_for, transition_connection
@@ -268,6 +268,8 @@ class WebsiteReliabilityLifecycleTests(WebsiteDatabaseFixture, TestCase):
         stale = journey_for_context(context, self.config, capabilities={"repositorySourceSha": "b" * 40})
         self.assertEqual(stale["prerequisites"]["inventory"]["status"], "stale")
 
+    # The founder's host as a lock (the ARTICLES_READY_ON_MERGE_ENABLED kill switch off); tests_website_live_status covers it on.
+    @override_settings(ARTICLES_READY_ON_MERGE_ENABLED=False)
     def test_native_authoring_does_not_grant_publication_before_live_proof(self):
         from .website_models import WebsiteConnectionTarget, WebsiteConnectionOperation
         from .activation import article_capabilities, live_deployment_verified
