@@ -109,6 +109,8 @@ def adopt_researched_island(organization, run, proposal, *, merge_evidence=False
     now = timezone.now()
     with transaction.atomic():
         org = Organization.objects.select_for_update().get(pk=organization.pk)
+        from .research_workspace import require_current_research
+        require_current_research(org, run)
         if not ContentIsland.objects.filter(organization=org, status="visible").exists():
             seed_islands_from_bootstrap_pillars(org)
         # An existing measured theme is reused; its members and positioning stay intact.

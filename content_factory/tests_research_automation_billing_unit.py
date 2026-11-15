@@ -35,6 +35,7 @@ class ResearchAutomationBillingTests(SimpleTestCase):
         self.payload = {"domain": "fixture.test", "requested_topic_count": 3, "requested_by_slack_user_id": "mlai_user:7"}
 
     def harness(self, stack, *, remote=None, charge_error=None):
+        stack.enter_context(patch("content_factory.research_workspace.research_config", return_value=None))
         stack.enter_context(patch.object(research.transaction, "atomic", return_value=nullcontext()))
         runs = stack.enter_context(patch.object(research.AutomationRun, "objects"))
         runs.select_related.return_value.get.return_value = self.run
