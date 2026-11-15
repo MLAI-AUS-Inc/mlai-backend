@@ -675,6 +675,10 @@ def github_callback(request):
         )
 
     retried = False
+    # A legacy Chat return may bind the domain's repository only for an
+    # organisation with no repository setup yet; set below, before this
+    # callback stores a repository.
+    legacy_auto_bind_allowed = False
     if is_org_oauth:
         # ====== ORG-LEVEL OAUTH ======
         # Store credentials in OrganizationContentConfig for the domain
@@ -717,6 +721,8 @@ def github_callback(request):
             ))
 
         previous_repo = str(config.github_repo or "").strip()
+        if flow is not None and not flow.new_journey:
+            legacy_auto_bind_allowed = not github_callback_reasons.has_repository_setup(config)
         if not selected_repo and len(repo_names) > 1 and previous_repo:
             selected_repo = next(
                 (repo_name for repo_name in repo_names if repo_name.casefold() == previous_repo.casefold()),
@@ -840,9 +846,12 @@ def github_callback(request):
             except Exception as e:
                 logger.error(f"Failed to auto-retry job {job_id}: {e}")
 
-    if flow is not None and not flow.new_journey and is_org_oauth and chat_company is not None:
-        # A legacy Chat flow binds and starts setup when exactly one repository
-        # is named like the domain; otherwise the picker below, as before.
+    if flow is not None and not flow.new_journey and is_org_oauth and chat_company is not None \
+            and legacy_auto_bind_allowed:
+        # A legacy Chat flow with no repository setup yet binds and starts
+        # setup when exactly one repository is named like the domain;
+        # otherwise (and for an organisation that already has a repository,
+        # templates or components) the return below, as before.
         bound = github_callback_reasons.bind_legacy_domain_repository(
             config=config, user=chat_company.profile.user, company=chat_company,
             repositories=repos, installation_id=installation_id)

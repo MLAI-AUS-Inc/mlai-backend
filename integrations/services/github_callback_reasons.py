@@ -428,11 +428,18 @@ def begin_callback(request) -> Optional[ChatCallback]:
     flow.organization = company.organization
     if (request.GET.get("setup_action") or "") == "request":
         # Remember who asked, so the owner's approval can connect this founder.
-        from integrations.services.github_owner_requests import record_request
-        try:
-            record_request(organization=company.organization, user_id=context["user_id"], company_id=company.pk)
-        except Exception:
-            logger.exception("github_owner_request_record_failed org=%s", getattr(company.organization, "pk", None))
+        from integrations.services import github_owner_requests as owner_requests
+        if owner_requests.enabled():
+            try:
+                # The founder's GitHub login lets the owner's approval be matched
+                # to this founder (GitHub names them as the requester), and to no one else.
+                logins = owner_requests.founder_github_logins(
+                    company.profile.user, owner_requests.login_from_code(request.GET.get("code")))
+                owner_requests.record_request(organization=company.organization, user_id=context["user_id"],
+                                              company_id=company.pk, github_logins=logins)
+            except Exception:
+                logger.exception("github_owner_request_record_failed org=%s",
+                                 getattr(company.organization, "pk", None))
         flow.response = flow.redirect(OWNER_APPROVAL_REQUESTED)
     elif not request.GET.get("code"):
         flow.response = flow.redirect(CANCELLED if request.GET.get("error") == "access_denied" else AUTHORIZATION_FAILED)
@@ -638,8 +645,27 @@ def bind_new_journey_repository(*, config, user, company, repositories, installa
                            installation_id=installation_id, owner_click=True)
 
 
+def has_repository_setup(config) -> bool:
+    """Whether a legacy organisation already has repository setup a first bind would reset.
+
+    A stored repository, a website connection, saved templates or generated
+    components all count. ``bind_website``'s first bind archives templates
+    and clears repository-derived setup, so a legacy return only auto-binds
+    when there is none of it.
+    """
+    if config.website_connection_id or str(config.github_repo or "").strip():
+        return True
+    if any(getattr(config, key, None) for key in ("article_template", "design_guide", "resource_prompt")):
+        return True
+    from content_factory.models import GeneratedComponent
+    return GeneratedComponent.objects.filter(organization_id=config.organization_id).exists()
+
+
 def bind_legacy_domain_repository(*, config, user, company, repositories, installation_id) -> Optional[str]:
     """A legacy Chat return: bind and start setup only for exactly one domain match.
+
+    The caller checks :func:`has_repository_setup` first (before the callback
+    stores a repository): an organisation with setup keeps today's return.
 
     Returns the bound ``owner/name``, or None when there is no single
     repository named like the domain (or it could not be bound), in which
@@ -669,7 +695,12 @@ def bind_repository(*, config, user, company, repo, installation_id, owner_click
         if not same_repository(current, repo) or current.state == "paused":
             # A different or paused website stays as it is; the founder chooses explicitly.
             return MULTIPLE_REPOS
-        # The same repository, perhaps renamed or moved since: refresh its name
+        if current.state == "connected" and current.github_repo.casefold() == full_name.casefold():
+            # Already connected under this name: nothing to refresh, so no
+            # GitHub round trip that a transient error could turn into a failure.
+            _start_prepare(config, company=company, user=user)
+            return CONNECTED
+        # The same repository, renamed or moved since: refresh its name
         # and access. A connected website keeps its setup; a disconnected or
         # revoked one is reconnected, which the founder asked for by connecting.
         try:

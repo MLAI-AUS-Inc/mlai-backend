@@ -305,3 +305,16 @@ class LinkedRepositoryCallbackTests(TestCase):
         built, _ = self.linked()
         other = {**_repo("founder/banksia-studio"), "id": 9999}
         self.assertEqual(self.reason(self.callback(built, [other], verify=self.verify_by_id)), reasons.MULTIPLE_REPOS)
+
+    def test_an_already_connected_repository_skips_the_github_round_trip(self):
+        built, connection = self.linked(name="founder/banksia-studio")
+        generation = connection.generation
+
+        def unavailable(**kwargs):
+            raise AssertionError("an already connected repository is not re-verified")
+        response = self.callback(built, [self.renamed_repo()], verify=unavailable)
+        self.assertEqual(self.reason(response), reasons.CONNECTED)
+        self.verify.assert_not_called()
+        self.prepare.assert_called_once()
+        connection.refresh_from_db()
+        self.assertEqual((connection.generation, connection.state), (generation, "connected"))

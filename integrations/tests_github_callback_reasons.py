@@ -458,6 +458,30 @@ class G7UnchangedTests(CallbackReasonTestBase):
         legacy.config.refresh_from_db()
         self.assertEqual(legacy.config.website_connection_id, before)
 
+    def test_legacy_success_keeps_existing_repository_setup(self):
+        repositories = _repos("founder/banksia-legacy-studio", "founder/other")
+        with self.subTest("saved templates, no repository yet"):
+            legacy = self.unlinked_legacy()
+            legacy.config.article_template = "# Saved template"
+            legacy.config.save(update_fields=["article_template"])
+            back = f"{FRONTEND}/my-startup/connections?company_id={legacy.company.pk}&connected=github"
+            response = self.callback(self.params(self.chat_state(legacy, return_url=back)),
+                                     get=[_json(USER), _json(repositories)])
+            self.assertIn("&github=multiple_repos&", response["Location"])
+            legacy.config.refresh_from_db()
+            self.assertIsNone(legacy.config.website_connection_id)
+            self.assertEqual(legacy.config.article_template, "# Saved template")
+        with self.subTest("a repository stored before this return"):
+            legacy.config.article_template = ""
+            legacy.config.github_repo = "founder/banksia-legacy-studio"
+            legacy.config.save(update_fields=["article_template", "github_repo"])
+            self.callback(self.params(self.chat_state(legacy, return_url=back)),
+                          get=[_json(USER), _json(repositories)])
+            legacy.config.refresh_from_db()
+            self.assertIsNone(legacy.config.website_connection_id)
+        self.verify.assert_not_called()
+        self.prepare.assert_not_called()
+
     def test_slack_and_user_level_oauth_with_every_flag_on_are_byte_identical(self):
         makers = {
             "slack org-level": lambda: build_github_oauth_state(domain="slack-site.example", slack_user_id="U123",
