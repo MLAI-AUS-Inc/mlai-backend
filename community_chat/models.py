@@ -4,6 +4,8 @@ from django.conf import settings
 from django.db import models
 from django.db.models import Q
 
+from .roo_avatar.models import CommunityRooAvatar  # noqa: F401 -- Django model discovery
+
 from .onboarding_models import (  # noqa: F401 -- Django model discovery
     CommunityMemberConsent,
     CommunityMemberProfile,

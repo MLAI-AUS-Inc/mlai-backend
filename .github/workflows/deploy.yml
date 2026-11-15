@@ -101,6 +101,9 @@ jobs:
     - name: Test Pulse source selection and cached-account boundaries
       run: python scripts/test_without_database.py startup_updates.tests_generation_reliability.SelectionMatrixTests startup_updates.tests_generation_reliability.CachedAccountScopeTests
 
+    - name: Check Roo avatar unlock policy without database access
+      run: python -m unittest community_chat.roo_avatar.tests_policy -v
+
     - name: Check test-module assignment
       run: python scripts/check_test_assignment.py
 
@@ -620,6 +623,7 @@ jobs:
           community_chat.tests.test_slack_all_history \
           community_chat.tests.test_slack_private_mentions \
           community_chat.tests.test_slack_deletion \
+          community_chat.roo_avatar.tests_api \
           community_chat.tests.test_volunteer_policy \
           community_chat.tests.test_volunteer \
           community_chat.tests.test_volunteer_backfill \
@@ -951,6 +955,7 @@ jobs:
           integrations.tests_coworking_handoff.CoworkingConsentConcurrencyTests \
           integrations.tests_public_bridge_consent.PublicBridgeConsentConcurrencyTests \
           community_chat.tests.test_volunteer_backfill.HistoricalBonusBackfillTests \
+          community_chat.roo_avatar.tests_api.RooAvatarConcurrencyTests \
           community_chat.tests.test_volunteer_concurrency \
           roo.tests_api.FirstChannelPostAwardConcurrencyTests \
           community_chat.tests.test_slack_dm_io_authority.SlackDmIoAuthorityTransactionTests \
