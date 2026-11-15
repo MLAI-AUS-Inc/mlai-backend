@@ -76,3 +76,19 @@ class ProfileTests(SimpleTestCase):
 
     def test_malformed_published_handle_is_ignored(self):
         self.assertIsNone(ni.current_handle(dot(events=published("Maek"))))
+
+
+@patch.object(ni.native_sources, "community_config", return_value=CONFIG)
+class StoredHandleTests(SimpleTestCase):
+    def test_stored_handle_wins(self, _):
+        value = dot()
+        value.handle = "sam-donegan-maek@chat.mlai.au"
+        self.assertEqual(ni.dot_handle(value, taken={None}), "sam-donegan-maek@chat.mlai.au")
+
+    @override_settings(AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED=True)
+    def test_profile_handle_records_handle_and_about_for_saving(self, _):
+        value = dot()
+        with patch.object(ni, "dot_handle", return_value="sam-donegan-maek@chat.mlai.au"):
+            self.assertEqual(ni.profile_handle(value), "sam-donegan-maek@chat.mlai.au")
+        self.assertEqual(value.handle, "sam-donegan-maek@chat.mlai.au")
+        self.assertIn("personal OpenAI dot", value.about)

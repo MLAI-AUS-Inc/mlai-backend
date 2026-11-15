@@ -273,7 +273,7 @@ def _confirm_renewal(current, installation, enrollment, *, event, auth_tag, now)
         if result.get("event_id") != row["id"] or result.get("accepted") is not True:
             raise native_sources.SourceUnavailable("MLAI Chat did not confirm the renewed profile.")
     installation.profile_events = events
-    installation.save(update_fields=("owner_attestation", "profile_events", "updated_at"))
+    installation.save(update_fields=("owner_attestation", "profile_events", "handle", "about", "updated_at"))
     enrollment.confirmed_at = now
     enrollment.save(update_fields=("confirmed_at",))
     runtime.audit("native.installation.renewed", grant=grant, installation_id=str(installation.pk),
@@ -392,7 +392,7 @@ def confirm(owner, enrollment_id, *, event, auth_tag, now=None):
     installation.owner_attestation = attestation
     installation.profile_events = profile_events(installation, grant, now=now)
     installation.state = "provisioning"
-    installation.save(update_fields=("owner_attestation", "profile_events", "state", "updated_at"))
+    installation.save(update_fields=("owner_attestation", "profile_events", "handle", "about", "state", "updated_at"))
     enrollment.confirmed_at = now
     enrollment.save(update_fields=("confirmed_at",))
     runtime.audit("native.enrollment.confirmed", grant=grant, installation_id=str(installation.pk))
@@ -437,7 +437,10 @@ def _slug(value, limit):
 
 
 def current_handle(installation):
-    """The handle already published in the Dot's signed profile, if any."""
+    """The handle already stored for, or published in the signed profile of, this Dot."""
+    stored = getattr(installation, "handle", None)
+    if isinstance(stored, str) and HANDLE_RE.fullmatch(stored):
+        return stored
     for event in getattr(installation, "profile_events", None) or []:
         if isinstance(event, dict) and event.get("kind") == 0:
             try:
@@ -469,7 +472,7 @@ def dot_handle(installation, *, taken=()):
     used = set(taken)
     if not used:
         others = AgentInstallation.objects.filter(community_id=installation.community_id).exclude(
-            pk=installation.pk).only("profile_events")
+            pk=installation.pk).only("profile_events", "handle")
         used = {current_handle(row) for row in others}
     for suffix in ["", *[f"-{n}" for n in range(2, 100)]]:
         handle = f"{base}{suffix}@{host}"
@@ -503,7 +506,12 @@ def profile_handle(installation):
     """Personal Dots publish a handle and About panel when accounts are switched on."""
     if installation.app_id != "openai-dot" or not getattr(settings, "AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED", False):
         return current_handle(installation)
-    return dot_handle(installation)
+    handle = dot_handle(installation)
+    # The caller saves these with the re-signed profile; the database's unique
+    # (community, handle) constraint is the final guard against a race.
+    installation.handle = handle
+    installation.about = about_text(installation)
+    return handle
 
 
 def profile_events(installation, grant, *, now):
@@ -554,7 +562,7 @@ def set_picture(owner, installation_id, picture, *, now=None):
         raise native_sources.SourceUnavailable("MLAI Chat did not confirm the new picture.")
     installation.profile_events = [event if isinstance(row, dict) and row.get("kind") == 0 else row
                                    for row in installation.profile_events]
-    installation.save(update_fields=("profile_events", "updated_at"))
+    installation.save(update_fields=("profile_events", "handle", "about", "updated_at"))
     runtime.audit("native.installation.picture", grant=grant, installation_id=str(installation.pk),
                   cleared=picture is None)
     return installation
