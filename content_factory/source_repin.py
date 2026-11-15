@@ -39,15 +39,29 @@ def _refuse(*, limit=False):
 
 
 def repin_limit():
-    """Return the registry's bounded source re-pin limit, failing closed."""
+    """Return the registry's bounded source re-pin limit, failing closed.
+
+    An explicit 0 (or an unreadable value) turns re-pins off whatever the
+    follow switch says. Otherwise the follow switch outranks the registry's
+    positive limit, which is the P2 self-heal budget rather than a cap on
+    following ordinary pushes; Content Factory's _max_repins agrees.
+    """
     value = registry_policy.limits().get("source_repins_per_run", 2)
     limit = min(value, 2) if type(value) is int and value >= 0 else 0
+    if limit == 0:
+        return 0
     return max(limit, FOLLOW_MAX_REPINS) if follow_enabled() else limit
 
 
 def validated_history(value, *, max_repins=None):
-    """Validate a bounded backend receipt before trusting its source lineage."""
-    max_repins = repin_limit() if max_repins is None else max_repins
+    """Validate a bounded backend receipt before trusting its source lineage.
+
+    By default a stored receipt is accepted up to FOLLOW_MAX_REPINS whatever
+    the follow switch says now, so turning the switch off never makes an
+    earlier, valid lineage unreadable. Whether another re-pin is allowed is
+    checked separately against repin_limit().
+    """
+    max_repins = max(repin_limit(), FOLLOW_MAX_REPINS) if max_repins is None else max_repins
     receipt = _mapping(value)
     history = receipt.get("history")
     count = receipt.get("repins")
@@ -94,14 +108,29 @@ def _settled(run):
     return False
 
 
+ACTIVE_STATUSES = frozenset({"queued", "running", "failed", "blocked", "awaiting_delivery_mode",
+                             "awaiting_confirmation", "awaiting_approval", "approval_required"})
+ARTICLE_WORKFLOWS = frozenset({"direct_generate", "confirmed_topic", "article_revision"})
+# Any of these on a finished draft means the founder approved it or it is
+# being published: its review is bound to the exact preview commit.
+_HANDED_OFF_KEYS = ("article_publish_approval_receipt", "publish_child_run_id", "promoted_publish_job_id",
+                    "promote_bundle_requested_at", "publish_handoff_pending", "publish_pr_url")
+
+
+def _unapproved_draft(run):
+    """A finished article draft still awaiting review, whose preview may be rebuilt on a newer commit."""
+    result = _mapping(run.result)
+    return (follow_enabled() and run.status == "completed" and run.workflow in ARTICLE_WORKFLOWS
+            and not any(result.get(key) for key in _HANDED_OFF_KEYS))
+
+
 def _precheck(run):
     # With the follow switch every startup's run may re-pin; without it only a
     # P2-cohort run with ARTICLES_SOURCE_REPIN_ENABLED, as before.
     cohort_allowed = follow_enabled() or (getattr(settings, "ARTICLES_SOURCE_REPIN_ENABLED", False)
                                           and run.organization_id is not None and p2_foundation.p2_applies(run.organization))
     if (not cohort_allowed or run.organization_id is None or run.workflow not in REPOSITORY_WORKFLOWS
-            or run.status not in {"queued", "running", "failed", "blocked", "awaiting_delivery_mode",
-                                  "awaiting_confirmation", "awaiting_approval", "approval_required"} or _settled(run)):
+            or (run.status not in ACTIVE_STATUSES and not _unapproved_draft(run)) or _settled(run)):
         raise _refuse()
 
 

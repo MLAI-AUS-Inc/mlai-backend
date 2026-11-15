@@ -133,6 +133,49 @@ class SourceRepinTests(TransactionTestCase):
                 self.apply()
         self.assertFalse(self.provider_calls)
 
+    @override_settings(ARTICLES_SOURCE_FOLLOW_ENABLED=True)
+    def test_finished_draft_awaiting_review_repins_so_its_preview_can_be_rebuilt(self):
+        # A draft awaiting review used to be stuck on its old commit for good.
+        ContentFactoryRun.objects.filter(pk=self.run.pk).update(status='completed', workflow='direct_generate')
+        self.assertEqual(self.apply()['status'], 'repinned')
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.run_request['expected_source_sha'], B)
+        self.assertEqual(self.run.status, 'completed')
+
+    @override_settings(ARTICLES_SOURCE_FOLLOW_ENABLED=True)
+    def test_approved_or_published_draft_is_never_repinned(self):
+        for key, value in [('article_publish_approval_receipt', {'run_id': 'repin-test'}),
+                           ('publish_child_run_id', 'child'), ('publish_pr_url', 'https://github.com/x/y/pull/1'),
+                           ('publish_handoff_pending', True)]:
+            ContentFactoryRun.objects.filter(pk=self.run.pk).update(
+                status='completed', workflow='direct_generate', result={key: value})
+            with self.subTest(key=key), self.assertRaises(WebsiteAuthorityError):
+                self.apply()
+        self.assertFalse(self.provider_calls)
+
+    def test_finished_draft_stays_refused_with_the_follow_switch_off(self):
+        ContentFactoryRun.objects.filter(pk=self.run.pk).update(status='completed', workflow='direct_generate')
+        with override_settings(ARTICLES_SOURCE_FOLLOW_ENABLED=False), self.assertRaises(WebsiteAuthorityError):
+            self.apply()
+        self.assertFalse(self.provider_calls)
+
+    @override_settings(ARTICLES_SOURCE_FOLLOW_ENABLED=True)
+    def test_a_registry_limit_of_zero_turns_repins_off_even_when_following(self):
+        with patch.object(repin.registry_policy, 'limits', return_value={'source_repins_per_run': 0}):
+            self.assertEqual(repin.repin_limit(), 0)
+            with self.assertRaises(WebsiteAuthorityError) as error:
+                self.apply()
+        self.assertEqual(error.exception.authority_code, 'source_repin_limit_reached')
+
+    def test_a_longer_history_stays_valid_after_the_follow_switch_is_turned_off(self):
+        shas = [char * 40 for char in 'abcdef']
+        history = [{'from_sha': shas[i], 'to_sha': shas[i + 1], 'reason': 'source_changed_mid_run',
+                    'repin_key': f'repin-test:{i + 1}', 'at': '2026-11-15T00:00:00+00:00'} for i in range(5)]
+        receipt = {'version': 1, 'repins': 5, 'first_from_sha': shas[0], 'last_to_sha': shas[5], 'history': history}
+        with override_settings(ARTICLES_SOURCE_FOLLOW_ENABLED=False):
+            self.assertEqual(repin.repin_limit(), 2)
+            self.assertEqual(repin.validated_history(receipt), receipt)
+
     def test_changed_source_refused_without_receipt(self):
         with self.assertRaises(WebsiteAuthorityError):
             self.apply(from_sha=C)
