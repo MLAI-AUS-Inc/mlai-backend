@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source_repository": "drsamdonegan/content-factory",
-  "source_revision": "e2bc826545555fc7436d9b047123ed99f304f159",
+  "source_revision": "bb0724ab4730f1ecd7c9450aa86e26129bf02061",
   "artifacts": {
     "contracts/native-verifier-v3.json": {
       "source_path": "contracts/native-verifier-v3.json",
