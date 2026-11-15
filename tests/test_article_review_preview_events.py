@@ -80,6 +80,36 @@ class ArticleReviewPreviewEventTests(TestCase):
         self.assertIn("https://fallback.preview.pages.dev/articles/featured/x", text)
         self.assertIn("require", text)
 
+    def test_fallback_ready_with_an_approval_basis_says_it_can_be_approved(self):
+        cases = (
+            ("stand_in_preview", "review-preview-stand-in-1", "stand-in preview"),
+            ("article_text", "review-preview-text-1", "article text"),
+        )
+        for basis, job_id, surface in cases:
+            with self.subTest(basis=basis):
+                self.dm_mock.reset_mock()
+                response = self.client.post(
+                    CALLBACK_URL,
+                    _event_payload(
+                        "article_review_preview_fallback_ready",
+                        job_id,
+                        approval_basis=basis,
+                        publish_requires_exact_preview=False,
+                        fallback_preview_url="https://stand-in.preview.pages.dev/articles/x",
+                    ),
+                    format="json",
+                )
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                job = ContentFactoryJob.objects.get(job_id=job_id)
+                self.assertEqual(job.status, "needs_review")
+                self.dm_mock.assert_called_once()
+                text = self.dm_mock.call_args.args[1]
+                self.assertIn(f"Ready for approval from the {surface}", text)
+                self.assertIn("open a pull request", text)
+                self.assertNotIn("require the exact preview", text)
+                summary = self.card_mock.call_args.kwargs["summary_text"]
+                self.assertNotIn("publish requires the exact build", summary)
+
     def test_preview_failed_blocks_job_with_classified_reason(self):
         response = self.client.post(
             CALLBACK_URL,

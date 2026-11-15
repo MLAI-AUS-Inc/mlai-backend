@@ -2730,6 +2730,8 @@ ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED = _env_is_true("ARTICLES_GITHUB_OW
 # Kill switch, default on: a website-bound article whose own site build could
 # not be previewed may be approved from Content Factory's stand-in preview or,
 # with no rendering at all, from its text (CONTENT_FACTORY_STAND_IN_PREVIEW_APPROVAL).
+# Turn Content Factory's flag off first, or together with this one: with only
+# this one off, Content Factory still shows an Approve button that this gate refuses.
 ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED = _env_is_true("ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED", True)
 ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED", False)
 MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)

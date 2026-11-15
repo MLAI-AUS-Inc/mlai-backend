@@ -6395,7 +6395,10 @@ class ContentFactoryCallbackView(APIView):
         Three events cover the hosted review preview after generation:
         - article_review_preview_fallback_ready: the exact build failed but a
           fallback render is reviewable; comments work, publish stays gated on
-          the exact preview (policy enforced by content-factory's approve API).
+          the exact preview (policy enforced by content-factory's approve API),
+          unless the callback carries ``approval_basis`` (``stand_in_preview``
+          or ``article_text``): then the run is approvable and the founder's CI
+          on the publish PR builds the site.
         - article_review_preview_failed: no preview at all; the run is blocked
           with a classified reason (failure kind, failing file, attribution).
         - article_review_preview_not_available: the run cannot produce a
@@ -6417,9 +6420,15 @@ class ContentFactoryCallbackView(APIView):
         title = str(data.get('title') or '').strip()
         article_label = f' for "{title}"' if title else ''
 
+        approval_basis = str(data.get('approval_basis') or '').strip()
         if event_type == 'article_review_preview_fallback_ready':
             job_status = 'needs_review'
-            summary_text = 'Fallback preview ready for review; publish requires the exact build.'
+            if approval_basis == 'stand_in_preview':
+                summary_text = 'Stand-in preview ready for approval. The website\'s own checks build the real page.'
+            elif approval_basis == 'article_text':
+                summary_text = 'Article text ready for approval. The website\'s own checks build the real page.'
+            else:
+                summary_text = 'Fallback preview ready for review; publish requires the exact build.'
             stored_error = ''
         elif event_type == 'article_review_preview_not_available':
             job_status = 'blocked'
@@ -6455,7 +6464,18 @@ class ContentFactoryCallbackView(APIView):
                 exc,
             )
 
-        if event_type == 'article_review_preview_fallback_ready':
+        if event_type == 'article_review_preview_fallback_ready' and approval_basis in {
+            'stand_in_preview', 'article_text',
+        }:
+            surface = 'stand-in preview' if approval_basis == 'stand_in_preview' else 'article text'
+            text = (
+                f":mag: *Ready for approval from the {surface}{article_label}* ({domain})\n"
+                "The website's own preview build did not finish. Approve it and we will open a pull "
+                "request; the website's own checks then build the real page."
+            )
+            if fallback_preview_url:
+                text += f"\nPreview: {fallback_preview_url}"
+        elif event_type == 'article_review_preview_fallback_ready':
             text = (
                 f":mag: *Fallback preview ready for review{article_label}* ({domain})\n"
                 "The exact site build is unavailable, so this preview uses a fallback render. "
