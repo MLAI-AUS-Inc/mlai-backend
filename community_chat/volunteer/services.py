@@ -24,6 +24,14 @@ from .access import (
     public_source,
     require_capability,
 )
+from .credits import (
+    alert_unlabelled_credits,
+    ledger_amount,
+    one_record_enabled,
+    one_record_total,
+    opening_microroo,
+    store_level,
+)
 from .models import (
     VolunteerAttendance,
     VolunteerMemberState,
@@ -77,14 +85,21 @@ def lock_member(user):
 
 
 @transaction.atomic
-def state_for(user):
-    """Initialise only provably empty history; ambiguous legacy totals stay null."""
+def state_for(user, *, before_ledger=None):
+    """Initialise only provably empty history; ambiguous legacy totals stay null.
+
+    `before_ledger` creates a missing state as it was just before that credit,
+    so a member's first recorded credit counts after the cut-off instead of
+    making their history ambiguous.
+    """
     user = lock_member(user)
     state, created = VolunteerMemberState.objects.get_or_create(
         community=community_id(), user=user
     )
     if created:
         ledger = Ledger.objects.filter(user=user)
+        if before_ledger is not None:
+            ledger = ledger.filter(pk__lt=before_ledger.pk)
         maximum = ledger.aggregate(value=Max("pk"))["value"] or 0
         account = PointsAccount.objects.filter(user=user).first()
         has_history = (
@@ -92,9 +107,18 @@ def state_for(user):
             .filter(Q(kind="EARN") | Q(kind__isnull=True, delta__gt=0))
             .exists()
         )
-        has_history = has_history or bool(
-            account and (account.lifetime_earned or account.lifetime_earned_microroo)
-        )
+        if before_ledger is None:
+            lifetime = bool(
+                account
+                and (account.lifetime_earned or account.lifetime_earned_microroo)
+            )
+        else:
+            lifetime = bool(
+                account
+                and (account.lifetime_earned_microroo or 0)
+                > ledger_amount(before_ledger)
+            )
+        has_history = has_history or lifetime
         state.historical_ledger_cutoff = maximum
         if not has_history:
             state.historical_microroo = 0
@@ -109,6 +133,8 @@ def state_for(user):
 def contribution_total(user, state=None):
     """Return a reconciled contribution total, or None instead of a false rank."""
     state = state or state_for(user)
+    if one_record_enabled():
+        return one_record_total(user, state)
     if state.historical_microroo is None:
         return None
     known_ledger = VolunteerRecognition.objects.filter(
@@ -311,7 +337,13 @@ def journey(user):
     """Return server-owned exact totals and a two-to-three-step eligible checklist."""
     user = lock_member(user)
     member_state = state_for(user)
+    if one_record_enabled():
+        alert_unlabelled_credits(user, member_state)
+        opening = opening_microroo(user, member_state)
+    else:
+        opening = member_state.historical_microroo
     total = contribution_total(user, member_state)
+    store_level(member_state, total)
     actions = action_catalogue(user)
     state = (
         progress(total)
@@ -332,8 +364,7 @@ def journey(user):
             level,
             bonus_awarded=level["key"] in paid_levels,
             bonus_eligible=(
-                member_state.historical_microroo is not None
-                and microroo(level["threshold_roo"]) > member_state.historical_microroo
+                opening is not None and microroo(level["threshold_roo"]) > opening
             ),
         )
         for level in levels()
@@ -675,10 +706,16 @@ def award_milestones(user, recognition=None):
     """Issue missing stable bonuses once inside the member's award transaction."""
     if not flag("awards_enabled") or not flag("bonuses_enabled"):
         return
-    total = contribution_total(user)
+    state = state_for(user)
+    total = contribution_total(user, state)
     if total is None:
         return
-    historical = state_for(user).historical_microroo or 0
+    store_level(state, total)
+    historical = (
+        opening_microroo(user, state)
+        if one_record_enabled()
+        else state.historical_microroo
+    ) or 0
     for level in levels()[1:]:
         if total < microroo(level["threshold_roo"]):
             break

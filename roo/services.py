@@ -42,6 +42,13 @@ from core.models import User
 logger = logging.getLogger(__name__)
 
 
+def record_volunteer_credit(ledger):
+    """Give a counted Roo credit its one Volunteer record (inert unless step 2 is on)."""
+    from community_chat.volunteer.credits import record_wallet_credit
+
+    return record_wallet_credit(ledger)
+
+
 DATABASE_TRANSACTION_RETRY_ATTEMPTS = 3
 
 
@@ -2783,6 +2790,7 @@ class TaskService:
             reference_type='TASK_ASSIGNMENT',
             reference_id=str(assignment.id),
         )
+        record_volunteer_credit(ledger)
         
         now = timezone.now()
         submission.status = 'approved'
@@ -2877,6 +2885,7 @@ class TaskService:
             reference_type='TASK_ASSIGNMENT',
             reference_id=str(assignment.id),
         )
+        record_volunteer_credit(ledger)
 
         now = timezone.now()
         assignment.assigned_user = user

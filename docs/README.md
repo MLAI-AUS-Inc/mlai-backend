@@ -98,6 +98,7 @@ subsystem-specific contracts and runbooks.
 - [`community-chat-home.md`](community-chat-home.md)
 - [`community-chat-roo-dm.md`](community-chat-roo-dm.md) — owner-scoped Slack Roo chat
 - [`community-chat-coworking.md`](community-chat-coworking.md) — signed booking handoff to Public Roo
+- [Roo avatar account contract](community-chat-roo-avatar.md) — persistent outfits and current verified rank unlocks
 - [`volunteer-api.md`](volunteer-api.md) — gated member journey, recognition and Roo contracts
 
 - [Startup settings profile contract](startup-settings-profile-contract.md) — sparse profile saves, reviewed research, logo branding and scoped Chat facade

@@ -35,7 +35,7 @@ from .purchase_tax import inclusive_gst_snapshot, validate_gst_payment
 from .services import (
     PointsService, PointsPurchaseService, CoworkingService, CoworkingBatchBookingError,
     BoostPostAdmissionService, BoostPostPayloadConflictError, InvalidBoostPostError,
-    TaskService, RewardsService,
+    TaskService, RewardsService, record_volunteer_credit,
 )
 from .coworking_snapshot import build_booking_snapshot
 from .coding import roo_decimal_string
@@ -2542,6 +2542,7 @@ class PointsRequestViewSet(viewsets.ViewSet):
                     reference_type='POINTS_REQUEST',
                     reference_id=str(points_request.id),
                 )
+                record_volunteer_credit(ledger)
 
                 points_request.status = 'approved'
                 points_request.approved_by_slack_id = admin_slack_id

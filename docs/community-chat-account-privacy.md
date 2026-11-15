@@ -92,7 +92,8 @@ not disable consent enforcement to make the outbox drain.
 
 This is **not a complete account-erasure or universal AI-consent implementation**.
 
-1. Implement and verify cleanup of account dependencies protected by foreign keys,
+1. Implement and verify cleanup of account dependencies protected by foreign keys
+   (Volunteer records, including the opening entries added in November 2026),
    relay messages/media, devices, sessions, bootstrap proofs, Slack OAuth grants,
    other MLAI services, logs and backups. Failed external cleanup must remain
    pending; completion must leave only a non-identifying receipt.
