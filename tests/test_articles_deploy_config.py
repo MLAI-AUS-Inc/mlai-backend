@@ -1,6 +1,7 @@
 """Founder-journey Articles switches reach the host only when a release sets them."""
 
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -162,6 +163,21 @@ class ArticlesDeployConfigTests(unittest.TestCase):
         self.assertIn('    if [ -n "${!articles_setting}" ]; then\n'
                       '        install_remote_env_value "$articles_setting" "${!articles_setting}"', install)
 
+
+    def test_every_founder_switch_can_be_set_by_a_release(self):
+        # A switch missing here can only be changed by hand on the host.
+        settings_source = (ROOT / "mlai/settings.py").read_text()
+        boolean_reads = re.compile(
+            r"""_env_is_true\(\s*["']((?:ARTICLES|MY_STARTUP|CONTENT_FACTORY|WEBSITE)_[A-Z0-9_]+)["']"""
+            r"""|getenv\(\s*["']((?:ARTICLES|MY_STARTUP|CONTENT_FACTORY|WEBSITE)_[A-Z0-9_]+)["']\s*,\s*["'](?:true|false)["']\s*\)\.lower\(\)""")
+        switches = {first or second for first, second in boolean_reads.findall(settings_source)}
+        self.assertGreater(len(switches), 50)
+        self.assertEqual(sorted(switches - set(FLAG_KEYS)), [])
+
+    def test_only_the_stuck_founder_alert_defaults_on(self):
+        settings_source = (ROOT / "mlai/settings.py").read_text()
+        self.assertIn("_env_is_true('ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED', True)", settings_source)
+        self.assertIn("ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED", FLAG_KEYS)
 
 
 class StaffConsoleFlagReleaseTests(unittest.TestCase):
