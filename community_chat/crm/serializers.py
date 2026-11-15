@@ -292,6 +292,8 @@ class BlastInput(StrictSerializer):
     """A blast draft. On ``PATCH`` every key is optional and only sent keys change."""
 
     purpose = serializers.ChoiceField(choices=Blast.Purpose.values, required=False)
+    # Reminders are created by the system only.
+    message_type = serializers.ChoiceField(choices=("", "invite", "blast"), allow_blank=True, required=False)
     event_id = serializers.UUIDField(allow_null=True, required=False)
     quick_segment = serializers.ChoiceField(
         choices=BLAST_QUICK_SEGMENTS, allow_null=True, allow_blank=True, required=False
@@ -740,6 +742,11 @@ def blast_summary(blast, stats: Optional[dict] = None) -> dict:
         "id": str(blast.pk),
         "title": blast_title(blast),
         "purpose": blast.purpose,
+        "message_type": blast.message_type,
+        "reminder": (
+            {"offset": blast.reminder_offset, "scheduled_for": iso(blast.scheduled_for)}
+            if blast.message_type == Blast.MessageType.REMINDER else None
+        ),
         "status": blast.status,
         "event": {"id": str(blast.event_id), "name": blast.event.name} if blast.event_id and blast.event else None,
         "audience": _audience(blast),
@@ -934,4 +941,45 @@ def segment_dto(segment) -> dict:
         "last_count": segment.last_count,
         "last_counted_at": iso(segment.last_counted_at),
         "updated_at": iso(segment.updated_at),
+    }
+
+
+class RooDraftInput(StrictSerializer):
+    note = serializers.CharField(max_length=300, allow_blank=True, required=False)
+
+
+class EventRemindersInput(StrictSerializer):
+    day_before = serializers.BooleanField(required=False)
+    hour_before = serializers.BooleanField(required=False)
+    note = serializers.CharField(max_length=280, allow_blank=True, required=False)
+    # Small or private events get reminders only when staff switch this on.
+    force = serializers.BooleanField(required=False)
+
+
+def event_reminders(event) -> dict:
+    """Both reminders for one event: switches, send times and current state."""
+
+    from crm.reminders import eligible, enabled, send_time, settings_for
+    config = settings_for(event)
+    rows = {row.reminder_offset: row for row in Blast.objects.filter(
+        event=event, message_type=Blast.MessageType.REMINDER).order_by("created_at")}
+    items = []
+    for offset in (Blast.ReminderOffset.DAY_BEFORE, Blast.ReminderOffset.HOUR_BEFORE):
+        blast = rows.get(offset)
+        when = blast.scheduled_for if blast is not None and blast.scheduled_for else send_time(event, offset)
+        items.append({
+            "offset": offset,
+            "on": config[offset],
+            "send_at": iso(when),
+            "blast_id": str(blast.pk) if blast is not None else None,
+            "status": blast.status if blast is not None else None,
+            "recipient_count": blast.recipient_count if blast is not None else 0,
+            "last_error": (blast.last_error or None) if blast is not None else None,
+        })
+    return {
+        "enabled": enabled(),
+        "eligible": eligible(event, config),
+        "note": config["note"],
+        "force": config["force"],
+        "reminders": items,
     }
