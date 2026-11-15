@@ -1200,6 +1200,11 @@ CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID = os.getenv('CONTENT_FACTORY_OPS_SLACK_CHAN
 ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED', 'false').lower() == 'true'
 ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE', '2026-09-29').strip()
 ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK = int(os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK', '20'))
+# One "founder stuck" alert for every cohort (content_factory/founder_stuck_alerts.py):
+# a stopped website setup, a website step retrying for too long, or a latest article
+# run stopped with no next action. A kill switch that defaults on; the sweep runs at
+# most every 10 minutes with bounded, indexed queries.
+ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED = _env_is_true('ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED', True)
 ARTICLES_WEBSITE_STATUS_V1_ENABLED = os.getenv('ARTICLES_WEBSITE_STATUS_V1_ENABLED', 'false').lower() == 'true'
 ARTICLES_WEBSITE_CONSISTENCY_ENABLED = os.getenv('ARTICLES_WEBSITE_CONSISTENCY_ENABLED', 'false').lower() == 'true'
 ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED = os.getenv('ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED', 'false').lower() == 'true'
