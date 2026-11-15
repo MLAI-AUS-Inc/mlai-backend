@@ -295,7 +295,7 @@ def _locked_row(row_id) -> PointsAdmin:
         row_id = int(row_id)
     except (TypeError, ValueError):
         raise TeamError("not_found", 404) from None
-    row = PointsAdmin.objects.select_for_update().select_related("user").filter(pk=row_id, is_active=True).first()
+    row = PointsAdmin.objects.select_for_update(of=("self",)).select_related("user").filter(pk=row_id, is_active=True).first()
     if row is None:
         raise TeamError("not_found", 404)
     if row.user is not None and row.user.is_active and row.user.is_superuser:
