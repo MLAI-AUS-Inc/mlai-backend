@@ -468,13 +468,18 @@ def _live_url_detail(organization, domain):
     return None
 
 
-def verify_live_url_deployment(config, target, *, setup_run_id=""):
+def verify_live_url_deployment(config, target, *, setup_run_id="", renew=True):
     """Record a new-journey website's live-URL proof (``website_live_verification.verify_live_url``).
 
     Requires the target's own build proof first, so a page that shows the
     kit's marker never certifies a build MLAI did not verify, then the
     reviewed marker on the live listing. The build proof is kept and the live
     proof is written beside it.
+
+    ``renew=False`` (the background live status, ``website_live_status``) only
+    observes: it records the ``deployment-verify`` receipt for the target's
+    current, already verified source and leaves the target, its proof age and
+    the connection's verified source as they are.
     """
     from . import website_live_verification as live
     from .website_live_fetch import fetch_live_route
@@ -502,6 +507,8 @@ def verify_live_url_deployment(config, target, *, setup_run_id=""):
         if current_target is None or current_target.contract != target.contract or current_target.source_sha != source_sha:
             raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
         changed_source = current.verified_sha != source_sha
+        if changed_source and not renew:
+            raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
         domain = current.organization.domain
         organization = current.organization
     require_unlocked_remote_call()
@@ -526,6 +533,14 @@ def verify_live_url_deployment(config, target, *, setup_run_id=""):
         if (target is None or target.contract != current_target.contract or target.source_sha != source_sha
                 or not live.build_proof(target) or not live.applicable(target)):
             raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
+        if not renew:
+            if current.verified_sha != source_sha:
+                raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
+            operation, _ = WebsiteConnectionOperation.objects.update_or_create(
+                idempotency_key=f"{current.pk}:live-url:{evidence_digest(binding)}", defaults={
+                    "connection": current, "generation": current.generation, "action": "deployment-verify",
+                    "state": "completed", "payload": binding, "receipt": receipt})
+            return {**receipt, "operation_id": str(operation.pk)}
         target.verified_at = now
         target.contract = {**target.contract, live.PROOF_KEY: {"status": "verified", "attestation_origin": live.ORIGIN,
             "observed_at": now.isoformat(), "source_sha": source_sha, "target_id": target.target_key,

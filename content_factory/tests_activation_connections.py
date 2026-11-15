@@ -125,7 +125,13 @@ class ActivationConnectionTests(TestCase):
         access = {'verified': True, 'branch': 'main', 'sha': SHA}
         caps = article_capabilities(self.config, domain=self.org.domain, account={'saved': True, 'owned': True}, evidence=evidence, repository_access=access)
         self.assertTrue(caps['canGenerateArticle'])
-        self.assertFalse(caps['canPublishArticle'])
+        # MLAI's verified target is the publishing proof (ARTICLES_READY_ON_MERGE_ENABLED);
+        # with that kill switch off, publishing still waits for the live site.
+        self.assertTrue(caps['canPublishArticle'])
+        with override_settings(ARTICLES_READY_ON_MERGE_ENABLED=False):
+            evidence = integration_evidence(self.config)
+            caps = article_capabilities(self.config, domain=self.org.domain, account={'saved': True, 'owned': True}, evidence=evidence, repository_access=access)
+            self.assertFalse(caps['canPublishArticle'])
         for update in ({'state': 'disconnected'}, {'state': 'paused'}, {'generation': 2},
             {'verified_sha': 'b' * 40}, {'last_verified_at': timezone.now() - timedelta(days=8)}, {'app_root': 'apps/site'}):
             original = {key: getattr(website, key) for key in update}

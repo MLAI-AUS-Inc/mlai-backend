@@ -58,13 +58,16 @@ FLAG_KEYS = (
     # Every other founder Articles, My startup and Content Factory switch, so a
     # release can set any of them and none can only be changed by hand on the
     # host. Empty keeps the host value; no default changes. The stuck-founder
-    # alert, the three GitHub linking kill switches below it and the stand-in
-    # preview approval switch are on by default.
+    # alert, the three GitHub linking kill switches below it, the stand-in
+    # preview approval switch and the ready-on-merge and no-workflow kill
+    # switches are on by default.
     "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED",
     "ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED",
     "MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED",
     "ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED",
     "ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED",
+    "ARTICLES_READY_ON_MERGE_ENABLED",
+    "ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED",
     "ARTICLES_STAFF_ALERT_RULES_ENABLED",
     "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE",
     "ARTICLES_FAILURE_POLICY_V2_ENABLED",

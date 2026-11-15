@@ -2680,6 +2680,12 @@ ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED = _env_is_true("ARTICLES_DRAFT_READY_
 ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED = _env_is_true("ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED", False)
 ARTICLES_DRAFT_TOOLS_ENABLED = _env_is_true("ARTICLES_DRAFT_TOOLS_ENABLED", False)
 ARTICLES_LIVE_URL_VERIFICATION_ENABLED = _env_is_true("ARTICLES_LIVE_URL_VERIFICATION_ENABLED", False)
+# Kill switch, default on: live-URL verification (no workflow, runner or sealed
+# digest written into the founder's repository, no Workflows/Checks/Statuses
+# grant) applies to every cohort, not only new-journey startups. Needs
+# ARTICLES_LIVE_URL_VERIFICATION_ENABLED, and Content Factory's
+# CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED for new setups.
+ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED = _env_is_true("ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED", True)
 MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED = _env_is_true("MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED", False)
 # Kill switch, default on: every Chat-started GitHub connection, legacy or new
 # journey, returns to Chat with a typed reason instead of a text error page.
@@ -2733,6 +2739,10 @@ ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED = _env_is_true("ARTICLES_GITHUB_OW
 # Turn Content Factory's flag off first, or together with this one: with only
 # this one off, Content Factory still shows an Approve button that this gate refuses.
 ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED = _env_is_true("ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED", True)
+# Kill switch, default on: a merged articles setup is Ready, and articles can be
+# written and published, on MLAI's own build and render proof. Whether the
+# founder's host has deployed it is a background status, never a lock.
+ARTICLES_READY_ON_MERGE_ENABLED = _env_is_true("ARTICLES_READY_ON_MERGE_ENABLED", True)
 ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED", False)
 MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
 MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)

@@ -51,6 +51,8 @@ class PrepareRetryReceiptTests(SimpleTestCase):
                 self.assertIn("4 attempts", op.receipt["message"])
                 self.assertIn("Try again", op.receipt["message"])
 
+    # The founder's host as a lock (the ARTICLES_READY_ON_MERGE_ENABLED kill switch off); tests_website_live_status covers it on.
+    @override_settings(ARTICLES_READY_ON_MERGE_ENABLED=False)
     def test_every_terminal_failure_transition_has_no_retry_promise(self):
         for code, step, retryable, limit in (("deployment_source_unverified", "verify", True, 6),
                 ("worker_unavailable", "setup", False, 1), ("worker_unavailable", "scan", True, 3)):

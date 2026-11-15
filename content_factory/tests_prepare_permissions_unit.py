@@ -3,13 +3,15 @@ from types import SimpleNamespace
 from itertools import product
 from unittest.mock import patch, Mock
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from . import tests_prepare_journey_unit as fixtures
 from .website_journey import project_journey
 from .activation import article_capabilities
 
 
+# The founder's host as a lock (the ARTICLES_READY_ON_MERGE_ENABLED kill switch off); tests_website_live_status covers it on.
+@override_settings(ARTICLES_READY_ON_MERGE_ENABLED=False)
 class PrepareVerificationRuntimeTests(SimpleTestCase):
     """Run actual verification and, after 1.2, the frozen preparation chain."""
 

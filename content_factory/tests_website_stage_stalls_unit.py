@@ -27,6 +27,8 @@ class StageStallTests(SimpleTestCase):
             error.user_action = {"id": "merge_pr", "label": "Merge pull request"}
         prepare.prepare_failure(self.op, step, error, now=now or self.now)
 
+    # The founder's host as a lock (the ARTICLES_READY_ON_MERGE_ENABLED kill switch off); tests_website_live_status covers it on.
+    @override_settings(ARTICLES_READY_ON_MERGE_ENABLED=False)
     def test_each_real_deadline_creates_one_causal_incident_and_normal_waits_create_none(self):
         cases = (("github_unavailable", "transient_started_at", "transient_policy_deadline"),
             ("preview_pending", "waiting_started_at", "waiting_policy_deadline"),

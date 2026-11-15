@@ -140,13 +140,23 @@ class FounderJourneyBootstrapTests(_Client, TestCase):
         built = make_named_legacy_org(name, marker=marker)
         for view in ("summary", "full"):
             with self.subTest(view=view):
-                before = _stable(self.bootstrap(built, view, FLAGS_OFF))
-                after = _stable(self.bootstrap(built, view, ALL_P1_FLAGS_ON))
-                without_v2 = _stable(self.bootstrap(built, view, WITHOUT_V2))
+                # The new-journey P1 switches leave a legacy bootstrap as it was.
+                # Plan step 7's all-cohorts no-workflow switch is the one deliberate
+                # change, checked on its own below.
+                cohort_only = {"ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED": False}
+                before = _stable(self.bootstrap(built, view, {**FLAGS_OFF, **cohort_only}))
+                after = _stable(self.bootstrap(built, view, {**ALL_P1_FLAGS_ON, **cohort_only}))
+                without_v2 = _stable(self.bootstrap(built, view, {**WITHOUT_V2, **cohort_only}))
                 self.assertNotIn("founderJourney", before)
                 self.assertEqual(after.pop("founderJourney"), LEGACY_JOURNEY)
                 self.assertEqual(_differences(after, before), [])
                 self.assertEqual(_differences(without_v2, before), [])
+                # By default a legacy site is no longer asked for workflow grants;
+                # nothing else in its bootstrap moves.
+                no_workflow = _stable(self.bootstrap(built, view, ALL_P1_FLAGS_ON))
+                no_workflow.pop("founderJourney")
+                for path in _differences(no_workflow, before):
+                    self.assertTrue(any(part in path for part in (".prerequisites.permissions.", ".proofContract.requirements", ".steps[")), path)
 
 
 def _named_org_test(name, marker):

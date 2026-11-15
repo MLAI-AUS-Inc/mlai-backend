@@ -78,7 +78,7 @@ MAX_PENDING_ORGANIZATIONS = 500
 FOUNDER_OPERATION_ACTIONS = (
     "prepare", "setup", "reconnect", "repo_scan", "config_write", "custom_contract", "custom-contract",
     "resume", "setup-pr-merge", "verify-merged-setup", "source-reverify", "deployment-verify",
-    "ci-verify", "publish-pr",
+    "ci-verify", "publish-pr", "live-status",
 )
 RETRYING_OPERATION_STATES = ("pending", "running")
 # A wait with its own deadline (deployment, policy) is not a retry loop.
@@ -106,6 +106,7 @@ STEP_LABELS = {
     "deployment-verify": "Checking the live website",
     "ci-verify": "Checking the website build",
     "publish-pr": "Publishing an article",
+    "live-status": "Waiting for the live website to update",
     SETUP_WORKFLOW: "Website setup run",
     "article_generation": "Writing an article",
     "article_revision": "Revising an article",
