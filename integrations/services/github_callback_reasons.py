@@ -526,6 +526,15 @@ def _repository_owned_elsewhere(organization, repo) -> bool:
             .exclude(organization=organization).exists())
 
 
+def same_repository(connection, repo) -> bool:
+    """Whether GitHub's ``repo`` is the connection's repository: by permanent id,
+    or by name when either side has no id."""
+    repository_id = repo.get("id") if isinstance(repo, dict) else None
+    if type(repository_id) is int and connection.repository_id:
+        return repository_id == connection.repository_id
+    return connection.github_repo.casefold() == str((repo or {}).get("full_name") or "").strip().casefold()
+
+
 def bind_installation_id(user, repo, fallback) -> str:
     """The installation the bind mints its token for: the founder registry's, as
     ``verify_repository_access`` resolves it, else the callback's ``fallback``."""
@@ -585,11 +594,22 @@ def bind_new_journey_repository(*, config, user, company, repositories, installa
     full_name = str(repo["full_name"]).strip()
     current = config.website_connection
     if current is not None:
-        if current.state == "connected" and current.github_repo.casefold() == full_name.casefold():
-            _start_prepare(config, company=company, user=user)
-            return CONNECTED
-        # A different or paused website stays as it is; the founder chooses explicitly.
-        return MULTIPLE_REPOS
+        if not same_repository(current, repo) or current.state == "paused":
+            # A different or paused website stays as it is; the founder chooses explicitly.
+            return MULTIPLE_REPOS
+        # The same repository, perhaps renamed or moved since: refresh its name
+        # and access. A connected website keeps its setup; a disconnected or
+        # revoked one is reconnected, which the founder asked for by connecting.
+        try:
+            website_connections.bind_website(config, user=user, repo=full_name, app_root=current.app_root,
+                branch=current.branch, site_url=current.site_url, repository_id=current.repository_id,
+                reconnect=current.state != "connected",
+                expected=website_connections.contract_for(current) if current.state != "connected" else None)
+        except WebsiteAuthorityError as exc:
+            logger.warning("founder_github_rebind_refused org=%s", organization.pk)
+            return _failure_reason(exc)
+        _start_prepare(config, company=company, user=user)
+        return CONNECTED
     if _repository_owned_elsewhere(organization, full_name):
         return OWNED_ELSEWHERE
     reminted = False

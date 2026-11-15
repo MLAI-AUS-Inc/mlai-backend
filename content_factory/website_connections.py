@@ -363,9 +363,13 @@ def verify_repository_native_target(connection):
     if connection.app_root:
         raise WebsiteAuthorityError("APPLICATION_ROOT_VERIFICATION_REQUIRED", "This application root can be scanned, but native website changes need an adapter verified for that root.")
     metadata = read_repository_native_target(connection)
-    if (metadata.get("id") != connection.repository_id
-            or str(metadata.get("full_name") or "").casefold() != connection.github_repo.casefold()):
+    if metadata.get("id") != connection.repository_id:
         raise WebsiteAuthorityError("website_repository_changed", "The immutable GitHub repository identity changed.")
+    if str(metadata.get("full_name") or "").casefold() != connection.github_repo.casefold():
+        # Same repository under a new name or owner: refresh, do not stop.
+        from .website_repository_identity import refresh_repository_name
+        if not refresh_repository_name(connection, metadata.get("full_name")):
+            raise WebsiteAuthorityError("website_repository_changed", "The immutable GitHub repository identity changed.")
     if not metadata.get("default_branch") or metadata["default_branch"] != connection.branch:
         raise WebsiteAuthorityError("SETUP_BRANCH_VERIFICATION_REQUIRED", "This branch can be scanned, but native website changes need an adapter verified for this selected branch.")
 
@@ -786,16 +790,38 @@ def invalidate_repository_config(config, *, archive_templates=True):
     WebsiteDesignSnapshot.objects.filter(organization=config.organization, is_active=True).update(is_active=False, status="superseded")
 
 
-def verify_repository_access(*, user, repo, organization=None):
-    """Verify exact selected-repo access and immutable identity before binding."""
+def _read_repository_by_id(installation_id, repo, repository_id):
+    """GitHub's current metadata for a repository found by its permanent id."""
     from integrations import http_client
-    from integrations.services.github_installations import installation_for_repo
     from integrations.services.github_app import create_installation_access_token
+    credential = create_installation_access_token(installation_id=installation_id, repository=repo,
+        repository_id=repository_id, permission_mode="read")
+    return http_client.get(f"https://api.github.com/repositories/{repository_id}", headers={
+        "Authorization": f"Bearer {credential.token}", "Accept": "application/vnd.github+json"}, timeout=(3, 15))
+
+
+def verify_repository_access(*, user, repo, organization=None, repository_id=None):
+    """Verify exact selected-repo access and immutable identity before binding.
+
+    With ``repository_id`` (an already linked repository) the repository is
+    read by that permanent id, and GitHub's current ``full_name`` is returned
+    even when ``repo`` is an older name: a rename or transfer is the same
+    repository. Without it, the name GitHub returns must match ``repo``.
+    """
+    from integrations import http_client
+    from integrations.services.github_installations import installation_for_repo, installation_for_repository_id
+    from integrations.services.github_app import create_installation_access_token
+    if type(repository_id) is not int or repository_id < 1:
+        repository_id = None
     inst = installation_for_repo(user, repo)
+    if inst is None and repository_id is not None:
+        inst = installation_for_repository_id(user, repository_id)
     if inst is None:
         raise WebsiteAuthorityError("github_authorization_required", "Authorize the GitHub App for this repository first.")
     try:
-        if organization is not None:
+        if repository_id is not None:
+            response = _read_repository_by_id(str(inst.installation_id), repo, repository_id)
+        elif organization is not None:
             from types import SimpleNamespace
             from integrations.services.github_connections import read_bound_repository
             response = read_bound_repository(SimpleNamespace(installation_id=inst.installation_id,
@@ -810,7 +836,10 @@ def verify_repository_access(*, user, repo, organization=None):
             raise ValueError("Invalid GitHub repository payload")
         if not isinstance(metadata.get("id"), int) or metadata["id"] < 1:
             raise ValueError("Repository identity mismatch")
-        if metadata["full_name"].casefold() != repo.casefold():
+        if repository_id is not None:
+            if metadata["id"] != repository_id or not isinstance(metadata.get("full_name"), str):
+                raise ValueError("Repository identity mismatch")
+        elif metadata["full_name"].casefold() != repo.casefold():
             from .website_github_failure import taxonomy_active
             if taxonomy_active():
                 raise WebsiteAuthorityError("github_repository_identity_mismatch", "GitHub returned a different repository identity.")
@@ -823,8 +852,13 @@ def verify_repository_access(*, user, repo, organization=None):
     return {"repository_id": metadata["id"], "github_repo": metadata["full_name"], "installation_id": str(inst.installation_id), "branch": str(metadata.get("default_branch") or "")}
 
 
-def bind_website(config, *, user, repo, app_root="", branch="", site_url="", reconnect=False, expected=None):
-    """Explicitly authorize a selected website; stale work cannot call this path."""
+def bind_website(config, *, user, repo, app_root="", branch="", site_url="", reconnect=False, expected=None,
+                 repository_id=None):
+    """Explicitly authorize a selected website; stale work cannot call this path.
+
+    ``repository_id`` names an already linked repository by its permanent id,
+    so a stored name that GitHub has since renamed or moved still verifies.
+    """
     repo = str(repo or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repo) or repo.split("/")[-1] in {".", ".."}:
         raise WebsiteAuthorityError("invalid_github_repository", "Choose a GitHub owner/repository.", status=400)
@@ -843,12 +877,13 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
     from .website_failure_scope import failure_scope
     from django.conf import settings
     from .p2_foundation import p2_applies
+    by_id = {"repository_id": repository_id} if repository_id else {}
     with failure_scope(config.organization_id):
         if (getattr(settings, "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
                 and p2_applies(config.organization)):
-            metadata = verify_repository_access(user=user, repo=repo, organization=config.organization)
+            metadata = verify_repository_access(user=user, repo=repo, organization=config.organization, **by_id)
         else:
-            metadata = verify_repository_access(user=user, repo=repo)
+            metadata = verify_repository_access(user=user, repo=repo, **by_id)
     if new_journey and branch and branch.removeprefix("refs/heads/") == metadata["branch"]:
         # D-09: naming the repository's default branch is the same as leaving it empty.
         branch = ""
@@ -865,24 +900,16 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
         same = bool(current and current.repository_id == metadata["repository_id"] and current.app_root == app_root
                     and current.branch == (branch or metadata["branch"]) and current.site_url == (site_url or config.organization.domain))
         if same and current.state == "connected":
-            if reconnect:
-                # "Reconnect website" on a website that is still connected to the
-                # same repository and target only refreshes the GitHub
-                # authorization. Running it as a lifecycle transition cancelled
-                # in-flight runs and held goals and cleared publish targets,
-                # auto-publish and discovery. "Reset saved setup" starts over.
-                current.installation_id = metadata["installation_id"]
-                current.authorized_by = user
-                current.save(update_fields=["installation_id", "authorized_by", "updated_at"])
+            # The same repository (by permanent id) and target: this only
+            # refreshes GitHub's current name and authorization. Running it as
+            # a lifecycle transition cancelled in-flight runs and held goals
+            # and cleared publish targets, auto-publish and discovery. "Reset
+            # saved setup" starts over.
+            _refresh_same_repository(config, current, metadata, user=user, reconnect=reconnect)
             return current
         if same and current.state != "connected" and not reconnect:
-            from django.conf import settings
-            from .p2_foundation import p2_applies
-            if (getattr(settings, "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
-                    and p2_applies(config.organization)):
-                reconnect = True
-            else:
-                raise WebsiteAuthorityError("website_reconnect_required", "Explicitly reconnect this website before continuing.")
+            # Choosing the same repository again is the explicit reconnect.
+            reconnect = True
         if current:
             archive_repository_templates(config, current)
         elif any(getattr(config, key) for key in ("article_template", "design_guide", "resource_prompt")):
@@ -896,7 +923,8 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
             connection = current
             connection.installation_id = metadata["installation_id"]
             connection.authorized_by = user
-            connection.save(update_fields=["installation_id", "authorized_by", "updated_at"])
+            connection.github_repo = metadata["github_repo"]
+            connection.save(update_fields=["installation_id", "authorized_by", "github_repo", "updated_at"])
         else:
             connection = WebsiteConnection.objects.create(organization=config.organization, authorized_by=user, app_root=app_root,
                 site_url=site_url or config.organization.domain, **{**metadata, "branch": branch or metadata["branch"]})
@@ -914,6 +942,33 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
         config.github_installation_id = metadata["installation_id"]
         config.save(update_fields=["website_connection", "github_repo", "github_installation_id", "updated_at"])
         return connection
+
+
+def _refresh_same_repository(config, connection, metadata, *, user, reconnect):
+    """Store GitHub's current name and installation for the already connected repository.
+
+    Generation, setup, publish targets and running work are kept. Access was
+    just verified, so a "give MLAI access" blocker is cleared.
+    """
+    from .website_repository_identity import ACCESS_BLOCKER
+    fields = []
+    if connection.github_repo != metadata["github_repo"]:
+        connection.github_repo = metadata["github_repo"]
+        fields.append("github_repo")
+    if reconnect or connection.installation_id != metadata["installation_id"]:
+        connection.installation_id = metadata["installation_id"]
+        connection.authorized_by = user
+        fields += ["installation_id", "authorized_by"]
+    blockers = [item for item in connection.blockers or [] if not (isinstance(item, dict) and item.get("code") == ACCESS_BLOCKER)]
+    if blockers != (connection.blockers or []):
+        connection.blockers = blockers
+        fields.append("blockers")
+    if fields:
+        connection.save(update_fields=[*fields, "updated_at"])
+    if config.github_repo != metadata["github_repo"] or config.github_installation_id != metadata["installation_id"]:
+        config.github_repo = metadata["github_repo"]
+        config.github_installation_id = metadata["installation_id"]
+        config.save(update_fields=["github_repo", "github_installation_id", "updated_at"])
 
 
 def transition_connection(config, *, action, expected, idempotency_key="", verified_reconnect=False):

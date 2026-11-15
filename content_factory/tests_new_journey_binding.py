@@ -255,3 +255,51 @@ class CallbackBindingTests(TestCase):
         self.assertIn("github=connected&domain=banksia.studio&repo=founder%2Fbanksia-studio", response["Location"])
         self.verify.assert_not_called()
         self.assertIsNone((read_marker(built.organization) or {}).get("ownerClickRequired"))
+
+
+@override_settings(**COMMON, **ALL_P1_FLAGS_ON)
+class LinkedRepositoryCallbackTests(TestCase):
+    """Returning from GitHub for an already linked repository matches it by id."""
+
+    setUp = CallbackBindingTests.setUp
+    github = CallbackBindingTests.github
+    callback = CallbackBindingTests.callback
+    reason = CallbackBindingTests.reason
+
+    def linked(self, *, state="connected", name="founder/old-name"):
+        built = make_new_journey_org(domain="banksia.studio")
+        connection = WebsiteConnection.objects.create(organization=built.organization, github_repo=name,
+            repository_id=4242, installation_id="77", branch="main", site_url=built.organization.domain, state=state)
+        built.config.website_connection = connection
+        built.config.github_repo = name
+        built.config.save(update_fields=["website_connection", "github_repo"])
+        return built, connection
+
+    def renamed_repo(self):
+        return {**_repo("founder/banksia-studio"), "id": 4242}
+
+    def verify_by_id(self, *, user, repo, repository_id=None):
+        return {"repository_id": 4242, "github_repo": repo, "installation_id": "77", "branch": "main"}
+
+    def test_a_renamed_connected_repository_keeps_its_setup(self):
+        built, connection = self.linked()
+        generation = connection.generation
+        response = self.callback(built, [self.renamed_repo()], verify=self.verify_by_id)
+        self.assertEqual(self.reason(response), reasons.CONNECTED)
+        connection.refresh_from_db()
+        self.assertEqual((connection.github_repo, connection.generation, connection.state),
+                         ("founder/banksia-studio", generation, "connected"))
+        self.assertEqual(self.verify.call_args.kwargs["repository_id"], 4242)
+        self.prepare.assert_called_once()
+
+    def test_a_revoked_repository_is_reconnected(self):
+        built, connection = self.linked(state="revoked")
+        response = self.callback(built, [self.renamed_repo()], verify=self.verify_by_id)
+        self.assertEqual(self.reason(response), reasons.CONNECTED)
+        connection.refresh_from_db()
+        self.assertEqual((connection.state, connection.github_repo), ("connected", "founder/banksia-studio"))
+
+    def test_a_different_repository_still_asks(self):
+        built, _ = self.linked()
+        other = {**_repo("founder/banksia-studio"), "id": 9999}
+        self.assertEqual(self.reason(self.callback(built, [other], verify=self.verify_by_id)), reasons.MULTIPLE_REPOS)

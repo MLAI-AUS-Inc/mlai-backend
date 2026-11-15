@@ -169,3 +169,91 @@ class InstallationProbeTests(TestCase):
         self.assertEqual(mint.call_args.kwargs["repository_id"], 5)
         self.assertFalse(mint.call_args.kwargs["use_cache"])
         drop.assert_called_once()
+
+
+class LinkedRepositoryRebindTests(WebsiteDatabaseFixture, TestCase):
+    """After linking, the repository is matched by its permanent id, never by name."""
+
+    def renamed(self, *, installation_id="45", name="example/site-renamed"):
+        return {"repository_id": 123, "github_repo": name, "installation_id": installation_id, "branch": "main"}
+
+    def test_reconnecting_a_renamed_repository_keeps_setup_and_refreshes_the_name(self):
+        from .website_connections import bind_website, contract_for
+        generation = self.website.generation
+        self.website.blockers = [{"code": "github_access_required", "message": "x", "retryable": False}]
+        self.website.save(update_fields=["blockers"])
+        with patch("content_factory.website_connections.verify_repository_access", return_value=self.renamed()) as verify:
+            bind_website(self.config, user=None, repo="example/site", app_root="", branch="main",
+                         site_url=self.org.domain, reconnect=True, expected=contract_for(self.website), repository_id=123)
+        self.assertEqual(verify.call_args.kwargs["repository_id"], 123)
+        self.website.refresh_from_db()
+        self.config.refresh_from_db()
+        self.assertEqual((self.website.state, self.website.generation), ("connected", generation))
+        self.assertEqual((self.website.github_repo, self.config.github_repo), ("example/site-renamed",) * 2)
+        self.assertEqual(self.website.blockers, [])
+        self.assertEqual(self.config.publish_targets, [{"target_id": "native"}])
+        self.assertEqual(self.config.article_template, "# Article\nTemplate")
+
+    def test_rebinding_a_moved_repository_records_the_new_installation(self):
+        from .website_connections import bind_website
+        with patch("content_factory.website_connections.verify_repository_access",
+                   return_value=self.renamed(installation_id="99", name="Agency/site")):
+            bind_website(self.config, user=None, repo="Agency/site", branch="main", site_url=self.org.domain)
+        self.website.refresh_from_db()
+        self.config.refresh_from_db()
+        self.assertEqual((self.website.installation_id, self.config.github_installation_id), ("99", "99"))
+        self.assertEqual(self.website.github_repo, "Agency/site")
+
+    @override_settings(ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED=False)
+    def test_choosing_the_same_repository_while_disconnected_reconnects_it(self):
+        from .website_connections import bind_website, transition_connection
+        transition_connection(self.config, action="disconnect", expected=self.binding)
+        self.config.refresh_from_db()
+        with patch("content_factory.website_connections.verify_repository_access", return_value=self.renamed()):
+            connection = bind_website(self.config, user=None, repo="example/site-renamed", branch="main",
+                                      site_url=self.org.domain)
+        self.assertEqual(connection.pk, self.website.pk)
+        connection.refresh_from_db()
+        self.assertEqual((connection.state, connection.github_repo), ("connected", "example/site-renamed"))
+
+    def test_access_check_reads_a_linked_repository_by_id(self):
+        from types import SimpleNamespace
+        from .website_connections import verify_repository_access
+        response = SimpleNamespace(raise_for_status=lambda: None,
+            json=lambda: {"id": 123, "full_name": "example/site-renamed", "default_branch": "main"})
+        with patch("integrations.services.github_installations.installation_for_repo", return_value=None), \
+                patch("integrations.services.github_installations.installation_for_repository_id",
+                      return_value=SimpleNamespace(installation_id="45")), \
+                patch("content_factory.website_connections._read_repository_by_id", return_value=response) as read:
+            metadata = verify_repository_access(user=None, repo="example/site", repository_id=123)
+        read.assert_called_once_with("45", "example/site", 123)
+        self.assertEqual((metadata["repository_id"], metadata["github_repo"]), (123, "example/site-renamed"))
+
+    def test_access_check_by_id_refuses_a_different_repository(self):
+        from types import SimpleNamespace
+        from .website_connections import verify_repository_access
+        response = SimpleNamespace(raise_for_status=lambda: None,
+            json=lambda: {"id": 456, "full_name": "example/site", "default_branch": "main"})
+        with patch("integrations.services.github_installations.installation_for_repo",
+                   return_value=SimpleNamespace(installation_id="45")), \
+                patch("content_factory.website_connections._read_repository_by_id", return_value=response):
+            with self.assertRaises(Exception):
+                verify_repository_access(user=None, repo="example/site", repository_id=123)
+
+    def test_native_target_check_refreshes_a_renamed_repository(self):
+        from .website_connections import verify_repository_native_target
+        with patch("content_factory.website_connections.read_repository_native_target",
+                   return_value={"id": 123, "full_name": "example/site-renamed", "default_branch": "main"}):
+            verify_repository_native_target(self.website)
+        self.website.refresh_from_db()
+        self.config.refresh_from_db()
+        self.assertEqual((self.website.github_repo, self.config.github_repo), ("example/site-renamed",) * 2)
+
+    def test_native_target_check_still_stops_on_a_different_repository(self):
+        from .website_connections import verify_repository_native_target
+        from .website_contract import WebsiteAuthorityError
+        with patch("content_factory.website_connections.read_repository_native_target",
+                   return_value={"id": 456, "full_name": "example/site", "default_branch": "main"}):
+            with self.assertRaises(WebsiteAuthorityError) as raised:
+                verify_repository_native_target(self.website)
+        self.assertEqual(raised.exception.code, "website_repository_changed")

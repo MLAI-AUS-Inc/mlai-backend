@@ -183,7 +183,9 @@ def _normalize_repo(repo: dict, installation_id: str, account_login: str = "") -
     default_branch = str(repo.get("default_branch") or "").strip()
     installation_id = str(installation_id or "").strip()
     account_login = (account_login or owner_name).strip()
+    repository_id = repo.get("id")
     return {
+        "id": repository_id if type(repository_id) is int and repository_id > 0 else None,
         "fullName": full_name,
         "full_name": full_name,
         "owner": owner_name,
@@ -287,6 +289,20 @@ def installation_for_repo(user, repo) -> Optional[GitHubInstallation]:
             for r in _list_repos_for_installation(inst)
         }
         if repo.lower() in names:
+            return inst
+    return None
+
+
+def installation_for_repository_id(user, repository_id) -> Optional[GitHubInstallation]:
+    """Which of the founder's installations can see the repository with this permanent id.
+
+    A renamed or transferred repository keeps its id, so this finds it when
+    its stored ``owner/name`` is out of date.
+    """
+    if user is None or type(repository_id) is not int or repository_id < 1:
+        return None
+    for inst in user_github_installations(user):
+        if any(repo.get("id") == repository_id for repo in _list_repos_for_installation(inst)):
             return inst
     return None
 
