@@ -41,7 +41,7 @@ class AccessDatabaseTests(CrmApiMixin, TestCase):
         self.assertEqual(
             member.json(),
             {"enabled": True, "can_view": False, "can_send": False, "can_manage_deliverability": False,
-                'campaign_features': {'waves': False, 'preflight': False}, "luma_sync": None, "channels": None},
+                'campaign_features': {'waves': False, 'preflight': False, 'roo_draft': False, 'auto_reminders': False}, "luma_sync": None, "channels": None},
         )
         self.assertEqual(APIClient().get(PREFIX + "access/").status_code, 401)
 

@@ -78,7 +78,7 @@ class CampaignUiContractTests(CrmApiMixin, TestCase):
 
     def test_access_capabilities_fail_closed_and_list_includes_pause_copy(self):
         response = self.client.get(PREFIX + 'access/')
-        self.assertEqual(response.json()['campaign_features'], {'waves': True, 'preflight': False})
+        self.assertEqual(response.json()['campaign_features'], {'waves': True, 'preflight': False, 'roo_draft': False, 'auto_reminders': False})
         self.assertFalse(self.member_client.get(PREFIX + 'access/').json()['campaign_features']['waves'])
         blast, _ = self.create()
         blast.status = 'queued'; blast.pause_state = 'staff'; blast.paused_by = self.admin; blast.save()

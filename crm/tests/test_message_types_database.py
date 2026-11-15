@@ -60,6 +60,16 @@ class InviteAudienceDatabaseTests(BlastFixtures, TestCase):
         self.assertEqual(response.status_code, 400, response.content)
         self.assertEqual(response.json()["error"], "invite_cannot_target_guests")
 
+    def test_an_invite_to_everyone_opted_in_keeps_its_event(self):
+        response = self.client.post(PREFIX + "blasts/", {
+            "purpose": "marketing", "message_type": "invite", "event_id": str(self.event.pk),
+            "audience_preset": "opted_in", "channels": ["email"]}, format="json")
+        self.assertEqual(response.status_code, 201, response.content)
+        blast = Blast.objects.get(pk=response.json()["id"])
+        self.assertEqual((blast.event_id, blast.purpose), (self.event.pk, "marketing"))
+        # The guest list is still left out of the opted-in audience.
+        self.assertEqual(self.emails(blast)[1]["already_registered"], 5)
+
     def test_the_api_saves_and_returns_the_message_type(self):
         response = self.client.post(PREFIX + "blasts/", self.draft_body(
             message_type="blast", channels=["email"], sms={}, whatsapp={}), format="json")

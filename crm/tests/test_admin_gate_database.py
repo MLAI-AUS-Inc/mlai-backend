@@ -147,7 +147,7 @@ class RouteAuditDatabaseTests(CrmApiMixin, TestCase):
         self.assertEqual(
             self.member_client.get(PREFIX + "access/").json(),
             {"enabled": True, "can_view": False, "can_send": False, "can_manage_deliverability": False,
-                'campaign_features': {'waves': False, 'preflight': False}, "luma_sync": None, "channels": None},
+                'campaign_features': {'waves': False, 'preflight': False, 'roo_draft': False, 'auto_reminders': False}, "luma_sync": None, "channels": None},
         )
         self.assertEqual(self.member_client.get(ADMIN_ACCESS).json(), {"is_admin": False, "sections": []})
 
