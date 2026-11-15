@@ -32,9 +32,13 @@ from integrations.services.github_connections import build_github_oauth_state
 
 FRONTEND = "https://chat.example"
 FIXED_ROUTE = FRONTEND + "/my-startup/website?github=state_expired"
-FLAG_OFF = {**ALL_P1_FLAGS_ON, "MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED": False}
+# The return-for-every-Chat-connection kill switch (default on). Off, a legacy
+# organisation's Chat callback keeps its text pages.
+ALL_RETURNS_OFF = {"MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED": False}
+FLAG_OFF = {**ALL_P1_FLAGS_ON, "MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED": False, **ALL_RETURNS_OFF}
 # The V2 kill switch (and production between turn-on steps 5 and 6): every P1 flag on but V2.
-V2_OFF = {**ALL_P1_FLAGS_ON, "MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED": False}
+V2_OFF = {**ALL_P1_FLAGS_ON, "MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED": False, **ALL_RETURNS_OFF}
+LEGACY_TODAY = {**ALL_P1_FLAGS_ON, **ALL_RETURNS_OFF}
 TODAY_BAD_STATE = (400, b"Invalid or expired state", None)
 COMMON = {
     "CACHES": {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
@@ -268,7 +272,7 @@ class BadChatStateTests(CallbackReasonTestBase):
         replayed = self.chat_state(built)
         with override_settings(**FLAG_OFF):
             self.callback(self.params(replayed))
-        with patch("time.time", return_value=time.time() - 3600):
+        with patch("time.time", return_value=time.time() - 7200):
             expired = self.chat_state(built).raw
         tampered = self.chat_state(built).raw
         return {"expired": expired, "replayed": replayed.raw,
@@ -293,22 +297,32 @@ class BadChatStateTests(CallbackReasonTestBase):
                 self.assertEqual(self._revoked(built, V2_OFF), self._revoked(built, FLAG_OFF))
         self.assertIsNone((read_marker(self.new.organization) or {}).get("githubReturn"))
 
-    def test_legacy_expired_replayed_and_revoked_states_keep_todays_400_with_every_flag_on(self):
-        """G1: a legacy org's validly signed bad state is not redirected; only its org is read."""
+    def test_legacy_expired_replayed_and_revoked_states_use_the_fixed_route(self):
+        """Every Chat-started connection, legacy too, can restart from an expired link in one click."""
         legacy = make_named_legacy_org("vyavos", domain=f"vyavos-{uuid.uuid4().hex[:6]}.example")
         states = self._bad_states(legacy)
-        for label in ("expired", "replayed"):
+        for label in ("expired", "replayed", "tampered"):
             with self.subTest(label):
-                today = _snapshot(self.callback({"code": "c", "installation_id": "77", "state": states[label]}))
-                with override_settings(**FLAG_OFF):
-                    flag_off = _snapshot(self.callback({"code": "c", "installation_id": "77", "state": states[label]}))
-                self.assertEqual(today, TODAY_BAD_STATE)
-                self.assertEqual(today, flag_off)
+                response = self.callback({"code": "c", "installation_id": "77", "state": states[label]})
+                self.assertEqual(_snapshot(response), (302, b"", FIXED_ROUTE))
         with self.subTest("revoked session"):
-            self.assertEqual(self._revoked(legacy, ALL_P1_FLAGS_ON), self._revoked(legacy, FLAG_OFF))
-        with self.subTest("tampered (names no trusted org: the contract's fixed route)"):
-            response = self.callback({"code": "c", "installation_id": "77", "state": states["tampered"]})
-            self.assertEqual(response["Location"], FIXED_ROUTE)
+            self.assertEqual(self._revoked(legacy, ALL_P1_FLAGS_ON), (302, b"", FIXED_ROUTE))
+        with self.subTest("kill switch off keeps today's 400"):
+            with override_settings(**LEGACY_TODAY):
+                response = self.callback({"code": "c", "installation_id": "77", "state": states["expired"]})
+            self.assertEqual(_snapshot(response), TODAY_BAD_STATE)
+
+    def test_v2_off_with_returns_for_all_on_still_uses_the_fixed_route(self):
+        states = self._bad_states(self.new)
+        with override_settings(**{**ALL_P1_FLAGS_ON, "MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED": False}):
+            response = self.callback({"code": "c", "installation_id": "77", "state": states["expired"]})
+        self.assertEqual(response["Location"], FIXED_ROUTE)
+
+    def test_a_state_older_than_ten_minutes_still_works(self):
+        with patch("time.time", return_value=time.time() - 50 * 60):
+            state = self.chat_state(self.new)
+        response = self.callback(self.params(state))
+        self.assertReason(response, reasons.CONNECTED)
 
     def test_missing_and_non_chat_states_keep_todays_400_with_the_flag_on(self):
         missing = self.callback({"code": "c", "installation_id": "77"})
@@ -369,18 +383,104 @@ class G7UnchangedTests(CallbackReasonTestBase):
         self.assertIn("/my-startup/website", results["success"][2])
         self.verify.assert_not_called()
 
-    def test_legacy_chat_state_with_every_flag_on_is_byte_identical(self):
+    LEGACY_REASONS = {
+        "missing code": reasons.AUTHORIZATION_FAILED,
+        "missing installation": reasons.NO_REPO,
+        "owner approval request": reasons.OWNER_APPROVAL_REQUESTED,
+        "token offline": reasons.UNAVAILABLE,
+        "provider error": reasons.AUTHORIZATION_FAILED,
+        "no token": reasons.AUTHORIZATION_FAILED,
+        "user fetch": reasons.UNAVAILABLE,
+        "repository access": reasons.REPOSITORY_ACCESS,
+    }
+
+    def test_legacy_chat_state_returns_every_failure_to_chat_with_a_reason(self):
         for name in ("talathrive", "pawshare"):
             with self.subTest(name):
                 legacy = make_named_legacy_org(name, domain=f"{name}-{uuid.uuid4().hex[:6]}.example")
                 before = read_marker(legacy.organization)
-                make = lambda: self.chat_state(legacy, return_url=f"{FRONTEND}/my-startup/connections?company_id={legacy.company.pk}&connected=github")
-                today = self.run_table(make, FLAG_OFF)
+                back = f"{FRONTEND}/my-startup/connections?company_id={legacy.company.pk}&connected=github"
+                make = lambda: self.chat_state(legacy, return_url=back)
                 now = self.run_table(make, ALL_P1_FLAGS_ON)
-                self.assertEqual(now, today)
-                for label, expected in self.TODAY.items():
-                    self.assertEqual(now[label], expected)
+                for label, reason in self.LEGACY_REASONS.items():
+                    self.assertEqual(now[label], (302, b"", f"{back}&github={reason}"), label)
+                # Success keeps the legacy return; no domain match, so nothing is bound.
+                self.assertEqual(now["success"][0], 302)
+                self.assertTrue(now["success"][2].startswith(back + "&github=connected"))
+                self.verify.assert_not_called()
                 self.assertEqual(read_marker(legacy.organization), before)
+
+    def test_legacy_chat_state_with_the_kill_switch_off_is_byte_identical(self):
+        legacy = make_named_legacy_org("talathrive", domain=f"talathrive-{uuid.uuid4().hex[:6]}.example")
+        make = lambda: self.chat_state(legacy, return_url=f"{FRONTEND}/my-startup/connections?company_id={legacy.company.pk}&connected=github")
+        today = self.run_table(make, FLAG_OFF)
+        now = self.run_table(make, LEGACY_TODAY)
+        self.assertEqual(now, today)
+        for label, expected in self.TODAY.items():
+            self.assertEqual(now[label], expected)
+
+    def unlinked_legacy(self):
+        legacy = make_named_legacy_org("mlai", domain="banksia-legacy.studio")
+        legacy.config.website_connection = None
+        legacy.config.github_repo = None
+        legacy.config.save(update_fields=["website_connection", "github_repo"])
+        return legacy
+
+    def test_legacy_success_binds_the_one_repository_named_like_the_domain(self):
+        legacy = self.unlinked_legacy()
+        back = f"{FRONTEND}/my-startup/connections?company_id={legacy.company.pk}&connected=github"
+        response = self.callback(self.params(self.chat_state(legacy, return_url=back)),
+                                 get=[_json(USER), _json(_repos("founder/banksia-legacy-studio", "founder/other"))])
+        self.assertEqual(response["Location"],
+                         back + "&github=connected&domain=banksia-legacy.studio&repo=founder%2Fbanksia-studio")
+        self.verify.assert_called_once()
+        self.prepare.assert_called_once()
+        legacy.config.refresh_from_db()
+        self.assertIsNotNone(legacy.config.website_connection_id)
+        self.assertIsNone((read_marker(legacy.organization) or {}).get("ownerClickRequired"))
+
+    def test_legacy_success_without_a_domain_match_lands_on_the_picker(self):
+        legacy = self.unlinked_legacy()
+        back = f"{FRONTEND}/my-startup/connections?company_id={legacy.company.pk}&connected=github"
+        response = self.callback(self.params(self.chat_state(legacy, return_url=back)),
+                                 get=[_json(USER), _json(_repos("founder/one", "founder/two"))])
+        self.assertEqual(response["Location"], back + "&github=multiple_repos&domain=banksia-legacy.studio")
+        self.verify.assert_not_called()
+
+    def test_legacy_success_never_replaces_a_different_connected_repository(self):
+        legacy = make_named_legacy_org("talathrive", domain="banksia-legacy.studio")
+        before = legacy.config.website_connection_id
+        back = f"{FRONTEND}/my-startup/connections?company_id={legacy.company.pk}&connected=github"
+        response = self.callback(self.params(self.chat_state(legacy, return_url=back)),
+                                 get=[_json(USER), _json(_repos("founder/banksia-legacy-studio", "founder/other"))])
+        self.assertIn("&github=multiple_repos&", response["Location"])
+        self.verify.assert_not_called()
+        legacy.config.refresh_from_db()
+        self.assertEqual(legacy.config.website_connection_id, before)
+
+    def test_legacy_success_keeps_existing_repository_setup(self):
+        repositories = _repos("founder/banksia-legacy-studio", "founder/other")
+        with self.subTest("saved templates, no repository yet"):
+            legacy = self.unlinked_legacy()
+            legacy.config.article_template = "# Saved template"
+            legacy.config.save(update_fields=["article_template"])
+            back = f"{FRONTEND}/my-startup/connections?company_id={legacy.company.pk}&connected=github"
+            response = self.callback(self.params(self.chat_state(legacy, return_url=back)),
+                                     get=[_json(USER), _json(repositories)])
+            self.assertIn("&github=multiple_repos&", response["Location"])
+            legacy.config.refresh_from_db()
+            self.assertIsNone(legacy.config.website_connection_id)
+            self.assertEqual(legacy.config.article_template, "# Saved template")
+        with self.subTest("a repository stored before this return"):
+            legacy.config.article_template = ""
+            legacy.config.github_repo = "founder/banksia-legacy-studio"
+            legacy.config.save(update_fields=["article_template", "github_repo"])
+            self.callback(self.params(self.chat_state(legacy, return_url=back)),
+                          get=[_json(USER), _json(repositories)])
+            legacy.config.refresh_from_db()
+            self.assertIsNone(legacy.config.website_connection_id)
+        self.verify.assert_not_called()
+        self.prepare.assert_not_called()
 
     def test_slack_and_user_level_oauth_with_every_flag_on_are_byte_identical(self):
         makers = {
@@ -447,10 +547,20 @@ class ConnectBrowserTests(CallbackReasonTestBase):
             response = self.browse(used[:-2] + "zz")
             self.assertEqual(_snapshot(response)[:2], (400, TODAY_BAD_TICKET))
 
-    def test_bad_tickets_of_legacy_orgs_and_with_v2_off_keep_todays_400(self):
-        """G1 and G3: only a new-journey org's ticket is redirected, and never with V2 off."""
+    def test_bad_tickets_of_legacy_orgs_use_the_fixed_route(self):
         legacy = make_named_legacy_org("vyavos", domain=f"vyavos-{uuid.uuid4().hex[:6]}.example")
-        for label, built, values in (("legacy, every flag on", legacy, ALL_P1_FLAGS_ON),
+        used = self.ticket(legacy)
+        self.browse(used)
+        for kind, raw in {"replayed": used, "expired": self.ticket(legacy, age=3600)}.items():
+            with self.subTest(kind):
+                self.assertEqual(self.browse(raw)["Location"], FIXED_ROUTE)
+        with self.subTest("tampered keeps today's 400"):
+            self.assertEqual(_snapshot(self.browse(used[:-2] + "zz"))[:2], (400, TODAY_BAD_TICKET))
+
+    def test_bad_tickets_with_the_kill_switches_off_keep_todays_400(self):
+        """G1 and G3 with the return-for-all switch off: only a new-journey org's ticket, never with V2 off."""
+        legacy = make_named_legacy_org("vyavos", domain=f"vyavos-{uuid.uuid4().hex[:6]}.example")
+        for label, built, values in (("legacy, return-for-all off", legacy, LEGACY_TODAY),
                                      ("new journey, V2 off", self.new, V2_OFF)):
             with self.subTest(label), override_settings(**values):
                 used = self.ticket(built)

@@ -113,6 +113,16 @@ def connection_contract(payload):
     return result
 
 
+#: Work an archived repository, or one MLAI can no longer see, cannot take.
+PAUSED_BY_BLOCKER_ACTIONS = {"setup", "preview", "publish", "merge"}
+
+
+def _held_by_repository_blocker(connection):
+    """True while an archived or "give MLAI access" blocker holds repository changes."""
+    from .website_repository_identity import has_pausing_blocker
+    return has_pausing_blocker(connection)
+
+
 def validate_authority(connection, payload, *, action="read", domain="", github_repo=""):
     """Check one persisted connection without granting authority from the payload."""
     if action not in REPO_ACTIONS:
@@ -125,6 +135,8 @@ def validate_authority(connection, payload, *, action="read", domain="", github_
     if action != "portable" and connection.state not in {"connected", "paused"}:
         raise WebsiteAuthorityError("website_disconnected", "This website is disconnected. Reconnect it before continuing.")
     if action in WRITE_ACTIONS and connection.state != "connected":
+        raise WebsiteAuthorityError("website_publishing_paused", "Publishing is paused for this website.")
+    if action in PAUSED_BY_BLOCKER_ACTIONS and _held_by_repository_blocker(connection):
         raise WebsiteAuthorityError("website_publishing_paused", "Publishing is paused for this website.")
     if action in {"publish", "merge"} and not (connection.capabilities or {}).get("publishingReady"):
         raise WebsiteAuthorityError("website_publish_verification_required", "Verify a publishing adapter for this repository before publishing.")

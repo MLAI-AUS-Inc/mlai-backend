@@ -33,7 +33,12 @@ PROVIDER_ALIASES = {"google-drive": "google_drive", "google-analytics": "google_
 
 
 def consume_ticket(ticket):
-    """Consume once before entering provider OAuth; reject tampering and replay."""
+    """Consume once before entering provider OAuth; reject tampering and replay.
+
+    The ticket is minted when the founder presses Connect and is spent at once
+    by the browser hop, so five minutes is plenty; the GitHub state it leads
+    to is what has to outlive the founder's time on GitHub.
+    """
     payload = signing.loads(ticket, salt=SALT, max_age=300)
     key = "startup-connect-used:" + hashlib.sha256(ticket.encode()).hexdigest()
     if not cache.add(key, True, timeout=301):
@@ -106,6 +111,20 @@ def _peek_github_ticket(ticket):
     except (signing.BadSignature, KeyError, ValueError, TypeError, AttributeError, VibeRaisingCompany.DoesNotExist):
         return None, None
     return payload, company
+
+
+def _bad_ticket_is_signed(ticket):
+    """Whether a bad GitHub ticket is one we signed (expired, replayed or for an ended session).
+
+    Such a ticket goes to the fixed route for every cohort, so Chat can
+    restart the connection in one click. A tampered ticket keeps today's 400.
+    Nothing in it is used.
+    """
+    try:
+        payload = signing.loads(ticket, salt=SALT)
+    except (signing.BadSignature, ValueError, TypeError):
+        return False
+    return isinstance(payload, dict) and payload.get("provider") == "github"
 
 
 def _bad_ticket_is_new_journey(ticket):
@@ -245,8 +264,9 @@ def connect_browser(request):
             raise ValueError("Unknown provider")
     except (signing.BadSignature, KeyError, ValueError, get_user_model().DoesNotExist, VibeRaisingCompany.DoesNotExist):
         bad_ticket = request.GET.get("ticket", "")
-        if (reasons.redirects_enabled() and reasons.is_github_chat_ticket(bad_ticket)
-                and _bad_ticket_is_new_journey(bad_ticket)):
+        if (reasons.is_github_chat_ticket(bad_ticket)
+                and ((reasons.all_chat_returns_enabled() and _bad_ticket_is_signed(bad_ticket))
+                     or (reasons.redirects_enabled() and _bad_ticket_is_new_journey(bad_ticket)))):
             # Nothing in a bad ticket is used: the fixed route only.
             fixed = reasons.state_expired_redirect()
             if fixed is not None:
