@@ -242,3 +242,10 @@ class RouteTests(SimpleTestCase):
     def test_renew_route(self):
         match = resolve(f"/api/v1/agent-runtime/installations/{uuid4()}/renew/")
         self.assertEqual(match.func.view_class.__name__, "NativeInstallationRenewView")
+
+
+class PromptTests(SimpleTestCase):
+    def test_wake_and_schedule_prompts_use_the_pending_tool(self):
+        self.assertIn("list_pending_invocations", ni.WAKE_PROMPT)
+        self.assertIn("list_pending_invocations", ni.SCHEDULE_PROMPT)
+        self.assertIn("no end date", ni.WAKE_PROMPT)

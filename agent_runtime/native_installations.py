@@ -46,6 +46,16 @@ PERSONAL_CONTEXT_POLICY = (
 )
 
 
+WAKE_PROMPT = (
+    "Start watching my MLAI mentions again with the MLAI plugin, with no end date, then call "
+    "list_pending_invocations and answer anything still waiting, oldest first."
+)
+SCHEDULE_PROMPT = (
+    "Every 15 minutes, use the MLAI plugin to call list_pending_invocations and answer anything still "
+    "waiting in MLAI Chat, oldest first. Do nothing if nothing is waiting."
+)
+
+
 def setup_prompt():
     """Describe the operator-selected connection using its actual public tools."""
     prompt = " ".join((SETUP_PROMPT.strip(), OWNER_REQUEST_POLICY, REPLY_POLICY))
@@ -616,6 +626,7 @@ def installation_payload(installation, *, now=None):
         "resource": enrollment.resource if enrollment else (grant.resources[0] if grant and grant.resources else None),
         "error_code": installation.native_cursor.get("error_code", ""),
         "setup_url": setup_url(), "instructions": SETUP_INSTRUCTIONS, "setup_prompt": setup_prompt(),
+        "wake_prompt": WAKE_PROMPT, "schedule_prompt": SCHEDULE_PROMPT,
         "picture": current_picture(installation), **diagnostics,
         **personal_capability}
 
