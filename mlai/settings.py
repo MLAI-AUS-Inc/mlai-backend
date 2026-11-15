@@ -2727,6 +2727,10 @@ ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED = _env_is_true("ARTICLES_REPOSITORY
 # Kill switch, default on: an organisation owner's approval of a founder's
 # GitHub app request connects that founder's website when it arrives.
 ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED = _env_is_true("ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED", True)
+# Kill switch, default on: a website-bound article whose own site build could
+# not be previewed may be approved from Content Factory's stand-in preview or,
+# with no rendering at all, from its text (CONTENT_FACTORY_STAND_IN_PREVIEW_APPROVAL).
+ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED = _env_is_true("ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED", True)
 ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED", False)
 MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
 MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)
