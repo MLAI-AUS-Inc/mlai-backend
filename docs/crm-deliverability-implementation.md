@@ -378,3 +378,26 @@ before this documentation update. System-mail receipts are excluded from
 the Contacts activity feed, and the monitor uses the existing action/time
 audit index. The seven transactional pure tests and eight deployment
 configuration tests also pass. The schema remains the approved graph only.
+
+## Campaign domains on mlai.org.au (approved 13 Nov 2026)
+
+Campaign mail moves off mlai.au entirely. mlai.au keeps staff mail (Google
+Workspace) and system mail (`notify.mlai.au`). Campaigns and event updates send
+from two subdomains of a second registered domain, so a bad campaign cannot
+touch mlai.au reputation and a slowed marketing stream cannot hold event
+updates. This is configuration only; `crm/tests/test_org_streams_unit.py`
+proves the code accepts it.
+
+| GitHub variable / droplet `.env` | Value |
+| --- | --- |
+| `CRM_STREAMS` | `news:news.mlai.org.au:hello@news.mlai.org.au:marketing;events:events.mlai.org.au:events@events.mlai.org.au:event_update;notify:notify.mlai.au:notifications@notify.mlai.au:transactional` |
+| `CRM_SENDING_DOMAINS` | `news.mlai.org.au:resend,events.mlai.org.au:resend` |
+| `CRM_PROTECTED_DOMAINS` | `mlai.au,mlai.org.au` |
+| `CRM_LISTMONK_PUBLIC_URL` | `https://links.mlai.org.au` (listmonk `app.root_url` must match; keep `lists.mlai.au` serving old unsubscribe links) |
+| `CRM_EVENT_SEND_WINDOW` | `mon-sun 08:00-20:00 Australia/Melbourne` (evening "starts soon" reminders for events within `CRM_TIME_CRITICAL_HOURS`) |
+
+Order: Resend domains verified and listmonk SMTP routes in place first, then the
+variables, then `python manage.py crm_streams sync` (mailboxes are created
+disabled; an owner enables each in Admin → Sending), then monitors and guardian,
+then waves and preflight together with the mlai-chat staff screens and
+`CRM_LEGACY_MAILBOX_PATH_ENABLED=false`.
