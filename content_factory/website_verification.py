@@ -468,13 +468,18 @@ def _live_url_detail(organization, domain):
     return None
 
 
-def verify_live_url_deployment(config, target, *, setup_run_id=""):
+def verify_live_url_deployment(config, target, *, setup_run_id="", renew=True):
     """Record a new-journey website's live-URL proof (``website_live_verification.verify_live_url``).
 
     Requires the target's own build proof first, so a page that shows the
     kit's marker never certifies a build MLAI did not verify, then the
     reviewed marker on the live listing. The build proof is kept and the live
     proof is written beside it.
+
+    ``renew=False`` (the background live status, ``website_live_status``) only
+    observes: it records the ``deployment-verify`` receipt for the target's
+    current, already verified source and leaves the target, its proof age and
+    the connection's verified source as they are.
     """
     from . import website_live_verification as live
     from .website_live_fetch import fetch_live_route
@@ -502,6 +507,8 @@ def verify_live_url_deployment(config, target, *, setup_run_id=""):
         if current_target is None or current_target.contract != target.contract or current_target.source_sha != source_sha:
             raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
         changed_source = current.verified_sha != source_sha
+        if changed_source and not renew:
+            raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
         domain = current.organization.domain
         organization = current.organization
     require_unlocked_remote_call()
@@ -526,6 +533,14 @@ def verify_live_url_deployment(config, target, *, setup_run_id=""):
         if (target is None or target.contract != current_target.contract or target.source_sha != source_sha
                 or not live.build_proof(target) or not live.applicable(target)):
             raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
+        if not renew:
+            if current.verified_sha != source_sha:
+                raise WebsiteAuthorityError("website_configuration_changed", "The verified target changed during the live check.")
+            operation, _ = WebsiteConnectionOperation.objects.update_or_create(
+                idempotency_key=f"{current.pk}:live-url:{evidence_digest(binding)}", defaults={
+                    "connection": current, "generation": current.generation, "action": "deployment-verify",
+                    "state": "completed", "payload": binding, "receipt": receipt})
+            return {**receipt, "operation_id": str(operation.pk)}
         target.verified_at = now
         target.contract = {**target.contract, live.PROOF_KEY: {"status": "verified", "attestation_origin": live.ORIGIN,
             "observed_at": now.isoformat(), "source_sha": source_sha, "target_id": target.target_key,
@@ -559,6 +574,46 @@ def verify_live_url_deployment(config, target, *, setup_run_id=""):
     logger.info("website_live_url_verified org=%s connection=%s target=%s detail=%s", current.organization_id, current.pk,
         target.target_key, "compared" if detail is not None else "none")
     return {**receipt, "operation_id": str(operation.pk)}
+
+
+def renew_build_proof(config, target, *, source_sha):
+    """Renew MLAI's own proof of an unchanged source while the founder's host lags.
+
+    With ``ARTICLES_READY_ON_MERGE_ENABLED`` the founder's host deploying is a
+    background status (``website_live_status``), so the same-source refresh
+    that keeps a proof inside ``VERIFICATION_MAX_AGE`` must not need it. This
+    re-reads GitHub's selected branch, requires it still to be ``source_sha``,
+    requires the target's own build proof at that source and a target that
+    needs no sealed proof, then renews ``verified_at`` on the target and
+    ``last_verified_at`` on the connection. It never moves the verified source,
+    records no live receipt and returns ``None`` when it does not apply.
+    """
+    from . import website_live_verification as live
+    from .website_live_status import enabled as ready_on_merge
+    from .website_sealed_workflow import required as sealed_required
+    from .website_connections import verify_repository_head
+    website = getattr(config, "website_connection", None)
+    if (not ready_on_merge() or website is None or target is None or target.source_sha != source_sha
+            or not live.build_proof(target) or sealed_required(website, target)):
+        return None
+    binding = {**contract_for(website), "source_sha": source_sha, "target_id": target.target_key}
+    with authority_guard(binding, action="read") as current:
+        if current.verified_sha != source_sha:
+            return None
+    require_unlocked_remote_call()
+    verify_repository_head(website, source_sha)
+    now = timezone.now()
+    with authority_guard(binding, action="read") as current:
+        locked = current.targets.filter(generation=current.generation, target_key=target.target_key).first()
+        if (locked is None or locked.contract != target.contract or locked.source_sha != source_sha
+                or current.verified_sha != source_sha or not live.build_proof(locked) or sealed_required(current, locked)):
+            return None
+        locked.verified_at = now
+        locked.save(update_fields=["verified_at", "updated_at"])
+        current.last_verified_at = now
+        current.save(update_fields=["last_verified_at", "updated_at"])
+    logger.info("website_build_proof_renewed connection=%s target=%s source_sha=%s", current.pk, target.target_key, source_sha)
+    return {"status": "verified", "method": "build_proof", "source_sha": source_sha, "renewed_at": now.isoformat()}
 
 
 class WebsiteCiAttestationView(APIView):

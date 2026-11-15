@@ -307,6 +307,7 @@
   ],
   "nextAction": null,
   "setupPullRequest": null,
+  "liveStatus": null,
   "discovery": {
     "version": 1,
     "complete": true,

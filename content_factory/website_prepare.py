@@ -34,6 +34,11 @@ AUTHORIZATION_CODES = frozenset({"github_reconnect_required", "github_authorizat
 DEPLOYMENT_WAIT_CODES = frozenset({"deployment_source_unverified", "deployment_marker_unverified",
     "live_route_unavailable", "ci_attestation_required", "ci_evidence_unavailable", "verified_target_required",
     "deployment_verification_required", "native_ci_attestation_missing", "ci_proof_unavailable"})
+# The deployment waits that only the founder's host can end. With
+# ARTICLES_READY_ON_MERGE_ENABLED they never stop preparation.
+HOST_WAIT_CODES = frozenset({"deployment_source_unverified", "deployment_marker_unverified", "live_route_unavailable",
+    "deployment_verification_required", "deployment_route_transient", "deployment_route_unverified",
+    "deployment_route_contract_invalid", "deployment_origin_invalid", "deployment_tls_invalid", "deployment_body_oversized"})
 SETUP_EXAMPLE_CLEANUP_CODE = "SETUP_EXAMPLE_CLEANUP_REQUIRED"
 # Content Factory reported an authorization check it could not complete (a
 # timeout while this backend restarted, for example) as this code until it
@@ -399,6 +404,11 @@ def _finish_prepare(op, *, now):
     from .website_goal_runner import owns_goal, finish_goal
     if owns_goal(op):
         finish_goal(op, now=now)
+    if op.state not in {"pending", "running"} and op.receipt.get("staff_alerted"):
+        # Ready, or stopped, cancelled or superseded: this preparation's own
+        # deadline alert is no longer a founder waiting on it.
+        from .website_live_status import close_prepare_alert
+        close_prepare_alert(op)
     logger.info("website_prepare operation=%s company=%s connection=%s generation=%s step=%s state=%s reason=%s attempt=%s next_attempt=%s dispatch_outcome=%s",
         op.pk, op.payload.get("company_id"), op.connection_id, op.generation, op.receipt.get("current_step"),
         op.state, op.receipt.get("reason_code", ""), op.attempts, op.next_attempt_at, op.receipt.get("dispatch_outcome", ""))
@@ -510,19 +520,31 @@ def prepare_failure(op, step, error, *, now=None):
             from .website_operational_alerts import record_policy_stall
             record_policy_stall(op, step=step, reason="deployment_policy_deadline", started_at=started, deadline=deadline, now=now)
         op.receipt["failure_class"] = "waiting"
-        op.state = "pending" if now < deadline else "needs_user"
-        op.receipt["status"] = "waiting_for_deployment" if op.state == "pending" else "needs_you"
-        op.next_attempt_at = min(deadline, now + timedelta(minutes=DEPLOYMENT_RETRY_MINUTES[min(count - 1, len(DEPLOYMENT_RETRY_MINUTES) - 1)])) if op.state == "pending" else None
-        if op.state == "needs_user":
-            provider = (getattr(op.connection, "capabilities", {}) or {}).get("hosting_provider") or "your hosting provider"
-            op.receipt.update(message=f"Deploy your site with {provider}, then check again.",
-                user_action={"id": "deploy_site", "label": "Deploy your site", "hosting_provider": provider})
-            if deploy_detection_enabled():
-                action = manual_action(op.connection,source)
-                op.receipt.update(user_action=action,message=action["instructions"] + " We’ll check the live site and continue when it is deployed.")
-            # Keep a quiet observer after the owner prompt, so a manual deploy
-            # resumes without requiring another button click.
-            op.next_attempt_at = now + timedelta(hours=2)
+        from .website_live_status import enabled as ready_on_merge
+        if ready_on_merge() and not manual_deploy and now >= deadline:
+            # Past the deadline the wait is a status plus a staff alert, not a
+            # stop and not a "deploy your site" ask: a quiet re-check carries on.
+            from .website_live_status import raise_staff_alert, prepare_alert_source, HOST_HELP, saved_host, STAFF_TOLD
+            raise_staff_alert(op.connection, code=code, now=now, source_sha=prepare_alert_source(op))
+            op.state, op.next_attempt_at = "pending", now + timedelta(hours=2)
+            op.receipt.pop("user_action", None)
+            op.receipt.update(status="waiting_for_deployment", retryable=True, staff_alerted=True,
+                message=(HOST_HELP[saved_host(op.connection)] if code in HOST_WAIT_CODES
+                    else "We're still checking the latest change to your website.") + STAFF_TOLD)
+        else:
+            op.state = "pending" if now < deadline else "needs_user"
+            op.receipt["status"] = "waiting_for_deployment" if op.state == "pending" else "needs_you"
+            op.next_attempt_at = min(deadline, now + timedelta(minutes=DEPLOYMENT_RETRY_MINUTES[min(count - 1, len(DEPLOYMENT_RETRY_MINUTES) - 1)])) if op.state == "pending" else None
+            if op.state == "needs_user":
+                provider = (getattr(op.connection, "capabilities", {}) or {}).get("hosting_provider") or "your hosting provider"
+                op.receipt.update(message=f"Deploy your site with {provider}, then check again.",
+                    user_action={"id": "deploy_site", "label": "Deploy your site", "hosting_provider": provider})
+                if deploy_detection_enabled():
+                    action = manual_action(op.connection,source)
+                    op.receipt.update(user_action=action,message=action["instructions"] + " We’ll check the live site and continue when it is deployed.")
+                # Keep a quiet observer after the owner prompt, so a manual deploy
+                # resumes without requiring another button click.
+                op.next_attempt_at = now + timedelta(hours=2)
     elif classification == "transient":
         from datetime import datetime
         started = op.receipt.setdefault("transient_started_at", now.isoformat())
@@ -829,8 +851,18 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
         # scan's build proof. A current hosted proof, when one exists, and a
         # target that needs sealed execution proof still take the CI path below.
         from .website_live_verification import verify_live_url
-        verified = verify_live_url(config, target,
-            setup_run_id=op.receipt.get("merged_setup_run_id") or op.receipt.get("setup_run_id") or "")
+        try:
+            verified = verify_live_url(config, target,
+                setup_run_id=op.receipt.get("merged_setup_run_id") or op.receipt.get("setup_run_id") or "")
+        except WebsiteAuthorityError as exc:
+            from .website_live_status import enabled as ready_on_merge
+            from .website_sealed_workflow import required as sealed_required
+            if not (ready_on_merge() and exc.code in HOST_WAIT_CODES and not sealed_required(website, target)
+                    and target.source_sha == website.verified_sha):
+                raise
+            # MLAI's build proof already carried this source; the host serving
+            # it is a background status (website_live_status), never this step.
+            return {"status": "completed"}
         return {"status": "completed", "operation_id": verified["operation_id"]}
     if receipt is None:
         from .website_connections import observed_source_sha
@@ -851,7 +883,19 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
             ci = record_ci_attestation(proof)
             receipt = ci.receipt
     if step == "verify":
-        deployment = verify_live_deployment(config, data=receipt)
+        try:
+            deployment = verify_live_deployment(config, data=receipt)
+        except WebsiteAuthorityError as exc:
+            from .website_live_status import enabled as ready_on_merge
+            from .website_sealed_workflow import required as sealed_required
+            if not (ready_on_merge() and exc.code in HOST_WAIT_CODES and not sealed_required(website, target)
+                    and target.source_sha == website.verified_sha):
+                raise
+            # The source's proof is recorded; the host serving it is a
+            # background status (website_live_status), never this step. A
+            # target that needs sealed proof keeps its deployment wait, since
+            # the journey still requires the live check for it.
+            return {"status": "completed"}
         return {"status": "completed", "operation_id": str(deployment.pk)}
     return {"status": "completed", "operation_id": str(ci.pk)}
 

@@ -81,6 +81,8 @@ class ManualRecoveryTests(SimpleTestCase):
         # A verified marker uses the ordinary prepare success path; no extra click is required.
         self.assertEqual(action["id"],"deploy_site")
 
+    # The founder's host as a lock (the ARTICLES_READY_ON_MERGE_ENABLED kill switch off); tests_website_live_status covers it on.
+    @override_settings(ARTICLES_READY_ON_MERGE_ENABLED=False)
     def test_actual_prepare_chain_resumes_when_manual_deployment_marker_appears(self):
         from . import tests_prepare_permissions_unit as fixtures
         from .website_contract import WebsiteAuthorityError

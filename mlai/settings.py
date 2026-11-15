@@ -2682,6 +2682,12 @@ ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED = _env_is_true("ARTICLES_DRAFT_READY_
 ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED = _env_is_true("ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED", False)
 ARTICLES_DRAFT_TOOLS_ENABLED = _env_is_true("ARTICLES_DRAFT_TOOLS_ENABLED", False)
 ARTICLES_LIVE_URL_VERIFICATION_ENABLED = _env_is_true("ARTICLES_LIVE_URL_VERIFICATION_ENABLED", False)
+# Kill switch, default on: live-URL verification (no workflow, runner or sealed
+# digest written into the founder's repository, no Workflows/Checks/Statuses
+# grant) applies to every cohort, not only new-journey startups. Needs
+# ARTICLES_LIVE_URL_VERIFICATION_ENABLED, and Content Factory's
+# CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED for new setups.
+ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED = _env_is_true("ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED", True)
 MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED = _env_is_true("MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED", False)
 # Kill switch, default on: every Chat-started GitHub connection, legacy or new
 # journey, returns to Chat with a typed reason instead of a text error page.
@@ -2712,6 +2718,12 @@ ARTICLES_SELF_HEAL_REPORT_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_REPORT_ENAB
 ARTICLES_SELF_HEAL_SWEEP_LIMIT = int(os.getenv("ARTICLES_SELF_HEAL_SWEEP_LIMIT", "50"))
 ARTICLES_CHANNEL_SWITCH_ENABLED = _env_is_true("ARTICLES_CHANNEL_SWITCH_ENABLED", False)
 ARTICLES_SOURCE_REPIN_ENABLED = _env_is_true("ARTICLES_SOURCE_REPIN_ENABLED", False)
+# Kill switch, on by default and for every startup (not cohort-gated): a push
+# to the founder's branch re-pins in-flight runs to the new head instead of
+# stopping them, up to content_factory.source_repin.FOLLOW_MAX_REPINS, and a
+# copy-ready run no longer stops because the site moved. Content Factory's
+# CONTENT_FACTORY_SOURCE_FOLLOW_ENABLED is the paired switch.
+ARTICLES_SOURCE_FOLLOW_ENABLED = _env_is_true("ARTICLES_SOURCE_FOLLOW_ENABLED", True)
 ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED = _env_is_true("ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
 ARTICLES_DISPATCH_RELIABILITY_ENABLED = _env_is_true("ARTICLES_DISPATCH_RELIABILITY_ENABLED", False)
 ARTICLES_NO_CODELESS_TERMINAL_ENABLED = _env_is_true("ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False)
@@ -2729,6 +2741,16 @@ ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED = _env_is_true("ARTICLES_REPOSITORY
 # Kill switch, default on: an organisation owner's approval of a founder's
 # GitHub app request connects that founder's website when it arrives.
 ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED = _env_is_true("ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED", True)
+# Kill switch, default on: a website-bound article whose own site build could
+# not be previewed may be approved from Content Factory's stand-in preview or,
+# with no rendering at all, from its text (CONTENT_FACTORY_STAND_IN_PREVIEW_APPROVAL).
+# Turn Content Factory's flag off first, or together with this one: with only
+# this one off, Content Factory still shows an Approve button that this gate refuses.
+ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED = _env_is_true("ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED", True)
+# Kill switch, default on: a merged articles setup is Ready, and articles can be
+# written and published, on MLAI's own build and render proof. Whether the
+# founder's host has deployed it is a background status, never a lock.
+ARTICLES_READY_ON_MERGE_ENABLED = _env_is_true("ARTICLES_READY_ON_MERGE_ENABLED", True)
 ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED", False)
 MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
 MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)

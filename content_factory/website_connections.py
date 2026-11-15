@@ -478,7 +478,12 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         if action in {"publish", "merge"} and observed and not expected:
             raise WebsiteAuthorityError("website_source_required", "Current source identity is required.")
         if action == "portable" and expected and observed and expected != observed:
-            raise WebsiteAuthorityError("website_source_changed", "The reviewed repository source changed.")
+            # A copy-ready run never touches the repository, so a newer commit
+            # does not make its copy stale. Only with the follow switch off does
+            # it still stop the run, as before.
+            from .source_repin import follow_enabled as source_follow_enabled
+            if not source_follow_enabled():
+                raise WebsiteAuthorityError("website_source_changed", "The reviewed repository source changed.")
         snapshot = (candidate.generation, candidate.configuration_version, candidate.state, candidate.installation_id, candidate.authorized_by_id, observed)
         needs_head = not cleanup and action != "portable" and (bool(expected and observed and expected != observed) or action in {"publish", "merge"} or (action == "preview" and bool(expected)))
         targets = payload.get("publish_targets") if isinstance(payload.get("publish_targets"), list) else []
@@ -537,7 +542,12 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
                 raise WebsiteAuthorityError("publishing_adapter_required", "A verified build contract needs an implemented article publishing adapter. Portable drafts remain available.")
             if action in {"publish", "merge"} and (target is None or not target.verified_at or not target.capabilities.get("publishingReady") or target.source_sha != connection.verified_sha):
                 raise WebsiteAuthorityError("website_target_verification_required", "Select a verified publishing target.")
-            if action in {"publish", "merge"}:
+            from .website_live_status import enabled as ready_on_merge
+            from .website_sealed_workflow import required as sealed_required
+            if action in {"publish", "merge"} and not (ready_on_merge() and not sealed_required(connection, target)):
+                # With ready-on-merge on, the verified target above is the proof;
+                # the founder's host deploying it is only a status. A target
+                # that needs sealed execution proof keeps its live check.
                 from .activation import live_deployment_verified
                 if not live_deployment_verified(connection, target):
                     raise WebsiteAuthorityError("deployment_verification_required", "Verify the current public articles integration before publishing.")
@@ -1161,7 +1171,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
             website.blockers = [item for item in website.blockers if isinstance(item, dict) and item.get("code") != "website_data_deleted"] + [
                 {"code": "website_data_deleted", "deletion_epoch": watermark, "message": "Previous website data was removed."}]
             website.save(update_fields=["blockers", "updated_at"])
-            website.operations.filter(action__in=["goal-usage", "usage-refresh", "goal-alert"]).delete()
+            website.operations.filter(action__in=["goal-usage", "usage-refresh", "goal-alert", "live-status"]).delete()
             website.scan_snapshots.all().delete()
             website.template_revisions.all().delete()
             website.targets.all().delete()

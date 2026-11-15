@@ -19,6 +19,7 @@ from content_factory.reconciliation import run_content_factory_reconciliation_sw
 from content_factory.run_reconciliation import run_authoritative_reconciliation_sweep
 from content_factory.run_terminal_settlement import run_terminal_settlement_sweep
 from content_factory.website_reconciliation import process_website_connection_operations
+from content_factory.website_live_status import run_live_status_sweep
 from content_factory.dispatch_outbox import process_dispatch_outbox
 from content_factory.services.island_refresh_scheduler import run_island_refresh_scheduler
 from crm.blasts import run_blast_dispatch_scheduler
@@ -143,6 +144,11 @@ class Command(BaseCommand):
             # interval + batch cap), so it is safe to tick every loop.
             ("github_installation_reconciliation", run_github_installation_reconciliation_sweep),
             ("website_connection_operations", process_website_connection_operations),
+            # Whether each Ready website's host shows its merged articles setup:
+            # a background status with a staff alert after 24 h, never a lock.
+            # Off only with ARTICLES_READY_ON_MERGE_ENABLED=false; one bounded
+            # pass every 5 minutes.
+            ("website_live_status", run_live_status_sweep),
             ("website_consistency", run_website_consistency_sweep),
             ("article_dispatch_outbox", process_dispatch_outbox),
             # P2 self-heal sweeps (policy, refunds, merge worker, notifications,

@@ -223,9 +223,11 @@ def mint_website_token(data, *, permission_mode="read", action="read"):
         if not connection.repository_id or not connection.installation_id:
             raise WebsiteAuthorityError("github_verification_required", "Reconnect GitHub to verify repository identity.")
         if profile == "workflow_files" and action in {"setup", "restoration"}:
-            from .website_live_verification import selected as live_url_selected
-            if live_url_selected(connection.organization):
-                # Live-URL verified sites never get a workflow file (IF-P1-16).
+            from .website_live_verification import new_journey_selected
+            if new_journey_selected(connection.organization):
+                # Live-URL verified new-journey sites never get a workflow file (IF-P1-16).
+                # A legacy repository's existing kit stays writable: plan step 7
+                # stops requiring it, it does not forbid or remove it.
                 # Removing one an opted-in site already has stays allowed.
                 raise WebsiteAuthorityError("invalid_permission_profile", "This website is verified by its live pages and needs no workflow files.", status=400)
         if profile == "workflow_files":
