@@ -117,7 +117,7 @@ class AdminGateTests(SimpleTestCase):
         device, role = admin_gate()
         with device, role:
             response = self.call(AdminAccessView, signed_in())
-        self.assertEqual((response.status_code, response.data), (200, {"is_admin": True, "sections": ["crm"]}))
+        self.assertEqual((response.status_code, response.data), (200, {"is_admin": True, "sections": ["crm", "team"]}))
         self.assertEqual(response["Cache-Control"], "no-store")
 
         device, role = admin_gate(False)
@@ -133,7 +133,7 @@ class AdminGateTests(SimpleTestCase):
         device, role = admin_gate()
         with device, role:
             response = self.call(AdminAccessView, signed_in())
-        self.assertEqual(response.data, {"is_admin": True, "sections": []})
+        self.assertEqual(response.data, {"is_admin": True, "sections": ["team"]})
 
 
 class MlaiAdminRoleUnitTests(SimpleTestCase):

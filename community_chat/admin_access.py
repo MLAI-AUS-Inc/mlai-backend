@@ -51,6 +51,8 @@ def admin_sections(request) -> list[str]:
 
     from django.conf import settings
     sections = ["crm"] if crm_enabled() else []
+    # Users and teams: every MLAI admin may see who else is one.
+    sections.append("team")
     if getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False) and getattr(request.user, "is_staff", False):
         sections.append("startups")
     return sections

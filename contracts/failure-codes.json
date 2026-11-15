@@ -11745,6 +11745,27 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "transient_memory_kill",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "transient_memory_kill",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "retry_same_step",
+      "user_message": "We hit a temporary limit while checking your website. We will try again shortly."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "unknown",
       "emitter_scopes": [
         "content_factory"
