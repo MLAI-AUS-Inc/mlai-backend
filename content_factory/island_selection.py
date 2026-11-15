@@ -83,6 +83,8 @@ def adopt_selection(organization, run, ids):
     with transaction.atomic():
         Organization.objects.select_for_update().get(pk=organization.pk)
         run = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        from .research_workspace import require_current_research
+        require_current_research(organization, run)
         proposals = selected_proposals(run, ids)
         state = dict((run.result or {}).get(STATE_KEY, {}))
         added = set(state.get("selected_ids", []))
@@ -129,8 +131,10 @@ def adopt_selection(organization, run, ids):
 
 def selection_runs(organization):
     from workflow_runs.models import ContentFactoryRun
-    return ContentFactoryRun.objects.filter(organization=organization, status="completed",
+    from .research_workspace import current_research_runs, research_config
+    rows = ContentFactoryRun.objects.filter(organization=organization, status="completed",
         result__island_research_selection__isnull=False).order_by("created_at", "pk")
+    return current_research_runs(rows, research_config(organization))
 
 
 def resolve_alias(slug, aliases):

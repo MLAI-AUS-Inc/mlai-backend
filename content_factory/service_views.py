@@ -857,6 +857,12 @@ class ContentFactoryOrgConfigView(APIView):
             current_config = OrganizationContentConfig.objects.filter(organization=org).first()
             current_strategy = current_config.pillar_strategy if current_config else {}
             if 'pillar_strategy' in defaults:
+                from .research_workspace import GENERATED_STRATEGY_KEYS, research_paused
+                if research_paused(current_config):
+                    defaults["pillar_strategy"] = {
+                        key: value for key, value in (defaults["pillar_strategy"] or {}).items()
+                        if key not in GENERATED_STRATEGY_KEYS
+                    }
                 defaults['pillar_strategy'] = merge_strategy(current_strategy, defaults['pillar_strategy'])
             from .incident_guards import protect_certified_config
             defaults = protect_certified_config(current_config, defaults, sha=scan_head_sha)
@@ -3912,6 +3918,11 @@ class ContentFactoryCallbackView(APIView):
         # Order before *any* handler can mutate state, refund or notify. Use the
         # existing run JSON and row lock; no schema migration is required.
         run_id = str(data.get("run_id") or job_id)
+        if event_type in {"topic_selection", "discovery_progress"}:
+            from .research_workspace import accepts_research_write, research_config
+            organization = Organization.objects.filter(domain=data.get("domain") or "").first()
+            if organization and not accepts_research_write(research_config(organization), run_id):
+                return Response({"status": "ignored_retired_research", "run_id": run_id})
         from .run_reconciliation import authoritative_run
         if authoritative_run(ContentFactoryRun.objects.filter(run_id=run_id).first()):
             return Response({"error": "owned_callback_requires_observation_boundary", "retryable": True}, status=409)
@@ -7572,6 +7583,16 @@ def _ai_search_keyword_defaults(kw_data):
     return defaults
 
 
+def _retired_research_result(organization, run_id):
+    from .research_workspace import accepts_research_write, research_config
+    Organization.objects.select_for_update().get(pk=organization.pk)
+    return not accepts_research_write(research_config(organization), run_id)
+
+
+def _research_result_retired():
+    return Response({"detail": "This result belongs to a previous research workspace.", "retryable": False}, status=409)
+
+
 class SEOKeywordBulkUpsertView(APIView):
     """
     POST /api/seo/keywords/bulk/
@@ -7602,6 +7623,8 @@ class SEOKeywordBulkUpsertView(APIView):
         updated_count = 0
 
         with transaction.atomic():
+            if _retired_research_result(org, serializer.validated_data.get("session_id")):
+                return _research_result_retired()
             for kw_data in keywords_data:
                 keyword_text = kw_data.get('keyword', '').strip()
                 if not keyword_text:
@@ -7777,6 +7800,8 @@ class SEOKeywordResearchFeedbackView(APIView):
         rejected_count = 0
 
         with transaction.atomic():
+            if _retired_research_result(org, serializer.validated_data.get("session_id")):
+                return _research_result_retired()
             for keyword_text in shown_keywords:
                 keyword = ResearchedKeyword.objects.filter(
                     organization=org,
@@ -7889,16 +7914,19 @@ class SEOTopicFeedbackView(APIView):
         except Organization.DoesNotExist:
             return Response({'error': f'Organization not found for domain: {domain}'}, status=status.HTTP_404_NOT_FOUND)
 
-        feedback, created = record_topic_feedback(
-            org,
-            keyword=keyword,
-            feedback_type=serializer.validated_data.get('feedback_type') or 'declined',
-            reason_code=serializer.validated_data.get('reason_code') or 'not_appropriate',
-            reason_text=serializer.validated_data.get('reason_text'),
-            decline_scope=serializer.validated_data.get('decline_scope') or 'similar',
-            source=serializer.validated_data.get('source') or 'homepage_topic_card',
-            session_id=serializer.validated_data.get('session_id'),
-        )
+        with transaction.atomic():
+            if _retired_research_result(org, serializer.validated_data.get("session_id")):
+                return _research_result_retired()
+            feedback, created = record_topic_feedback(
+                org,
+                keyword=keyword,
+                feedback_type=serializer.validated_data.get('feedback_type') or 'declined',
+                reason_code=serializer.validated_data.get('reason_code') or 'not_appropriate',
+                reason_text=serializer.validated_data.get('reason_text'),
+                decline_scope=serializer.validated_data.get('decline_scope') or 'similar',
+                source=serializer.validated_data.get('source') or 'homepage_topic_card',
+                session_id=serializer.validated_data.get('session_id'),
+            )
         return Response(
             {**serialize_topic_feedback(feedback), 'created': created},
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
@@ -7986,6 +8014,8 @@ class SEOClusterBulkUpsertView(APIView):
         updated_count = 0
 
         with transaction.atomic():
+            if _retired_research_result(org, serializer.validated_data.get("session_id")):
+                return _research_result_retired()
             for cluster_data in clusters_data:
                 cluster_id = cluster_data.get('cluster_id')
                 pillar_keyword = cluster_data.get('pillar_keyword', '')
@@ -8314,7 +8344,8 @@ class SEOContentIslandBulkSyncView(APIView):
         expanded_applied = []
 
         with transaction.atomic():
-            Organization.objects.select_for_update().get(pk=org.pk)
+            if _retired_research_result(org, run_id):
+                return _research_result_retired()
             existing_by_slug = {island.slug: island for island in ContentIsland.objects.filter(organization=org)}
             from .island_selection import selection_runs, STATE_KEY
             managed_slugs = {slug for run in selection_runs(org)

@@ -27,6 +27,9 @@ class CustomContentIslandView(APIView):
             return Response({"detail": str(exc)}, status=400)
         with transaction.atomic():
             org = Organization.objects.select_for_update().get(pk=context.organization.pk)
+            from .research_workspace import RESET_DETAIL, research_config, research_paused
+            if research_paused(research_config(org)):
+                return Response({"detail": RESET_DETAIL}, status=409)
             if _content_islands_enabled() and not ContentIsland.objects.filter(
                 organization=org, status=ContentIslandStatus.VISIBLE,
             ).exists():

@@ -215,6 +215,7 @@ class ClusterBulkUpsertSerializer(serializers.Serializer):
     """Serializer for bulk cluster upsert from content-factory."""
     domain = serializers.CharField()
     clusters = serializers.ListField(child=serializers.DictField())
+    session_id = serializers.UUIDField(required=False, allow_null=True)
 
 
 class WrittenArticleSerializer(serializers.ModelSerializer):

@@ -177,6 +177,9 @@ def _notify(run_id, evidence_id, nonce):
     from workflow_runs.models import ContentFactoryRun
     from integrations.services.notification_adapters import resolve_automation_run, send_topic_selection
     run = ContentFactoryRun.objects.select_related("organization").get(run_id=run_id)
+    from .research_workspace import accepts_research_write, research_config
+    if not accepts_research_write(research_config(run.organization), run.run_id):
+        return
     state = _state(run)
     notice = state.get("notification", {})
     if notice.get("nonce") != nonce or notice.get("state") != "claimed":
