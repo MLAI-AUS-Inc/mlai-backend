@@ -1,4 +1,4 @@
-"""The always-on founder stuck alert, on synthetic rows."""
+"""The always-on founder stuck alert and the staff console's stuck state, on synthetic rows."""
 from datetime import timedelta
 import re
 from unittest.mock import patch
@@ -15,6 +15,7 @@ from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from organizations.models import Organization
 from workflow_runs.models import ContentFactoryRun
 from . import founder_stuck_alerts as stuck
+from . import staff_console as console
 from .models import OrganizationContentConfig
 from .website_models import WebsiteConnection, WebsiteConnectionOperation
 
@@ -207,3 +208,29 @@ class FounderStuckBoundTests(FounderStuckFixture):
         # Fixed work per alert; nothing grows with the number of startups or receipts.
         self.assertLessEqual(len(queries), 16 * stuck.MAX_ALERTS_PER_SWEEP)
 
+
+@override_settings(MY_STARTUP_STAFF_CONSOLE_ENABLED=True)
+class StaffConsoleStuckStateTests(FounderStuckFixture):
+    def test_a_stopped_run_reads_as_stuck_not_working(self):
+        self.make_run(result={"error_code": STRATEGY_CODE}, age=timedelta(minutes=5))
+        row = console.startup_detail(self.org.pk, now=self.now)
+        self.assertEqual(row["state"], "stuck")
+        self.assertEqual(row["stuckReason"]["code"], STRATEGY_CODE)
+        self.assertEqual(row["stuckReason"]["stepLabel"], "Writing an article")
+        self.assertTrue(row["stuckReason"]["description"])
+
+    def test_newest_run_in_progress_does_not_hide_a_stopped_setup(self):
+        self.operation(receipt={"code": STRATEGY_CODE}, age=timedelta(days=2))
+        self.make_run(status="running", age=timedelta(minutes=1))
+        page = console.startup_list({"state": "stuck"}, now=self.now)
+        self.assertEqual([r["organizationId"] for r in page["results"]], [self.org.pk])
+        row = page["results"][0]
+        self.assertEqual((row["stuckReason"]["step"], row["stuckReason"]["kind"]), ("prepare", "operation_stopped"))
+        self.assertGreaterEqual(row["stuckReason"]["stuckMinutes"], 48 * 60)
+        self.assertEqual(len(console.startup_detail(self.org.pk, now=self.now)["stuckReasons"]), 1)
+
+    def test_founder_with_an_ask_stays_your_turn(self):
+        self.make_run(result={"error_code": FOUNDER_CODE}, age=timedelta(minutes=5))
+        row = console.startup_detail(self.org.pk, now=self.now)
+        self.assertEqual(row["state"], "your_turn")
+        self.assertIsNone(row["stuckReason"])
