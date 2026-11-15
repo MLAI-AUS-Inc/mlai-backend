@@ -138,7 +138,8 @@ class AccessTests(SimpleTestCase):
                 patch("community_chat.admin_access.is_mlai_admin_user", return_value=is_admin),
             ):
                 self.assertEqual(
-                    crm_access(request), {"enabled": True, "can_view": allowed, "can_send": allowed, "can_manage_deliverability": False,
+                    # Every MLAI admin manages sending (superuser, admin or committee).
+                    crm_access(request), {"enabled": True, "can_view": allowed, "can_send": allowed, "can_manage_deliverability": allowed,
                         'campaign_features': {'waves': False, 'preflight': False}}
                 )
                 device.assert_called_once_with(

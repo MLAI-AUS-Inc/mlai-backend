@@ -46,6 +46,9 @@ class CrmEvent(TimestampedRecord):
     waitlist_count = models.PositiveIntegerField(default=0)
     checked_in_count = models.PositiveIntegerField(default=0)
     guests_synced_at = models.DateTimeField(null=True, blank=True)
+    # Automatic reminders: {"day_before": bool, "hour_before": bool, "note": str}.
+    # Missing keys mean on, with no note.
+    reminder_settings = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ("-start_at",)
@@ -322,6 +325,17 @@ class Blast(TimestampedRecord):
         EVENT_UPDATE = "event_update", "Event update"
         MARKETING = "marketing", "Marketing"
 
+    class MessageType(models.TextChoices):
+        GENERAL = "", "General"
+        INVITE = "invite", "Invite"
+        BLAST = "blast", "Blast"
+        REMINDER = "reminder", "Reminder"
+
+    class ReminderOffset(models.TextChoices):
+        NONE = "", "None"
+        DAY_BEFORE = "day_before", "Day before"
+        HOUR_BEFORE = "hour_before", "Hour before"
+
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
         QUEUED = "queued", "Queued"
@@ -332,6 +346,12 @@ class Blast(TimestampedRecord):
         CANCELLED = "cancelled", "Cancelled"
 
     purpose = models.CharField(max_length=16, choices=Purpose.choices)
+    # Invite (sign-ups, marketing), blast (guests, event update) or an
+    # automatic reminder; general marketing leaves it empty.
+    message_type = models.CharField(max_length=16, choices=MessageType.choices, default="", blank=True)
+    # Automatic reminders only: when it should go out and which one it is.
+    scheduled_for = models.DateTimeField(null=True, blank=True)
+    reminder_offset = models.CharField(max_length=16, choices=ReminderOffset.choices, default="", blank=True)
     event = models.ForeignKey(
         CrmEvent, on_delete=models.SET_NULL, null=True, blank=True, related_name="blasts"
     )
@@ -395,6 +415,7 @@ class Blast(TimestampedRecord):
         ]
         indexes = [
             models.Index(fields=("status", "queued_at"), name="crm_blast_queue_idx"),
+            models.Index(fields=("message_type", "scheduled_for"), name="crm_blast_schedule_idx"),
         ]
 
 

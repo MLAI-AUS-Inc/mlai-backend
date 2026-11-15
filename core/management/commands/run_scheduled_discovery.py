@@ -24,6 +24,7 @@ from content_factory.services.island_refresh_scheduler import run_island_refresh
 from crm.blasts import run_blast_dispatch_scheduler
 from crm.listmonk_sync import run_listmonk_sync_scheduler
 from crm.luma_sync import run_luma_guest_sync_scheduler
+from crm.reminders import run_reminder_scheduler
 from crm.warmup import run_warmup_scheduler
 from crm.deliverability.guardian import run_deliverability_guard
 from crm.deliverability.day_close import run_stream_day_close
@@ -194,6 +195,9 @@ class Command(BaseCommand):
             ("crm_deliverability_digest", run_daily_digest),
             ("crm_seed_checks", run_seed_checks),
             ("crm_stream_day_close", run_stream_day_close),
+            # Automatic event reminders (day before, hour before). Off unless
+            # CRM_AUTO_REMINDERS_ENABLED; queues through the normal blast path.
+            ("crm_event_reminders", run_reminder_scheduler),
             ("crm_blast_dispatch", run_blast_dispatch_scheduler),
             # Polls listmonk for campaign progress, opens, clicks, bounces and
             # unsubscribes. Runs whenever listmonk is configured, throttled to

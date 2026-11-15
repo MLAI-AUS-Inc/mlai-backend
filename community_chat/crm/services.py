@@ -366,6 +366,10 @@ def save_blast_draft(blast: Optional[Blast], data: dict, *, actor, now: datetime
             raise CrmError('reconfirmation_audience_fixed')
     if "purpose" in data:
         blast.purpose = data["purpose"]
+    if "message_type" in data:
+        if blast.message_type == Blast.MessageType.REMINDER:
+            raise CrmError("reminder_type_fixed")
+        blast.message_type = data["message_type"]
     if "event_id" in data:
         blast.event = (
             None if data["event_id"] is None else _found(CrmEvent, data["event_id"], "event_not_found")

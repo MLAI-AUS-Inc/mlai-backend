@@ -22,6 +22,8 @@ from .test_blasts_database import SENDING
 @override_settings(**{**SENDING, 'CRM_GUARDIAN_ENABLED': True, 'CRM_MONITORS_ENABLED': True,
     'CRM_WAVES_ENABLED': True, 'CRM_PREFLIGHT_ENABLED': False, 'CRM_SENDING_DOMAINS': ['news.mlai.au:resend'],
     'CRM_DELIVERABILITY_OWNERS': ('admin@example.test',), 'CRM_DELIVERABILITY_SLACK_CHANNEL': ''})
+# These tests cover the named-owner gate; production gives every admin owner access.
+@override_settings(CRM_ALL_ADMINS_ARE_OWNERS=False)
 class MonitorDatabaseTests(CrmApiMixin, TestCase):
     def setUp(self):
         super().setUp()

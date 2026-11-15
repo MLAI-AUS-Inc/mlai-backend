@@ -139,7 +139,9 @@ def audience_body(*, people: int, reachable: dict, excluded: dict, sms: dict, wh
 
     def excluded_for(channel):
         counts = excluded.get(channel) or {}
-        extra = ('no_mx', 'domain_unverified', 'disposable', 'likely_typo', 'role_address', 'repeated_soft_bounce', 'dormant')
+        # Invites also report who was skipped for being on the guest list or already invited.
+        extra = ('no_mx', 'domain_unverified', 'disposable', 'likely_typo', 'role_address', 'repeated_soft_bounce', 'dormant',
+                 'already_registered', 'already_invited')
         reasons = (*EXCLUDED[channel], *(key for key in extra if channel == Channel.EMAIL and key in counts))
         return {reason: int(counts.get(reason) or 0) for reason in reasons}
 
@@ -203,6 +205,11 @@ def check_channel_rules(blast) -> None:
         raise BlastError("event_required")
     if blast.quick_segment and blast.event_id is None:
         raise BlastError("event_required")
+    from .message_types import MessageTypeError, check_rules
+    try:
+        check_rules(blast)
+    except MessageTypeError as exc:
+        raise BlastError(exc.code) from None
     has_event = blast.event_id is not None
     check_merge_tags(blast.subject, "subject", has_event=has_event)
     check_merge_tags(blast.body_markdown, "body_markdown", has_event=has_event)
@@ -312,6 +319,10 @@ def resolve_audience(blast, *, now) -> Audience:
     querysets[Channel.EMAIL], excluded[Channel.EMAIL] = evaluate(
         definition, blast.purpose, blast.event, now=now
     )
+    if (blast.message_type or "") == Blast.MessageType.INVITE:
+        from .message_types import exclude_invitees
+        querysets[Channel.EMAIL], skipped = exclude_invitees(blast, querysets[Channel.EMAIL])
+        excluded[Channel.EMAIL] = {**excluded[Channel.EMAIL], **skipped}
     if ((blast.stats or {}).get('audience_preset') or {}).get('kind') == 'opted_in':
         from .community_optins import opted_in_q
         before = querysets[Channel.EMAIL]

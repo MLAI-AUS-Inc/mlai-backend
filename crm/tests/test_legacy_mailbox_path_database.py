@@ -107,6 +107,8 @@ class LegacyMailboxPathTests(BlastFixtures, TestCase):
 
 
 @override_settings(**PRODUCTION_SHAPE)
+# These tests cover the named-owner gate; production gives every admin owner access.
+@override_settings(CRM_ALL_ADMINS_ARE_OWNERS=False)
 class StreamPathStaysStrictTests(BlastFixtures, TestCase):
     def setUp(self):
         super().setUp()
