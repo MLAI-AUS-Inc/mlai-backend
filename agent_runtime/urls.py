@@ -13,6 +13,7 @@ urlpatterns = [
     path("installations/<uuid:installation_id>/state/", native_views.NativeInstallationStateView.as_view()),
     path("installations/<uuid:installation_id>/mentions/", native_views.NativePersonalMentionView.as_view()),
     path("installations/<uuid:installation_id>/picture/", native_views.NativeInstallationPictureView.as_view()),
+    path("installations/<uuid:installation_id>/renew/", native_views.NativeInstallationRenewView.as_view()),
     path("internal/native/registry/<str:public_key>/", native_views.NativeRegistryView.as_view()),
     path("connected/", views.ConnectedAgentsView.as_view(), name="agent-connected"),
     path("channels/", views.EligibleChannelsView.as_view()),

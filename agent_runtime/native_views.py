@@ -80,6 +80,15 @@ class NativeInstallationStateView(NativeOwnerView):
         return Response(native_installations.installation_payload(row))
 
 
+class NativeInstallationRenewView(NativeOwnerView):
+    """Start an owner-signed renewal; confirm it through the enrollment confirm route."""
+
+    def post(self, request, installation_id):
+        schema.validated(schema.EmptySerializer, request.data)
+        row = native_installations.start_renewal(request.user, installation_id)
+        return Response(native_installations.enrollment_payload(row), status=201)
+
+
 class NativeInstallationPictureView(NativeOwnerView):
     """Owner-chosen avatar for their personal Dot, uploaded to MLAI Chat media first."""
 

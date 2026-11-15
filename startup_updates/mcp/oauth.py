@@ -380,6 +380,27 @@ def authenticate_token(raw_token, *, scope=None, resource=None):
     return principal
 
 
+def extend_native_grant(grant_id, *, native_grant_id, user_id, until):
+    """Slide a personal-agent consent forward after the owner's signed renewal.
+
+    Only an unrevoked, unexpired grant already bound to that exact native grant
+    and owner is extended, never past GRANT_TTL from now. Scopes, client and
+    session are unchanged. Returns the new expiry timestamp, or None.
+    """
+    with lock("grant", grant_id):
+        grant = cache.get(key("grant", grant_id))
+        now = time.time()
+        if (not grant or grant.get("revoked") or grant.get("expiresAt", 0) <= now
+                or grant.get("native_agent_grant_id") != str(native_grant_id) or grant.get("user_id") != user_id):
+            return None
+        expires = int(min(float(until), now + GRANT_TTL))
+        if expires <= grant["expiresAt"]:
+            return grant["expiresAt"]
+        grant["expiresAt"] = expires
+        cache.set(key("grant", grant_id), grant, timeout=max(1, int(expires - now)))
+        return expires
+
+
 def revoke_grant(grant_id):
     grant = cache.get(key("grant", grant_id))
     if grant:

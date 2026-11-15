@@ -408,3 +408,28 @@ establish that a user's Google Calendar is connected, that OpenAI will approve
 an action, or that a live Dot has completed it. A live acceptance test after
 deployment should use a clearly named disposable calendar event and verify both
 its single creation and the correlated MLAI reply before claiming completion.
+
+## Owner renewal (Nov 2026)
+
+`AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED` turns on owner renewal. From seven days
+before a personal Dot's grant ends until fourteen days after, the owner payload
+reports `renewable: true`, `renew_by` and `delivery.needs=renew`.
+`POST /api/v1/agent-runtime/installations/<id>/renew/` returns a normal
+enrollment challenge for the same installation, key and channel. The owner's
+enrolling device signs it with a fresh 30-day NIP-OA attestation and confirms
+through the existing `enrollments/<id>/confirm/` route.
+
+Confirmation extends the existing grant in place: no new generation, scopes,
+resources or limits. Activated private adapters and fixed `grant`-policy leases
+move to the new end. The Dot's kind 0 and 10100 profiles are re-signed with the
+new attestation and republished; a relay refusal leaves the renewal unconfirmed.
+
+With `MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED`, the bound ChatGPT consent is
+extended to the same end, never more than 30 days from now and never if it is
+revoked, expired or bound to another owner or grant. Without it, the grant stays
+capped by the consent. If the consent has already ended, renewal still keeps the
+signed Dot, so the owner reconnects in ChatGPT without disconnecting first.
+
+Past the fourteen-day grace a Dot is `lapsed`: it keeps its key and tombstone,
+reports `status: lapsed`, and no longer counts toward
+`AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT`, so the owner can connect again.
