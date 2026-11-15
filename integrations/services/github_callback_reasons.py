@@ -427,6 +427,12 @@ def begin_callback(request) -> Optional[ChatCallback]:
         return flow
     flow.organization = company.organization
     if (request.GET.get("setup_action") or "") == "request":
+        # Remember who asked, so the owner's approval can connect this founder.
+        from integrations.services.github_owner_requests import record_request
+        try:
+            record_request(organization=company.organization, user_id=context["user_id"], company_id=company.pk)
+        except Exception:
+            logger.exception("github_owner_request_record_failed org=%s", getattr(company.organization, "pk", None))
         flow.response = flow.redirect(OWNER_APPROVAL_REQUESTED)
     elif not request.GET.get("code"):
         flow.response = flow.redirect(CANCELLED if request.GET.get("error") == "access_denied" else AUTHORIZATION_FAILED)
@@ -691,6 +697,12 @@ def bind_repository(*, config, user, company, repo, installation_id, owner_click
                     continue
             logger.warning("founder_github_bind_refused org=%s", organization.pk)
             return _failure_reason(exc)
+    from integrations.services.github_owner_requests import clear_request
+    try:
+        config.refresh_from_db()
+        clear_request(config)
+    except Exception:
+        logger.exception("github_owner_request_clear_failed org=%s", organization.pk)
     if owner_click:
         try:
             update_marker(organization, owner_click_required=True)

@@ -353,6 +353,13 @@ def handle_website_github_event(event_type, payload):
     elif event_type == "installation_repositories" and action == "removed" and installation_id:
         ids = [r["id"] for r in payload.get("repositories_removed", []) if isinstance(r, dict) and isinstance(r.get("id"), int)]
         result["revoked"] = revoke_installation(installation_id, repository_ids=ids, reason="github_repository_removed")
+    elif (event_type, action) in {("installation", "created"), ("installation_repositories", "added")}:
+        # An organisation owner approved a founder's request: connect that founder.
+        from integrations.services.github_owner_requests import pick_up
+        try:
+            result["owner_requests_connected"] = pick_up(event_type, payload)
+        except Exception:
+            logger.exception("github_owner_request_pickup_failed installation_id=%s", installation_id)
     elif event_type == "repository" and action in identity.IDENTITY_ACTIONS and identity.enabled():
         # Same repository id, new name, owner or visibility: refresh, never revoke.
         result.update(identity.handle_repository_event(action, payload))

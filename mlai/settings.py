@@ -2703,6 +2703,9 @@ ARTICLES_GITHUB_INSTALLATION_WAKES_ENABLED = _env_is_true("ARTICLES_GITHUB_INSTA
 # Kill switch, default on: a renamed, moved, archived or private repository
 # refreshes the website connection's name instead of revoking it.
 ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED = _env_is_true("ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED", True)
+# Kill switch, default on: an organisation owner's approval of a founder's
+# GitHub app request connects that founder's website when it arrives.
+ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED = _env_is_true("ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED", True)
 ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED", False)
 MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
 MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)
