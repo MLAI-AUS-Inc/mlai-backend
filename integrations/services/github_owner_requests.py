@@ -8,13 +8,22 @@ GitHub sends an ``installation`` ``created`` (or ``installation_repositories``
 their card never moved on.
 
 Now the request is remembered on the startup's content config
-(``article_system["github_owner_request"]``: the founder's user id, company id
-and time; no schema change), and the webhook matches the new installation's
-repositories back to it by the startup's domain. When exactly one pending
-startup matches exactly one repository, the installation is registered for
-that founder, the repository is bound and setup starts, as if the founder
-had connected it. A startup that is already connected, an ambiguous match
-and a request older than :data:`REQUEST_DAYS` are left alone.
+(``article_system["github_owner_request"]``: the founder's user id, company
+id, time and the founder's own GitHub logins; no schema change). The
+logins come from the authorization GitHub returns with the request, and
+from the founder's earlier installations.
+
+GitHub names the person who asked for the app as the webhook's
+``requester``. An event is only picked up when that requester is one of the
+founder's recorded logins, so an installation on someone else's account
+can never attach to a founder. Then the new installation's repositories are
+matched back to the startup by its domain. When exactly one pending startup
+matches exactly one repository, the installation is registered for that
+founder, the repository is bound and setup starts, as if the founder had
+connected it. If the bind is refused, a registration made for it is removed
+again. A startup that is already connected, an event without a matching
+requester, an ambiguous match and a request older than :data:`REQUEST_DAYS`
+are left alone.
 
 ``ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED`` (default on) is the kill switch.
 """
@@ -30,6 +39,8 @@ logger = logging.getLogger(__name__)
 FLAG = "ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED"
 KEY = "github_owner_request"
 REQUEST_DAYS = 30
+#: At most this many recent pending requests are read for one webhook.
+MAX_PENDING = 200
 
 
 def enabled() -> bool:
@@ -37,24 +48,76 @@ def enabled() -> bool:
     return bool(getattr(settings, FLAG, True))
 
 
-def record_request(*, organization, user_id, company_id) -> None:
-    """Remember that this founder asked a GitHub organisation owner for the app."""
+def founder_github_logins(user, *extra) -> list:
+    """The founder's own GitHub logins: ``extra`` plus those of their earlier installations."""
+    from integrations.models import GitHubInstallation
+    logins = [str(login or "").strip() for login in extra]
+    if user is not None and getattr(user, "pk", None):
+        logins += [str(login or "").strip() for login in
+                   GitHubInstallation.objects.filter(user=user).values_list("github_user_name", flat=True)]
+    seen, ordered = set(), []
+    for login in logins:
+        key = login.casefold()
+        if login and key not in seen:
+            seen.add(key)
+            ordered.append(key)
+    return ordered
+
+
+def login_from_code(code) -> str:
+    """The GitHub login behind the authorization ``code`` returned with a request, or ""."""
+    if not code:
+        return ""
+    from integrations import http_client as requests
+    try:
+        token = requests.post("https://github.com/login/oauth/access_token", headers={"Accept": "application/json"},
+            data={"client_id": settings.GITHUB_OAUTH_CLIENT_ID, "client_secret": settings.GITHUB_OAUTH_CLIENT_SECRET,
+                  "code": code}, timeout=(3, 10))
+        token.raise_for_status()
+        access_token = (token.json() or {}).get("access_token")
+        if not access_token:
+            return ""
+        user = requests.get("https://api.github.com/user", headers={
+            "Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"}, timeout=(3, 10))
+        user.raise_for_status()
+        return str((user.json() or {}).get("login") or "").strip()
+    except Exception:
+        logger.warning("github_owner_request_login_unavailable")
+        return ""
+
+
+def record_request(*, organization, user_id, company_id, github_logins=()) -> None:
+    """Remember that this founder asked a GitHub organisation owner for the app.
+
+    ``github_logins`` are the founder's own GitHub logins; the approval is
+    only picked up when GitHub names one of them as the requester.
+    """
+    from django.db import transaction
     from content_factory.models import OrganizationContentConfig
     if not enabled() or organization is None or not getattr(organization, "pk", None):
         return
-    config, _ = OrganizationContentConfig.objects.get_or_create(organization=organization)
-    config.article_system = {**(config.article_system or {}), KEY: {
-        "user_id": user_id, "company_id": str(company_id), "requested_at": timezone.now().isoformat()}}
-    config.save(update_fields=["article_system", "updated_at"])
+    OrganizationContentConfig.objects.get_or_create(organization=organization)
+    with transaction.atomic():
+        config = OrganizationContentConfig.objects.select_for_update().get(organization=organization)
+        config.article_system = {**(config.article_system or {}), KEY: {
+            "user_id": user_id, "company_id": str(company_id), "requested_at": timezone.now().isoformat(),
+            "github_logins": [str(login).casefold() for login in github_logins if login]}}
+        config.save(update_fields=["article_system", "updated_at"])
 
 
 def clear_request(config) -> None:
     """Forget a pending request once the startup's website is connected."""
-    system = dict(config.article_system or {})
-    if KEY in system:
-        system.pop(KEY)
-        config.article_system = system
-        config.save(update_fields=["article_system", "updated_at"])
+    from django.db import transaction
+    if KEY not in (config.article_system or {}):
+        return
+    with transaction.atomic():
+        locked = type(config).objects.select_for_update().get(pk=config.pk)
+        system = dict(locked.article_system or {})
+        if KEY in system:
+            system.pop(KEY)
+            locked.article_system = system
+            locked.save(update_fields=["article_system", "updated_at"])
+    config.article_system = locked.article_system
 
 
 def _pending(config, now):
@@ -75,19 +138,26 @@ def _named_like(domain, repositories):
             and _normalised(str(repo["full_name"]).split("/", 1)[1]) in keys]
 
 
-def match_requests(repositories, *, now=None):
-    """``[(config, request, repo)]``: each pending startup with exactly one repository
-    named like its domain, where no other pending startup claims that repository."""
+def match_requests(repositories, *, requester="", now=None):
+    """``[(config, request, repo)]``: each pending startup asked for by ``requester``
+    with exactly one repository named like its domain, where no other pending
+    startup claims that repository."""
     from content_factory.models import OrganizationContentConfig
     now = now or timezone.now()
+    requester = str(requester or "").strip().casefold()
     repositories = [repo for repo in repositories or [] if isinstance(repo, dict)]
-    if not repositories:
+    if not repositories or not requester:
         return []
     candidates = []
-    for config in (OrganizationContentConfig.objects.filter(article_system__has_key=KEY, website_connection__isnull=True)
-                   .select_related("organization")):
+    pending = (OrganizationContentConfig.objects
+               .filter(article_system__has_key=KEY, website_connection__isnull=True,
+                       updated_at__gte=now - timedelta(days=REQUEST_DAYS))
+               .select_related("organization").order_by("-updated_at")[:MAX_PENDING])
+    for config in pending:
         request = _pending(config, now)
         if request is None or not config.organization.domain:
+            continue
+        if requester not in [str(login).casefold() for login in request.get("github_logins") or []]:
             continue
         matches = _named_like(config.organization.domain, repositories)
         if len(matches) == 1:
@@ -129,9 +199,15 @@ def pick_up(event_type, payload) -> int:
     if type(installation_id) is not int:
         return 0
     account = installation.get("account") if isinstance(installation.get("account"), dict) else {}
+    requester = payload.get("requester") if isinstance(payload.get("requester"), dict) else {}
+    requester_login = str(requester.get("login") or "").strip()
+    if not requester_login:
+        # Not an approved request (the owner installed it directly): nothing
+        # ties this installation to a founder who asked.
+        return 0
     repositories = _installation_repositories(installation_id, payload, added=action == "added")
     connected = 0
-    for config, request, repo in match_requests(repositories):
+    for config, request, repo in match_requests(repositories, requester=requester_login):
         connected += _connect(config, request, repo, installation_id=str(installation_id), account=account)
     return connected
 
@@ -148,13 +224,23 @@ def _connect(config, request, repo, *, installation_id, account) -> int:
     if company is None:
         logger.info("github_owner_request_unmatched org=%s reason=founder_changed", organization.pk)
         return 0
+    from integrations.models import GitHubInstallation
+    # The bind verifies access through the founder's own installations, so
+    # register this one first, and remove it again if the bind is refused.
+    registered_before = GitHubInstallation.objects.filter(user=user, installation_id=installation_id).exists()
     upsert_github_installation(user=user, installation_id=installation_id,
                                account_login=str(account.get("login") or ""), account_type=str(account.get("type") or ""))
-    reason = reasons.bind_repository(config=config, user=user, company=company, repo=repo,
-                                     installation_id=installation_id,
-                                     owner_click=reasons.is_new_journey_organization(organization))
+    try:
+        reason = reasons.bind_repository(config=config, user=user, company=company, repo=repo,
+                                         installation_id=installation_id,
+                                         owner_click=reasons.is_new_journey_organization(organization))
+    except Exception:
+        logger.exception("github_owner_request_bind_failed org=%s", organization.pk)
+        reason = reasons.UNAVAILABLE
     reasons.log_return(organization, reason)
     if reason != reasons.CONNECTED:
+        if not registered_before:
+            GitHubInstallation.objects.filter(user=user, installation_id=installation_id).delete()
         return 0
     config.refresh_from_db()
     clear_request(config)
