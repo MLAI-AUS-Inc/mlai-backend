@@ -57,3 +57,61 @@ class AdminAccessView(MlaiAdminView):
         if not is_mlai_admin_request(request):
             return Response({"is_admin": False, "sections": []})
         return Response({"is_admin": True, "sections": admin_sections(request)})
+
+
+class AdminTeamView(MlaiAdminView):
+    """``admin/team/``: list everyone with admin access (GET), add someone (POST)."""
+
+    def get(self, request):
+        from . import admin_team
+
+        return Response(admin_team.list_team(request.user))
+
+    def post(self, request):
+        from . import admin_team
+
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            member = admin_team.grant(
+                request.user, data.get("account_id"), data.get("role"), data.get("team"),
+            )
+        except admin_team.TeamError as exc:
+            return Response({"error": exc.code}, status=exc.status)
+        return Response({"member": member})
+
+
+class AdminTeamMemberView(MlaiAdminView):
+    """``admin/team/<id>/``: change a role or team (PATCH), remove someone (DELETE)."""
+
+    def patch(self, request, member_id):
+        from . import admin_team
+
+        data = request.data if isinstance(request.data, dict) else {}
+        changes = {key: data[key] for key in ("role", "team") if key in data}
+        try:
+            member = admin_team.update(request.user, member_id, **changes)
+        except admin_team.TeamError as exc:
+            return Response({"error": exc.code}, status=exc.status)
+        return Response({"member": member})
+
+    def delete(self, request, member_id):
+        from . import admin_team
+
+        try:
+            admin_team.remove(request.user, member_id)
+        except admin_team.TeamError as exc:
+            return Response({"error": exc.code}, status=exc.status)
+        return Response({"removed": True})
+
+
+class AdminTeamSearchView(MlaiAdminView):
+    """``admin/team/search/?q=``: accounts to add, for those who may manage."""
+
+    def get(self, request):
+        from . import admin_team
+
+        try:
+            results = admin_team.search_accounts(request.user, request.query_params.get("q", ""))
+        except admin_team.TeamError as exc:
+            return Response({"error": exc.code}, status=exc.status)
+        return Response({"results": results})
