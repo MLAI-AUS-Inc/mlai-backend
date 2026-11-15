@@ -9,12 +9,28 @@ from django.db import transaction
 
 from integrations.models import StudioMeetingOccurrence
 from mentoring.calendars.google import GoogleCalendarClient
-from .linear_meeting_actions import create_linear_meeting_issue, _create_linear_channel_issue_comment
+from .linear_meeting_actions import (create_linear_meeting_issue, _create_linear_channel_issue_comment,
+                                    list_issue_labels, _label_is_compatible_with_team)
 from .studio_payment_rules import ReviewError, digest
 from .studio_treasury import scope_for
-from .studio_treasury_sources import StudioSources
+from .studio_treasury_sources import StudioSources, SIZES
 
 TZ = ZoneInfo("Australia/Melbourne")
+
+
+def planned_sizing(project, settings, seconds):
+    """Use the existing upper-bound rubric for planning, with no payable time."""
+    effort = next((name for name, maximum in SIZES.items() if seconds <= maximum), None)
+    if effort is None:
+        raise ReviewError("meeting_size_needs_review")
+    compatible = [label for label in list_issue_labels() if label.get("name") == effort
+                  and not label.get("archivedAt") and _label_is_compatible_with_team(label, settings["team_id"])]
+    if len(compatible) != 1:
+        raise ReviewError("meeting_effort_label_needs_review")
+    return {"label_ids": [compatible[0]["id"]], "sizing_metadata": {
+        "projectId": project, "projectNameAtAssessment": settings["name"],
+        "rubricVersion": "studio-upper-bound-v1", "effortLabel": effort,
+        "rationale": f"Planned check-in for {seconds/60:g} minutes, with attendance confirmed after it finishes."}}
 
 
 def instant(value):
@@ -154,6 +170,7 @@ def enrich(workspace, actor, projects, *, mode="review", now=None, start=None, e
                         row.save()
                         linked = row.linear_issue
                     if create_input:
+                        create_input.update(planned_sizing(project, settings, int((ends-starts).total_seconds())))
                         # The existing Linear receipt must commit outside our row transaction.
                         # A crash after the provider write can then replay its exact issue.
                         issue = create_linear_meeting_issue(create_input)

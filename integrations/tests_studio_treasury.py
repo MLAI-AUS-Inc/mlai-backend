@@ -129,7 +129,7 @@ class MeetingDatabaseTests(TestCase):
             workspace_id="T123", configuration={"members": ["UONE", "UTWO"], "treasurers": ["USAM"],
                 "builders": {"one": {"slack_id": "UONE", "senders": ["one@example.invalid"]},
                              "two": {"slack_id": "UTWO", "senders": ["two@example.invalid"]}},
-                "projects": {"project": {"team_id": "team", "calendars": [
+                "projects": {"project": {"name": "[Studio] Project", "team_id": "team", "calendars": [
                     {"calendar_id": "one", "title_patterns": ["Studio check-in"]},
                     {"calendar_id": "two", "title_patterns": ["Studio check-in"]}]}}})
         self.start = timezone.now() - timedelta(hours=1)
@@ -138,6 +138,10 @@ class MeetingDatabaseTests(TestCase):
             "attendees": [{"email": "one@example.invalid"}, {"email": "two@example.invalid"}]}
         self.source = Mock()
         self.source.issues.return_value = []
+        labels = patch("integrations.services.studio_meetings.list_issue_labels", return_value=[
+            {"id": "small", "name": "Small (S)", "team": {"id": "team"}}])
+        labels.start()
+        self.addCleanup(labels.stop)
 
     def scan(self):
         return enrich("T123", "UONE", ["project"], mode="create", source_factory=lambda scope: self.source,

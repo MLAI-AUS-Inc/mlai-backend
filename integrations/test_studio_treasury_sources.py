@@ -6,11 +6,24 @@ from django.test import SimpleTestCase, override_settings
 from rest_framework.test import APIRequestFactory
 
 from integrations.api_views_studio_treasury import StudioTreasuryView
-from integrations.services.studio_meetings import occurrence_key, enrich
+from integrations.services.studio_meetings import occurrence_key, enrich, planned_sizing
 from integrations.services.studio_treasury_sources import StudioSources
 
 
 class StudioSourceTests(SimpleTestCase):
+    @override_settings(LINEAR_TASK_SIZING_ENFORCEMENT_MODE="required")
+    @patch("integrations.services.linear_meeting_actions._get_linear_project_identity")
+    @patch("integrations.services.linear_meeting_actions.list_issue_labels")
+    @patch("integrations.services.studio_meetings.list_issue_labels")
+    def test_planned_calendar_ticket_satisfies_existing_required_sizing(self, planner_labels, enforcement_labels, project):
+        from integrations.services.linear_meeting_actions import _enforce_project_sizing
+        labels = [{"id": "small", "name": "Small (S)", "team": {"id": "team"}}]
+        planner_labels.return_value = enforcement_labels.return_value = labels
+        project.return_value = {"id": "project", "name": "[Studio] Project"}
+        payload = planned_sizing("project", {"name": "[Studio] Project", "team_id": "team"}, 1800)
+        payload.update(project_id="project", team_id="team", idempotency_key="a"*64)
+        self.assertTrue(_enforce_project_sizing(payload)["valid"])
+
     def scope(self, basis="actual"):
         return SimpleNamespace(organization_id=1, configuration={"projects": {"project": {
             "basis": basis, "pool": "shared", "version": "v1", "effective_from": "2026-01-01"}},
