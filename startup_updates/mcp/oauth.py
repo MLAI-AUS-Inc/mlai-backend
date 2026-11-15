@@ -26,7 +26,7 @@ from community_chat.account_sessions import InvalidAccountSession, _valid_sessio
 from community_chat.models import CommunityChatAccountSession
 from community_chat.onboarding import require_community_access
 from founder_tools.models import VibeRaisingCompany
-from .config import ALL_SCOPES, DOT_SCOPES, SCOPES, availability, mcp_url, mlai_url, public_base, resource_scopes
+from .config import ALL_SCOPES, DOT_MESSAGES_SCOPE, DOT_SCOPES, SCOPES, availability, mcp_url, mlai_url, public_base, resource_scopes
 
 CODE_TTL = 300
 INTENT_TTL = 600
@@ -227,6 +227,8 @@ def approve_intent(request_id, *, user, session, company_id, approve, scopes=Non
             raise ValidationError("Select all personal agent permissions and an enrolled agent.")
         if not native and native_installation_id:
             raise ValidationError("Select personal agent permissions before choosing an agent.")
+        if DOT_MESSAGES_SCOPE in selected and not native:
+            raise ValidationError("Select personal agent permissions before letting the agent message people.")
         needs_company = legacy or any(scope.startswith(("startup:", "article:")) for scope in selected)
         company = company_for(user, company_id) if needs_company or (company_id and not native) else None
         channels = []
@@ -378,6 +380,27 @@ def authenticate_token(raw_token, *, scope=None, resource=None):
         # revocation during that wait still invalidates the entire unified token.
         principal = valid_grant(principal.grant["id"], scope=scope)
     return principal
+
+
+def extend_native_grant(grant_id, *, native_grant_id, user_id, until):
+    """Slide a personal-agent consent forward after the owner's signed renewal.
+
+    Only an unrevoked, unexpired grant already bound to that exact native grant
+    and owner is extended, never past GRANT_TTL from now. Scopes, client and
+    session are unchanged. Returns the new expiry timestamp, or None.
+    """
+    with lock("grant", grant_id):
+        grant = cache.get(key("grant", grant_id))
+        now = time.time()
+        if (not grant or grant.get("revoked") or grant.get("expiresAt", 0) <= now
+                or grant.get("native_agent_grant_id") != str(native_grant_id) or grant.get("user_id") != user_id):
+            return None
+        expires = int(min(float(until), now + GRANT_TTL))
+        if expires <= grant["expiresAt"]:
+            return grant["expiresAt"]
+        grant["expiresAt"] = expires
+        cache.set(key("grant", grant_id), grant, timeout=max(1, int(expires - now)))
+        return expires
 
 
 def revoke_grant(grant_id):

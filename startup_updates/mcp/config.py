@@ -8,6 +8,7 @@ from django.core.cache import caches
 
 SCOPES = frozenset({"startup:brief:read", "startup:draft:write"})
 DOT_SCOPES = frozenset({"agent:mentions:listen", "agent:thread:read", "agent:thread:reply"})
+DOT_MESSAGES_SCOPE = "agent:messages:send"
 CAPABILITIES = (
     {"id": "pulse", "title": "Pulse updates", "description": "Read your startup brief and save private narrative drafts for founder review. Financial evidence remains server-owned.", "scopes": ["startup:brief:read", "startup:draft:write"]},
     {"id": "articles-read", "title": "Read articles", "description": "Read article setup, Roo prices, existing drafts and run progress.", "scopes": ["article:read"]},
@@ -17,6 +18,7 @@ CAPABILITIES = (
     {"id": "community-read", "title": "Read community messages", "description": "List, read and search only the channels you select and can currently access.", "scopes": ["community:read"]},
     {"id": "community-write", "title": "Send community messages", "description": "Post and reply in your selected channels with visible agent attribution.", "scopes": ["community:write"]},
     {"id": "personal-agent", "title": "Personal Dot in chat", "description": "Listen for your mentions in one approved public channel, read those threads and automatically answer there. Select an existing agent you enrolled in Apps & agents. Thread messages may be sent to your AI provider.", "scopes": sorted(DOT_SCOPES)},
+    {"id": "personal-agent-messages", "title": "Let your Dot message people", "description": "Your Dot can post in channels and DMs you belong to, open DMs that always include you, and list your conversations. Up to 100 messages and 20 new DMs a day. Members who mute your Dot can't be messaged by it.", "scopes": [DOT_MESSAGES_SCOPE]},
 )
 ALL_SCOPES = frozenset(scope for item in CAPABILITIES for scope in item["scopes"])
 STARTUP_IDENTITY_SCOPES = ("startup:brief:read", "article:read", "startup:draft:write", "article:generate", "article:draft:write", "article:publish")

@@ -22,16 +22,25 @@ class AgentInstallation(models.Model):
     community_id = models.UUIDField(null=True, blank=True)
     app_id = models.CharField(max_length=80, blank=True, default="")
     state = models.CharField(max_length=24, default="active", choices=[
-        (x, x) for x in ("awaiting_owner_proof", "provisioning", "active", "paused", "revoked")])
+        (x, x) for x in ("awaiting_owner_proof", "provisioning", "active", "paused", "suspended", "revoked")])
     owner_device = models.ForeignKey("community_chat.CommunityChatDevice", null=True, blank=True,
                                     on_delete=models.PROTECT)
     owner_attestation = models.JSONField(default=list)
     sealed_signing_key = models.TextField(blank=True, default="")
     native_cursor = models.JSONField(default=dict)
     profile_events = models.JSONField(default=list)
+    # Slack-style Dot account: a community-unique handle and the About text.
+    handle = models.CharField(max_length=100, null=True, blank=True)
+    about = models.TextField(blank=True, default="")
+    # Set while a community admin has suspended this Dot.
+    suspended_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=("community_id", "handle"), condition=Q(handle__isnull=False),
+                                               name="agent_installation_unique_handle")]
 
 
 class AgentGrant(models.Model):

@@ -104,6 +104,9 @@ remains `24h`. Changing these defaults is a separate owner deployment action.
 | `AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS` | `600` | 60–86400 |
 | `AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS` | `86400` | 600–604800 |
 | `AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED` | `false` | true / false |
+| `AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED` | `false` | true / false |
+| `AGENT_RUNTIME_DOT_MEMBERS_ENABLED` | `false` | true / false |
+| `AGENT_RUNTIME_DOT_MESSAGING_ENABLED` | `false` | true / false |
 | `MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED` | `false` | true / false |
 | `MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS` | `0` | 0–300 |
 
@@ -408,3 +411,57 @@ establish that a user's Google Calendar is connected, that OpenAI will approve
 an action, or that a live Dot has completed it. A live acceptance test after
 deployment should use a clearly named disposable calendar event and verify both
 its single creation and the correlated MLAI reply before claiming completion.
+
+## Owner renewal (Nov 2026)
+
+`AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED` turns on owner renewal. From seven days
+before a personal Dot's grant ends until fourteen days after, the owner payload
+reports `renewable: true`, `renew_by` and `delivery.needs=renew`.
+`POST /api/v1/agent-runtime/installations/<id>/renew/` returns a normal
+enrollment challenge for the same installation, key and channel. The owner's
+enrolling device signs it with a fresh 30-day NIP-OA attestation and confirms
+through the existing `enrollments/<id>/confirm/` route.
+
+Confirmation extends the existing grant in place: no new generation, scopes,
+resources or limits. Activated private adapters and fixed `grant`-policy leases
+move to the new end. The Dot's kind 0 and 10100 profiles are re-signed with the
+new attestation and republished; a relay refusal leaves the renewal unconfirmed.
+
+With `MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED`, the bound ChatGPT consent is
+extended to the same end, never more than 30 days from now and never if it is
+revoked, expired or bound to another owner or grant. Without it, the grant stays
+capped by the consent. If the consent has already ended, renewal still keeps the
+signed Dot, so the owner reconnects in ChatGPT without disconnecting first.
+
+Past the fourteen-day grace a Dot is `lapsed`: it keeps its key and tombstone,
+reports `status: lapsed`, and no longer counts toward
+`AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT`, so the owner can connect again.
+
+## Dot accounts (Nov 2026)
+
+With `AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED`, a personal Dot's signed kind 0
+profile carries a handle and an About text, the way Slack names a dot after its
+owner (`dr-sam-maek`). The handle is `{owner}-{dot}@{relay host}`, built from
+the owner's account name and the Dot's name, numbered on collision with the
+community's other Dots, and never changed once published. The relay accepts
+`nip05` only as two or more lowercase words joined by hyphens, and its users
+table keeps handles unique per community. `about` says whose Dot it is, that it
+answers only its owner, and how to start. The owner payload reports `handle`.
+
+## Dots message people (Nov 2026)
+
+With `AGENT_RUNTIME_DOT_MESSAGING_ENABLED` and `AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED` on, a Dot whose owner
+approved the extra "Let your Dot message people" capability (scope `agent:messages:send`, which needs fresh
+consent) gets three more tools on `/mcp/mlai`:
+
+- `list_my_conversations`: the channels and DMs the owner belongs to, with DM participant keys.
+- `open_dm`: opens a DM of the owner, the Dot and 1 to 7 members (MLAI account emails or chat keys). The owner
+  is always in the DM.
+- `send_message`: a new top-level message in a conversation the owner can read and write. One idempotency key
+  per message; repeats return the first result.
+
+Each call is a fresh relay `personal_context` delegation (operations `conversations`, `open_dm`, `post`,
+advertised as `proactive-v1`) that the relay re-checks against the owner's current access, bans and mutes.
+Members block a Dot by muting it (their NIP-51 mute list); the relay then refuses DMs and DM posts to them.
+Limits: 100 messages and 20 new DMs a day per Dot. Audits (`native.dot.message_sent`, `native.dot.dm_opened`)
+hold ids only, never text.

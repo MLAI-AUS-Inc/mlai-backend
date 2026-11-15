@@ -39,7 +39,7 @@ class NativeInstallationsView(NativeOwnerView):
         community, _ = native_sources.community_config(request.query_params.get("community"))
         if not getattr(settings, "AGENT_RUNTIME_ENABLED", False):
             return Response({"community_id": community, "installations": [],
-                "limits": {"personal_limit": max(0, getattr(settings, "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT", 1)),
+                "limits": {"personal_limit": native_installations.personal_limit(),
                            "personal_used": 0}})
         rows = AgentInstallation.objects.filter(owner=request.user, community_id=community,
             app_id__in=("openai-dot", "mlai-community")).select_related("owner_device").order_by("-created_at")
@@ -78,6 +78,51 @@ class NativeInstallationStateView(NativeOwnerView):
         data = schema.validated(schema.InstallationStateSerializer, request.data)
         row = native_installations.change_state(request.user, installation_id, data["state"])
         return Response(native_installations.installation_payload(row))
+
+
+class NativeInstallationRenewView(NativeOwnerView):
+    """Start an owner-signed renewal; confirm it through the enrollment confirm route."""
+
+    def post(self, request, installation_id):
+        schema.validated(schema.EmptySerializer, request.data)
+        row = native_installations.start_renewal(request.user, installation_id)
+        return Response(native_installations.enrollment_payload(row), status=201)
+
+
+class NativeAdminInstallationsView(NativeOwnerView):
+    """Chat owners and admins: every Dot in the community."""
+
+    def get(self, request):
+        from . import native_admin
+        community, _ = native_sources.community_config(request.query_params.get("community"))
+        return Response({"community_id": community, "is_admin": native_admin.is_chat_admin(request.user),
+                         "installations": native_admin.list_installations(request.user, community)
+                         if native_admin.is_chat_admin(request.user) else []})
+
+
+class NativeAdminInstallationActionView(NativeOwnerView):
+    """Suspend, restore or remove one Dot as a Chat owner or admin."""
+
+    def post(self, request, installation_id, action):
+        from . import native_admin
+        schema.validated(schema.EmptySerializer, request.data)
+        operation = {"suspend": native_admin.suspend, "restore": native_admin.restore,
+                     "remove": native_admin.remove}.get(action)
+        if operation is None:
+            raise ValidationError("Unknown agent action.")
+        native_admin.require_admin(request.user)
+        get_object_or_404(AgentInstallation, pk=installation_id)
+        return Response(operation(request.user, installation_id))
+
+
+class NativeAdminActivityView(NativeOwnerView):
+    """Chat owners and admins: one Dot's recent activity, ids only."""
+
+    def get(self, request, installation_id):
+        from . import native_admin
+        native_admin.require_admin(request.user)
+        get_object_or_404(AgentInstallation, pk=installation_id)
+        return Response({"activity": native_admin.activity(request.user, installation_id)})
 
 
 class NativeInstallationPictureView(NativeOwnerView):

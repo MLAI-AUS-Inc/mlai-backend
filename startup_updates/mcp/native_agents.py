@@ -18,7 +18,7 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import APIException, AuthenticationFailed, PermissionDenied, ValidationError
 
-from agent_runtime import broker, event_webhooks, native_crypto, native_installations, native_sources, runtime
+from agent_runtime import broker, event_webhooks, native_crypto, native_installations, native_messaging, native_sources, runtime
 from agent_runtime.authentication import token_hash, validate_credential
 from agent_runtime.mcp import input_schema
 from agent_runtime.models import AgentCredential, AgentGrant, AgentInstallation, AgentInvocationReply, AgentOAuthBinding, AgentSubscription
@@ -32,6 +32,8 @@ NAMES = {"get_agent_account": "get_profile", "list_agent_channels": "list_channe
          "get_invocation": "get_invocation", "read_invocation_thread": "read_invocation_thread",
          "reply_to_invocation": "reply_to_invocation", "get_invocation_status": "get_invocation_status"}
 TOOL_SCOPES = {name: sorted(DOT_SCOPES) for name in NAMES}
+MESSAGE_SCOPES = sorted(DOT_SCOPES | {native_messaging.SCOPE})
+TOOL_SCOPES.update({name: MESSAGE_SCOPES for name in native_messaging.NAMES})
 TOOLS = []
 for public_name, native_name in NAMES.items():
     template = deepcopy(next(item for item in broker.TOOLS if item["name"] == native_name))
@@ -48,6 +50,36 @@ for public_name, native_name in NAMES.items():
     elif public_name == "list_agent_channels":
         template["description"] = "List only this personal agent's approved public MLAI Chat channel."
     TOOLS.append(template)
+
+
+ADD_ME = "add_me_to_mlai_chat"
+ADD_ME_TOOL = {"name": ADD_ME,
+    "description": "Start or check adding you, this Dot, to MLAI Chat as your owner's own member account. Returns "
+                   "the link your owner opens to finish (\"Add your dot\" in Apps & agents), the steps, and any "
+                   "Dots they already have there. It changes nothing by itself.",
+    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}}
+TOOL_SCOPES[ADD_ME] = []
+
+
+def members_enabled():
+    return enabled() and bool(getattr(settings, "AGENT_RUNTIME_DOT_MEMBERS_ENABLED", False))
+
+
+def add_me(principal):
+    """The owner finishes in MLAI Chat; this only explains how and shows status."""
+    owner = get_user_model().objects.get(pk=principal.grant["user_id"], is_active=True)
+    base = str(getattr(settings, "COMMUNITY_CHAT_FRONTEND_URL", "")).rstrip("/")
+    dots = [{"name": row.name, "handle": row.handle or "", "status": row.state}
+            for row in AgentInstallation.objects.filter(owner=owner, app_id="openai-dot", is_active=True)
+            .exclude(state="revoked").order_by("created_at")[:10]]
+    return {"setup_url": f"{base}/apps" if base else None, "dots": dots,
+            "limit": native_installations.personal_limit(),
+            "steps": ["Open the link in MLAI Chat and choose Add your dot.",
+                      "Approve your Dot's account on your own device.",
+                      "Come back here and approve the MLAI permissions for that Dot, including messaging if you "
+                      "want it to post updates.",
+                      "Ask the Dot to watch your mentions."]}
 
 
 def enabled():
@@ -236,13 +268,19 @@ def principal_for(principal):
 
 
 def available_tools(principal):
+    setup = [deepcopy(ADD_ME_TOOL)] if members_enabled() else []
     if not principal.grant.get("native_agent_grant_id") or not principal.grant.get("native_agent_credential_id") or not enabled():
-        return []
+        return setup
     try:
         principal_for(principal)
     except (APIException, AgentPermissionDenied, runtime.AgentRuntimeError):
-        return []
-    result = deepcopy(TOOLS)
+        return setup
+    result = deepcopy(TOOLS) + setup
+    if native_messaging.enabled() and native_messaging.SCOPE in principal.grant.get("scopes", []):
+        for tool in deepcopy(native_messaging.TOOLS):
+            tool["annotations"] = {"readOnlyHint": tool["name"] == "list_my_conversations",
+                "destructiveHint": False, "idempotentHint": tool["name"] != "open_dm", "openWorldHint": True}
+            result.append(tool)
     for tool in result:
         security = [{"type": "oauth2", "scopes": TOOL_SCOPES[tool["name"]]}]
         tool["securitySchemes"] = security
@@ -257,6 +295,14 @@ def supports_events(principal):
 @_api_errors
 @transaction.atomic
 def call_tool(principal, name, arguments):
+    if name == ADD_ME:
+        if not members_enabled():
+            raise ValidationError("Unknown MCP tool for this connection.")
+        return add_me(principal)
+    if name in native_messaging.NAMES:
+        if not set(MESSAGE_SCOPES) <= set(principal.grant.get("scopes", [])):
+            raise PermissionDenied("Reconnect MLAI and let your Dot message people.", code="scope_denied")
+        return native_messaging.execute(principal_for(principal), name, arguments)
     if name not in NAMES or not set(TOOL_SCOPES[name]) <= set(principal.grant.get("scopes", [])):
         raise PermissionDenied("Reconnect MLAI with the required personal agent permission.", code="scope_denied")
     native = principal_for(principal)

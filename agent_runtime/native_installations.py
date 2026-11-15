@@ -1,9 +1,11 @@
 """Personal Dot enrollment and quota admission in the existing gateway."""
 
 import json
+import logging
 import re
 import secrets
 from datetime import timedelta
+from functools import partial
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -17,6 +19,8 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from . import native_crypto, native_sources, runtime
 from .models import AgentEnrollment, AgentGrant, AgentInstallation, AgentInvocation, AgentInvocationReply, AgentSubscription
 from .policy import idempotency_key
+
+logger = logging.getLogger(__name__)
 
 CONSENT_VERSION = "dot-public-thread-v1"
 DOT_SCOPES = ["events:read", "messages:read", "messages:reply"]
@@ -43,6 +47,16 @@ REPLY_POLICY = (
 PERSONAL_CONTEXT_POLICY = (
     "For a request from another MLAI conversation, read its supplied conversation context before acting, and ask me "
     "in that conversation if a date, timezone, duration or other detail is unclear."
+)
+
+
+WAKE_PROMPT = (
+    "Start watching my MLAI mentions again with the MLAI plugin, with no end date, then call "
+    "list_pending_invocations and answer anything still waiting, oldest first."
+)
+SCHEDULE_PROMPT = (
+    "Every 15 minutes, use the MLAI plugin to call list_pending_invocations and answer anything still "
+    "waiting in MLAI Chat, oldest first. Do nothing if nothing is waiting."
 )
 
 
@@ -82,11 +96,28 @@ def dot_available():
         and getattr(settings, "AGENT_RUNTIME_MCP_EVENTS_ENABLED", False) and registered and setup_url())
 
 
+MEMBER_DOT_LIMIT = 3
+
+
+def personal_limit():
+    """Up to 3 Dots per member once Dots are members; the setting can raise it."""
+    configured = max(0, min(100, getattr(settings, "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT", 1)))
+    if getattr(settings, "AGENT_RUNTIME_DOT_MEMBERS_ENABLED", False):
+        return max(configured, MEMBER_DOT_LIMIT)
+    return configured
+
+
 def limits(owner, community, *, now=None):
     now = now or timezone.now()
-    limit = max(0, min(100, getattr(settings, "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT", 1)))
-    used = AgentInstallation.objects.filter(owner=owner, community_id=community, app_id="openai-dot", is_active=True).exclude(
-        state="revoked").exclude(state="awaiting_owner_proof", enrollments__expires_at__lte=now).distinct().count()
+    limit = personal_limit()
+    rows = AgentInstallation.objects.filter(owner=owner, community_id=community, app_id="openai-dot", is_active=True).exclude(
+        state="revoked").exclude(state="awaiting_owner_proof", enrollments__expires_at__lte=now).distinct()
+    if renewal_enabled():
+        # A Dot past its renewal grace keeps its tombstone but frees the slot.
+        used = sum(1 for row in rows.only("pk", "app_id", "community_id", "state", "is_active")
+                   if not lapsed(row, now=now))
+    else:
+        used = rows.count()
     return {"personal_limit": limit, "personal_used": used}
 
 
@@ -102,13 +133,184 @@ def catalog(owner, *, relay_url):
             "status": "available" if enabled else "setup_required", "setup_url": setup_url(),
             "instructions": SETUP_INSTRUCTIONS}],
         "limits": limits(owner, community) if getattr(settings, "AGENT_RUNTIME_ENABLED", False) else
-                  {"personal_limit": max(0, getattr(settings, "AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT", 1)), "personal_used": 0},
+                  {"personal_limit": personal_limit(), "personal_used": 0},
         "channels": native_sources.eligible_channels(owner, community) if enabled or shared_enabled else []}
     if shared.enabled():
         result["apps"].append({"id": shared.APP_ID, "name": "Maek · community", "provider": "MLAI",
             "status": "available" if shared_enabled else "setup_required", "setup_url": None,
             "instructions": "An independent assistant for members in your selected public channel. It can read only the mentioned thread and has no access to your personal Dot, connectors or private memory."})
     return result
+
+
+RENEWAL_PREFIX = "renew:"
+RENEWAL_WINDOW = timedelta(days=7)
+RENEWAL_GRACE = timedelta(days=14)
+ATTESTATION_LIFETIME = timedelta(days=30)
+
+
+def renewal_enabled():
+    return bool(getattr(settings, "AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED", False))
+
+
+def is_renewal(enrollment):
+    return str(enrollment.idempotency_key).startswith(RENEWAL_PREFIX)
+
+
+def latest_grant(installation):
+    """The newest unrevoked grant, expired or not, for renewal decisions."""
+    return installation.grants.filter(revoked_at__isnull=True).order_by("-created_at").first()
+
+
+def renewal_state(installation, grant, *, now):
+    """Whether the owner can re-sign before (or shortly after) the grant ends.
+
+    A personal Dot can be renewed from seven days before its access ends until
+    fourteen days after. Later it is lapsed: it keeps its key and tombstone but
+    no longer holds the owner's slot, so the owner can connect again.
+    """
+    if grant is None or installation.app_id != "openai-dot" or installation.community_id is None:
+        return {"renewable": False, "renew_by": None, "lapsed": False}
+    renew_by = grant.expires_at + RENEWAL_GRACE
+    lapsed = renewal_enabled() and now >= renew_by
+    renewable = (renewal_enabled() and installation.is_active and installation.state in {"active", "paused"}
+                 and grant.expires_at - RENEWAL_WINDOW <= now < renew_by)
+    return {"renewable": renewable, "renew_by": renew_by.isoformat(), "lapsed": lapsed}
+
+
+def lapsed(installation, *, now):
+    if not renewal_enabled() or installation.state not in {"active", "paused", "provisioning"}:
+        return False
+    grant = latest_grant(installation)
+    return grant is not None and renewal_state(installation, grant, now=now)["lapsed"]
+
+
+@transaction.atomic
+def start_renewal(owner, installation_id, *, now=None):
+    """Issue a fresh owner-signed challenge for an existing personal Dot.
+
+    The owner's enrolling device signs a new attestation; nothing about the
+    Dot's key, channels, scopes or limits changes.
+    """
+    now = now or timezone.now()
+    native_sources.require_native()
+    if not renewal_enabled() or not dot_available():
+        raise PermissionDenied("Renewal is not available yet.")
+    current = runtime.locked(get_user_model().objects.all()).get(pk=owner.pk)
+    installation = runtime.locked(AgentInstallation.objects.all()).select_related("owner_device").get(
+        pk=installation_id, owner=current)
+    grant = latest_grant(installation)
+    if not renewal_state(installation, grant, now=now)["renewable"] or installation.owner_device_id is None:
+        raise PermissionDenied("This Dot cannot be renewed now. Connect it again instead.")
+    native_sources.current_device(current, public_key=installation.owner_device.public_key)
+    pending = installation.enrollments.filter(idempotency_key__startswith=RENEWAL_PREFIX, confirmed_at__isnull=True,
+        expires_at__gt=now + timedelta(minutes=2)).order_by("-created_at").first()
+    if pending is not None:
+        return pending
+    enrollment = AgentEnrollment.objects.create(installation=installation,
+        idempotency_key=RENEWAL_PREFIX + secrets.token_hex(16), resource=grant.resources[0],
+        consent_version=CONSENT_VERSION, nonce=secrets.token_urlsafe(32),
+        auth_conditions=f"created_at<{int((now + ATTESTATION_LIFETIME).timestamp())}",
+        expires_at=now + timedelta(minutes=10))
+    runtime.audit("native.renewal.started", grant=grant, installation_id=str(installation.pk))
+    return enrollment
+
+
+def _extend_unified(grant, owner, until):
+    """Extend the bound ChatGPT consent with the owner's renewal, when switched on."""
+    from .models import AgentOAuthBinding
+    from .unified_authority import PREFIX
+    bindings = list(AgentOAuthBinding.objects.filter(credential__grant_id=grant.pk, client_id__startswith=PREFIX)
+                    .values_list("client_id", flat=True))
+    if not bindings:
+        return until, False
+    if not getattr(settings, "MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED", False):
+        from startup_updates.mcp import oauth
+        best = None
+        for client_id in bindings:
+            cached = oauth.cache.get(oauth.key("grant", client_id[len(PREFIX):]))
+            if cached and not cached.get("revoked"):
+                best = max(best or 0, cached.get("expiresAt", 0))
+        if best is None:
+            return until, True
+        return min(until, timezone.datetime.fromtimestamp(best, tz=until.tzinfo)), False
+    from startup_updates.mcp import oauth
+    extended = [oauth.extend_native_grant(client_id[len(PREFIX):], native_grant_id=grant.pk, user_id=owner.pk,
+                                          until=until.timestamp()) for client_id in bindings]
+    extended = [value for value in extended if value]
+    if not extended:
+        # The ChatGPT connection already ended. Renewal keeps the signed Dot so
+        # the owner can reconnect it in ChatGPT without disconnecting first.
+        return until, True
+    return min(until, timezone.datetime.fromtimestamp(max(extended), tz=until.tzinfo)), False
+
+
+def _confirm_renewal(current, installation, enrollment, *, event, auth_tag, now):
+    if not renewal_enabled() or not dot_available():
+        raise PermissionDenied("Renewal is not available yet.")
+    if (installation.app_id != "openai-dot" or not installation.is_active
+            or installation.state not in {"active", "paused"} or installation.owner_device_id is None):
+        raise PermissionDenied("Installation is unavailable.")
+    device = native_sources.current_device(current, public_key=installation.owner_device.public_key)
+    if device.pk != installation.owner_device_id:
+        raise PermissionDenied("Enrollment device has changed.")
+    _, config = native_sources.community_config(installation.community_id)
+    native_crypto.verify_enrollment(event, enrollment, relay_url=config["relay_url"],
+        audience=settings.AGENT_RUNTIME_RESOURCE, now=now)
+    attestation = native_crypto.verify_owner_attestation(auth_tag, installation, enrollment.auth_conditions)
+    if enrollment.confirmed_at is not None:
+        if attestation[:3] != installation.owner_attestation[:3]:
+            raise ValidationError("Renewal retry changed its owner proof.")
+        return installation
+    grant = runtime.locked(AgentGrant.objects.filter(pk=getattr(latest_grant(installation), "pk", None))).first()
+    if grant is None or not renewal_state(installation, grant, now=now)["renewable"]:
+        raise PermissionDenied("This Dot cannot be renewed now. Connect it again instead.")
+    if list(grant.resources) != [enrollment.resource]:
+        raise PermissionDenied("This Dot's channels changed. Start the renewal again.")
+    for resource in grant.resources:
+        if sources_available(current, resource, device.public_key) is not True:
+            raise PermissionDenied("Channel is no longer available.")
+    signed_until = timezone.datetime.fromtimestamp(int(enrollment.auth_conditions.split("<")[1]), tz=now.tzinfo)
+    expiry, reconnect = _extend_unified(grant, current, signed_until)
+    previous = grant.expires_at
+    if expiry > previous:
+        grant.expires_at = expiry
+        grant.save(update_fields=("expires_at", "updated_at"))
+        _extend_leases(grant, previous, expiry)
+        # Only an already-activated private adapter follows the grant forward.
+        for credential in grant.credentials.filter(kind="access", generation=grant.generation, revoked_at__isnull=True):
+            if credential.expires_at > credential.created_at and credential.expires_at < expiry:
+                credential.expires_at = expiry
+                credential.save(update_fields=("expires_at",))
+    installation.owner_attestation = attestation
+    events = profile_events(installation, grant, now=now)
+    for row in events:
+        result = native_sources._request(config, "/events", row)
+        if result.get("event_id") != row["id"] or result.get("accepted") is not True:
+            raise native_sources.SourceUnavailable("MLAI Chat did not confirm the renewed profile.")
+    installation.profile_events = events
+    installation.save(update_fields=("owner_attestation", "profile_events", "handle", "about", "updated_at"))
+    enrollment.confirmed_at = now
+    enrollment.save(update_fields=("confirmed_at",))
+    runtime.audit("native.installation.renewed", grant=grant, installation_id=str(installation.pk),
+                  expires_at=grant.expires_at.isoformat(), reconnect_required=reconnect)
+    return installation
+
+
+def _extend_leases(grant, previous, expiry):
+    """Fixed leases that ran to the old end of the grant run to the new end."""
+    from .event_webhooks import lease_policy
+    if lease_policy() != "grant":
+        return
+    for subscription in AgentSubscription.objects.filter(grant=grant, generation=grant.generation, is_active=True):
+        delivery = dict(subscription.delivery or {})
+        try:
+            ends = timezone.datetime.fromisoformat(delivery.get("expires_at", ""))
+        except (TypeError, ValueError):
+            continue
+        if delivery.get("requested_ttl_ms") == "omitted" and abs((ends - previous).total_seconds()) <= 1:
+            delivery["expires_at"] = expiry.isoformat()
+            subscription.delivery = delivery
+            subscription.save(update_fields=("delivery", "updated_at"))
 
 
 def enrollment_payload(enrollment, *, now=None):
@@ -181,6 +383,8 @@ def confirm(owner, enrollment_id, *, event, auth_tag, now=None):
     enrollment = runtime.locked(AgentEnrollment.objects.all()).get(pk=enrollment_id)
     enrollment.installation = installation
     installation.owner = current
+    if is_renewal(enrollment):
+        return _confirm_renewal(current, installation, enrollment, event=event, auth_tag=auth_tag, now=now)
     available = shared.available() if installation.app_id == shared.APP_ID else dot_available()
     if not available or not installation.is_active or installation.state not in {"awaiting_owner_proof", "provisioning", "active"}:
         raise PermissionDenied("Installation is unavailable.")
@@ -203,7 +407,7 @@ def confirm(owner, enrollment_id, *, event, auth_tag, now=None):
     installation.owner_attestation = attestation
     installation.profile_events = profile_events(installation, grant, now=now)
     installation.state = "provisioning"
-    installation.save(update_fields=("owner_attestation", "profile_events", "state", "updated_at"))
+    installation.save(update_fields=("owner_attestation", "profile_events", "handle", "about", "state", "updated_at"))
     enrollment.confirmed_at = now
     enrollment.save(update_fields=("confirmed_at",))
     runtime.audit("native.enrollment.confirmed", grant=grant, installation_id=str(installation.pk))
@@ -242,11 +446,87 @@ def _enrollment_tags(installation, grant):
                      ["native_installation", str(installation.pk)], installation.owner_attestation]
 
 
-def _profile(installation, picture):
+def _slug(value, limit):
+    words = re.findall(r"[a-z0-9]+", str(value or "").lower())
+    return "-".join(words)[:limit].strip("-")
+
+
+def current_handle(installation):
+    """The handle already stored for, or published in the signed profile of, this Dot."""
+    stored = getattr(installation, "handle", None)
+    if isinstance(stored, str) and HANDLE_RE.fullmatch(stored):
+        return stored
+    for event in getattr(installation, "profile_events", None) or []:
+        if isinstance(event, dict) and event.get("kind") == 0:
+            try:
+                handle = json.loads(event.get("content", "")).get("nip05")
+            except (TypeError, ValueError, AttributeError):
+                return None
+            return handle if isinstance(handle, str) and HANDLE_RE.fullmatch(handle) else None
+    return None
+
+
+HANDLE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)+@[a-z0-9.-]+$")
+
+
+def dot_handle(installation, *, taken=()):
+    """`{owner}-{dot}@host`, like Slack's `dr-sam-maek`. Stable once published.
+
+    The relay's users table keeps handles unique per community; this avoids
+    handles already used by this community's other Dots.
+    """
+    existing = current_handle(installation)
+    if existing:
+        return existing
+    _, config = native_sources.community_config(installation.community_id)
+    host = (urlsplit(config["relay_url"]).hostname or "").lower()
+    owner = getattr(installation, "owner", None)
+    person = _slug(f"{getattr(owner, 'first_name', '')} {getattr(owner, 'last_name', '')}", 40) or "member"
+    dot = _slug(installation.name, 40) or "dot"
+    base = f"{person}-{dot}"
+    used = set(taken)
+    if not used:
+        others = AgentInstallation.objects.filter(community_id=installation.community_id).exclude(
+            pk=installation.pk).only("profile_events", "handle")
+        used = {current_handle(row) for row in others}
+    for suffix in ["", *[f"-{n}" for n in range(2, 100)]]:
+        handle = f"{base}{suffix}@{host}"
+        if handle not in used:
+            return handle
+    return f"{base}-{secrets.token_hex(3)}@{host}"
+
+
+def about_text(installation):
+    owner = getattr(installation, "owner", None)
+    person = " ".join(f"{getattr(owner, 'first_name', '')} {getattr(owner, 'last_name', '')}".split())[:80] or "its owner"
+    name = " ".join(str(installation.name or "").split())[:80] or "This Dot"
+    return (f"{name} is {person}'s personal OpenAI dot. It answers {person} only; anyone else gets a short "
+            f"automatic reply. What it can do: answer questions, use {person}'s connected apps and take on longer "
+            f"tasks. Get started: {person} can message it directly, mention it in a channel, or add it to a group "
+            "chat. Everyone there can see its replies.")
+
+
+def _profile(installation, picture, *, handle=None):
     profile = {"name": installation.name, "display_name": installation.name, "bot": True}
     if picture:
         profile["picture"] = picture
+    if handle:
+        profile["name"] = handle.split("@", 1)[0]
+        profile["nip05"] = handle
+        profile["about"] = about_text(installation)
     return profile
+
+
+def profile_handle(installation):
+    """Personal Dots publish a handle and About panel when accounts are switched on."""
+    if installation.app_id != "openai-dot" or not getattr(settings, "AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED", False):
+        return current_handle(installation)
+    handle = dot_handle(installation)
+    # The caller saves these with the re-signed profile; the database's unique
+    # (community, handle) constraint is the final guard against a race.
+    installation.handle = handle
+    installation.about = about_text(installation)
+    return handle
 
 
 def profile_events(installation, grant, *, now):
@@ -255,7 +535,8 @@ def profile_events(installation, grant, *, now):
     channel, tags = _enrollment_tags(installation, grant)
     key = native_crypto.unseal_key(installation.sealed_signing_key)
     # Reconnecting keeps the avatar the owner chose.
-    profile = _profile(installation, None if is_community else current_picture(installation))
+    profile = _profile(installation, None if is_community else current_picture(installation),
+                       handle=None if is_community else profile_handle(installation))
     directory = {"name": installation.name, "display_name": installation.name, "agent_type": "community" if is_community else "external",
         "owner_pubkey": installation.owner_device.public_key, "respond_to": "anyone" if is_community else "owner-only", "channel_ids": [channel],
         "status": "offline", "channels": [], "capabilities": []}
@@ -288,14 +569,15 @@ def set_picture(owner, installation_id, picture, *, now=None):
     created_at = max(int(now.timestamp()), int(previous) + 1)
     _, tags = _enrollment_tags(installation, grant)
     event = native_crypto.sign_event(native_crypto.unseal_key(installation.sealed_signing_key), kind=0,
-        created_at=created_at, tags=tags, content=native_crypto.canonical_json(_profile(installation, picture)))
+        created_at=created_at, tags=tags, content=native_crypto.canonical_json(
+            _profile(installation, picture, handle=profile_handle(installation))))
     _, config = native_sources.community_config(installation.community_id)
     result = native_sources._request(config, "/events", event)
     if result.get("event_id") != event["id"] or result.get("accepted") is not True:
         raise native_sources.SourceUnavailable("MLAI Chat did not confirm the new picture.")
     installation.profile_events = [event if isinstance(row, dict) and row.get("kind") == 0 else row
                                    for row in installation.profile_events]
-    installation.save(update_fields=("profile_events", "updated_at"))
+    installation.save(update_fields=("profile_events", "handle", "about", "updated_at"))
     runtime.audit("native.installation.picture", grant=grant, installation_id=str(installation.pk),
                   cleared=picture is None)
     return installation
@@ -346,11 +628,26 @@ def provision_native_installations(*, limit=25, app_id="openai-dot"):
                 installation.state = "active"
                 installation.save(update_fields=("native_cursor", "state", "updated_at"))
                 runtime.audit("native.installation.provisioned", grant=grant)
+                if app_id == "openai-dot":
+                    transaction.on_commit(partial(_welcome, installation.pk, grant.pk))
                 completed += 1
             except (PermissionDenied, AgentPermissionDenied, ValidationError, native_sources.SourceUnavailable, ValueError):
                 # Committed signed profiles remain unchanged for the next attempt.
                 continue
     return completed
+
+
+def _welcome(installation_id, grant_id):
+    """Say hello in the owner's DM with their new Dot; never blocks provisioning."""
+    from . import native_messaging
+    try:
+        with transaction.atomic():
+            grant = runtime._grant(grant_id)
+            if grant.installation_id != installation_id:
+                return
+            native_messaging.welcome(grant.installation, grant)
+    except Exception:  # noqa: BLE001 - a welcome is best effort and retried by nothing.
+        logger.warning("Dot welcome message was not sent.", extra={"installation_id": str(installation_id)})
 
 
 def sources_available(owner, resource, public_key):
@@ -422,7 +719,14 @@ def installation_payload(installation, *, now=None):
     personal_capability = ({"personal_context_mode": personal_context.MODE}
         if personal_context.enabled() and installation.app_id == "openai-dot" and installation.state == "active"
         and installation.is_active and installation.owner.is_active and grant and authorized and status != "unavailable" else {})
+    renewal = renewal_state(installation, latest_grant(installation), now=now)
+    if renewal["lapsed"] and status in {"active", "ready", "needs_setup", "waiting_for_subscription", "delivery_problem", "limit_reached"}:
+        status = "lapsed"
+    if renewal["renewable"]:
+        diagnostics["delivery"]["needs"] = diagnostics["delivery"].get("needs") or "renew"
     return {"installation_id": str(installation.pk), "app_id": installation.app_id, "name": installation.name,
+        "renewable": renewal["renewable"], "renew_by": renewal["renew_by"],
+        "handle": current_handle(installation),
         "community_id": str(installation.community_id), "status": status, "resources": grant.resources if grant else [],
         "public_key": installation.public_key, "subscription_active": subscription, "test_completed": bool(verified_reply),
         "last_reply_at": reply.updated_at.isoformat() if reply else None,
@@ -431,6 +735,7 @@ def installation_payload(installation, *, now=None):
         "resource": enrollment.resource if enrollment else (grant.resources[0] if grant and grant.resources else None),
         "error_code": installation.native_cursor.get("error_code", ""),
         "setup_url": setup_url(), "instructions": SETUP_INSTRUCTIONS, "setup_prompt": setup_prompt(),
+        "wake_prompt": WAKE_PROMPT, "schedule_prompt": SCHEDULE_PROMPT,
         "picture": current_picture(installation), **diagnostics,
         **personal_capability}
 
