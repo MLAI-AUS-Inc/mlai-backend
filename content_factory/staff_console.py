@@ -90,8 +90,12 @@ def startup_row(org, company, run, *, now, stuck=()):
     code = failure_code(run) if run else None
     heal = mapping(result.get("self_heal_v1"))
     # Read the P2 registry directly here: staff inspect every cohort, without changing founder projection gates.
-    entry = registry_policy.load_registry()["by_code_v2"].get(code) if isinstance(code, str) else None
-    ask = registry_policy.canonical_action_id(entry.get("action_id")) if entry and entry.get("failure_class") == "needs_user" else None
+    # A code only the legacy registry knows falls back to it, the same lookup the stuck alert uses, so a stop
+    # the founder can fix reads as Your turn in both places.
+    registry = registry_policy.load_registry()
+    entry = registry["by_code_v2"].get(code) if isinstance(code, str) else None
+    asks = entry or (registry["by_code"].get(code) if isinstance(code, str) else None)
+    ask = registry_policy.canonical_action_id(asks.get("action_id")) if asks and asks.get("failure_class") == "needs_user" else None
     status = getattr(run, "status", "")
     delivered = status in {"completed", "awaiting_approval", "approval_required"} or bool(result.get("draft_ready_v1"))
     state = "your_turn" if ask or status in {"awaiting_approval", "approval_required"} else "done" if delivered else "working"

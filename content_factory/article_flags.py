@@ -60,3 +60,18 @@ def flag_rows() -> list[dict]:
             "secret": secret,
         })
     return rows
+
+
+def warnings() -> list[str]:
+    """Plain warnings about settings that are on but cannot work as configured."""
+    from .founder_journey_alerts import SLACK_CHANNEL_PATTERN
+    channel = str(getattr(settings, "CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID", "") or "").strip()
+    if SLACK_CHANNEL_PATTERN.fullmatch(channel):
+        return []
+    on = [name for name in ("ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED", "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED")
+          if getattr(settings, name, name == "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED")]
+    if not on:
+        return []
+    state = "is not set" if not channel else "is not a valid Slack channel id"
+    return [f"WARNING: {', '.join(on)} is on, but CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID {state}. "
+            "Alerts are only logged and never reach Slack. Set the channel id on the host."]

@@ -4,7 +4,7 @@ import json
 
 from django.core.management.base import BaseCommand
 
-from content_factory.article_flags import flag_rows
+from content_factory.article_flags import flag_rows, warnings
 
 
 class Command(BaseCommand):
@@ -23,6 +23,8 @@ class Command(BaseCommand):
         if options["json"]:
             self.stdout.write(json.dumps(rows, indent=2))
             return
+        for warning in warnings():
+            self.stdout.write(self.style.WARNING(warning))
         width = max((len(row["name"]) for row in rows), default=0)
         for row in rows:
             deploy = "deploy" if row["deploy"] else "host-only"

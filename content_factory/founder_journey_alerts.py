@@ -346,7 +346,10 @@ def _p2_details(receipt, *, organization, run, queued_at) -> dict:
     details = dict(receipt.get("details") or {})
     extra = _enriched(receipt, organization=organization, run=run)
     if extra:
-        details = _safe_details({**details, **extra})
+        # A founder_stuck receipt has no run, so enrichment would replace its own
+        # attempts and item with run-less defaults; its caller's details win.
+        merged = {**extra, **details} if receipt.get("alert_reason") == "founder_stuck" else {**details, **extra}
+        details = _safe_details(merged)
     if _ack_due_applies(receipt.get("alert_reason")):
         details["ack_due_at"] = ack_due_at(queued_at).isoformat()
     return details

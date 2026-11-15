@@ -37,3 +37,15 @@ class ArticleFlagsTests(SimpleTestCase):
         self.assertNotIn("CONTENT_FACTORY_URL", text.getvalue())
         self.assertNotIn("sensitive-key", text.getvalue() + data.getvalue())
         self.assertIn("ARTICLES_STAFF_ALERT_RULES_ENABLED", {row["name"] for row in json.loads(data.getvalue())})
+
+    @override_settings(ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED=True, ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=False,
+                       CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID="")
+    def test_warns_when_the_stuck_alert_is_on_but_has_no_slack_channel(self):
+        text = StringIO()
+        call_command("article_flags", "--only-flags", stdout=text)
+        self.assertIn("ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED is on, but CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID is not set",
+                      text.getvalue())
+        with override_settings(CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID="C0000000000"):
+            text = StringIO()
+            call_command("article_flags", "--only-flags", stdout=text)
+        self.assertNotIn("WARNING", text.getvalue())

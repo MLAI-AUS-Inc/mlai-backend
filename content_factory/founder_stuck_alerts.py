@@ -4,8 +4,9 @@ A founder can be stuck in three ways that the cohort-gated alerts miss:
 
 * a website setup step stopped (``needs_attention``, or ``failed`` with no
   automatic retry) on the connection's current generation;
-* a website step is still retrying after many attempts or a long time (La Vie's
-  reconnect sat pending after 21 attempts);
+* a website step is still retrying after many failed attempts or a long time
+  (La Vie's reconnect sat pending after 21 attempts); a deployment or policy wait
+  is left out, because it has its own 24-hour deadline that ends in a stop;
 * the founder's latest article or setup run stopped (failed, blocked, stopped or
   denied) more than six hours ago with no founder action and no scheduled
   self-heal retry.
@@ -18,11 +19,20 @@ cap. The Slack text names the founder and the startup, the step, the failure cod
 and its registry description, how long it has been stuck, and the staff console
 link. Names are read at send time and never stored in the receipt.
 
+Every cohort is covered: the sweep does not use the founder-journey launch date
+(``ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE``) and looks back ``LOOKBACK`` (90 days),
+so legacy founders who have been stuck longest are alerted too.
+
 Scheduler safety (the 10 Nov 2026 OOM, fixed by #1325): the sweep runs at most
 once per ``SWEEP_INTERVAL_SECONDS``, every query has a row limit, filters on
 indexed columns (``state``, ``workflow``/``status``) and reads only scalar
 columns and single JSON keys, never a whole ``result`` or ``receipt`` document.
-Receipts are read only for the organisations in this sweep's candidates.
+Each kind reads two pages a pass: the newest rows, so a fresh stop alerts at
+once, and the next page of a cursor that walks the whole window oldest first,
+so rows that are already alerted or Your turn can never hide an older stuck
+founder. Receipts are read only for the organisations in this pass's candidates
+plus those still holding a pending ``founder_stuck`` receipt (kept in the cache),
+so a failed Slack post is retried even after its condition leaves the window.
 
 ``ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED`` is a kill switch that defaults on.
 """
@@ -50,11 +60,18 @@ THROTTLE_KEY = "founder_stuck_alerts:last_sweep"
 # Rows read per condition query, and new alerts queued or delivered per sweep.
 QUERY_LIMIT = 50
 MAX_ALERTS_PER_SWEEP = 25
-# Stops older than this are history, not a founder waiting now.
-LOOKBACK = timedelta(days=14)
+# Stops older than this are history, not a founder waiting now. Long enough to
+# cover legacy founders stuck since before the new journey launched (29 Sep 2026).
+LOOKBACK = timedelta(days=90)
 OPERATION_RETRY_ATTEMPTS = 10
-OPERATION_PENDING_AFTER = timedelta(hours=24)
+# A setup that keeps progressing can legitimately be pending for a day (steps,
+# then a deployment wait of up to 24 hours), so only twice that reads as stuck.
+OPERATION_PENDING_AFTER = timedelta(hours=48)
 RUN_STUCK_AFTER = timedelta(hours=6)
+CURSOR_KEY = "founder_stuck_alerts:cursor:{kind}"
+PENDING_ORGS_KEY = "founder_stuck_alerts:pending_organizations"
+CURSOR_TIMEOUT_SECONDS = 7 * 24 * 3600
+MAX_PENDING_ORGANIZATIONS = 500
 
 # Website operations a founder waits on. Bookkeeping, cleanup and alert outbox
 # operations are left out on purpose: they never block a founder.
@@ -64,6 +81,12 @@ FOUNDER_OPERATION_ACTIONS = (
     "ci-verify", "publish-pr",
 )
 RETRYING_OPERATION_STATES = ("pending", "running")
+# A wait with its own deadline (deployment, policy) is not a retry loop.
+WAITING_RECEIPT_STATUSES = ("waiting_for_deployment", "waiting_for_step")
+# These actions count every worker claim as an attempt, including each step and
+# each deployment poll, so their attempts only count while a failure is recorded.
+POLLING_OPERATION_ACTIONS = ("prepare", "setup", "resume")
+OPERATION_FAILURE_KEYS = ("reason_code", "error_code", "last_error")
 RUN_STOP_STATUSES = ("failed", "blocked", "stopped", "denied")
 SETUP_WORKFLOW = "article_system_setup"
 RUN_WORKFLOWS = (*alerts.ARTICLE_WORKFLOWS, SETUP_WORKFLOW)
@@ -118,32 +141,46 @@ def run_founder_stuck_alert_sweep(now=None) -> dict:
     now = now or timezone.now()
     if not cache.add(THROTTLE_KEY, now.isoformat(), SWEEP_INTERVAL_SECONDS):
         return {"status": "throttled"}
-    try:
-        since = alerts.alerts_since()
-    except alerts.FounderJourneyAlertConfigError as exc:
-        return {"status": "failed", "error": str(exc)}
-    conditions = find_stuck_conditions(now=now, since=since)
+    conditions = find_stuck_conditions(now=now)
     organization_ids = {condition.organization_id for condition in conditions}
     queued = _queue(conditions, organization_ids=organization_ids)
-    delivered = alerts._deliver(now=now, limit=MAX_ALERTS_PER_SWEEP, organization_ids=organization_ids,
-                                reasons={STUCK_REASON}) if organization_ids else {"sent": 0, "unconfigured": 0, "undelivered": 0}
+    delivered = _deliver_pending(now=now, organization_ids=organization_ids)
     return {"status": "completed", "candidates": len(conditions), "queued": queued, **delivered}
+
+
+def _deliver_pending(*, now, organization_ids) -> dict:
+    """Deliver pending stuck receipts for this pass's organisations and every one still waiting from earlier passes.
+
+    The waiting set lives in the cache and is capped. When it is missing (a cold
+    cache), one pass reads every organisation's receipts to rebuild it; that is
+    the same read the founder-journey sweep makes on every tick.
+    """
+    remembered = cache.get(PENDING_ORGS_KEY)
+    if remembered is None:
+        scope = None
+    else:
+        scope = set(organization_ids) | {pk for pk in remembered if isinstance(pk, int)}
+    if scope is not None and not scope:
+        return {"sent": 0, "unconfigured": 0, "undelivered": 0}
+    delivered = alerts._deliver(now=now, limit=MAX_ALERTS_PER_SWEEP, organization_ids=scope, reasons={STUCK_REASON})
+    waiting = sorted({target.organization_id for target, _ in alerts._pending_targets(scope, {STUCK_REASON})})
+    cache.set(PENDING_ORGS_KEY, waiting[:MAX_PENDING_ORGANIZATIONS], None)
+    return delivered
 
 
 @dataclass(frozen=True)
 class Scope:
-    """How far detection looks. Alerts wait and look back 14 days; the staff console sees every stop now."""
+    """How far detection looks. Alerts wait and page through 90 days; the staff console sees every stop now."""
 
-    since: datetime | None = None
     organization_ids: frozenset | None = None
     run_stuck_after: timedelta = RUN_STUCK_AFTER
     lookback: timedelta | None = LOOKBACK
     limit: int | None = QUERY_LIMIT
 
 
-def find_stuck_conditions(*, now, since) -> list[StuckCondition]:
-    """Every stuck condition the bounded alert queries find, newest first within each kind."""
-    return _find(now=now, scope=Scope(since=since))
+def find_stuck_conditions(*, now) -> list[StuckCondition]:
+    """The stuck conditions in this pass's bounded pages: the newest rows plus the cursor's next page, per kind."""
+    return _find(now=now, scope=Scope())
 
 
 def stuck_conditions_by_organization(organization_ids, *, now) -> dict[int, list[StuckCondition]]:
@@ -165,8 +202,42 @@ def _find(*, now, scope) -> list[StuckCondition]:
     return [*_stuck_operations(now=now, scope=scope), *_stopped_runs(now=now, scope=scope)]
 
 
-def _bounded(queryset, scope):
-    return queryset[:scope.limit] if scope.limit is not None else queryset
+def _pages(queryset, scope, *, kind, pk_field) -> list[dict]:
+    """The rows to read this pass: all of them for the console, two bounded pages for the alert.
+
+    The head page (newest ``updated_at`` first) catches a fresh stop at once. The
+    cursor page continues, oldest first, from where the last pass stopped, and
+    starts again from the oldest row once it reaches the end. So every row in the
+    window is read within a bounded number of passes, however many newer rows are
+    already alerted or are Your turn.
+    """
+    if scope.limit is None:
+        return list(queryset.order_by("-updated_at", pk_field))
+    head = list(queryset.order_by("-updated_at", f"-{pk_field}")[:scope.limit])
+    key = CURSOR_KEY.format(kind=kind)
+    cursor = _cursor(cache.get(key))
+    tail = queryset
+    if cursor is not None:
+        moment, last = cursor
+        tail = tail.filter(Q(updated_at__gt=moment) | Q(updated_at=moment, **{f"{pk_field}__gt": last}))
+    tail = list(tail.order_by("updated_at", pk_field)[:scope.limit])
+    if len(tail) < scope.limit:
+        cache.delete(key)
+    else:
+        cache.set(key, [tail[-1]["updated_at"].isoformat(), tail[-1][pk_field]], CURSOR_TIMEOUT_SECONDS)
+    seen, rows = set(), []
+    for row in (*head, *tail):
+        if row[pk_field] not in seen:
+            seen.add(row[pk_field])
+            rows.append(row)
+    return rows
+
+
+def _cursor(value):
+    if not isinstance(value, (list, tuple)) or len(value) != 2 or not isinstance(value[1], int):
+        return None
+    moment = alerts._timestamp(value[0])
+    return (moment, value[1]) if moment else None
 
 
 def stuck_alert_id(condition: StuckCondition) -> str:
@@ -178,7 +249,12 @@ def stuck_alert_id(condition: StuckCondition) -> str:
 # --- Detection ---------------------------------------------------------------
 
 OPERATION_FIELDS = ("id", "connection__organization_id", "action", "state", "attempts", "created_at", "updated_at",
-                    "receipt__code", "receipt__last_error")
+                    "receipt__reason_code", "receipt__error_code", "receipt__failure__code", "receipt__code",
+                    "receipt__last_error")
+# Prepare records its code as reason_code (sometimes error_code or failure.code);
+# other operations use code or last_error. The first safe code wins.
+OPERATION_CODE_FIELDS = ("receipt__reason_code", "receipt__error_code", "receipt__failure__code", "receipt__code",
+                         "receipt__last_error")
 
 
 def _current_operations(*, scope):
@@ -187,15 +263,13 @@ def _current_operations(*, scope):
     newer = WebsiteConnectionOperation.objects.filter(connection_id=OuterRef("connection_id"), generation=OuterRef("generation"),
                                                       action=OuterRef("action"), created_at__gt=OuterRef("created_at"))
     rows = WebsiteConnectionOperation.objects.filter(action__in=FOUNDER_OPERATION_ACTIONS, generation=F("connection__generation"))
-    if scope.since is not None:
-        rows = rows.filter(created_at__gte=scope.since)
     if scope.organization_ids is not None:
         rows = rows.filter(connection__organization_id__in=scope.organization_ids)
     return rows.exclude(connection__state="disconnected").exclude(Exists(newer))
 
 
 def _operation_code(row) -> str:
-    for value in (row.get("receipt__code"), row.get("receipt__last_error")):
+    for value in (row.get(key) for key in OPERATION_CODE_FIELDS):
         if isinstance(value, str) and alerts.SAFE_CODE.fullmatch(value.strip()):
             return value.strip()
     return ""
@@ -209,18 +283,29 @@ def _operation_condition(row, *, kind, stuck_since) -> StuckCondition:
 
 
 def _stuck_operations(*, now, scope) -> list[StuckCondition]:
-    """Stopped and long-retrying operations in one bounded query (one round trip for the console)."""
+    """Stopped and long-retrying operations (one query for the console, two bounded pages for the alert)."""
     retry_unset = Q(receipt__retryable=False) | ~Q(receipt__has_key="retryable")
     stopped = Q(state="needs_attention") | (Q(state="failed") & retry_unset)
     if scope.lookback is not None:
         stopped &= Q(updated_at__gte=now - scope.lookback)
-    retrying = Q(state__in=RETRYING_OPERATION_STATES) & (
-        Q(attempts__gte=OPERATION_RETRY_ATTEMPTS) | Q(created_at__lte=now - OPERATION_PENDING_AFTER))
-    rows = _bounded(_current_operations(scope=scope).filter(stopped | retrying)
-                    .order_by("-updated_at", "id").values(*OPERATION_FIELDS), scope)
+    retrying = (Q(state__in=RETRYING_OPERATION_STATES)
+                & ~(Q(receipt__has_key="status") & Q(receipt__status__in=WAITING_RECEIPT_STATUSES))
+                & ((Q(attempts__gte=OPERATION_RETRY_ATTEMPTS) & (~Q(action__in=POLLING_OPERATION_ACTIONS) | _failure_recorded()))
+                   | Q(created_at__lte=now - OPERATION_PENDING_AFTER)))
+    rows = _pages(_current_operations(scope=scope).filter(stopped | retrying).values(*OPERATION_FIELDS), scope,
+                  kind="operations", pk_field="id")
     return [_operation_condition(row, kind="retrying", stuck_since=row["created_at"])
             if row["state"] in RETRYING_OPERATION_STATES
             else _operation_condition(row, kind="stopped", stuck_since=row["updated_at"]) for row in rows]
+
+
+def _failure_recorded() -> Q:
+    """The receipt holds a failure code right now (prepare clears it when a step succeeds)."""
+    recorded = Q()
+    for key in OPERATION_FAILURE_KEYS:
+        blank = Q(**{f"receipt__{key}": ""}) | Q(**{f"receipt__{key}": None})
+        recorded |= Q(receipt__has_key=key) & ~blank
+    return recorded
 
 
 RUN_FIELDS = ("pk", "run_id", "organization_id", "workflow", "status", "updated_at",
@@ -234,15 +319,13 @@ def _stopped_runs(*, now, scope) -> list[StuckCondition]:
                                              created_at__gt=OuterRef("created_at"))
     rows = ContentFactoryRun.objects.filter(workflow__in=RUN_WORKFLOWS, status__in=RUN_STOP_STATUSES,
                                             organization__isnull=False, updated_at__lte=now - scope.run_stuck_after)
-    if scope.since is not None:
-        rows = rows.filter(created_at__gte=scope.since)
     if scope.lookback is not None:
         rows = rows.filter(updated_at__gte=now - scope.lookback)
     if scope.organization_ids is not None:
         rows = rows.filter(organization_id__in=scope.organization_ids)
-    rows = _bounded(rows.filter(~Q(run_request__has_key="request_source")
-                                | ~Q(run_request__request_source=alerts.SCHEDULER_REQUEST_SOURCE))
-                    .exclude(Exists(newer)).order_by("-updated_at", "pk").values(*RUN_FIELDS), scope)
+    rows = _pages(rows.filter(~Q(run_request__has_key="request_source")
+                              | ~Q(run_request__request_source=alerts.SCHEDULER_REQUEST_SOURCE))
+                  .exclude(Exists(newer)).values(*RUN_FIELDS), scope, kind="runs", pk_field="pk")
     conditions = []
     for row in rows:
         code = _run_code(row)
@@ -270,7 +353,11 @@ def _founder_has_next_action(row, code) -> bool:
         if isinstance(value, str) and value.strip():
             return True
     entry = _registry_entry(code)
-    return bool(entry and entry.get("failure_class") == "needs_user" and entry.get("action_id"))
+    if not (entry and entry.get("failure_class") == "needs_user"):
+        return False
+    # The staff console's rule: a retired or unknown action id is no ask.
+    from .registry_policy import canonical_action_id
+    return canonical_action_id(entry.get("action_id")) is not None
 
 
 def _self_heal_scheduled(row, *, now) -> bool:
@@ -303,7 +390,8 @@ def _queue(conditions, *, organization_ids) -> int:
         organization = organizations.get(condition.organization_id)
         if organization is None:
             continue
-        details = {**condition.details, "step": condition.step, "kind": condition.kind,
+        item = "website" if condition.kind.startswith("operation_") or condition.step == SETUP_WORKFLOW else "article"
+        details = {**condition.details, "step": condition.step, "kind": condition.kind, "item": item,
                    "stuck_since_at": condition.stuck_since.isoformat()}
         if condition.code:
             details["code"] = condition.code

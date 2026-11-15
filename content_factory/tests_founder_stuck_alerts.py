@@ -37,9 +37,6 @@ class FounderStuckFixture(TestCase):
     def setUp(self):
         cache.clear()
         self.now = timezone.now()
-        self.since = override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE=(self.now - timedelta(days=60)).date().isoformat())
-        self.since.enable()
-        self.addCleanup(self.since.disable)
         self.org, self.website = self.startup("Lavie Studio", "lavie.example.test", "Clara", "Founder")
 
     def startup(self, name, domain, first, last):
@@ -68,10 +65,10 @@ class FounderStuckFixture(TestCase):
         ContentFactoryRun.objects.filter(pk=run.pk).update(created_at=self.now - age, updated_at=self.now - age)
         return run
 
-    def sweep(self, now=None):
+    def sweep(self, now=None, side_effect=acknowledged):
         cache.delete(stuck.THROTTLE_KEY)
         with patch(SLACK) as client:
-            client.return_value.chat_postMessage.side_effect = acknowledged
+            client.return_value.chat_postMessage.side_effect = side_effect
             outcome = stuck.run_founder_stuck_alert_sweep(now=now or self.now)
         return outcome, [call.kwargs["text"] for call in client.return_value.chat_postMessage.call_args_list]
 
@@ -82,7 +79,9 @@ class FounderStuckFixture(TestCase):
 
 class FounderStuckAlertTests(FounderStuckFixture):
     def test_stopped_setup_alerts_once_with_names_step_reason_duration_and_console_link(self):
-        op = self.operation(receipt={"code": STRATEGY_CODE, "retryable": False}, age=timedelta(hours=27))
+        # The real prepare receipt shape: the code is reason_code.
+        op = self.operation(receipt={"reason_code": STRATEGY_CODE, "retryable": False, "status": "needs_attention",
+                                     "step_failures": {"scan": 1}}, age=timedelta(hours=27))
         outcome, texts = self.sweep()
         self.assertEqual((outcome["queued"], outcome["sent"]), (1, 1))
         text = texts[0]
@@ -116,6 +115,54 @@ class FounderStuckAlertTests(FounderStuckFixture):
         self.operation(generation=self.website.generation + 5)          # not the current generation
         self.assertEqual(self.sweep()[0]["candidates"], 0)
 
+    def test_a_progressing_setup_or_a_deployment_wait_is_not_retrying(self):
+        # Prepare counts every claim (each step, each deployment poll) as an attempt.
+        self.operation(action="prepare", state="pending", attempts=15, age=timedelta(hours=20),
+                       receipt={"reason_code": "", "status": "working", "step_failures": {}})
+        self.assertEqual(self.sweep()[0]["candidates"], 0)
+        self.operation(action="prepare", state="pending", attempts=30, age=timedelta(hours=40),
+                       receipt={"reason_code": "deployment_marker_unverified", "status": "waiting_for_deployment"})
+        self.assertEqual(self.sweep()[0]["candidates"], 0)
+
+    def test_a_setup_failing_over_and_over_is_retrying(self):
+        self.operation(action="prepare", state="pending", attempts=12, age=timedelta(hours=5),
+                       receipt={"reason_code": STRATEGY_CODE, "status": "working", "step_failures": {"scan": 12}})
+        outcome, texts = self.sweep()
+        self.assertEqual(outcome["queued"], 1)
+        self.assertIn(f"Reason: {STRATEGY_CODE}:", texts[0])
+
+    @override_settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE="2026-09-29")
+    def test_legacy_stops_from_before_the_new_journey_launch_still_alert(self):
+        # Created long before the launch date the founder-journey alerts use.
+        op = self.operation(receipt={"reason_code": STRATEGY_CODE}, age=timedelta(days=80))
+        WebsiteConnectionOperation.objects.filter(pk=op.pk).update(created_at=self.now - timedelta(days=400))
+        run = self.make_run(result={"error_code": STRATEGY_CODE}, age=timedelta(days=60))
+        ContentFactoryRun.objects.filter(pk=run.pk).update(created_at=self.now - timedelta(days=400))
+        self.assertEqual(self.sweep()[0]["queued"], 2)
+
+    def test_a_failed_post_is_retried_after_its_condition_clears(self):
+        op = self.operation()
+        outcome, _ = self.sweep(side_effect=RuntimeError("slack down"))
+        self.assertEqual((outcome["queued"], outcome["undelivered"]), (1, 1))
+        WebsiteConnectionOperation.objects.filter(pk=op.pk).update(state="completed")
+        receipt = self.receipts()[0]
+        self.assertEqual(receipt["state"], "pending")
+        later = self.now + timedelta(minutes=10)
+        outcome, texts = self.sweep(now=later)
+        self.assertEqual((outcome["candidates"], outcome["sent"]), (0, 1))
+        self.assertEqual(self.receipts()[0]["state"], "sent")
+        # Nothing left waiting, so the next pass reads no receipts at all.
+        self.assertEqual(cache.get(stuck.PENDING_ORGS_KEY), [])
+
+    @override_settings(ARTICLES_STAFF_ALERT_RULES_ENABLED=True)
+    def test_staff_rule_enrichment_keeps_the_alerts_own_attempts_and_item(self):
+        self.operation(action="reconnect", state="pending", attempts=21, age=timedelta(days=3))
+        outcome, texts = self.sweep()
+        self.assertEqual(outcome["queued"], 1)
+        self.assertIn("Attempts 21.", texts[0])
+        details = self.receipts()[0]["details"]
+        self.assertEqual((details["attempts"], details["item"]), (21, "website"))
+
     def test_a_newer_operation_or_a_disconnected_site_hides_the_old_stop(self):
         self.operation(age=timedelta(hours=5))
         self.operation(state="running", age=timedelta(hours=1))
@@ -145,7 +192,7 @@ class FounderStuckAlertTests(FounderStuckFixture):
         self.assertEqual(self.sweep()[0]["candidates"], 0)
         older = self.make_run(age=timedelta(hours=30))
         self.make_run(status="running", age=timedelta(hours=7))                     # a newer run replaced it
-        self.assertNotIn(older.run_id, str(stuck.find_stuck_conditions(now=self.now, since=self.now - timedelta(days=60))))
+        self.assertNotIn(older.run_id, str(stuck.find_stuck_conditions(now=self.now)))
         self.assertEqual(self.sweep()[0]["candidates"], 0)
 
     def test_kill_switch_does_no_queries(self):
@@ -184,9 +231,10 @@ class FounderStuckBoundTests(FounderStuckFixture):
             self.operation(website=site)
             self.make_run(org=org, result={"error_code": STRATEGY_CODE, "verification_summary": "x" * 1000})
         with CaptureQueriesContext(connection) as queries:
-            conditions = stuck.find_stuck_conditions(now=self.now, since=self.now - timedelta(days=60))
-        self.assertEqual(len(queries), 2)
-        self.assertEqual(len(conditions), 2 * stuck.QUERY_LIMIT)
+            conditions = stuck.find_stuck_conditions(now=self.now)
+        # Two pages per kind: the newest rows and the cursor's next page.
+        self.assertEqual(len(queries), 4)
+        self.assertLessEqual(len(conditions), 4 * stuck.QUERY_LIMIT)
         for query in queries:
             sql = query["sql"]
             self.assertIn(f"LIMIT {stuck.QUERY_LIMIT}", sql)
@@ -208,6 +256,25 @@ class FounderStuckBoundTests(FounderStuckFixture):
         # Fixed work per alert; nothing grows with the number of startups or receipts.
         self.assertLessEqual(len(queries), 16 * stuck.MAX_ALERTS_PER_SWEEP)
 
+    def test_already_alerted_rows_never_hide_a_new_stuck_founder(self):
+        # 60 newer stops are already alerted; one older stop is new. A plain
+        # newest-50 window would never read it.
+        for index in range(stuck.QUERY_LIMIT + 10):
+            _, site = self.startup(f"Load {index}", f"load-{index}.example.test", "Load", str(index))
+            self.operation(website=site, age=timedelta(hours=1, minutes=index))
+        for _ in range(3):
+            self.sweep()
+        self.assertEqual(sum(len(self.receipts(org)) for org in Organization.objects.exclude(pk=self.org.pk)),
+                         stuck.QUERY_LIMIT + 10)
+        older, site = self.startup("Older", "older.example.test", "Older", "Founder")
+        self.operation(website=site, age=timedelta(days=5))
+        middle, site = self.startup("Middle", "middle.example.test", "Middle", "Founder")
+        self.operation(website=site, age=timedelta(hours=1, minutes=55))
+        for _ in range(3):
+            self.sweep()
+        self.assertEqual(len(self.receipts(older)), 1)
+        self.assertEqual(len(self.receipts(middle)), 1)
+
 
 @override_settings(MY_STARTUP_STAFF_CONSOLE_ENABLED=True)
 class StaffConsoleStuckStateTests(FounderStuckFixture):
@@ -220,7 +287,7 @@ class StaffConsoleStuckStateTests(FounderStuckFixture):
         self.assertTrue(row["stuckReason"]["description"])
 
     def test_newest_run_in_progress_does_not_hide_a_stopped_setup(self):
-        self.operation(receipt={"code": STRATEGY_CODE}, age=timedelta(days=2))
+        self.operation(receipt={"reason_code": STRATEGY_CODE}, age=timedelta(days=2))
         self.make_run(status="running", age=timedelta(minutes=1))
         page = console.startup_list({"state": "stuck"}, now=self.now)
         self.assertEqual([r["organizationId"] for r in page["results"]], [self.org.pk])
@@ -234,3 +301,15 @@ class StaffConsoleStuckStateTests(FounderStuckFixture):
         row = console.startup_detail(self.org.pk, now=self.now)
         self.assertEqual(row["state"], "your_turn")
         self.assertIsNone(row["stuckReason"])
+
+    def test_a_legacy_only_founder_code_is_your_turn_in_the_console_and_never_alerts(self):
+        from copy import deepcopy
+        from .website_failure_contract import load_registry
+        registry = deepcopy(load_registry())
+        action = registry["by_code_v2"][FOUNDER_CODE]["action_id"]
+        registry["by_code"]["LEGACY_ONLY_FOUNDER_STOP"] = {"failure_class": "needs_user", "action_id": action}
+        with patch("content_factory.website_failure_contract.load_registry", return_value=registry), \
+                patch("content_factory.registry_policy.load_registry", return_value=registry):
+            self.make_run(result={"error_code": "LEGACY_ONLY_FOUNDER_STOP"})
+            self.assertEqual(console.startup_detail(self.org.pk, now=self.now)["state"], "your_turn")
+            self.assertEqual(self.sweep()[0]["candidates"], 0)
