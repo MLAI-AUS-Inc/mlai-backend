@@ -12,6 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .services.studio_report_source import SourceIncomplete, instant, prepare, mailbox_ids
+from .services.studio_contract_cash import contract_cash
 
 
 class HasStudioSourceKey(BasePermission):
@@ -32,14 +33,15 @@ class StudioReportPrepareView(APIView):
         try:
             if (not isinstance(data, dict) or set(data) not in ({"owner", "team", "cutoff", "nonce"},
                                                               {"owner", "team", "cutoff", "nonce", "mode"})
-                    or data.get('mode', 'strict') not in {'strict', 'latest'}
+                    or data.get('mode', 'strict') not in {'strict', 'latest', 'contract_cash'}
                     or any(not isinstance(data[key], str) for key in data)
                     or re.fullmatch(r"[a-f0-9]{64}", data["nonce"]) is None):
                 raise ValueError
             instant(data["cutoff"])
             scopes = json.loads(Path(settings.STUDIO_REPORT_SOURCE_CONFIG).read_text())
             scope = scopes[data["owner"]]
-            if scope["team"] != data["team"]:
+            if (scope["team"] != data["team"]
+                    or bool(scope.get('contract_cash')) != (data.get('mode') == 'contract_cash')):
                 raise ValueError
         except (KeyError, TypeError, ValueError, OSError):
             return Response({"error": "invalid_source_scope"}, status=400)
@@ -59,7 +61,10 @@ class StudioReportPrepareView(APIView):
                     if time.monotonic() >= deadline:
                         raise SourceIncomplete("finance_time_limit")
                     return _xero_get_json(connection, path, **kwargs)
-                result = prepare(scope, data, get=get, mail=mailbox_ids)
+                if data.get('mode') == 'contract_cash':
+                    result = contract_cash(scope, data, get)
+                else:
+                    result = prepare(scope, data, get=get, mail=mailbox_ids)
         except Exception:
             return Response({"error": "source_preparation_failed"}, status=503)
         body = json.dumps(result, sort_keys=True, separators=(",", ":"))

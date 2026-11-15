@@ -453,3 +453,32 @@ class SubmittedWorkTests(SimpleTestCase):
                 result=prepare(self.scope,{**req,'cutoff':later.isoformat()},get=get,mail=mail,now=later)
                 self.assertIn('finance_rate_limited',result['missing'])
                 self.assertEqual(result['snapshot']['clients']['UMARK']['source_freshness']['finance_checked_at'],NOW.isoformat())
+
+
+class ContractCashTests(SimpleTestCase):
+    def test_reconciled_gross_receipt_without_implied_extra_hours_and_shared_cooldown(self):
+        from .services.studio_contract_cash import contract_cash
+        from .services.studio_report_source import finance_cooldown
+        with TemporaryDirectory() as root:
+            scope = {'organization_id': 1, 'xero_connection_id': 2, 'xero_contact_id': 'contact',
+                     'linear_organization': 'org', 'project_ids': ['project'], 'review_directory': root}
+            req = {'owner': 'UDEV', 'team': 'T1', 'cutoff': NOW.isoformat(), 'nonce': 'a' * 64}
+            inv = {**invoice(amount=5500), 'SubTotal': 5000, 'TotalTax': 500}
+            def get(path, **kwargs):
+                return {'Invoices': [inv]} if path == '/Invoices' else {'Payments': [payment(amount=5500)]}
+            first = contract_cash(scope, req, get, NOW)
+            self.assertEqual(first['status'], 'ready')
+            self.assertEqual(first['ledger']['invoices'][0]['net_cents'], 500000)
+            self.assertEqual(first['ledger']['payments'][0]['amount_cents'], 550000)
+            later = NOW + timedelta(minutes=2)
+            req['cutoff'] = later.isoformat()
+            blocked = Mock(side_effect=AssertionError('unexpected external read'))
+            self.assertEqual(contract_cash(scope, req, blocked, later)['finance_checked_at'], NOW.isoformat())
+            finance_cooldown({**scope, 'xero_contact_id': 'another'}, later, until=later + timedelta(days=1))
+            limited = contract_cash(scope, req, blocked, later)
+            self.assertEqual(limited['status'], 'partial')
+            self.assertEqual(limited['ledger'], first['ledger'])
+            other = contract_cash({**scope, 'xero_contact_id': 'another'}, req, blocked, later)
+            self.assertEqual(other['status'], 'waiting_data')
+            self.assertNotIn('ledger', other)
+            blocked.assert_not_called()

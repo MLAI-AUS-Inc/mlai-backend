@@ -177,3 +177,13 @@ current submissions, with the original finance timestamp and rate-limit status.
 A first deployment may seed the private cache from a validated previous latest
 preparation with the same finance scope and cutoff. Strict Friday requests
 waiting on work skip Xero and recheck the work gate hourly.
+
+A dedicated private owner scope with `contract_cash: true` accepts only
+`mode: "contract_cash"` on the same signed endpoint. This mode reads AUD sales
+invoices and reconciled receipts for its configured Xero contact. It returns
+gross, net and GST in integer cents, plus the actual payment allocations.
+The worker supplies the Linear usage and signed contract allowance. No work
+manifest or contractor mailbox is involved. Repeated current requests share a
+15-minute finance projection. During the connection's Xero cooldown a verified
+projection up to seven days old retains its original observation time. Without
+usable evidence the endpoint returns a waiting status.
