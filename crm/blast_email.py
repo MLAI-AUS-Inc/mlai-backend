@@ -148,6 +148,9 @@ def campaign_body(blast) -> str:
         body += reconfirmation.BUTTON
     if getattr(blast, 'sign_off_name', ''):
         body += '\n\n— ' + listmonk_text(html.escape(blast.sign_off_name), blast.event, markdown=True)
+    if getattr(blast, 'message_type', ''):
+        from .message_types import layout
+        body = layout(blast, body, campaign=resource_name(blast.pk))
     if getattr(blast, 'preview_text', ''):
         preview = listmonk_text(html.escape(blast.preview_text), blast.event, markdown=True)
         body = '<div style="display:none;max-height:0;overflow:hidden;mso-hide:all" aria-hidden="true">' + preview + '</div>\n\n' + body
@@ -298,6 +301,11 @@ def _drop_reason(blast, contact, is_banned: bool) -> Optional[str]:
 
     if is_banned:
         return "banned"
+    if getattr(blast, "message_type", "") == Blast.MessageType.INVITE:
+        from .message_types import invite_drop_reason
+        reason = invite_drop_reason(blast, contact.pk)
+        if reason:
+            return reason
     if contact.email_status in (Contact.EmailStatus.UNSUBSCRIBED, Contact.EmailStatus.COMPLAINED):
         return "opted_out"
     if contact.email_status != Contact.EmailStatus.ACTIVE:
@@ -573,6 +581,11 @@ def apply_campaign(blast_id, campaign: dict, *, now) -> str:
 def dispatch_email(blast, *, now) -> dict:
     """One tick of a blast's email: load recipients, then create and start the campaign."""
 
+    if getattr(blast, "message_type", "") == Blast.MessageType.INVITE:
+        # People still waiting for their invite (waves load them later) are
+        # re-checked against Luma's latest guest list, at most every ten minutes.
+        from .message_types import refresh_guests_before_invite
+        refresh_guests_before_invite(blast)
     from .deliverability import waves
     if waves.managed(blast):
         return waves.dispatch(blast.pk, now=now)
@@ -649,6 +662,11 @@ def fail_email(blast_id, code: str, *, now) -> None:
     """listmonk refused this blast's email: rows it may have sent become ``unknown``."""
 
     blast = Blast.objects.only("stats").get(pk=blast_id)
+    if getattr(blast, "message_type", "") == Blast.MessageType.INVITE:
+        # People still waiting for their invite (waves load them later) are
+        # re-checked against Luma's latest guest list, at most every ten minutes.
+        from .message_types import refresh_guests_before_invite
+        refresh_guests_before_invite(blast)
     from .deliverability import waves
     if waves.managed(blast):
         waves.fail(blast_id, code, now)

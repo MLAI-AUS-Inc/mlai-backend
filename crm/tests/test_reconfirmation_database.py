@@ -19,6 +19,8 @@ from .test_campaign_waves_database import WAVE_SETTINGS, WaveProvider
 
 
 @override_settings(**{**WAVE_SETTINGS, 'CRM_LIFECYCLE_ENABLED': True, 'CRM_PREFLIGHT_ENABLED': False})
+# These tests cover the named-owner gate; production gives every admin owner access.
+@override_settings(CRM_ALL_ADMINS_ARE_OWNERS=False)
 class ReconfirmationDatabaseTests(CrmApiMixin, TestCase):
     def setUp(self):
         super().setUp()

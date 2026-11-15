@@ -38,6 +38,7 @@ from crm.models import (
     Channel,
     Contact,
     ContactImport,
+    CrmAuditEvent,
     CrmEvent,
     MessageTemplate,
     Segment,
@@ -57,6 +58,7 @@ from crm.segments import (
 from . import serializers as wire
 from .errors import CrmError
 from .services import (
+    audit,
     create_contact,
     delete_segment,
     save_blast_draft,
@@ -657,3 +659,39 @@ class BlastRepliesView(CrmView):
                 lambda page: [wire.reply_row(message) for message in page],
             )
         )
+
+
+class BlastRooDraftView(CrmView):
+    """Ask Roo for a first draft. Returns text for the composer; saves and sends nothing."""
+
+    def post(self, request, blast_id):
+        from crm.roo_draft import RooDraftError, draft
+        blast = get_object_or_404(Blast.objects.select_related(*BLAST_RELATIONS), pk=blast_id)
+        data = validated(wire.RooDraftInput, request)
+        try:
+            result = draft(blast, data.get("note", ""), actor=request.user)
+        except RooDraftError as exc:
+            return Response(error_body(exc.code, **exc.extra), status=exc.status)
+        return Response(result)
+
+
+class EventRemindersView(CrmView):
+    """The event's two automatic reminders and their switches."""
+
+    def get(self, request, event_id):
+        event = get_object_or_404(CrmEvent, pk=event_id)
+        return Response(wire.event_reminders(event))
+
+    def patch(self, request, event_id):
+        from crm.reminders import enabled, ensure_reminders, system_actor
+        event = get_object_or_404(CrmEvent, pk=event_id)
+        data = validated(wire.EventRemindersInput, request, partial=True)
+        current = dict(event.reminder_settings or {})
+        current.update({key: value for key, value in data.items()})
+        event.reminder_settings = current
+        event.save(update_fields=["reminder_settings", "updated_at"])
+        audit(request.user, CrmAuditEvent.Action.EDIT, "event", event.pk,
+              {"operation": "reminder_settings", "fields": sorted(data)})
+        if enabled():
+            ensure_reminders(event, now=timezone.now(), actor=system_actor())
+        return Response(wire.event_reminders(event))

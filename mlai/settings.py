@@ -2351,6 +2351,16 @@ LUMA_UPCOMING_EVENTS_CACHE_SECONDS = max(
 # Contacts store (crm app). The scheduled Luma guest sync stays off until an
 # operator enables it; the backfill and import commands work regardless.
 CRM_LUMA_SYNC_ENABLED = _env_is_true('CRM_LUMA_SYNC_ENABLED', False)
+# Every MLAI admin (superuser, admin, committee) may manage Admin → Sending.
+CRM_ALL_ADMINS_ARE_OWNERS = _env_is_true('CRM_ALL_ADMINS_ARE_OWNERS', True)
+# "Ask Roo to draft" in the campaign composer (uses OPENAI_API_KEY; staff review every draft).
+CRM_ROO_DRAFT_ENABLED = _env_is_true('CRM_ROO_DRAFT_ENABLED', False)
+CRM_ROO_DRAFT_MODEL = os.getenv('CRM_ROO_DRAFT_MODEL', 'gpt-5.6-luna')
+# Automatic event reminders a day and an hour before each event. Off until
+# Luma's own reminders are switched off for the same events.
+CRM_AUTO_REMINDERS_ENABLED = _env_is_true('CRM_AUTO_REMINDERS_ENABLED', False)
+CRM_REMINDER_SLACK_CHANNEL = os.getenv('CRM_REMINDER_SLACK_CHANNEL', '')
+CRM_REMINDER_MIN_GUESTS = int(os.getenv('CRM_REMINDER_MIN_GUESTS', '3') or 3)
 CRM_ENGAGEMENT_REFRESH_ENABLED = _env_is_true('CRM_ENGAGEMENT_REFRESH_ENABLED', False)
 CRM_SUBSTACK_ACTIVITY_ENABLED = _env_is_true('CRM_SUBSTACK_ACTIVITY_ENABLED', False)
 CRM_ENGAGEMENT_REFRESH_HOUR = max(0, min(23, int(os.environ.get('CRM_ENGAGEMENT_REFRESH_HOUR', '6'))))
