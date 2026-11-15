@@ -21,10 +21,18 @@ What this module owns:
   repository that matches the domain (or the only one the founder can push
   to) and starts website preparation.
 
-Everything else (Slack and user-level OAuth, valid legacy Chat callbacks,
-every flow with the flag off, a missing or non-chat state) keeps today's
-responses byte for byte: :func:`begin_callback` returns None for them and the
-callers run their unchanged code.
+With ``MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED`` (a kill switch,
+default on) the same typed redirects cover every Chat-started connection,
+legacy organisations included, and a bad Chat state or ticket of any cohort
+goes to the fixed route so Chat can restart the connection in one click. A
+legacy success keeps its return and picker, but first binds and starts setup
+when exactly one repository is named like the domain
+(:func:`bind_legacy_domain_repository`).
+
+Slack and user-level OAuth, a missing or non-chat state, and every flow
+with both flags off keep today's responses byte for byte:
+:func:`begin_callback` returns None for them and the callers run their
+unchanged code.
 
 Nothing from a state that failed validation is ever used: a bad chat-shaped
 state goes to :func:`state_expired_redirect`, which carries no company, no
@@ -50,6 +58,9 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 FLAG = "MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED"
+#: Kill switch (default on): every Chat-started connection, whatever its
+#: cohort, returns to Chat with a typed reason instead of a text page.
+ALL_CHAT_FLAG = "MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED"
 
 CONNECTED = "connected"
 MULTIPLE_REPOS = "multiple_repos"
@@ -88,6 +99,11 @@ def redirects_enabled() -> bool:
     return bool(getattr(settings, FLAG, False))
 
 
+def all_chat_returns_enabled() -> bool:
+    """True when every Chat-started GitHub connection returns with a typed reason (default on)."""
+    return bool(getattr(settings, ALL_CHAT_FLAG, True))
+
+
 def is_new_journey_organization(organization) -> bool:
     """The cohort gate: the organisation is in the new journey (V2 on, not disabled)."""
     if organization is None or not getattr(organization, "pk", None):
@@ -99,6 +115,18 @@ def is_new_journey_organization(organization) -> bool:
 def gate_open(organization) -> bool:
     """The flag is on and the organisation is in the new journey."""
     return redirects_enabled() and is_new_journey_organization(organization)
+
+
+def chat_return_open(organization) -> bool:
+    """A Chat-started callback for ``organization`` returns to Chat on every failure.
+
+    True for every organisation while :data:`ALL_CHAT_FLAG` is on, and for a
+    new-journey one under the older flag. Binding the domain's repository
+    the new-journey way still needs :func:`gate_open`.
+    """
+    if organization is None or not getattr(organization, "pk", None):
+        return False
+    return all_chat_returns_enabled() or gate_open(organization)
 
 
 def log_return(organization, reason) -> None:
@@ -276,6 +304,9 @@ class ChatCallback:
     company: object = None
     organization: object = None
     response: object = None
+    #: False for a legacy (or redirect-flag-off) organisation: failures still
+    #: return with a reason, but success keeps the legacy return and picker.
+    new_journey: bool = True
 
     def redirect(self, reason):
         """A 302 with ``reason`` to this flow's validated return."""
@@ -307,6 +338,10 @@ def bad_state_redirect_applies(raw_state) -> bool:
     unsigned or tampered state names no organisation it can be trusted for,
     so it takes the fixed route (contract IF-P1-17).
     """
+    if all_chat_returns_enabled():
+        # Every Chat-started connection takes the fixed route, which lets
+        # Chat restart the connection in one click.
+        return True
     from content_factory.founder_journey_cohort import v2_enabled
     if not v2_enabled():
         return False
@@ -350,7 +385,7 @@ def begin_callback(request) -> Optional[ChatCallback]:
     route only as :func:`bad_state_redirect_applies` decides; otherwise it
     also returns None, and today's code answers its 400.
     """
-    if not redirects_enabled():
+    if not (redirects_enabled() or all_chat_returns_enabled()):
         return None
     raw_state = request.GET.get("state")
     if not raw_state or not is_chat_shaped_state(raw_state):
@@ -374,7 +409,7 @@ def begin_callback(request) -> Optional[ChatCallback]:
             if context.get("organization_id") is not None else None
     except (ValueError, TypeError):
         organization = None
-    if not gate_open(organization):
+    if not chat_return_open(organization):
         return None
     try:
         oauth_state = validate_github_oauth_state(raw_state, request=request)
@@ -385,12 +420,26 @@ def begin_callback(request) -> Optional[ChatCallback]:
         pk=context["chat_company_id"], profile__user_id=context["user_id"],
         organization__domain=oauth_state.domain,
     ).first()
-    flow = ChatCallback(oauth_state=oauth_state, company=company, organization=organization)
+    flow = ChatCallback(oauth_state=oauth_state, company=company, organization=organization,
+                        new_journey=gate_open(organization))
     if company is None:
         flow.response = flow.redirect(STARTUP_CHANGED)
         return flow
     flow.organization = company.organization
     if (request.GET.get("setup_action") or "") == "request":
+        # Remember who asked, so the owner's approval can connect this founder.
+        from integrations.services import github_owner_requests as owner_requests
+        if owner_requests.enabled():
+            try:
+                # The founder's GitHub login lets the owner's approval be matched
+                # to this founder (GitHub names them as the requester), and to no one else.
+                logins = owner_requests.founder_github_logins(
+                    company.profile.user, owner_requests.login_from_code(request.GET.get("code")))
+                owner_requests.record_request(organization=company.organization, user_id=context["user_id"],
+                                              company_id=company.pk, github_logins=logins)
+            except Exception:
+                logger.exception("github_owner_request_record_failed org=%s",
+                                 getattr(company.organization, "pk", None))
         flow.response = flow.redirect(OWNER_APPROVAL_REQUESTED)
     elif not request.GET.get("code"):
         flow.response = flow.redirect(CANCELLED if request.GET.get("error") == "access_denied" else AUTHORIZATION_FAILED)
@@ -452,6 +501,13 @@ def push_candidates(repositories) -> list:
     return candidates
 
 
+def domain_matches(domain, repositories) -> list:
+    """The pushable repositories whose name matches ``domain``."""
+    keys = domain_name_keys(domain)
+    return [repo for repo in push_candidates(repositories)
+            if _normalised(str(repo["full_name"]).split("/", 1)[1]) in keys]
+
+
 def match_repository(domain, repositories):
     """``(reason, repo)``: the one repository to bind, or why there is none.
 
@@ -462,9 +518,7 @@ def match_repository(domain, repositories):
     candidates = push_candidates(repositories)
     if not candidates:
         return NO_REPO, None
-    keys = domain_name_keys(domain)
-    matches = [repo for repo in candidates
-               if _normalised(str(repo["full_name"]).split("/", 1)[1]) in keys]
+    matches = domain_matches(domain, candidates)
     if len(matches) == 1:
         return CONNECTED, matches[0]
     if not matches and len(candidates) == 1:
@@ -526,6 +580,15 @@ def _repository_owned_elsewhere(organization, repo) -> bool:
             .exclude(organization=organization).exists())
 
 
+def same_repository(connection, repo) -> bool:
+    """Whether GitHub's ``repo`` is the connection's repository: by permanent id,
+    or by name when either side has no id."""
+    repository_id = repo.get("id") if isinstance(repo, dict) else None
+    if type(repository_id) is int and connection.repository_id:
+        return repository_id == connection.repository_id
+    return connection.github_repo.casefold() == str((repo or {}).get("full_name") or "").strip().casefold()
+
+
 def bind_installation_id(user, repo, fallback) -> str:
     """The installation the bind mints its token for: the founder registry's, as
     ``verify_repository_access`` resolves it, else the callback's ``fallback``."""
@@ -575,21 +638,81 @@ def bind_new_journey_repository(*, config, user, company, repositories, installa
     ``github_repository_unavailable`` or an unverified token, the installation
     token is re-minted once and the bind retried.
     """
+    reason, repo = match_repository(config.organization.domain, repositories)
+    if repo is None:
+        return reason
+    return bind_repository(config=config, user=user, company=company, repo=repo,
+                           installation_id=installation_id, owner_click=True)
+
+
+def has_repository_setup(config) -> bool:
+    """Whether a legacy organisation already has repository setup a first bind would reset.
+
+    A stored repository, a website connection, saved templates or generated
+    components all count. ``bind_website``'s first bind archives templates
+    and clears repository-derived setup, so a legacy return only auto-binds
+    when there is none of it.
+    """
+    if config.website_connection_id or str(config.github_repo or "").strip():
+        return True
+    if any(getattr(config, key, None) for key in ("article_template", "design_guide", "resource_prompt")):
+        return True
+    from content_factory.models import GeneratedComponent
+    return GeneratedComponent.objects.filter(organization_id=config.organization_id).exists()
+
+
+def bind_legacy_domain_repository(*, config, user, company, repositories, installation_id) -> Optional[str]:
+    """A legacy Chat return: bind and start setup only for exactly one domain match.
+
+    The caller checks :func:`has_repository_setup` first (before the callback
+    stores a repository): an organisation with setup keeps today's return.
+
+    Returns the bound ``owner/name``, or None when there is no single
+    repository named like the domain (or it could not be bound), in which
+    case the founder lands on the repository picker as before.
+    """
+    matches = domain_matches(config.organization.domain, repositories)
+    if len(matches) != 1:
+        return None
+    reason = bind_repository(config=config, user=user, company=company, repo=matches[0],
+                             installation_id=installation_id, owner_click=False)
+    if reason != CONNECTED:
+        log_return(config.organization, reason)
+        return None
+    config.refresh_from_db()
+    return config.website_connection.github_repo if config.website_connection_id else None
+
+
+def bind_repository(*, config, user, company, repo, installation_id, owner_click) -> str:
+    """Bind ``repo`` (a GitHub repository dict) and start setup; the reason to return with."""
     from content_factory import website_connections
     from content_factory.founder_journey_cohort import update_marker
     from content_factory.website_contract import WebsiteAuthorityError
     organization = config.organization
-    reason, repo = match_repository(organization.domain, repositories)
-    if repo is None:
-        return reason
     full_name = str(repo["full_name"]).strip()
     current = config.website_connection
     if current is not None:
+        if not same_repository(current, repo) or current.state == "paused":
+            # A different or paused website stays as it is; the founder chooses explicitly.
+            return MULTIPLE_REPOS
         if current.state == "connected" and current.github_repo.casefold() == full_name.casefold():
+            # Already connected under this name: nothing to refresh, so no
+            # GitHub round trip that a transient error could turn into a failure.
             _start_prepare(config, company=company, user=user)
             return CONNECTED
-        # A different or paused website stays as it is; the founder chooses explicitly.
-        return MULTIPLE_REPOS
+        # The same repository, renamed or moved since: refresh its name
+        # and access. A connected website keeps its setup; a disconnected or
+        # revoked one is reconnected, which the founder asked for by connecting.
+        try:
+            website_connections.bind_website(config, user=user, repo=full_name, app_root=current.app_root,
+                branch=current.branch, site_url=current.site_url, repository_id=current.repository_id,
+                reconnect=current.state != "connected",
+                expected=website_connections.contract_for(current) if current.state != "connected" else None)
+        except WebsiteAuthorityError as exc:
+            logger.warning("founder_github_rebind_refused org=%s", organization.pk)
+            return _failure_reason(exc)
+        _start_prepare(config, company=company, user=user)
+        return CONNECTED
     if _repository_owned_elsewhere(organization, full_name):
         return OWNED_ELSEWHERE
     reminted = False
@@ -605,10 +728,17 @@ def bind_new_journey_repository(*, config, user, company, repositories, installa
                     continue
             logger.warning("founder_github_bind_refused org=%s", organization.pk)
             return _failure_reason(exc)
+    from integrations.services.github_owner_requests import clear_request
     try:
-        update_marker(organization, owner_click_required=True)
+        config.refresh_from_db()
+        clear_request(config)
     except Exception:
-        logger.exception("founder_github_owner_click_marker_failed org=%s", organization.pk)
+        logger.exception("github_owner_request_clear_failed org=%s", organization.pk)
+    if owner_click:
+        try:
+            update_marker(organization, owner_click_required=True)
+        except Exception:
+            logger.exception("founder_github_owner_click_marker_failed org=%s", organization.pk)
     _start_prepare(config, company=company, user=user)
     return CONNECTED
 

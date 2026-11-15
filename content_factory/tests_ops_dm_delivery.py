@@ -37,7 +37,7 @@ class OpsDirectMessageDeliveryTests(SimpleTestCase):
     def test_founder_dm_acknowledgement_is_saved_and_replay_does_not_send(self):
         now, target, client = self.founder_scope({"ok": True, "ts": "1.2"})
         original_id = target.receipt["alert_id"]
-        with patch.object(founder, "_pending_targets", side_effect=lambda: [(target, target.receipt)]), \
+        with patch.object(founder, "_pending_targets", side_effect=lambda *_: [(target, target.receipt)]), \
                 patch.object(founder.transaction, "atomic", side_effect=lambda: nullcontext()), \
                 patch.object(founder, "_alert_context", return_value=CONTEXT), \
                 patch.object(founder, "_mirror_settled"), patch.object(founder, "_log_alert"), \
@@ -56,7 +56,7 @@ class OpsDirectMessageDeliveryTests(SimpleTestCase):
     @override_settings(CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID=DM)
     def test_unacknowledged_dm_stays_pending_and_honours_retry_lease(self):
         now, target, client = self.founder_scope({"ok": True})
-        with patch.object(founder, "_pending_targets", side_effect=lambda: [(target, target.receipt)]), \
+        with patch.object(founder, "_pending_targets", side_effect=lambda *_: [(target, target.receipt)]), \
                 patch.object(founder.transaction, "atomic", side_effect=lambda: nullcontext()), \
                 patch.object(founder, "_alert_context", return_value=CONTEXT), \
                 patch.object(founder, "_mirror_settled"), patch.object(founder, "_log_alert"), \

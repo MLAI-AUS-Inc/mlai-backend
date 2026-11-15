@@ -83,6 +83,18 @@ class GitHubInstallationRegistryTests(TestCase):
         self.assertEqual(by_name["HB-Vastu/studynash"]["accountLogin"], "HB-Vastu")
 
     @mock.patch.object(gh, "github_app_credentials_configured", return_value=True)
+    @mock.patch.object(gh, "list_installation_repositories_via_app",
+                       side_effect=lambda i: [{**r, "id": 7} for r in REPOS_ORG] if str(i) == "140000000" else REPOS_HB)
+    def test_installation_for_repository_id_finds_a_renamed_or_moved_repository(self, _m_list, _m_cfg):
+        gh.upsert_github_installation(user=self.founder, installation_id="144909617", account_login="HB-Vastu")
+        gh.upsert_github_installation(user=self.founder, installation_id="140000000", account_login="acme-inc")
+        self.assertEqual(gh.installation_for_repository_id(self.founder, 7).installation_id, "140000000")
+        self.assertIsNone(gh.installation_for_repository_id(self.founder, 8))
+        self.assertIsNone(gh.installation_for_repository_id(self.other, 7))
+        self.assertIsNone(gh.installation_for_repository_id(self.founder, "7"))
+        self.assertEqual({r["id"] for r in gh.list_user_repos(self.founder)}, {7, None})
+
+    @mock.patch.object(gh, "github_app_credentials_configured", return_value=True)
     @mock.patch.object(gh, "list_installation_repositories_via_app", side_effect=_fake_list_repos)
     def test_cross_founder_isolation(self, _m_list, _m_cfg):
         gh.upsert_github_installation(user=self.founder, installation_id="144909617", account_login="HB-Vastu")

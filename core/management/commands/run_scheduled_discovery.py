@@ -11,6 +11,7 @@ from core.slack_founder_link_retention import (
 )
 from content_analytics.services.report_scheduler import run_daily_article_report_scheduler
 from content_factory.founder_journey_alerts import run_founder_journey_alert_sweep
+from content_factory.founder_stuck_alerts import run_founder_stuck_alert_sweep
 from content_factory.founder_journey_sweeps import scheduled_founder_journey_sweeps
 from content_factory.founder_website_checks import scheduled_founder_website_checks
 from content_factory.self_heal_sweeps import scheduled_self_heal_sweeps
@@ -125,6 +126,11 @@ class Command(BaseCommand):
             # every org. Gated by ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED and
             # bounded by ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK.
             ("founder_journey_alerts", run_founder_journey_alert_sweep),
+            # One "founder stuck" alert for every cohort: a stopped website
+            # setup, a website step retrying too long, or a latest run stopped
+            # with no next action. On unless ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED
+            # is false; at most one bounded pass every 10 minutes.
+            ("founder_stuck_alerts", run_founder_stuck_alert_sweep),
             # P1 founder-journey sweeps (first profile, draft-ready outbox).
             # Runs only while MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED is on;
             # each sweep checks its own flag and never raises.

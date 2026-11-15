@@ -233,7 +233,8 @@ class CallbackBindingTests(TestCase):
         self.assertTrue(after["ownerClickRequired"])
         self.assertEqual({key: value for key, value in after.items() if key != "ownerClickRequired"}, before)
 
-    def test_legacy_org_bind_writes_nothing_and_keeps_todays_behaviour(self):
+    @override_settings(MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED=False)
+    def test_legacy_org_bind_writes_nothing_and_keeps_todays_behaviour_with_the_kill_switch_off(self):
         legacy = make_named_legacy_org("talathrive", domain="banksia-legacy.studio")
         connection_before = legacy.config.website_connection_id
         marker_before = read_marker(legacy.organization)
@@ -250,8 +251,70 @@ class CallbackBindingTests(TestCase):
 
     def test_flag_off_new_journey_bind_is_todays_behaviour(self):
         built = make_new_journey_org(domain="banksia.studio")
-        with override_settings(MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED=False):
+        with override_settings(MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED=False,
+                               MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED=False):
             response = self.callback(built, [_repo("founder/banksia-studio")])
         self.assertIn("github=connected&domain=banksia.studio&repo=founder%2Fbanksia-studio", response["Location"])
         self.verify.assert_not_called()
         self.assertIsNone((read_marker(built.organization) or {}).get("ownerClickRequired"))
+
+
+@override_settings(**COMMON, **ALL_P1_FLAGS_ON)
+class LinkedRepositoryCallbackTests(TestCase):
+    """Returning from GitHub for an already linked repository matches it by id."""
+
+    setUp = CallbackBindingTests.setUp
+    github = CallbackBindingTests.github
+    callback = CallbackBindingTests.callback
+    reason = CallbackBindingTests.reason
+
+    def linked(self, *, state="connected", name="founder/old-name"):
+        built = make_new_journey_org(domain="banksia.studio")
+        connection = WebsiteConnection.objects.create(organization=built.organization, github_repo=name,
+            repository_id=4242, installation_id="77", branch="main", site_url=built.organization.domain, state=state)
+        built.config.website_connection = connection
+        built.config.github_repo = name
+        built.config.save(update_fields=["website_connection", "github_repo"])
+        return built, connection
+
+    def renamed_repo(self):
+        return {**_repo("founder/banksia-studio"), "id": 4242}
+
+    def verify_by_id(self, *, user, repo, repository_id=None):
+        return {"repository_id": 4242, "github_repo": repo, "installation_id": "77", "branch": "main"}
+
+    def test_a_renamed_connected_repository_keeps_its_setup(self):
+        built, connection = self.linked()
+        generation = connection.generation
+        response = self.callback(built, [self.renamed_repo()], verify=self.verify_by_id)
+        self.assertEqual(self.reason(response), reasons.CONNECTED)
+        connection.refresh_from_db()
+        self.assertEqual((connection.github_repo, connection.generation, connection.state),
+                         ("founder/banksia-studio", generation, "connected"))
+        self.assertEqual(self.verify.call_args.kwargs["repository_id"], 4242)
+        self.prepare.assert_called_once()
+
+    def test_a_revoked_repository_is_reconnected(self):
+        built, connection = self.linked(state="revoked")
+        response = self.callback(built, [self.renamed_repo()], verify=self.verify_by_id)
+        self.assertEqual(self.reason(response), reasons.CONNECTED)
+        connection.refresh_from_db()
+        self.assertEqual((connection.state, connection.github_repo), ("connected", "founder/banksia-studio"))
+
+    def test_a_different_repository_still_asks(self):
+        built, _ = self.linked()
+        other = {**_repo("founder/banksia-studio"), "id": 9999}
+        self.assertEqual(self.reason(self.callback(built, [other], verify=self.verify_by_id)), reasons.MULTIPLE_REPOS)
+
+    def test_an_already_connected_repository_skips_the_github_round_trip(self):
+        built, connection = self.linked(name="founder/banksia-studio")
+        generation = connection.generation
+
+        def unavailable(**kwargs):
+            raise AssertionError("an already connected repository is not re-verified")
+        response = self.callback(built, [self.renamed_repo()], verify=unavailable)
+        self.assertEqual(self.reason(response), reasons.CONNECTED)
+        self.verify.assert_not_called()
+        self.prepare.assert_called_once()
+        connection.refresh_from_db()
+        self.assertEqual((connection.generation, connection.state), (generation, "connected"))
