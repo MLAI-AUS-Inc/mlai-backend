@@ -104,6 +104,9 @@ remains `24h`. Changing these defaults is a separate owner deployment action.
 | `AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS` | `600` | 60–86400 |
 | `AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS` | `86400` | 600–604800 |
 | `AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED` | `false` | true / false |
+| `AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED` | `false` | true / false |
+| `AGENT_RUNTIME_DOT_MEMBERS_ENABLED` | `false` | true / false |
+| `AGENT_RUNTIME_DOT_MESSAGING_ENABLED` | `false` | true / false |
 | `MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED` | `false` | true / false |
 | `MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS` | `0` | 0–300 |
 
@@ -433,3 +436,14 @@ signed Dot, so the owner reconnects in ChatGPT without disconnecting first.
 Past the fourteen-day grace a Dot is `lapsed`: it keeps its key and tombstone,
 reports `status: lapsed`, and no longer counts toward
 `AGENT_RUNTIME_NATIVE_PERSONAL_LIMIT`, so the owner can connect again.
+
+## Dot accounts (Nov 2026)
+
+With `AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED`, a personal Dot's signed kind 0
+profile carries a handle and an About text, the way Slack names a dot after its
+owner (`dr-sam-maek`). The handle is `{owner}-{dot}@{relay host}`, built from
+the owner's account name and the Dot's name, numbered on collision with the
+community's other Dots, and never changed once published. The relay accepts
+`nip05` only as two or more lowercase words joined by hyphens, and its users
+table keeps handles unique per community. `about` says whose Dot it is, that it
+answers only its owner, and how to start. The owner payload reports `handle`.

@@ -431,11 +431,79 @@ def _enrollment_tags(installation, grant):
                      ["native_installation", str(installation.pk)], installation.owner_attestation]
 
 
-def _profile(installation, picture):
+def _slug(value, limit):
+    words = re.findall(r"[a-z0-9]+", str(value or "").lower())
+    return "-".join(words)[:limit].strip("-")
+
+
+def current_handle(installation):
+    """The handle already published in the Dot's signed profile, if any."""
+    for event in getattr(installation, "profile_events", None) or []:
+        if isinstance(event, dict) and event.get("kind") == 0:
+            try:
+                handle = json.loads(event.get("content", "")).get("nip05")
+            except (TypeError, ValueError, AttributeError):
+                return None
+            return handle if isinstance(handle, str) and HANDLE_RE.fullmatch(handle) else None
+    return None
+
+
+HANDLE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)+@[a-z0-9.-]+$")
+
+
+def dot_handle(installation, *, taken=()):
+    """`{owner}-{dot}@host`, like Slack's `dr-sam-maek`. Stable once published.
+
+    The relay's users table keeps handles unique per community; this avoids
+    handles already used by this community's other Dots.
+    """
+    existing = current_handle(installation)
+    if existing:
+        return existing
+    _, config = native_sources.community_config(installation.community_id)
+    host = (urlsplit(config["relay_url"]).hostname or "").lower()
+    owner = getattr(installation, "owner", None)
+    person = _slug(f"{getattr(owner, 'first_name', '')} {getattr(owner, 'last_name', '')}", 40) or "member"
+    dot = _slug(installation.name, 40) or "dot"
+    base = f"{person}-{dot}"
+    used = set(taken)
+    if not used:
+        others = AgentInstallation.objects.filter(community_id=installation.community_id).exclude(
+            pk=installation.pk).only("profile_events")
+        used = {current_handle(row) for row in others}
+    for suffix in ["", *[f"-{n}" for n in range(2, 100)]]:
+        handle = f"{base}{suffix}@{host}"
+        if handle not in used:
+            return handle
+    return f"{base}-{secrets.token_hex(3)}@{host}"
+
+
+def about_text(installation):
+    owner = getattr(installation, "owner", None)
+    person = " ".join(f"{getattr(owner, 'first_name', '')} {getattr(owner, 'last_name', '')}".split())[:80] or "its owner"
+    name = " ".join(str(installation.name or "").split())[:80] or "This Dot"
+    return (f"{name} is {person}'s personal OpenAI dot. It answers {person} only; anyone else gets a short "
+            f"automatic reply. What it can do: answer questions, use {person}'s connected apps and take on longer "
+            f"tasks. Get started: {person} can message it directly, mention it in a channel, or add it to a group "
+            "chat. Everyone there can see its replies.")
+
+
+def _profile(installation, picture, *, handle=None):
     profile = {"name": installation.name, "display_name": installation.name, "bot": True}
     if picture:
         profile["picture"] = picture
+    if handle:
+        profile["name"] = handle.split("@", 1)[0]
+        profile["nip05"] = handle
+        profile["about"] = about_text(installation)
     return profile
+
+
+def profile_handle(installation):
+    """Personal Dots publish a handle and About panel when accounts are switched on."""
+    if installation.app_id != "openai-dot" or not getattr(settings, "AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED", False):
+        return current_handle(installation)
+    return dot_handle(installation)
 
 
 def profile_events(installation, grant, *, now):
@@ -444,7 +512,8 @@ def profile_events(installation, grant, *, now):
     channel, tags = _enrollment_tags(installation, grant)
     key = native_crypto.unseal_key(installation.sealed_signing_key)
     # Reconnecting keeps the avatar the owner chose.
-    profile = _profile(installation, None if is_community else current_picture(installation))
+    profile = _profile(installation, None if is_community else current_picture(installation),
+                       handle=None if is_community else profile_handle(installation))
     directory = {"name": installation.name, "display_name": installation.name, "agent_type": "community" if is_community else "external",
         "owner_pubkey": installation.owner_device.public_key, "respond_to": "anyone" if is_community else "owner-only", "channel_ids": [channel],
         "status": "offline", "channels": [], "capabilities": []}
@@ -477,7 +546,8 @@ def set_picture(owner, installation_id, picture, *, now=None):
     created_at = max(int(now.timestamp()), int(previous) + 1)
     _, tags = _enrollment_tags(installation, grant)
     event = native_crypto.sign_event(native_crypto.unseal_key(installation.sealed_signing_key), kind=0,
-        created_at=created_at, tags=tags, content=native_crypto.canonical_json(_profile(installation, picture)))
+        created_at=created_at, tags=tags, content=native_crypto.canonical_json(
+            _profile(installation, picture, handle=profile_handle(installation))))
     _, config = native_sources.community_config(installation.community_id)
     result = native_sources._request(config, "/events", event)
     if result.get("event_id") != event["id"] or result.get("accepted") is not True:
@@ -618,6 +688,7 @@ def installation_payload(installation, *, now=None):
         diagnostics["delivery"]["needs"] = diagnostics["delivery"].get("needs") or "renew"
     return {"installation_id": str(installation.pk), "app_id": installation.app_id, "name": installation.name,
         "renewable": renewal["renewable"], "renew_by": renewal["renew_by"],
+        "handle": current_handle(installation),
         "community_id": str(installation.community_id), "status": status, "resources": grant.resources if grant else [],
         "public_key": installation.public_key, "subscription_active": subscription, "test_completed": bool(verified_reply),
         "last_reply_at": reply.updated_at.isoformat() if reply else None,

@@ -145,7 +145,7 @@ jobs:
 
     - name: Check personal agent gateway without database access
       # SQL suites skip here; they require the separately reviewed disposable runner.
-      run: python scripts/test_without_database.py agent_runtime.tests.test_personal_context agent_runtime.tests.test_native_guest agent_runtime.tests.test_community agent_runtime.tests.test_core agent_runtime.tests.test_interface agent_runtime.tests.test_event_webhooks agent_runtime.tests.test_dot_protocol agent_runtime.tests.test_native_pilot agent_runtime.tests.test_native_safety agent_runtime.tests.test_native_queue agent_runtime.tests.test_native_watch agent_runtime.tests.test_model_budget agent_runtime.tests.test_model_proxy agent_runtime.tests.test_model_transport agent_runtime.tests.test_native_database agent_runtime.tests.test_unified_bridge_database agent_runtime.tests.test_native_renewal
+      run: python scripts/test_without_database.py agent_runtime.tests.test_personal_context agent_runtime.tests.test_native_guest agent_runtime.tests.test_community agent_runtime.tests.test_core agent_runtime.tests.test_interface agent_runtime.tests.test_event_webhooks agent_runtime.tests.test_dot_protocol agent_runtime.tests.test_native_pilot agent_runtime.tests.test_native_safety agent_runtime.tests.test_native_queue agent_runtime.tests.test_native_watch agent_runtime.tests.test_model_budget agent_runtime.tests.test_model_proxy agent_runtime.tests.test_model_transport agent_runtime.tests.test_native_database agent_runtime.tests.test_unified_bridge_database agent_runtime.tests.test_native_renewal agent_runtime.tests.test_dot_accounts
 
     - name: Check inbox account bindings without database access
       run: python scripts/test_without_database.py community_chat.tests.test_inbox_accounts community_chat.tests.test_inbox_erasure integrations.tests_inbox_activity integrations.tests_inbox_targeted_selection integrations.tests_inbox_own_hints integrations.tests_inbox_coverage integrations.tests_read_coverage integrations.tests_inbox_exports integrations.tests_inbox_observations integrations.tests_inbox_mentions integrations.tests_inbox_relay_counts community_chat.tests.test_adapter
@@ -1609,6 +1609,9 @@ jobs:
         AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS: ${{ vars.AGENT_RUNTIME_NATIVE_DENIAL_GRACE_SECONDS || '600' }}
         AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS: ${{ vars.AGENT_RUNTIME_NATIVE_UNIFIED_GRACE_SECONDS || '86400' }}
         AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED: ${{ vars.AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED || 'false' }}
+        AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED: ${{ vars.AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED || 'false' }}
+        AGENT_RUNTIME_DOT_MEMBERS_ENABLED: ${{ vars.AGENT_RUNTIME_DOT_MEMBERS_ENABLED || 'false' }}
+        AGENT_RUNTIME_DOT_MESSAGING_ENABLED: ${{ vars.AGENT_RUNTIME_DOT_MESSAGING_ENABLED || 'false' }}
         MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED: ${{ vars.MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED || 'false' }}
         MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS: ${{ vars.MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS || '0' }}
         AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY: ${{ secrets.AGENT_RUNTIME_NATIVE_SERVICE_PRIVATE_KEY || '' }}
