@@ -64,6 +64,7 @@ class SourceRepinTests(TransactionTestCase):
         self.assertEqual(self.run.result, result)
         self.assertEqual(Ledger.objects.count(), rows)
 
+    @override_settings(ARTICLES_SOURCE_FOLLOW_ENABLED=False)
     def test_third_repin_refused_and_alert_deduped(self):
         self.apply()
         self.apply(from_sha=B, to_sha=C, repin_key='repin-test:2')
@@ -81,16 +82,45 @@ class SourceRepinTests(TransactionTestCase):
         self.assertEqual(self.run.result['re_pin_v1']['repins'], 2)
 
     def test_flag_off_never_calls_provider(self):
-        with override_settings(ARTICLES_SOURCE_REPIN_ENABLED=False), self.assertRaises(WebsiteAuthorityError):
+        with override_settings(ARTICLES_SOURCE_REPIN_ENABLED=False, ARTICLES_SOURCE_FOLLOW_ENABLED=False), \
+                self.assertRaises(WebsiteAuthorityError):
             self.apply()
         self.assertFalse(self.provider_calls)
 
+    @override_settings(ARTICLES_SOURCE_FOLLOW_ENABLED=False)
     def test_legacy_never_calls_provider(self):
         legacy = make_named_legacy_org('la_vie').organization
         ContentFactoryRun.objects.filter(pk=self.run.pk).update(organization=legacy)
         with self.assertRaises(WebsiteAuthorityError):
             self.apply()
         self.assertFalse(self.provider_calls)
+
+    @override_settings(ARTICLES_SOURCE_REPIN_ENABLED=False, ARTICLES_SOURCE_FOLLOW_ENABLED=True)
+    def test_follow_switch_repins_a_legacy_run_without_the_p2_flag(self):
+        # The stuck founders are legacy-cohort: the follow switch alone must reach them.
+        legacy = make_named_legacy_org('la_vie').organization
+        ContentFactoryRun.objects.filter(pk=self.run.pk).update(organization=legacy, workflow='direct_generate')
+        self.connection.organization = legacy
+        self.assertEqual(self.apply()['status'], 'repinned')
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.run_request['expected_source_sha'], B)
+        self.assertEqual(self.run.run_request['article_text'], 'Keep the written article')
+
+    @override_settings(ARTICLES_SOURCE_FOLLOW_ENABLED=True)
+    def test_follow_switch_allows_several_pushes_then_stops_with_the_limit_code(self):
+        shas = [char * 40 for char in 'abcdef0123456789'[:repin.FOLLOW_MAX_REPINS + 2]]
+        for index in range(repin.FOLLOW_MAX_REPINS):
+            result = self.apply(from_sha=shas[index], to_sha=shas[index + 1], repin_key=f'repin-test:{index + 1}')
+            self.assertEqual(result['status'], 'repinned')
+            self.assertEqual(result['max_repins'], repin.FOLLOW_MAX_REPINS)
+        last = repin.FOLLOW_MAX_REPINS
+        with self.assertRaises(WebsiteAuthorityError) as error:
+            self.apply(from_sha=shas[last], to_sha=shas[last + 1], repin_key=f'repin-test:{last + 1}')
+        self.assertEqual(error.exception.authority_code, 'source_repin_limit_reached')
+        self.run.refresh_from_db()
+        self.assertEqual(self.run.result['re_pin_v1']['repins'], repin.FOLLOW_MAX_REPINS)
+        # The longer history stays readable for the service view's receipt.
+        self.assertIsNotNone(repin.validated_history(self.run.result['re_pin_v1']))
 
     def test_terminal_and_settled_runs_refused(self):
         for status in ['completed', 'cancelled', 'denied']:

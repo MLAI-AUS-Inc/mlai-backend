@@ -103,7 +103,12 @@ class ActivationConnectionTests(TestCase):
             response = self.admission(delivery_mode='content_only', delivery_mode_confirmed='true', expected_source_sha=SHA.upper(), **binding)
             self.assertEqual(response.status_code, 200, response.data)
             self.assertEqual(response.data['expected_source_sha'], SHA)
-            with self.assertRaises(WebsiteAuthorityError) as error:
+            # A copy-ready run never touches the repository: with the source
+            # follow switch on a newer commit does not stop it, and no remote
+            # head check runs either. Off keeps the earlier stop.
+            with authority_guard({**binding, 'expected_source_sha': 'b' * 40}, action='portable'):
+                pass
+            with override_settings(ARTICLES_SOURCE_FOLLOW_ENABLED=False), self.assertRaises(WebsiteAuthorityError) as error:
                 with authority_guard({**binding, 'expected_source_sha': 'b' * 40}, action='portable'):
                     pass
             self.assertEqual(error.exception.code, 'website_source_changed')

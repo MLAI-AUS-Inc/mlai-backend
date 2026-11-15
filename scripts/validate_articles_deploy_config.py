@@ -59,8 +59,8 @@ FLAG_KEYS = (
     # release can set any of them and none can only be changed by hand on the
     # host. Empty keeps the host value; no default changes. The stuck-founder
     # alert, the three GitHub linking kill switches below it, the stand-in
-    # preview approval switch and the ready-on-merge and no-workflow kill
-    # switches are on by default.
+    # preview approval switch, the ready-on-merge and no-workflow kill
+    # switches and ARTICLES_SOURCE_FOLLOW_ENABLED are on by default.
     "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED",
     "ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED",
     "MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED",
@@ -83,6 +83,7 @@ FLAG_KEYS = (
     "ARTICLES_REGISTRY_REFUNDS_ENABLED",
     "ARTICLES_CHANNEL_SWITCH_ENABLED",
     "ARTICLES_SOURCE_REPIN_ENABLED",
+    "ARTICLES_SOURCE_FOLLOW_ENABLED",
     "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED",
     "ARTICLES_MERGE_WORKER_ENABLED",
     "ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED",

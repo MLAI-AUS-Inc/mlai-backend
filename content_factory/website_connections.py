@@ -478,7 +478,12 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         if action in {"publish", "merge"} and observed and not expected:
             raise WebsiteAuthorityError("website_source_required", "Current source identity is required.")
         if action == "portable" and expected and observed and expected != observed:
-            raise WebsiteAuthorityError("website_source_changed", "The reviewed repository source changed.")
+            # A copy-ready run never touches the repository, so a newer commit
+            # does not make its copy stale. Only with the follow switch off does
+            # it still stop the run, as before.
+            from .source_repin import follow_enabled as source_follow_enabled
+            if not source_follow_enabled():
+                raise WebsiteAuthorityError("website_source_changed", "The reviewed repository source changed.")
         snapshot = (candidate.generation, candidate.configuration_version, candidate.state, candidate.installation_id, candidate.authorized_by_id, observed)
         needs_head = not cleanup and action != "portable" and (bool(expected and observed and expected != observed) or action in {"publish", "merge"} or (action == "preview" and bool(expected)))
         targets = payload.get("publish_targets") if isinstance(payload.get("publish_targets"), list) else []

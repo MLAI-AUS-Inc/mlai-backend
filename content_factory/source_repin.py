@@ -15,6 +15,15 @@ from .website_connections import authority_guard, REPOSITORY_WORKFLOWS
 
 SHA = re.compile(r"[a-f0-9]{40}\Z")
 REASONS = frozenset({"source_changed_mid_run", "setup_start_moved", "resume_latest"})
+# With ARTICLES_SOURCE_FOLLOW_ENABLED, a founder who pushes a few times while an
+# article is written still gets it. Content Factory's
+# harness.source_repin.FOLLOW_MAX_REPINS must match.
+FOLLOW_MAX_REPINS = 10
+
+
+def follow_enabled():
+    """ARTICLES_SOURCE_FOLLOW_ENABLED: re-pin every startup's runs, not only the P2 cohort's."""
+    return bool(getattr(settings, "ARTICLES_SOURCE_FOLLOW_ENABLED", False))
 
 
 def _mapping(value):
@@ -32,11 +41,13 @@ def _refuse(*, limit=False):
 def repin_limit():
     """Return the registry's bounded source re-pin limit, failing closed."""
     value = registry_policy.limits().get("source_repins_per_run", 2)
-    return min(value, 2) if type(value) is int and value >= 0 else 0
+    limit = min(value, 2) if type(value) is int and value >= 0 else 0
+    return max(limit, FOLLOW_MAX_REPINS) if follow_enabled() else limit
 
 
-def validated_history(value, *, max_repins=2):
+def validated_history(value, *, max_repins=None):
     """Validate a bounded backend receipt before trusting its source lineage."""
+    max_repins = repin_limit() if max_repins is None else max_repins
     receipt = _mapping(value)
     history = receipt.get("history")
     count = receipt.get("repins")
@@ -84,8 +95,11 @@ def _settled(run):
 
 
 def _precheck(run):
-    if (not getattr(settings, "ARTICLES_SOURCE_REPIN_ENABLED", False) or run.organization_id is None
-            or not p2_foundation.p2_applies(run.organization) or run.workflow not in REPOSITORY_WORKFLOWS
+    # With the follow switch every startup's run may re-pin; without it only a
+    # P2-cohort run with ARTICLES_SOURCE_REPIN_ENABLED, as before.
+    cohort_allowed = follow_enabled() or (getattr(settings, "ARTICLES_SOURCE_REPIN_ENABLED", False)
+                                          and run.organization_id is not None and p2_foundation.p2_applies(run.organization))
+    if (not cohort_allowed or run.organization_id is None or run.workflow not in REPOSITORY_WORKFLOWS
             or run.status not in {"queued", "running", "failed", "blocked", "awaiting_delivery_mode",
                                   "awaiting_confirmation", "awaiting_approval", "approval_required"} or _settled(run)):
         raise _refuse()
