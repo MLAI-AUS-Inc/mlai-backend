@@ -69,8 +69,20 @@ def _latest_runs(orgs):
                                       order_by=[F("created_at").desc(), F("pk").desc()])).filter(staff_rank=1)}
 
 
-def startup_row(org, company, run, *, now):
-    """A pure projection over preloaded rows; never issue a query per startup."""
+def _stuck(orgs, *, now):
+    """Every current stop for these startups in one batch, so a stuck founder never reads as 'working'."""
+    from .founder_stuck_alerts import stuck_conditions_by_organization
+    return stuck_conditions_by_organization([o.pk for o in orgs], now=now)
+
+
+def startup_row(org, company, run, *, now, stuck=()):
+    """A pure projection over preloaded rows; never issue a query per startup.
+
+    ``stuck`` holds the startup's preloaded stuck conditions
+    (content_factory.founder_stuck_alerts). A founder with no ask and a stuck
+    condition reads as ``stuck`` with the oldest reason, even when the newest
+    run is still in progress or finished.
+    """
     config = _config(org)
     strategy = mapping(getattr(config, "pillar_strategy", None))
     marker = mapping(strategy.get("founder_journey"))
@@ -78,13 +90,22 @@ def startup_row(org, company, run, *, now):
     code = failure_code(run) if run else None
     heal = mapping(result.get("self_heal_v1"))
     # Read the P2 registry directly here: staff inspect every cohort, without changing founder projection gates.
-    entry = registry_policy.load_registry()["by_code_v2"].get(code) if isinstance(code, str) else None
-    ask = registry_policy.canonical_action_id(entry.get("action_id")) if entry and entry.get("failure_class") == "needs_user" else None
+    # A code only the legacy registry knows falls back to it, the same lookup the stuck alert uses, so a stop
+    # the founder can fix reads as Your turn in both places.
+    registry = registry_policy.load_registry()
+    entry = registry["by_code_v2"].get(code) if isinstance(code, str) else None
+    asks = entry or (registry["by_code"].get(code) if isinstance(code, str) else None)
+    ask = registry_policy.canonical_action_id(asks.get("action_id")) if asks and asks.get("failure_class") == "needs_user" else None
     status = getattr(run, "status", "")
     delivered = status in {"completed", "awaiting_approval", "approval_required"} or bool(result.get("draft_ready_v1"))
     state = "your_turn" if ask or status in {"awaiting_approval", "approval_required"} else "done" if delivered else "working"
     if state == "your_turn" and not ask:
         ask = "review_draft"
+    stuck_reason = None
+    if stuck and state != "your_turn":
+        from .founder_stuck_alerts import describe
+        state = "stuck"
+        stuck_reason = describe(min(stuck, key=lambda condition: condition.stuck_since), now=now)
     workflow = getattr(run, "workflow", "")
     stage = ("setup" if workflow == "article_system_setup" else "website" if workflow in {"scan", "startup_autofill", "website_scan"}
              else "review" if delivered else "writing" if run else "first_article" if config and config.website_connection_id else "website")
@@ -97,7 +118,7 @@ def startup_row(org, company, run, *, now):
     transitions = transitions if isinstance(transitions, list) else []
     return {"organizationId": org.pk, "companyId": str(company.pk) if company else None, "startupName": org.name,
             "domain": org.domain, "createdAt": org.created_at.isoformat(), "cohort": marker.get("cohort", "legacy"),
-            "state": state, "stage": stage, "ask": ask, "copyId": copy_id,
+            "state": state, "stuckReason": stuck_reason, "stuckCount": len(stuck), "stage": stage, "ask": ask, "copyId": copy_id,
             "code": code, "runId": getattr(run, "run_id", None), "attempts": heal.get("attempts", 0), "capped": bool(heal.get("capped")),
             "lastTransitions": [{k: t.get(k) for k in ("at", "from", "to")} for t in transitions[-3:] if isinstance(t, dict)],
             "openAlerts": len(alerts), "oldestOpenAlertAt": min((r.get("queued_at", "") for r in alerts), default=None),
@@ -123,8 +144,9 @@ def startup_list(params, *, now=None):
         value = signing.loads(params["cursor"], salt="staff-startups", max_age=86400)
         offset = max(0, int(value["offset"]))
     # State filtering needs a run projection; keep its single batched query and then paginate.
-    companies, runs = _companies(orgs), _latest_runs(orgs)
-    rows = [startup_row(org, companies.get(org.pk), runs.get(org.pk), now=now) for org in orgs]
+    companies, runs, stuck = _companies(orgs), _latest_runs(orgs), _stuck(orgs, now=now)
+    rows = [startup_row(org, companies.get(org.pk), runs.get(org.pk), now=now, stuck=stuck.get(org.pk, ()))
+            for org in orgs]
     if params.get("state"):
         rows = [r for r in rows if r["state"] == params["state"]]
     page = rows[offset:offset+50]
@@ -138,7 +160,10 @@ def startup_detail(organization_id, *, now=None):
     org = _orgs().get(pk=organization_id)
     company = _companies([org]).get(org.pk)
     runs = list(ContentFactoryRun.objects.filter(organization=org).order_by("-created_at", "-pk")[:10])
-    row = startup_row(org, company, runs[0] if runs else None, now=now)
+    stuck = _stuck([org], now=now).get(org.pk, ())
+    row = startup_row(org, company, runs[0] if runs else None, now=now, stuck=stuck)
+    from .founder_stuck_alerts import describe
+    row["stuckReasons"] = [describe(condition, now=now) for condition in sorted(stuck, key=lambda c: c.stuck_since)]
     config = _config(org)
     website = config.website_connection if config else None
     row["runs"] = [{"runId": r.run_id, "status": r.status, "code": failure_code(r),

@@ -29,6 +29,10 @@ time ``details["ack_due_at"]`` (one Melbourne business day after queueing) and a
 seam through which be-staff's ``staff_alert_rules.enrich_alert_details`` adds ids
 to a receipt's details. Details still hold ids only; the staff console resolves
 names, emails and links at read time.
+
+``founder_stuck`` (content_factory.founder_stuck_alerts) is the one reason whose
+Slack text names the founder and the startup, so staff can act without opening
+the database. The names are read at send time and are never stored in a receipt.
 """
 from __future__ import annotations
 
@@ -99,6 +103,7 @@ P2_REASON_LABELS = {
     "deploy_not_detected": "A merged article was not deployed within 30 minutes",
     "merge_rejected_twice": "GitHub rejected an MLAI merge twice",
     "join_request_unanswered": "A team join request has waited 72 hours",
+    "founder_stuck": "A founder is stuck",
 }
 P2_ALERT_REASONS = frozenset(P2_REASON_LABELS)
 ALERT_REASONS = ALERT_REASONS | P2_ALERT_REASONS
@@ -341,7 +346,10 @@ def _p2_details(receipt, *, organization, run, queued_at) -> dict:
     details = dict(receipt.get("details") or {})
     extra = _enriched(receipt, organization=organization, run=run)
     if extra:
-        details = _safe_details({**details, **extra})
+        # A founder_stuck receipt has no run, so enrichment would replace its own
+        # attempts and item with run-less defaults; its caller's details win.
+        merged = {**extra, **details} if receipt.get("alert_reason") == "founder_stuck" else {**details, **extra}
+        details = _safe_details(merged)
     if _ack_due_applies(receipt.get("alert_reason")):
         details["ack_due_at"] = ack_due_at(queued_at).isoformat()
     return details
@@ -625,11 +633,13 @@ def _receipts_in(result) -> dict:
     return receipts if isinstance(receipts, dict) else {}
 
 
-def _receipt_index():
-    """(organization_id, receipts) for every org holding receipts; reads only the receipt JSON."""
+def _receipt_index(organization_ids=None):
+    """(organization_id, receipts) for every org holding receipts, or only ``organization_ids``; reads only the receipt JSON."""
     from .models import OrganizationContentConfig
-    rows = (OrganizationContentConfig.objects.filter(pillar_strategy__has_key=RECEIPTS_KEY)
-            .order_by("pk").values_list("organization_id", f"pillar_strategy__{RECEIPTS_KEY}"))
+    rows = OrganizationContentConfig.objects.filter(pillar_strategy__has_key=RECEIPTS_KEY)
+    if organization_ids is not None:
+        rows = rows.filter(organization_id__in=list(organization_ids))
+    rows = (rows.order_by("pk").values_list("organization_id", f"pillar_strategy__{RECEIPTS_KEY}"))
     return [(organization_id, receipts if isinstance(receipts, dict) else {}) for organization_id, receipts in rows]
 
 
@@ -771,21 +781,22 @@ class _Target:
         OrganizationContentConfig.objects.filter(pk=row.pk).update(pillar_strategy={**container, RECEIPTS_KEY: receipts})
 
 
-def _pending_targets() -> list:
-    """Every pending index receipt, oldest queued first."""
+def _pending_targets(organization_ids=None, reasons=None) -> list:
+    """Every pending index receipt, oldest queued first, optionally only some orgs and reasons."""
     targets = [(_Target(organization_id=organization_id, key=key), receipt)
-               for organization_id, receipts in _receipt_index()
+               for organization_id, receipts in _receipt_index(organization_ids)
                for key, receipt in receipts.items()
-               if isinstance(receipt, dict) and receipt.get("state") == "pending"]
+               if isinstance(receipt, dict) and receipt.get("state") == "pending"
+               and (reasons is None or receipt.get("alert_reason") in reasons)]
     return sorted(targets, key=lambda item: (str(item[1].get("queued_at") or ""), item[0].organization_id, item[0].key))
 
 
-def _deliver(*, now, limit) -> dict:
+def _deliver(*, now, limit, organization_ids=None, reasons=None) -> dict:
     channel = str(getattr(settings, "CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID", "") or "").strip()
     configured = bool(SLACK_CHANNEL_PATTERN.fullmatch(channel))
     outcome = {"sent": 0, "unconfigured": 0, "undelivered": 0}
     processed = 0
-    for target, seen in _pending_targets():
+    for target, seen in _pending_targets(organization_ids, reasons):
         if processed >= limit:
             break
         lease = _timestamp(seen.get("next_attempt_at"))
@@ -906,6 +917,9 @@ def run_stop_code(result) -> str:
 def alert_text(receipt, context) -> str:
     """The Slack message. The error code lives only inside this string (IF-23)."""
     reason = receipt.get("alert_reason") or ""
+    if reason == "founder_stuck":
+        from .founder_stuck_alerts import stuck_alert_text
+        return stuck_alert_text(receipt, context)
     parts = [f"Founder journey alert: {REASON_LABELS.get(reason, reason)} ({reason})."]
     parts.append(f"Org {context['org_id']}" + (f" ({context['domain']})." if context["domain"] else "."))
     if context["company_id"]:
