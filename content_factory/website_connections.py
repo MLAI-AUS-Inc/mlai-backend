@@ -261,6 +261,14 @@ def summary_for(config, *, company_id=None):
     if target_blocked:
         capabilities.update(publishingReady=False, previewSupported=False)
         actions = [action for action in actions if action not in {"setup", "publish", "preview"}]
+    from .website_repository_identity import ACCESS_BLOCKER, has_pausing_blocker
+    if connection.state in {"connected", "paused"} and has_pausing_blocker(connection):
+        # Moved where MLAI can't see it, or archived: keep the connection and
+        # its setup, hold changes, and offer GitHub access as the next step.
+        capabilities.update(publishingReady=False, previewSupported=False)
+        actions = [action for action in actions if action not in {"setup", "publish", "preview"}]
+        if any(item.get("code") == ACCESS_BLOCKER for item in connection.blockers) and "reconnect" not in actions:
+            actions.append("reconnect")
     latest = connection.operations.exclude(action__in=["goal-usage", "goal-alert", "usage-refresh"]).order_by("-created_at").first()
     summary = {
         "latestOperation": {"id": str(latest.pk), "action": latest.action, "state": latest.state, "receipt": latest.receipt} if latest else None,

@@ -198,6 +198,9 @@ def durable_integration_evidence(config, connection, *, now=None):
         return {**base, "reasonCode": "publishing_adapter_required"}
     if connection.app_root or any(item.get("code") in {"APPLICATION_ROOT_VERIFICATION_REQUIRED", "SETUP_BRANCH_VERIFICATION_REQUIRED"} for item in connection.blockers):
         return {**base, "reasonCode": "integration_required"}
+    if any(item.get("code") == "github_access_required" for item in connection.blockers):
+        # The repository moved to an account MLAI can't see yet.
+        return {**base, "reasonCode": "github_access_required"}
     if any(item.get("code") == "repository_source_changed" for item in connection.blockers):
         return {**base, "reasonCode": "repository_source_changed"}
     if not mapping(connection.capabilities).get("publishingReady"):
