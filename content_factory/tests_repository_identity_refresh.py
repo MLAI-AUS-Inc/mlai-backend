@@ -112,7 +112,7 @@ class RepositoryIdentityRefreshTests(WebsiteDatabaseFixture, TestCase):
     def test_archive_pauses_changes_and_unarchive_resumes(self):
         handle_website_github_event("repository", repository_event("archived", full_name="example/site"))
         self.assert_setup_kept()
-        self.assertEqual([item["code"] for item in self.website.blockers], ["github_repository_archived"])
+        self.assertEqual([item["code"] for item in self.website.blockers], ["CONNECTION_READ_ONLY"])
         summary = summary_for(self.config)
         self.assertFalse({"setup", "publish", "preview"} & set(summary["allowedActions"]))
         self.assertNotIn("reconnect", summary["allowedActions"])
@@ -229,6 +229,20 @@ class LinkedRepositoryRebindTests(WebsiteDatabaseFixture, TestCase):
         read.assert_called_once_with("45", "example/site", 123)
         self.assertEqual((metadata["repository_id"], metadata["github_repo"]), (123, "example/site-renamed"))
 
+    def test_access_check_prefers_the_installation_that_sees_the_id(self):
+        from types import SimpleNamespace
+        from .website_connections import verify_repository_access
+        response = SimpleNamespace(raise_for_status=lambda: None,
+            json=lambda: {"id": 123, "full_name": "Agency/site", "default_branch": "main"})
+        with patch("integrations.services.github_installations.installation_for_repo",
+                   return_value=SimpleNamespace(installation_id="45")), \
+                patch("integrations.services.github_installations.installation_for_repository_id",
+                      return_value=SimpleNamespace(installation_id="99")), \
+                patch("content_factory.website_connections._read_repository_by_id", return_value=response) as read:
+            metadata = verify_repository_access(user=None, repo="example/site", repository_id=123)
+        read.assert_called_once_with("99", "example/site", 123)
+        self.assertEqual(metadata["installation_id"], "99")
+
     def test_access_check_by_id_refuses_a_different_repository(self):
         from types import SimpleNamespace
         from .website_connections import verify_repository_access
@@ -236,6 +250,7 @@ class LinkedRepositoryRebindTests(WebsiteDatabaseFixture, TestCase):
             json=lambda: {"id": 456, "full_name": "example/site", "default_branch": "main"})
         with patch("integrations.services.github_installations.installation_for_repo",
                    return_value=SimpleNamespace(installation_id="45")), \
+                patch("integrations.services.github_installations.installation_for_repository_id", return_value=None), \
                 patch("content_factory.website_connections._read_repository_by_id", return_value=response):
             with self.assertRaises(Exception):
                 verify_repository_access(user=None, repo="example/site", repository_id=123)

@@ -813,9 +813,11 @@ def verify_repository_access(*, user, repo, organization=None, repository_id=Non
     from integrations.services.github_app import create_installation_access_token
     if type(repository_id) is not int or repository_id < 1:
         repository_id = None
-    inst = installation_for_repo(user, repo)
-    if inst is None and repository_id is not None:
-        inst = installation_for_repository_id(user, repository_id)
+    # A moved repository is no longer in the installation its old owner name
+    # points at, so a linked repository is looked up by id first.
+    inst = installation_for_repository_id(user, repository_id) if repository_id is not None else None
+    if inst is None:
+        inst = installation_for_repo(user, repo)
     if inst is None:
         raise WebsiteAuthorityError("github_authorization_required", "Authorize the GitHub App for this repository first.")
     try:

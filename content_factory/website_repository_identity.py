@@ -41,7 +41,8 @@ FLAG = "ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED"
 IDENTITY_ACTIONS = frozenset({"renamed", "transferred", "privatized", "publicized", "archived", "unarchived"})
 
 ACCESS_BLOCKER = "github_access_required"
-ARCHIVED_BLOCKER = "github_repository_archived"
+# An archived repository is read-only; reuse the registered read-only code.
+ARCHIVED_BLOCKER = "CONNECTION_READ_ONLY"
 #: Blockers that stop setup, preview and publish but keep the connection.
 PAUSING_BLOCKERS = frozenset({ACCESS_BLOCKER, ARCHIVED_BLOCKER})
 
@@ -49,6 +50,8 @@ ACCESS_MESSAGE = ("Your website's code moved to a GitHub account MLAI can't see 
                   "Give MLAI access on GitHub to carry on.")
 ARCHIVED_MESSAGE = ("Your website's code is archived on GitHub, so MLAI can't add articles to it. "
                     "Unarchive it on GitHub to carry on.")
+ACCESS_ENTRY = {"code": "github_access_required", "message": ACCESS_MESSAGE, "retryable": False}
+ARCHIVED_ENTRY = {"code": "CONNECTION_READ_ONLY", "message": ARCHIVED_MESSAGE, "retryable": False}
 
 _FULL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+")
 
@@ -105,13 +108,13 @@ def refresh_repository_name(connection, full_name) -> bool:
     return True
 
 
-def set_blocker(connection, code, message, present) -> bool:
-    """Add (``present``) or remove one blocker without touching any other state."""
+def set_blocker(connection, entry, present) -> bool:
+    """Add (``present``) or remove one blocker entry without touching any other state."""
     with transaction.atomic():
         locked = _locked(connection)
         current = [item for item in (locked.blockers or []) if isinstance(item, dict)]
-        kept = [item for item in current if item.get("code") != code]
-        updated = [*kept, {"code": code, "message": message, "retryable": False}] if present else kept
+        kept = [item for item in current if item.get("code") != entry["code"]]
+        updated = [*kept, dict(entry)] if present else kept
         if updated == current:
             connection.blockers = current
             return False
@@ -190,13 +193,13 @@ def resolve_access(connection, owner_login="") -> str:
                                        full_name=connection.github_repo)
         if verdict is True:
             moved = update_installation(connection, identifier)
-            set_blocker(connection, ACCESS_BLOCKER, ACCESS_MESSAGE, False)
+            set_blocker(connection, ACCESS_ENTRY, False)
             return "moved" if moved else "kept"
         if verdict is None:
             unknown = True
     if unknown:
         return "unknown"
-    set_blocker(connection, ACCESS_BLOCKER, ACCESS_MESSAGE, True)
+    set_blocker(connection, ACCESS_ENTRY, True)
     return "access_required"
 
 
@@ -220,7 +223,7 @@ def handle_repository_event(action, payload) -> dict:
                 changed = changed or outcome in {"moved", "access_required"}
                 result["access_required"] += outcome == "access_required"
             elif action in {"archived", "unarchived"}:
-                changed = set_blocker(connection, ARCHIVED_BLOCKER, ARCHIVED_MESSAGE, action == "archived") or changed
+                changed = set_blocker(connection, ARCHIVED_ENTRY, action == "archived") or changed
         result["refreshed"] += bool(changed)
         logger.info("website_repository_identity_event connection=%s repository_id=%s action=%s changed=%s",
                     connection.pk, repository_id, action, changed)
