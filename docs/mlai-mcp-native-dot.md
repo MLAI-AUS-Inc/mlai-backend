@@ -447,3 +447,21 @@ community's other Dots, and never changed once published. The relay accepts
 `nip05` only as two or more lowercase words joined by hyphens, and its users
 table keeps handles unique per community. `about` says whose Dot it is, that it
 answers only its owner, and how to start. The owner payload reports `handle`.
+
+## Dots message people (Nov 2026)
+
+With `AGENT_RUNTIME_DOT_MESSAGING_ENABLED` and `AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED` on, a Dot whose owner
+approved the extra "Let your Dot message people" capability (scope `agent:messages:send`, which needs fresh
+consent) gets three more tools on `/mcp/mlai`:
+
+- `list_my_conversations`: the channels and DMs the owner belongs to, with DM participant keys.
+- `open_dm`: opens a DM of the owner, the Dot and 1 to 7 members (MLAI account emails or chat keys). The owner
+  is always in the DM.
+- `send_message`: a new top-level message in a conversation the owner can read and write. One idempotency key
+  per message; repeats return the first result.
+
+Each call is a fresh relay `personal_context` delegation (operations `conversations`, `open_dm`, `post`,
+advertised as `proactive-v1`) that the relay re-checks against the owner's current access, bans and mutes.
+Members block a Dot by muting it (their NIP-51 mute list); the relay then refuses DMs and DM posts to them.
+Limits: 100 messages and 20 new DMs a day per Dot. Audits (`native.dot.message_sent`, `native.dot.dm_opened`)
+hold ids only, never text.

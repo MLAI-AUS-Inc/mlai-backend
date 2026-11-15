@@ -26,7 +26,7 @@ from community_chat.account_sessions import InvalidAccountSession, _valid_sessio
 from community_chat.models import CommunityChatAccountSession
 from community_chat.onboarding import require_community_access
 from founder_tools.models import VibeRaisingCompany
-from .config import ALL_SCOPES, DOT_SCOPES, SCOPES, availability, mcp_url, mlai_url, public_base, resource_scopes
+from .config import ALL_SCOPES, DOT_MESSAGES_SCOPE, DOT_SCOPES, SCOPES, availability, mcp_url, mlai_url, public_base, resource_scopes
 
 CODE_TTL = 300
 INTENT_TTL = 600
@@ -227,6 +227,8 @@ def approve_intent(request_id, *, user, session, company_id, approve, scopes=Non
             raise ValidationError("Select all personal agent permissions and an enrolled agent.")
         if not native and native_installation_id:
             raise ValidationError("Select personal agent permissions before choosing an agent.")
+        if DOT_MESSAGES_SCOPE in selected and not native:
+            raise ValidationError("Select personal agent permissions before letting the agent message people.")
         needs_company = legacy or any(scope.startswith(("startup:", "article:")) for scope in selected)
         company = company_for(user, company_id) if needs_company or (company_id and not native) else None
         channels = []
