@@ -404,7 +404,9 @@ def _finish_prepare(op, *, now):
     from .website_goal_runner import owns_goal, finish_goal
     if owns_goal(op):
         finish_goal(op, now=now)
-    if op.state == "completed" and op.receipt.get("staff_alerted"):
+    if op.state not in {"pending", "running"} and op.receipt.get("staff_alerted"):
+        # Ready, or stopped, cancelled or superseded: this preparation's own
+        # deadline alert is no longer a founder waiting on it.
         from .website_live_status import close_prepare_alert
         close_prepare_alert(op)
     logger.info("website_prepare operation=%s company=%s connection=%s generation=%s step=%s state=%s reason=%s attempt=%s next_attempt=%s dispatch_outcome=%s",
@@ -854,7 +856,9 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
                 setup_run_id=op.receipt.get("merged_setup_run_id") or op.receipt.get("setup_run_id") or "")
         except WebsiteAuthorityError as exc:
             from .website_live_status import enabled as ready_on_merge
-            if not (ready_on_merge() and exc.code in HOST_WAIT_CODES and target.source_sha == website.verified_sha):
+            from .website_sealed_workflow import required as sealed_required
+            if not (ready_on_merge() and exc.code in HOST_WAIT_CODES and not sealed_required(website, target)
+                    and target.source_sha == website.verified_sha):
                 raise
             # MLAI's build proof already carried this source; the host serving
             # it is a background status (website_live_status), never this step.
@@ -883,10 +887,14 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
             deployment = verify_live_deployment(config, data=receipt)
         except WebsiteAuthorityError as exc:
             from .website_live_status import enabled as ready_on_merge
-            if not (ready_on_merge() and exc.code in HOST_WAIT_CODES):
+            from .website_sealed_workflow import required as sealed_required
+            if not (ready_on_merge() and exc.code in HOST_WAIT_CODES and not sealed_required(website, target)
+                    and target.source_sha == website.verified_sha):
                 raise
             # The source's proof is recorded; the host serving it is a
-            # background status (website_live_status), never this step.
+            # background status (website_live_status), never this step. A
+            # target that needs sealed proof keeps its deployment wait, since
+            # the journey still requires the live check for it.
             return {"status": "completed"}
         return {"status": "completed", "operation_id": str(deployment.pk)}
     return {"status": "completed", "operation_id": str(ci.pk)}

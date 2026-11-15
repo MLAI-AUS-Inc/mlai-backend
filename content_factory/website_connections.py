@@ -1166,7 +1166,7 @@ def offboard_website_connections(organization, *, user=None, purge=False):
             website.blockers = [item for item in website.blockers if isinstance(item, dict) and item.get("code") != "website_data_deleted"] + [
                 {"code": "website_data_deleted", "deletion_epoch": watermark, "message": "Previous website data was removed."}]
             website.save(update_fields=["blockers", "updated_at"])
-            website.operations.filter(action__in=["goal-usage", "usage-refresh", "goal-alert"]).delete()
+            website.operations.filter(action__in=["goal-usage", "usage-refresh", "goal-alert", "live-status"]).delete()
             website.scan_snapshots.all().delete()
             website.template_revisions.all().delete()
             website.targets.all().delete()

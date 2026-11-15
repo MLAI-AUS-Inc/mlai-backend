@@ -576,6 +576,46 @@ def verify_live_url_deployment(config, target, *, setup_run_id="", renew=True):
     return {**receipt, "operation_id": str(operation.pk)}
 
 
+def renew_build_proof(config, target, *, source_sha):
+    """Renew MLAI's own proof of an unchanged source while the founder's host lags.
+
+    With ``ARTICLES_READY_ON_MERGE_ENABLED`` the founder's host deploying is a
+    background status (``website_live_status``), so the same-source refresh
+    that keeps a proof inside ``VERIFICATION_MAX_AGE`` must not need it. This
+    re-reads GitHub's selected branch, requires it still to be ``source_sha``,
+    requires the target's own build proof at that source and a target that
+    needs no sealed proof, then renews ``verified_at`` on the target and
+    ``last_verified_at`` on the connection. It never moves the verified source,
+    records no live receipt and returns ``None`` when it does not apply.
+    """
+    from . import website_live_verification as live
+    from .website_live_status import enabled as ready_on_merge
+    from .website_sealed_workflow import required as sealed_required
+    from .website_connections import verify_repository_head
+    website = getattr(config, "website_connection", None)
+    if (not ready_on_merge() or website is None or target is None or target.source_sha != source_sha
+            or not live.build_proof(target) or sealed_required(website, target)):
+        return None
+    binding = {**contract_for(website), "source_sha": source_sha, "target_id": target.target_key}
+    with authority_guard(binding, action="read") as current:
+        if current.verified_sha != source_sha:
+            return None
+    require_unlocked_remote_call()
+    verify_repository_head(website, source_sha)
+    now = timezone.now()
+    with authority_guard(binding, action="read") as current:
+        locked = current.targets.filter(generation=current.generation, target_key=target.target_key).first()
+        if (locked is None or locked.contract != target.contract or locked.source_sha != source_sha
+                or current.verified_sha != source_sha or not live.build_proof(locked) or sealed_required(current, locked)):
+            return None
+        locked.verified_at = now
+        locked.save(update_fields=["verified_at", "updated_at"])
+        current.last_verified_at = now
+        current.save(update_fields=["last_verified_at", "updated_at"])
+    logger.info("website_build_proof_renewed connection=%s target=%s source_sha=%s", current.pk, target.target_key, source_sha)
+    return {"status": "verified", "method": "build_proof", "source_sha": source_sha, "renewed_at": now.isoformat()}
+
+
 class WebsiteCiAttestationView(APIView):
     """Authenticate exact provider CI evidence for internal worker consumers."""
 

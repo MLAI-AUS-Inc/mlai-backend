@@ -765,6 +765,10 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     from .website_operational_alert_delivery import ACTION as alert_action, advance as advance_alert, channel as alert_channel
     notices_enabled=getattr(settings,"ARTICLES_GOAL_NOTIFICATIONS_ENABLED",False)
     excluded = ["workflow"] if notices_enabled else ["workflow", notice_action]
+    # The live-status watch is advanced only by its own sweep; the generic
+    # cancellation branch below would close it and restart its clock.
+    from .website_live_status import ACTION as live_status_action
+    excluded.append(live_status_action)
     if not accounting_enabled():
         excluded.append(usage_action)
     if not getattr(settings, "ARTICLES_OPERATIONAL_ALERTS_ENABLED", False):
@@ -1336,8 +1340,18 @@ def _refresh_target(connection, config):
     accepted = connection.operations.filter(generation=connection.generation, action="ci-verify", state="completed",
         payload__source_sha=connection.verified_sha, payload__target_id=target.target_key).order_by("-updated_at").first()
     if accepted is None or mapping(accepted.receipt).get("attestation_origin") != "authenticated_ci":
-        return None
+        # A site Ready on merge on MLAI's own build proof (no live or CI proof)
+        # renews that proof the same way, without the founder's host.
+        return target if _renews_build_proof_only(connection, target) else None
     return target
+
+
+def _renews_build_proof_only(connection, target):
+    """Whether ``target``'s accepted proof is MLAI's build proof alone, renewable under ARTICLES_READY_ON_MERGE_ENABLED."""
+    from .website_live_status import enabled as ready_on_merge
+    from .website_live_verification import build_proof
+    from .website_sealed_workflow import required
+    return bool(ready_on_merge() and build_proof(target) and not required(connection, target))
 
 
 def queue_verification_refreshes(*, limit=20, now=None, connection_id=None):
@@ -1482,6 +1496,22 @@ def _renews_by_live_url(website, target):
     return selected(website.organization) and applicable(target)
 
 
+def _renew_while_host_lags(exc, config, target, source_sha):
+    """Renew MLAI's own proof when only the founder's host failed the check; ``None`` otherwise.
+
+    With ``ARTICLES_READY_ON_MERGE_ENABLED`` the host is a background status
+    (``website_live_status``), so a same-source check whose live fetch fails
+    keeps the build proof current instead of letting it age out after
+    ``VERIFICATION_MAX_AGE``. A changed source or a sealed target still needs
+    the full check.
+    """
+    from .website_prepare import HOST_WAIT_CODES
+    from .website_verification import renew_build_proof
+    if exc.code not in HOST_WAIT_CODES:
+        return None
+    return renew_build_proof(config, target, source_sha=source_sha)
+
+
 def _process_source_reverification(identifier, now):
     """Re-scan external changes and then authenticate current CI/live proof."""
     from .website_connections import authority_guard, require_unlocked_remote_call
@@ -1593,10 +1623,30 @@ def _process_source_reverification(identifier, now):
                 # The rescan has not recorded this source's build proof yet.
                 raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
             config = OrganizationContentConfig.objects.get(website_connection=website)
-            verified = verify_live_url(config, target, setup_run_id=op.payload.get("owned_merge_run_id") or "")
+            try:
+                verified = verify_live_url(config, target, setup_run_id=op.payload.get("owned_merge_run_id") or "")
+            except WebsiteAuthorityError as exc:
+                renewed = _renew_while_host_lags(exc, config, target, op.payload["source_sha"])
+                if renewed is None:
+                    raise
+                verified = {"operation_id": ""}
+                receipt.update(method="build_proof", host_code=exc.code)
             state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
-                "target_id": target.target_key, "ci_operation_id": "", "ci_reused": False, "method": "live_url",
+                "target_id": target.target_key, "ci_operation_id": "", "ci_reused": False, "method": receipt.get("method") or "live_url",
                 "deployment_operation_id": verified["operation_id"], "repository_modified": False}
+        elif (op.payload.get("purpose") == VERIFICATION_REFRESH_PURPOSE and getattr(website, "verified_sha", None) == op.payload["source_sha"]
+                and target.source_sha == op.payload["source_sha"] and _renews_build_proof_only(website, target)
+                and not website.operations.filter(generation=website.generation, action="ci-verify", state="completed",
+                    payload__source_sha=op.payload["source_sha"], payload__target_id=target.target_key).exists()):
+            # A same-source refresh with no CI proof to read again: MLAI's own
+            # build proof is renewed (ARTICLES_READY_ON_MERGE_ENABLED).
+            from .website_verification import renew_build_proof
+            config = OrganizationContentConfig.objects.get(website_connection=website)
+            if renew_build_proof(config, target, source_sha=op.payload["source_sha"]) is None:
+                raise WebsiteAuthorityError("verified_target_required", "Waiting for a current verified publishing target.", retryable=True)
+            state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
+                "target_id": target.target_key, "ci_operation_id": "", "ci_reused": False, "method": "build_proof",
+                "deployment_operation_id": "", "repository_modified": False}
         else:
             ci, attested = None, None
             if op.payload.get("renew") == "deployment":
@@ -1608,10 +1658,16 @@ def _process_source_reverification(identifier, now):
                 ci = record_ci_attestation(proof)
                 attested = ci.receipt
             config = OrganizationContentConfig.objects.get(website_connection=website)
-            deployment = verify_live_deployment(config, data=attested)
+            try:
+                deployment_id = str(verify_live_deployment(config, data=attested).pk)
+            except WebsiteAuthorityError as exc:
+                if _renew_while_host_lags(exc, config, target, op.payload["source_sha"]) is None:
+                    raise
+                deployment_id = ""
+                receipt.update(method="build_proof", host_code=exc.code)
             state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
                 "target_id": target.target_key, "ci_operation_id": str(ci.pk) if ci else "", "ci_reused": ci is None,
-                "deployment_operation_id": str(deployment.pk), "repository_modified": False}
+                "deployment_operation_id": deployment_id, "repository_modified": False}
     except WebsiteAuthorityError as exc:
         receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
         if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:

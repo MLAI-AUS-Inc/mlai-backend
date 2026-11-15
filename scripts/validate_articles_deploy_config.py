@@ -67,6 +67,11 @@ FLAG_KEYS = (
     "ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED",
     "ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED",
     "ARTICLES_READY_ON_MERGE_ENABLED",
+    # Cross-repo dependency: with ARTICLES_LIVE_URL_VERIFICATION_ENABLED on,
+    # this switch sends verification_mode=hosted for every cohort, which needs
+    # Content Factory's CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED=true
+    # (check with CF's articles_rollout_inspection before a release). This repo
+    # cannot read CF's value, so turn this off if CF's is false.
     "ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED",
     "ARTICLES_STAFF_ALERT_RULES_ENABLED",
     "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE",

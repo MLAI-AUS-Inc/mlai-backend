@@ -18,6 +18,7 @@ changes what the founder can do.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta
 
 from django.conf import settings
@@ -35,6 +36,10 @@ CHECK_MINUTES = (5, 10, 15, 30, 60, 120)
 # A live site is re-checked this often, so a host that stops deploying shows.
 LIVE_RECHECK = timedelta(days=1)
 SWEEP_LIMIT = 50
+# One pass reads at most this many candidates and stops after this long, so a
+# run of skipped sites or a slow host never starves the rest or the scheduler.
+SWEEP_SCAN_LIMIT = 500
+SWEEP_BUDGET = timedelta(seconds=60)
 SWEEP_INTERVAL_SECONDS = 300
 THROTTLE_KEY = "website_live_status:last_sweep"
 # The code a watch that passed ALERT_AFTER is recorded under for staff.
@@ -133,10 +138,11 @@ def project(*, deployed, ready, watch=None, now=None):
     """
     if deployed:
         return {"status": "live", "message": LIVE_MESSAGE, "provider": (watch or {}).get("provider") or None, "staffAlerted": False}
-    if not ready or not enabled():
+    if not ready or not enabled() or not watch:
+        # Nothing is checking this site (no watch yet, or the site is not one
+        # the watch can observe), so say nothing rather than "checking".
         return None
     now = now or timezone.now()
-    watch = watch or {}
     started = _stamp(watch.get("startedAt"))
     provider = watch.get("provider") if watch.get("provider") in HOST_HELP else "unknown"
     if started is None or now - started < HELP_AFTER:
@@ -150,11 +156,16 @@ def project(*, deployed, ready, watch=None, now=None):
 def _reserve(connection, *, now, source_sha=None):
     from .website_models import WebsiteConnectionOperation
     source = source_sha or connection.verified_sha
-    operation, _ = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=watch_key(connection, source), defaults={
+    operation, created = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=watch_key(connection, source), defaults={
         "connection": connection, "generation": connection.generation, "action": ACTION, "state": "pending",
         "payload": {"source_sha": source}, "next_attempt_at": now,
         "receipt": {"status": "waiting_for_deployment", "source_sha": source, "started_at": now.isoformat(),
             "checks": 0, "repository_modified": False}})
+    if created and not str(source).startswith("prepare-"):
+        # A newer source's watch replaces older ones: nothing advances those.
+        (WebsiteConnectionOperation.objects.filter(connection=connection, action=ACTION, state__in=["pending", "needs_attention"])
+            .exclude(pk=operation.pk).exclude(payload__source_sha__startswith="prepare-")
+            .update(state="cancelled", next_attempt_at=None, updated_at=timezone.now()))
     return operation
 
 
@@ -198,6 +209,32 @@ def close_prepare_alert(op):
         state="needs_attention").update(state="completed", next_attempt_at=None, updated_at=timezone.now())
 
 
+def close_stale_prepare_alerts(limit=100) -> int:
+    """Close preparation deadline alerts whose preparation is no longer waiting.
+
+    ``_finish_prepare`` closes them as a preparation ends; this catches one
+    cancelled, superseded or replaced outside that path, so staff never see a
+    stale "Waiting for the live website to update".
+    """
+    from .website_models import WebsiteConnectionOperation
+    import uuid
+    rows = WebsiteConnectionOperation.objects.filter(action=ACTION, state="needs_attention",
+        payload__source_sha__startswith="prepare-").values_list("pk", "payload")[:limit]
+    owners = {}
+    for pk, payload in rows:
+        try:
+            owners[pk] = uuid.UUID(str((payload or {}).get("source_sha", ""))[len("prepare-"):])
+        except ValueError:
+            owners[pk] = None
+    waiting = set(WebsiteConnectionOperation.objects.filter(action="prepare", state__in=["pending", "running"],
+        pk__in=[owner for owner in owners.values() if owner]).values_list("pk", flat=True))
+    stale = [pk for pk, owner in owners.items() if owner not in waiting]
+    if not stale:
+        return 0
+    return WebsiteConnectionOperation.objects.filter(pk__in=stale, state="needs_attention").update(
+        state="completed", next_attempt_at=None, updated_at=timezone.now())
+
+
 def observe(config, *, now=None) -> str:
     """Check one website once when its watch is due. Returns what happened, never raises for the host.
 
@@ -220,9 +257,11 @@ def observe(config, *, now=None) -> str:
     if operation is not None and operation.next_attempt_at and operation.next_attempt_at > now:
         return "not_due"
     if live_deployment_verified(connection, target, now=now):
-        if operation is not None and operation.state != "completed":
-            receipt = {**mapping(operation.receipt), "status": "live", "live_at": now.isoformat()}
-            _settle(operation, state="completed", receipt=receipt, next_at=now + LIVE_RECHECK)
+        # Record a not-due re-check even when no watch existed yet, so the
+        # sweep moves on to sites that still need checking.
+        operation = operation or _reserve(connection, now=now)
+        receipt = {**mapping(operation.receipt), "status": "live", "live_at": receipt_time(operation, now)}
+        _settle(operation, state="completed", receipt=receipt, next_at=now + LIVE_RECHECK)
         return "live"
     operation = operation or _reserve(connection, now=now)
     receipt = dict(mapping(operation.receipt))
@@ -256,7 +295,14 @@ def observe(config, *, now=None) -> str:
     return "live"
 
 
-def run_live_status_sweep(now=None, limit=None) -> dict:
+def receipt_time(operation, now):
+    """When the watch first saw the site live, kept across daily re-checks."""
+    from .activation import mapping
+    receipt = mapping(operation.receipt)
+    return receipt.get("live_at") if operation.state == "completed" and receipt.get("live_at") else now.isoformat()
+
+
+def run_live_status_sweep(now=None, limit=None, budget=None) -> dict:
     """Check every Ready website whose live status is due, at most one bounded pass every 5 minutes."""
     if not enabled():
         return {"status": "disabled"}
@@ -274,12 +320,25 @@ def run_live_status_sweep(now=None, limit=None) -> dict:
     configs = (OrganizationContentConfig.objects.select_related("website_connection__organization")
         .filter(website_connection__state="connected", website_connection__capabilities__publishingReady=True)
         .exclude(default_publish_target_id="").exclude(website_connection__verified_sha="")
-        .exclude(Exists(not_due)).order_by("-website_connection__last_verified_at")[: limit or SWEEP_LIMIT])
+        .exclude(Exists(not_due)).order_by("-website_connection__last_verified_at")[:SWEEP_SCAN_LIMIT])
     counts = {"live": 0, "waiting": 0, "skipped": 0, "not_due": 0, "errors": 0}
-    for config in configs:
+    try:
+        counts["stale_prepare_alerts_closed"] = close_stale_prepare_alerts()
+    except Exception:  # noqa: BLE001 - housekeeping must never stop the checks
+        logger.warning("website_live_status_prepare_alert_cleanup_failed", exc_info=True)
+    # Skipped sites are cheap (no fetch) and do not use up the limit, so they
+    # never crowd out older sites that are still waiting for their host.
+    checks, limit = 0, limit or SWEEP_LIMIT
+    deadline = time.monotonic() + (SWEEP_BUDGET if budget is None else budget).total_seconds()
+    for config in configs.iterator(chunk_size=100):
+        if checks >= limit or time.monotonic() >= deadline:
+            counts["deferred"] = True
+            break
         try:
-            counts[observe(config, now=now)] += 1
+            outcome = observe(config, now=now)
         except Exception:  # noqa: BLE001 - one website must never stop the next
             logger.warning("website_live_status_failed config=%s", config.pk, exc_info=True)
-            counts["errors"] += 1
+            outcome = "errors"
+        counts[outcome] += 1
+        checks += outcome != "skipped"
     return {"status": "completed", **counts}

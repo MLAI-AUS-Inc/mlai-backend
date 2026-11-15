@@ -73,6 +73,11 @@ class ReadyOnMergeTests(MergedLegacySite, TestCase):
         self.assertTrue(journey_can_publish(journey))
         self.assertEqual(journey["prerequisites"]["deployment"]["status"], "complete")
         self.assertIsNone(journey["nextAction"])
+        # Nothing has checked the site yet, so nothing claims to be checking.
+        self.assertIsNone(journey["liveStatus"])
+        with self.not_deployed():
+            live_status.observe(self.config)
+        journey = self.journey(readyOnMerge=True, watch=live_status.summary(live_status.watch_for(self.connection)))
         self.assertEqual(journey["liveStatus"]["status"], "checking")
         self.assertEqual(journey["liveStatus"]["message"], live_status.CHECKING_MESSAGE)
 
@@ -143,6 +148,60 @@ class ReadyOnMergeTests(MergedLegacySite, TestCase):
         watch.refresh_from_db()
         self.assertEqual(watch.state, "completed")
 
+    def test_the_general_operations_worker_leaves_the_watch_to_reach_its_staff_alert(self):
+        from .website_reconciliation import process_website_connection_operations
+        start = timezone.now()
+        with self.not_deployed(), patch("content_factory.website_live_status._probe_host", return_value="vercel"):
+            live_status.observe(self.config, now=start)
+            watch = live_status.watch_for(self.connection)
+            payload = dict(watch.payload)
+            moment = start
+            while moment < start + timedelta(hours=25):
+                moment += timedelta(minutes=30)
+                process_website_connection_operations(now=moment)
+                watch.refresh_from_db()
+                self.assertIn(watch.state, {"pending", "needs_attention"})
+                self.assertEqual(watch.payload, payload)
+                if watch.next_attempt_at <= moment:
+                    live_status.observe(self.config, now=moment)
+        watch.refresh_from_db()
+        self.assertEqual(watch.receipt["started_at"], start.isoformat())
+        self.assertEqual((watch.state, watch.receipt["reason_code"]), ("needs_attention", "live_route_unavailable"))
+        projected = live_status.project(deployed=False, ready=True, watch=live_status.summary(watch), now=moment)
+        self.assertEqual(projected["status"], "waiting")
+        self.assertTrue(projected["message"].startswith(live_status.HOST_HELP["vercel"]))
+
+    def test_a_live_site_gets_a_not_due_recheck_so_the_sweep_moves_on(self):
+        with self.live():
+            self.assertEqual(live_status.observe(self.config), "live")
+        watch = live_status.watch_for(self.connection)
+        self.assertEqual(watch.state, "completed")
+        self.assertGreater(watch.next_attempt_at, timezone.now() + timedelta(hours=23))
+        self.assertEqual(live_status.run_live_status_sweep()["live"], 0)
+
+    def test_skipped_sites_never_use_up_the_sweep(self):
+        # A more recently verified site the watch cannot observe (no MLAI build proof).
+        other = make_history_free_org(domain="skipped.example.test")
+        skipped = _connect(other, verified_sha=MERGED)
+        skipped.capabilities = {**skipped.capabilities, "publishingReady": True}
+        skipped.last_verified_at = timezone.now()
+        skipped.save(update_fields=["capabilities", "last_verified_at"])
+        _next_js_target(skipped, build_proof=False)
+        with self.not_deployed():
+            result = live_status.run_live_status_sweep(limit=1)
+        self.assertEqual((result["skipped"], result["waiting"]), (1, 1))
+        self.assertIsNone(live_status.watch_for(skipped))
+        cache.delete(live_status.THROTTLE_KEY)
+        self.assertEqual(live_status.run_live_status_sweep(budget=timedelta(0))["deferred"], True)
+
+    def test_a_newer_source_watch_replaces_the_older_one(self):
+        with self.not_deployed():
+            live_status.observe(self.config)
+        old = live_status.watch_for(self.connection)
+        live_status._reserve(self.connection, now=timezone.now(), source_sha="f" * 40)
+        old.refresh_from_db()
+        self.assertEqual(old.state, "cancelled")
+
     def test_the_sweep_checks_ready_sites_and_leaves_others(self):
         with self.not_deployed():
             result = live_status.run_live_status_sweep()
@@ -182,6 +241,36 @@ class PrepareDeadlineTests(MergedLegacySite, TestCase):
         persist.assert_called_once()
         alert.refresh_from_db()
         self.assertEqual(alert.state, "completed")
+
+    def test_a_deadline_alert_closes_when_its_preparation_stops_waiting(self):
+        from .website_prepare import prepare_failure
+        op = self.prepare()
+        start = timezone.now()
+        error = WebsiteAuthorityError("live_route_unavailable", "The public blog page has not deployed yet.", retryable=True)
+        prepare_failure(op, "verify", error, now=start)
+        prepare_failure(op, "verify", error, now=start + timedelta(hours=25))
+        alert = WebsiteConnectionOperation.objects.get(action="live-status")
+        # Still waiting (the saved preparation is running): the alert stays.
+        self.assertEqual(live_status.close_stale_prepare_alerts(), 0)
+        # Cancelled outside _finish_prepare: the sweep closes it.
+        WebsiteConnectionOperation.objects.filter(pk=op.pk).update(state="cancelled")
+        self.assertEqual(live_status.close_stale_prepare_alerts(), 1)
+        alert.refresh_from_db()
+        self.assertEqual(alert.state, "completed")
+
+    def test_a_sealed_target_that_lags_on_the_host_keeps_its_deployment_wait(self):
+        from . import website_prepare
+        from .website_sealed_workflow import REQUIRED_VERSION
+        self.target.capabilities = {**self.target.capabilities, REQUIRED_VERSION: 3}
+        self.target.save(update_fields=["capabilities"])
+        op = SimpleNamespace(receipt={}, pk="op")
+        context = SimpleNamespace(organization=self.built.organization, company=self.built.company)
+        lag = WebsiteAuthorityError("live_route_unavailable", "Not deployed yet.")
+        with patch("content_factory.website_verification.current_ci_attestation", return_value={"evidence_digest": "e"}), \
+                patch("content_factory.website_verification.verify_live_deployment", side_effect=lag), \
+                self.assertRaises(WebsiteAuthorityError) as raised:
+            website_prepare._dispatch_prepare_step(op, context, self.config, "verify", user=None, journey={})
+        self.assertEqual(raised.exception.code, "live_route_unavailable")
 
     def test_with_the_kill_switch_off_the_deadline_still_asks_to_deploy(self):
         from .website_prepare import prepare_failure
@@ -228,6 +317,69 @@ class PrepareDeadlineTests(MergedLegacySite, TestCase):
             with override_settings(**READY_OFF), self.assertRaises(WebsiteAuthorityError) as raised:
                 website_prepare._dispatch_prepare_step(op, context, self.config, "verify", user=None, journey={})
         self.assertEqual(raised.exception.code, "live_route_unavailable")
+
+
+@override_settings(ARTICLES_LIVE_URL_VERIFICATION_ENABLED=True)
+class ProofRenewalTests(MergedLegacySite, TestCase):
+    """The 7-day proof renewal must not need the founder's host either."""
+
+    def age(self, days):
+        aged = timezone.now() - timedelta(days=days)
+        WebsiteConnectionTarget.objects.filter(pk=self.target.pk).update(verified_at=aged)
+        type(self.connection).objects.filter(pk=self.connection.pk).update(last_verified_at=aged)
+        self.connection.refresh_from_db()
+        self.target.refresh_from_db()
+
+    def renew(self):
+        from . import website_reconciliation as recon
+        queued = recon.queue_verification_refreshes(now=timezone.now())
+        self.assertEqual(len(queued), 1)
+        with self.not_deployed():
+            state = recon._process_source_reverification(queued[0], timezone.now())
+        return state, WebsiteConnectionOperation.objects.get(pk=queued[0])
+
+    def test_a_merged_site_whose_host_never_deploys_is_still_publishable_after_8_days(self):
+        self.age(6)
+        state, operation = self.renew()
+        self.assertEqual(state, "completed")
+        self.assertEqual((operation.receipt["method"], operation.receipt["host_code"]), ("build_proof", "live_route_unavailable"))
+        self.connection.refresh_from_db()
+        self.target.refresh_from_db()
+        # MLAI's proof is renewed, the verified source is unchanged and nothing claims the site is live.
+        self.assertEqual(self.connection.verified_sha, MERGED)
+        self.assertNotIn("live_verification", self.target.contract)
+        self.assertFalse(WebsiteConnectionOperation.objects.filter(action="deployment-verify").exists())
+        later = timezone.now() + timedelta(days=2)
+        evidence = durable_integration_evidence(self.config, self.connection, now=later)
+        self.assertEqual((evidence["verified"], evidence["publishingVerified"], evidence["liveVerified"]), (True, True, False))
+
+    def test_with_the_kill_switch_off_a_build_proof_alone_still_ages_out(self):
+        from . import website_reconciliation as recon
+        self.age(6)
+        with override_settings(**READY_OFF):
+            # As before: a build proof alone is not renewed, so it ages out.
+            self.assertEqual(recon.queue_verification_refreshes(now=timezone.now()), [])
+        evidence = durable_integration_evidence(self.config, self.connection, now=timezone.now() + timedelta(days=2))
+        self.assertEqual(evidence["reasonCode"], "verification_stale")
+
+    @override_settings(ARTICLES_LIVE_URL_VERIFICATION_ENABLED=False)
+    def test_without_live_url_verification_a_build_proof_alone_is_renewed(self):
+        self.age(6)
+        with patch("content_factory.website_verification.discover_source_attestation") as discover:
+            state, operation = self.renew()
+        discover.assert_not_called()
+        self.assertEqual((state, operation.receipt["method"]), ("completed", "build_proof"))
+        self.connection.refresh_from_db()
+        evidence = durable_integration_evidence(self.config, self.connection, now=timezone.now() + timedelta(days=2))
+        self.assertEqual((evidence["verified"], evidence["publishingVerified"]), (True, True))
+
+    def test_a_sealed_target_is_not_renewed_without_its_full_check(self):
+        from .website_verification import renew_build_proof
+        from .website_sealed_workflow import REQUIRED_VERSION
+        self.target.capabilities = {**self.target.capabilities, REQUIRED_VERSION: 3}
+        self.target.save(update_fields=["capabilities"])
+        self.assertIsNone(renew_build_proof(self.config, self.target, source_sha=MERGED))
+        self.assertIsNone(renew_build_proof(self.config, self.target, source_sha="f" * 40))
 
 
 class PublishGuardTests(WebsiteDatabaseFixture, TestCase):
