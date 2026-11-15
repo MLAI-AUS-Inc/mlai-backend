@@ -27,6 +27,7 @@ from .access import (
     public_source,
     require_capability,
 )
+from .credits import one_record_enabled
 from .models import (
     VolunteerAttendance,
     VolunteerMilestone,
@@ -761,6 +762,9 @@ class ReconciliationView(VolunteerView):
     @transaction.atomic
     def post(self, request):
         require_capability(request.user, "can_correct")
+        if one_record_enabled():
+            # Openings come from reviewed opening entries in step 2.
+            raise VolunteerError("use_opening_entries", 409)
         payload = validated(ReconciliationInput, request)
         user = lock_member(linked_member(payload["member_id"]))
         if user.pk == request.user.pk:

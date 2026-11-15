@@ -10,6 +10,7 @@ from core.actor_ids import preferred_actor_id_for_user
 from roo.services import PointsService
 
 from .access import VolunteerError, community_id, flag, require_capability
+from .credits import has_opening_entries, one_record_enabled, opening_microroo
 from .models import VolunteerMemberState, VolunteerMilestone, VolunteerSourceReceipt
 from .policy import VERSION, levels, microroo, roo
 from .services import contribution_total, lock_member
@@ -19,7 +20,12 @@ def bonus_liability(user, state, total):
     """Read unpaid historical potential and prospective liability separately."""
     if total is None:
         return dict(historical_potential_roo=None, prospective_pending_roo=None)
-    opening = state.historical_microroo or 0 if state else 0
+    if state is None:
+        opening = 0
+    elif one_record_enabled():
+        opening = opening_microroo(user, state) or 0
+    else:
+        opening = state.historical_microroo or 0
     paid = set(
         VolunteerMilestone.objects.filter(
             community=community_id(),
@@ -49,6 +55,10 @@ def bonus_liability(user, state, total):
 
 
 def _reviewed_state(user, state):
+    # Opening entries never bring level bonuses, so a member who has them is
+    # outside this one-shot historical bonus path.
+    if one_record_enabled() and has_opening_entries(user):
+        raise VolunteerError("opening_entries_present", 409)
     if (
         state is None
         or state.historical_microroo is None

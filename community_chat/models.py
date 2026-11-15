@@ -16,6 +16,7 @@ from .volunteer.models import (  # noqa: F401 -- Django model discovery
     VolunteerAttendance,
     VolunteerMemberState,
     VolunteerMilestone,
+    VolunteerOpeningEntry,
     VolunteerOpportunity,
     VolunteerProject,
     VolunteerRecognition,

@@ -124,6 +124,10 @@ class VolunteerMemberState(ScopedRecord):
     )
     reconciliation_note = models.TextField(blank=True)
     reconciled_at = models.DateTimeField(null=True, blank=True)
+    # Stored by the one-record calculation; empty until that flag is on.
+    level = models.PositiveSmallIntegerField(null=True, blank=True)
+    highest_level = models.PositiveSmallIntegerField(null=True, blank=True)
+    level_policy = models.CharField(max_length=64, blank=True, default="")
 
     class Meta:
         constraints = [
@@ -165,6 +169,9 @@ class VolunteerRecognition(ScopedRecord):
     status = models.CharField(max_length=20, default="pending")
     version = models.PositiveIntegerField(default=1)
     reward_microroo = models.PositiveBigIntegerField(default=0)
+    # Points toward level, kept apart from the Roo paid. Empty means "the same
+    # as reward_microroo", which is what every row before this field means.
+    level_microroo = models.PositiveBigIntegerField(null=True, blank=True)
     ledger = models.OneToOneField(
         "roo.Ledger",
         on_delete=models.PROTECT,
@@ -297,4 +304,71 @@ class VolunteerSourceReceipt(ScopedRecord):
                 fields=("community", "kind", "status"), name="vol_source_processing_idx"
             ),
             models.Index(fields=("actor", "occurred_at"), name="vol_source_actor_idx"),
+        ]
+
+
+class VolunteerOpeningEntry(ScopedRecord):
+    """One reviewed piece of a member's opening balance, written by the back-fill.
+
+    Replaces the single historical opening number. A unique source key per
+    community means a re-run can never count the same evidence twice. Rows are
+    reversed, never deleted, so the trail stays auditable.
+    """
+
+    EVIDENCE_CLASSES = (
+        ("A", "Recorded by a system"),
+        ("B", "Recorded and checked by a person"),
+        ("C", "Claimed by the member"),
+        ("D", "Declared role baseline, checked by two people"),
+        ("carried_over", "Carried over from the seven-level system"),
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="volunteer_opening_entries",
+    )
+    amount_microroo = models.PositiveBigIntegerField()
+    # True when the work was paid, False when unpaid, empty when not known.
+    paid = models.BooleanField(null=True, blank=True)
+    evidence_class = models.CharField(max_length=16, choices=EVIDENCE_CLASSES)
+    source = models.CharField(max_length=64)
+    source_key = models.CharField(max_length=255)
+    evidence = models.JSONField(default=dict)
+    occurred_at = models.DateTimeField(null=True, blank=True)
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="added_volunteer_opening_entries",
+    )
+    reversed_at = models.DateTimeField(null=True, blank=True)
+    reversed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="reversed_volunteer_opening_entries",
+    )
+    reversal_reason = models.TextField(blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("community", "source_key"), name="vol_opening_source_unique"
+            ),
+            models.CheckConstraint(
+                check=Q(amount_microroo__gt=0), name="vol_opening_amount_positive"
+            ),
+            models.CheckConstraint(
+                check=Q(evidence_class__in=("A", "B", "C", "D", "carried_over")),
+                name="vol_opening_class_valid",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("community", "user", "reversed_at"),
+                name="vol_opening_member_idx",
+            )
         ]

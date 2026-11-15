@@ -280,6 +280,45 @@ through Level 6 per eligible member, less any already credited milestones.
 Rollback disables new issuance and keeps history/ledger entries. Source receipts
 stay retryable; a failed client refresh cannot repeat a wallet transaction.
 
+## One record per contribution (build step 2, November 2026)
+
+`COMMUNITY_CHAT_VOLUNTEER_ONE_RECORD_ENABLED` (default false) switches the level
+calculation to one record per contribution. Migration
+`community_chat 0017_volunteer_one_record` adds the columns and table it uses;
+with the flag off nothing reads them and behaviour is unchanged.
+
+- **Credit labels.** `community_chat/volunteer/credits.py` labels every earned
+  wallet credit by reference type, then source and description, following the
+  back-fill plan's ledger table. Rate-card tasks, manual awards, points
+  requests, volunteer recognitions and first posts count toward level.
+  Reaction rewards (`link-love`), startup updates, mentor payouts, level
+  bonuses, corrections, merges, purchases and committee pay don't. Their Roo
+  still pays as before.
+- **One record.** Rate-card task approvals, manual awards and points requests
+  each write one approved `VolunteerRecognition` linked to their ledger row,
+  inside the same transaction. A replay finds the existing record.
+- **Level points apart from Roo.** `VolunteerRecognition.level_microroo` holds
+  the points toward level when they differ from the Roo paid; empty means the
+  same. Reaction and startup-update recognitions count 0 toward level.
+- **Opening entries.** `VolunteerOpeningEntry` holds a member's opening
+  balance, one row per piece of evidence, with a unique source key per
+  community, paid or unpaid, evidence class, who added it, and reversal fields.
+  A member with entries opens at their unreversed sum; one without keeps the
+  old single opening, and stays "being checked" if that is empty. The level
+  sum, bonus payer, journey and bonus liability all read the same opening.
+  Opening entries never bring level bonuses, the reconcile endpoint answers
+  `use_opening_entries`, and the one-shot historical bonus path refuses any
+  member with entries (`opening_entries_present`).
+- **Unlabelled credits.** A credit after the member's cut-off that no label
+  covers is left out of the level, logged once at error level and kept as a
+  `VolunteerSourceReceipt` with kind `unlabelled_credit` and status `alert`.
+  The member's level stays visible.
+- **Stored level.** `VolunteerMemberState.level`, `highest_level` and
+  `level_policy` are written when the journey loads or a bonus check runs.
+
+`VolunteerOpeningEntry` protects its user (and the users who added or reversed
+it), so account deletion must handle it with the other Volunteer records.
+
 ## Roo Points member guide refresh (September 2026)
 
 Home includes `boost_startup` (2 points, once for each distinct verified startup

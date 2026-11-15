@@ -630,6 +630,7 @@ jobs:
           community_chat.tests.test_volunteer_policy \
           community_chat.tests.test_volunteer \
           community_chat.tests.test_volunteer_backfill \
+          community_chat.tests.test_volunteer_one_record \
           community_chat.tests.test_volunteer_presentation \
           community_chat.tests.test_volunteer_events \
           community_chat.tests.test_intro_award_handoff \
