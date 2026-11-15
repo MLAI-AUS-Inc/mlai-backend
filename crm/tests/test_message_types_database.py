@@ -1,6 +1,7 @@
 """PostgreSQL-backed checks for invites, automatic reminders and Ask Roo to draft."""
 
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
@@ -83,6 +84,11 @@ class ReminderDatabaseTests(BlastFixtures, TestCase):
         super().setUp()
         self.event.approved_count = 5
         self.event.raw_payload = {"platform": "luma", "access": "manage"}
+        # An evening start a week out, so both reminders fall inside sending
+        # hours whatever time of day the suite runs.
+        zone = ZoneInfo(self.event.timezone or "Australia/Melbourne")
+        local = (self.now + timedelta(days=7)).astimezone(zone)
+        self.event.start_at = local.replace(hour=18, minute=30, second=0, microsecond=0)
         self.event.save()
 
     def reminders_for(self):
