@@ -25,6 +25,7 @@ from .policy import AgentPermissionDenied
 SCOPE = "agent:messages:send"
 SEND_EVENT = "native.dot.message_sent"
 DM_EVENT = "native.dot.dm_opened"
+WELCOME_EVENT = "native.dot.welcomed"
 DAILY_SENDS = 100
 DAILY_NEW_DMS = 20
 MAX_TEXT_BYTES = 16384
@@ -40,10 +41,10 @@ TOOLS = [
          "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, "additionalProperties": False}},
     {"name": "open_dm",
      "description": "Open (or find) a DM in MLAI Chat between your owner, you and up to 7 other members, so you can "
-                    "message them with send_message. Members are MLAI account emails or chat public keys. Your owner "
-                    "is always in the DM and sees what you send. Members who muted you cannot be added.",
+                    "message them with send_message. Members are MLAI account emails or chat public keys; an empty "
+                    "list opens your own DM with your owner. Your owner is always in the DM and sees what you send. Members who muted you cannot be added.",
      "inputSchema": {"type": "object", "properties": {
-         "members": {"type": "array", "minItems": 1, "maxItems": MAX_PARTICIPANTS, "items": {"type": "string"}}},
+         "members": {"type": "array", "minItems": 0, "maxItems": MAX_PARTICIPANTS, "items": {"type": "string"}}},
          "required": ["members"], "additionalProperties": False}},
     {"name": "send_message",
      "description": "Post a new message as yourself in an MLAI Chat channel or DM your owner belongs to (an id from "
@@ -137,8 +138,8 @@ def _member_key(value, owner):
 def open_dm(native, arguments):
     now = timezone.now()
     members = arguments.get("members")
-    if not isinstance(members, list) or not 1 <= len(members) <= MAX_PARTICIPANTS:
-        raise ValidationError(f"Choose 1 to {MAX_PARTICIPANTS} members.")
+    if not isinstance(members, list) or len(members) > MAX_PARTICIPANTS:
+        raise ValidationError(f"Choose up to {MAX_PARTICIPANTS} members.")
     installation = _require(native)
     keys = []
     for member in members:
@@ -212,3 +213,35 @@ def execute(native, name, arguments):
         return open_dm(native, arguments)
     return send_message(native, arguments)
 
+
+
+def welcome_text(installation):
+    owner = installation.owner
+    first = " ".join(str(getattr(owner, "first_name", "") or "").split())[:80] or "there"
+    name = " ".join(str(installation.name or "").split())[:80] or "your Dot"
+    handle = str(getattr(installation, "handle", "") or "").split("@", 1)[0]
+    mention = f"@{handle}" if handle else f"@{name}"
+    return (f"Hi {first}! I'm {name}, your OpenAI dot, now in MLAI Chat. Message me here any time, or mention "
+            f"me with {mention} in any channel or group DM you're in. I only act for you: if someone else "
+            "mentions me they get a short automatic reply. If I go quiet, open my card in Apps & agents to wake "
+            "me up.")
+
+
+def welcome(installation, grant):
+    """Best effort: open the owner's DM with their new Dot and say hello, once."""
+    if not (getattr(settings, "AGENT_RUNTIME_DOT_MEMBERS_ENABLED", False) and enabled()):
+        return False
+    if AgentAuditEvent.objects.filter(grant__installation=installation, event_type=WELCOME_EVENT).exists():
+        return False
+    native = type("Native", (), {"grant": grant})()
+    now = timezone.now()
+    _, config, directive = _directive(native, "open_dm", now=now, participants=[])
+    opened = native_sources._request(config, "/query", [{"native_agent": directive}])
+    channel = str(uuid.UUID(str(opened.get("channel_id"))))
+    _, config, directive = _directive(native, "post", now=now, channel_id=channel)
+    event = post_event(installation, directive, welcome_text(installation), created_at=int(now.timestamp()))
+    result = native_sources._request(config, "/events", event)
+    if result.get("event_id") != event["id"] or result.get("accepted") is not True:
+        raise native_sources.SourceUnavailable("Native relay did not acknowledge the welcome.")
+    runtime.audit(WELCOME_EVENT, grant=grant, channel_id=channel, event_id=event["id"])
+    return True

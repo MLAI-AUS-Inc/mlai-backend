@@ -89,7 +89,7 @@ class OpenDmTests(SimpleTestCase):
         request.assert_not_called()
 
     def test_member_list_is_bounded_and_validated(self, *_):
-        for members in ([], ["c" * 64] * 8, ["not a member"], [5]):
+        for members in (["c" * 64] * 8, ["not a member"], [5], "x"):
             with self.assertRaises(ValidationError):
                 nm.execute(native(), "open_dm", {"members": members})
 
@@ -156,3 +156,42 @@ class CatalogueTests(SimpleTestCase):
         self.assertIn(nm.SCOPE, config.ALL_SCOPES)
         for name in nm.NAMES:
             self.assertIn(nm.SCOPE, native_agents.TOOL_SCOPES[name])
+
+
+@override_settings(**ON, AGENT_RUNTIME_DOT_MEMBERS_ENABLED=True)
+@patch.object(nm.native_sources, "community_config", return_value=CONFIG)
+@patch.object(nm.native_sources, "current_device", return_value=SimpleNamespace(public_key=OWNER_KEY))
+@patch.object(nm.runtime, "audit")
+class WelcomeTests(SimpleTestCase):
+    def setUp(self):
+        self.native = native()
+        installation = self.native.grant.installation
+        installation.name = "Maek"
+        installation.handle = "sam-donegan-maek@chat.mlai.au"
+        installation.owner.first_name = "Sam"
+
+    def test_welcome_opens_owner_dm_and_says_hello_once(self, audit, *_):
+        exists = MagicMock()
+        exists.exists.return_value = False
+        responses = [{"channel_id": CHANNEL, "created": True}, {"event_id": "e" * 64, "accepted": True}]
+        with patch.object(nm.AgentAuditEvent.objects, "filter", return_value=exists), \
+                patch.object(nm.native_crypto, "unseal_key", return_value="k"), \
+                patch.object(nm.native_crypto, "sign_event", side_effect=SendTests.signed.__get__(self)), \
+                patch.object(nm.native_sources, "_request", side_effect=responses) as request:
+            self.assertTrue(nm.welcome(self.native.grant.installation, self.native.grant))
+        opened = request.call_args_list[0].args[2][0]["native_agent"]
+        self.assertEqual((opened["operation"], opened["participants"]), ("open_dm", []))
+        event = request.call_args_list[1].args[2]
+        self.assertIn("@sam-donegan-maek", event["content"])
+        self.assertIn("Hi Sam", event["content"])
+        self.assertEqual(audit.call_args.args[0], nm.WELCOME_EVENT)
+
+    def test_already_welcomed_or_flag_off_does_nothing(self, *_):
+        exists = MagicMock()
+        exists.exists.return_value = True
+        with patch.object(nm.AgentAuditEvent.objects, "filter", return_value=exists), \
+                patch.object(nm.native_sources, "_request") as request:
+            self.assertFalse(nm.welcome(self.native.grant.installation, self.native.grant))
+            with override_settings(AGENT_RUNTIME_DOT_MEMBERS_ENABLED=False):
+                self.assertFalse(nm.welcome(self.native.grant.installation, self.native.grant))
+        request.assert_not_called()

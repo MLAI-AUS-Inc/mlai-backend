@@ -1,9 +1,11 @@
 """Personal Dot enrollment and quota admission in the existing gateway."""
 
 import json
+import logging
 import re
 import secrets
 from datetime import timedelta
+from functools import partial
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -17,6 +19,8 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from . import native_crypto, native_sources, runtime
 from .models import AgentEnrollment, AgentGrant, AgentInstallation, AgentInvocation, AgentInvocationReply, AgentSubscription
 from .policy import idempotency_key
+
+logger = logging.getLogger(__name__)
 
 CONSENT_VERSION = "dot-public-thread-v1"
 DOT_SCOPES = ["events:read", "messages:read", "messages:reply"]
@@ -613,11 +617,26 @@ def provision_native_installations(*, limit=25, app_id="openai-dot"):
                 installation.state = "active"
                 installation.save(update_fields=("native_cursor", "state", "updated_at"))
                 runtime.audit("native.installation.provisioned", grant=grant)
+                if app_id == "openai-dot":
+                    transaction.on_commit(partial(_welcome, installation.pk, grant.pk))
                 completed += 1
             except (PermissionDenied, AgentPermissionDenied, ValidationError, native_sources.SourceUnavailable, ValueError):
                 # Committed signed profiles remain unchanged for the next attempt.
                 continue
     return completed
+
+
+def _welcome(installation_id, grant_id):
+    """Say hello in the owner's DM with their new Dot; never blocks provisioning."""
+    from . import native_messaging
+    try:
+        with transaction.atomic():
+            grant = runtime._grant(grant_id)
+            if grant.installation_id != installation_id:
+                return
+            native_messaging.welcome(grant.installation, grant)
+    except Exception:  # noqa: BLE001 - a welcome is best effort and retried by nothing.
+        logger.warning("Dot welcome message was not sent.", extra={"installation_id": str(installation_id)})
 
 
 def sources_available(owner, resource, public_key):
