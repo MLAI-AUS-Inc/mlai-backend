@@ -46,7 +46,7 @@ class AdminAccessMatrixDatabaseTests(CrmApiMixin, TestCase):
     def assert_admin(self, client):
         overview, preview, access = self.requests(client)
         self.assertEqual((overview.status_code, preview.status_code), (200, 200))
-        self.assertEqual((access.status_code, access.json()), (200, {"is_admin": True, "sections": ["crm"]}))
+        self.assertEqual((access.status_code, access.json()), (200, {"is_admin": True, "sections": ["crm", "team"]}))
 
     def assert_refused(self, client):
         overview, preview, access = self.requests(client)
@@ -118,7 +118,7 @@ class AdminAccessMatrixDatabaseTests(CrmApiMixin, TestCase):
             member_access = self.member_client.get(ADMIN_ACCESS).json()
         self.assertEqual((admin.status_code, admin.json()["error"]), (404, "crm_disabled"))
         self.assertEqual((member.status_code, member.json()["error"]), (403, "not_authorised"))
-        self.assertEqual(admin_access, {"is_admin": True, "sections": []})
+        self.assertEqual(admin_access, {"is_admin": True, "sections": ["team"]})
         self.assertEqual(member_access, {"is_admin": False, "sections": []})
 
 
