@@ -265,9 +265,13 @@ def save_mailbox(mailbox: Optional[SenderMailbox], data: dict, *, actor) -> Send
     creating = mailbox is None
     # Existing pre-stream mailboxes stay editable by admins exactly as on main
     # (limits, switching off and on). New mailboxes always follow the stream rules.
+    # Switching an existing sender off is always allowed, even on a protected
+    # domain: after the legacy path ends, that is how the old root mailboxes retire.
+    only_switching_off = not creating and set(data) == {"enabled"} and data["enabled"] is False
     if not (not creating and legacy_mailbox(mailbox)):
         domain = sending_domains.domain_of(data["email"]) if creating else mailbox.domain
-        if protected_domain(domain) or (mailbox is not None and protected_domain(sending_domains.domain_of(mailbox.email))):
+        if not only_switching_off and (protected_domain(domain) or (
+                mailbox is not None and protected_domain(sending_domains.domain_of(mailbox.email)))):
             raise CrmError("mailbox_domain_protected")
         if not is_owner(actor):
             raise CrmError("owner_required", 403)
