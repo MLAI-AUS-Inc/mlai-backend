@@ -513,10 +513,10 @@ def github_callback(request):
     installation_id = request.GET.get("installation_id")
     setup_action = request.GET.get("setup_action") or "install"
 
-    # P1.14: a new-journey Chat connection never ends on a text error page.
-    # `flow` is None for everything else (flag off, Slack, user-level, a
-    # missing or non-chat state, a valid legacy Chat state), which keeps
-    # today's responses below byte for byte.
+    # A Chat-started connection never ends on a text error page: every failure
+    # returns to Chat with a typed reason. `flow` is None for Slack,
+    # user-level OAuth and a missing or non-chat state (and for every flow with
+    # both callback flags off), which keep today's responses byte for byte.
     from integrations.services import github_callback_reasons
     from content_factory.staff_alert_rules import begin_github_callback
     flow = begin_github_callback(github_callback_reasons, request)
@@ -736,7 +736,7 @@ def github_callback(request):
         if not config.website_connection_id:
             # A new-journey Chat flow saves a repository only through its bind
             # below (push access, the domain match, the ownership check).
-            config.github_repo = repo_to_store if repo_to_store and flow is None else None
+            config.github_repo = repo_to_store if repo_to_store and (flow is None or not flow.new_journey) else None
             config.github_installation_id = installation_id
         config.github_scopes = []
         config.save()
@@ -840,7 +840,15 @@ def github_callback(request):
             except Exception as e:
                 logger.error(f"Failed to auto-retry job {job_id}: {e}")
 
-    if flow is not None:
+    if flow is not None and not flow.new_journey and is_org_oauth and chat_company is not None:
+        # A legacy Chat flow binds and starts setup when exactly one repository
+        # is named like the domain; otherwise the picker below, as before.
+        bound = github_callback_reasons.bind_legacy_domain_repository(
+            config=config, user=chat_company.profile.user, company=chat_company,
+            repositories=repos, installation_id=installation_id)
+        if bound:
+            selected_repo = bound
+    elif flow is not None and flow.new_journey:
         # New-journey Chat flows bind the domain's repository and start setup.
         reason = github_callback_reasons.NO_WEBSITE
         if is_org_oauth and chat_company is not None:

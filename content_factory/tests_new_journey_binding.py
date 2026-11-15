@@ -233,7 +233,8 @@ class CallbackBindingTests(TestCase):
         self.assertTrue(after["ownerClickRequired"])
         self.assertEqual({key: value for key, value in after.items() if key != "ownerClickRequired"}, before)
 
-    def test_legacy_org_bind_writes_nothing_and_keeps_todays_behaviour(self):
+    @override_settings(MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED=False)
+    def test_legacy_org_bind_writes_nothing_and_keeps_todays_behaviour_with_the_kill_switch_off(self):
         legacy = make_named_legacy_org("talathrive", domain="banksia-legacy.studio")
         connection_before = legacy.config.website_connection_id
         marker_before = read_marker(legacy.organization)
@@ -250,7 +251,8 @@ class CallbackBindingTests(TestCase):
 
     def test_flag_off_new_journey_bind_is_todays_behaviour(self):
         built = make_new_journey_org(domain="banksia.studio")
-        with override_settings(MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED=False):
+        with override_settings(MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED=False,
+                               MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED=False):
             response = self.callback(built, [_repo("founder/banksia-studio")])
         self.assertIn("github=connected&domain=banksia.studio&repo=founder%2Fbanksia-studio", response["Location"])
         self.verify.assert_not_called()

@@ -12,7 +12,9 @@ from content_factory.models import OrganizationContentConfig
 from integrations.utils import normalize_domain
 
 GITHUB_APP_SLUG = "mlai-tools"
-GITHUB_OAUTH_STATE_TIMEOUT_SECONDS = 600
+# A founder may need to sign in, set up two-factor or ask an organisation owner
+# on GitHub. The state is single-use, so an hour costs no replay window.
+GITHUB_OAUTH_STATE_TIMEOUT_SECONDS = 3600
 GITHUB_OAUTH_STATE_SALT = "integrations.github.oauth.state"
 
 
