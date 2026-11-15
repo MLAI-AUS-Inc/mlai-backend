@@ -8,7 +8,7 @@ organisation's ledger configuration. Treasury decisions require its treasurer
 allowlist. Member meeting confirmations can write only that member's attendance.
 
 Operations are `preview`, `show`, `authorize`, `receipt`, `unknown`,
-`meeting_review` and `meeting_time`. Financial operations include a stable
+`meeting_scan`, `meeting_review`, `meeting_link` and `meeting_time`. Financial operations include a stable
 64-hex `request_key`. Previews return a review ID, invoice statuses, original
 invoice sources, line-level matching reasons, and requested versus approved
 units. Authorisation re-reads all sources, compares their fingerprint, locks the
@@ -75,8 +75,10 @@ an operator task and cannot be replaced through a conversational model call.
 
 `python -m unittest integrations.test_studio_payment_rules` runs without a
 database. The October regression requests 101 hours from an 80-hour customer
-line and reports 21 hours without cover even though the money would fit. Test
-database migration approval is required before running the database suites.
+line and reports 21 hours without cover even though the money would fit.
+The approved migration and database regressions pass on disposable SQLite
+and PostgreSQL. The PostgreSQL suite exercises concurrent approvals against
+the final customer hour. CI includes both the source boundaries and database suites.
 Pilot a client with a reconciled opening ledger in preview, inspect source
 exceptions, then enable Roo handoffs. Production deployment and migrations use
 the repository's separate approval and release process.

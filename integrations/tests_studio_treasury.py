@@ -1,15 +1,19 @@
 """Database regressions. Run only after approval of the schema test migration."""
 from copy import deepcopy
 from datetime import timedelta
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
-from django.test import TestCase
+from django.db import close_old_connections, connections
+from django.test import TestCase, TransactionTestCase, skipUnlessDBFeature
 from django.utils import timezone
 from organizations.models import Organization
-from integrations.models import StudioTreasuryLedger, StudioPaymentReview
+from integrations.models import StudioTreasuryLedger, StudioPaymentReview, StudioMeetingOccurrence
 from integrations.services.studio_treasury import perform
 from integrations.services.studio_payment_rules import ReviewError
 from integrations.test_studio_payment_rules import claim, work, fund
+from integrations.services.studio_meetings import enrich, confirm, pending_times
 
 
 class TreasuryDatabaseTests(TestCase):
@@ -76,3 +80,105 @@ class TreasuryDatabaseTests(TestCase):
         self.assertEqual(preview["ready_cents"], 0)
         with self.assertRaises(ReviewError):
             self.call("authorize", review_id=preview["id"])
+
+
+@skipUnlessDBFeature("has_select_for_update")
+class TreasuryConcurrencyTests(TransactionTestCase):
+    def test_two_builders_cannot_reserve_the_last_customer_hour_together(self):
+        ledger = StudioTreasuryLedger.objects.create(
+            organization=Organization.objects.create(name="Concurrency Studio", domain="race.example.invalid"),
+            workspace_id="T123", configuration={"treasurers": ["USAM"]},
+            opening_verified_at=timezone.now(), opening_evidence="Reviewed opening")
+        claims = {"first": claim(number="first"), "second": claim(builder="second", number="second")}
+        works = [work(), work(builder="second", key="work-2")]
+
+        class Sources:
+            def snapshot(self, selector):
+                return {"claims": [claims[selector]], "work": works, "funding": [fund(1)], "exceptions": []}
+
+        factory = lambda scope: Sources()
+        reviews = [perform("T123", "USAM", "preview", request_key=key*64, selector=selector, source_factory=factory)
+                   for key, selector in (("a", "first"), ("b", "second"))]
+        self.assertTrue(all(row["ready_cents"] == 6500 for row in reviews))
+        barrier = Barrier(2)
+
+        def authorize(review_id):
+            close_old_connections()
+            try:
+                barrier.wait(timeout=10)
+                return perform("T123", "USAM", "authorize", request_key="c"*64,
+                               review_id=review_id, source_factory=factory)["status"]
+            except ReviewError as exc:
+                return str(exc)
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(authorize, [row["id"] for row in reviews]))
+        self.assertCountEqual(outcomes, ["reserved", "coverage_changed_request_new_review"])
+        ledger.refresh_from_db()
+        self.assertEqual(len(ledger.reservations), 1)
+        allocations = next(iter(ledger.reservations.values()))["allocations"]
+        self.assertEqual(sum(row["units"] for row in allocations), 3600)
+
+
+class MeetingDatabaseTests(TestCase):
+    def setUp(self):
+        self.ledger = StudioTreasuryLedger.objects.create(
+            organization=Organization.objects.create(name="Meeting Studio", domain="meeting.example.invalid"),
+            workspace_id="T123", configuration={"members": ["UONE", "UTWO"], "treasurers": ["USAM"],
+                "builders": {"one": {"slack_id": "UONE", "senders": ["one@example.invalid"]},
+                             "two": {"slack_id": "UTWO", "senders": ["two@example.invalid"]}},
+                "projects": {"project": {"team_id": "team", "calendars": [
+                    {"calendar_id": "one", "title_patterns": ["Studio check-in"]},
+                    {"calendar_id": "two", "title_patterns": ["Studio check-in"]}]}}})
+        self.start = timezone.now() - timedelta(hours=1)
+        self.event = {"id": "event", "iCalUID": "shared-uid", "summary": "Studio check-in", "status": "confirmed",
+            "start": {"dateTime": self.start.isoformat()}, "end": {"dateTime": (self.start+timedelta(minutes=30)).isoformat()},
+            "attendees": [{"email": "one@example.invalid"}, {"email": "two@example.invalid"}]}
+        self.source = Mock()
+        self.source.issues.return_value = []
+
+    def scan(self):
+        return enrich("T123", "UONE", ["project"], mode="create", source_factory=lambda scope: self.source,
+                      event_reader=lambda binding, start, end: [deepcopy(self.event)])
+
+    @patch("integrations.services.studio_meetings.create_linear_meeting_issue")
+    def test_calendar_copies_and_reruns_reuse_one_occurrence_and_issue(self, create):
+        create.return_value = {"id": "issue", "identifier": "STU-900", "title": "Meeting"}
+        first, second = self.scan(), self.scan()
+        create.assert_called_once()
+        self.assertEqual(first[0]["key"], second[0]["key"])
+        self.assertEqual(StudioMeetingOccurrence.objects.count(), 1)
+        row = StudioMeetingOccurrence.objects.get()
+        self.assertEqual(row.participation, {})
+        self.assertEqual(pending_times("T123", "UONE")[0]["minutes"], 30)
+
+    @patch("integrations.services.studio_meetings._create_linear_channel_issue_comment")
+    @patch("integrations.services.studio_meetings.create_linear_meeting_issue")
+    def test_each_person_confirms_and_only_treasurer_approves_actual_time(self, create, comment):
+        create.return_value = {"id": "issue", "identifier": "STU-900", "title": "Meeting"}
+        comment.return_value = {"comment": {"id": "comment"}}
+        key = self.scan()[0]["key"]
+        recorded = confirm("T123", "UONE", key, 20)
+        self.assertFalse(recorded["approved"])
+        self.assertEqual(confirm("T123", "UONE", key, 20), recorded)
+        comment.assert_called_once()
+        with self.assertRaises(PermissionError):
+            confirm("T123", "UONE", key, 20, builder="two", approved=True)
+        self.assertTrue(confirm("T123", "USAM", key, 20, builder="one", approved=True)["approved"])
+        self.assertEqual(StudioMeetingOccurrence.objects.get().participation.keys(), {"one"})
+        with self.assertRaises(ReviewError):
+            confirm("T123", "USAM", key, 30, builder="one", approved=True)
+
+    @patch("integrations.services.studio_meetings._create_linear_channel_issue_comment", side_effect=TimeoutError)
+    @patch("integrations.services.studio_meetings.create_linear_meeting_issue")
+    def test_uncertain_linear_note_keeps_time_unapproved_without_resending(self, create, comment):
+        create.return_value = {"id": "issue", "identifier": "STU-900", "title": "Meeting"}
+        key = self.scan()[0]["key"]
+        with self.assertRaises(TimeoutError):
+            confirm("T123", "UONE", key, 20)
+        with self.assertRaisesMessage(ReviewError, "note_needs_review"):
+            confirm("T123", "UONE", key, 20)
+        comment.assert_called_once()
+        self.assertFalse(StudioMeetingOccurrence.objects.get().participation["one"]["approved"])

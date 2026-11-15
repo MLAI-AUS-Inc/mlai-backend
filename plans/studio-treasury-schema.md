@@ -1,4 +1,4 @@
-# Studio treasury schema proposal
+# Studio treasury schema
 
 Migration `integrations/0052_studio_meetings_treasury` adds three models.
 
@@ -14,7 +14,9 @@ Migration `integrations/0052_studio_meetings_treasury` adds three models.
   `(ledger, occurrence_key)` constraint collapses recurring/calendar copies and
   requests from different Slack threads.
 
-The migration creates empty tables and constraints. It contains no data rewrite,
-deletion, backfill or production setup. Schema creation, disposable test
-application and the database regression suite require the specific approval
-requested from Sam. Production application uses the separate release process.
+Sam approved creating this migration and applying it to disposable local test
+databases on 15 November 2026. The migration creates the three empty tables
+and their constraints. It has been applied successfully on SQLite and
+PostgreSQL. PostgreSQL regressions verify that simultaneous approvals for two
+builders cannot reserve the same final customer hour. Production application
+uses the separate release process.
