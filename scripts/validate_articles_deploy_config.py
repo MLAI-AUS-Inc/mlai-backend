@@ -58,8 +58,11 @@ FLAG_KEYS = (
     # Every other founder Articles, My startup and Content Factory switch, so a
     # release can set any of them and none can only be changed by hand on the
     # host. Empty keeps the host value; no default changes. The stuck-founder
-    # alert (ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED) is the only one on by default.
+    # alert and the three GitHub linking kill switches below it are on by default.
     "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED",
+    "ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED",
+    "MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED",
+    "ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED",
     "ARTICLES_STAFF_ALERT_RULES_ENABLED",
     "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE",
     "ARTICLES_FAILURE_POLICY_V2_ENABLED",
