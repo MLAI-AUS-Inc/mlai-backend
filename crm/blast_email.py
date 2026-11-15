@@ -47,6 +47,8 @@ GO_EXPRESSIONS = {
 }
 TRACK_SUFFIX = "@TrackLink"
 _MARKDOWN_LINK = re.compile(r"\]\(\s*(https?://[^\s()<>]+)\s*\)")
+# Links in a layout's raw HTML; share links carry ``data-notrack`` and are left alone.
+_HTML_LINK = re.compile(r'(?<!data-notrack )href="(https?://[^"\s<>]+)"')
 
 Status = BlastDelivery.Status
 
@@ -109,15 +111,20 @@ def track_links(markdown: str) -> str:
         url = match.group(1)
         return match.group(0) if url.endswith(TRACK_SUFFIX) else f"]({url}{TRACK_SUFFIX})"
 
-    return _MARKDOWN_LINK.sub(tracked, markdown)
+    def tracked_href(match):
+        url = match.group(1)
+        return match.group(0) if url.endswith(TRACK_SUFFIX) else f'href="{url}{TRACK_SUFFIX}"'
+
+    return _HTML_LINK.sub(tracked_href, _MARKDOWN_LINK.sub(tracked, markdown))
 
 
 def tracked_urls(markdown: str) -> list[str]:
     """The distinct URLs a body tracks, in order, up to ``MAX_TRACKED_URLS``."""
 
     urls: list[str] = []
-    for match in _MARKDOWN_LINK.finditer(markdown):
-        url = match.group(1).removesuffix(TRACK_SUFFIX)
+    matches = sorted([*_MARKDOWN_LINK.finditer(markdown), *_HTML_LINK.finditer(markdown)], key=lambda m: m.start())
+    for match in matches:
+        url = html.unescape(match.group(1).removesuffix(TRACK_SUFFIX))
         if url not in urls:
             urls.append(url)
     return urls[:MAX_TRACKED_URLS]

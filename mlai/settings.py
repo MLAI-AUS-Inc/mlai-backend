@@ -2361,6 +2361,8 @@ CRM_ROO_DRAFT_MODEL = os.getenv('CRM_ROO_DRAFT_MODEL', 'gpt-5.6-luna')
 CRM_AUTO_REMINDERS_ENABLED = _env_is_true('CRM_AUTO_REMINDERS_ENABLED', False)
 CRM_REMINDER_SLACK_CHANNEL = os.getenv('CRM_REMINDER_SLACK_CHANNEL', '')
 CRM_REMINDER_MIN_GUESTS = int(os.getenv('CRM_REMINDER_MIN_GUESTS', '3') or 3)
+# Where invite emails load their logo and icons from (crm/static/crm/email).
+CRM_EMAIL_ASSET_BASE_URL = os.getenv('CRM_EMAIL_ASSET_BASE_URL') or f"{DEFAULT_BACKEND_URL.rstrip('/')}/static/crm/email"
 CRM_ENGAGEMENT_REFRESH_ENABLED = _env_is_true('CRM_ENGAGEMENT_REFRESH_ENABLED', False)
 CRM_SUBSTACK_ACTIVITY_ENABLED = _env_is_true('CRM_SUBSTACK_ACTIVITY_ENABLED', False)
 CRM_ENGAGEMENT_REFRESH_HOUR = max(0, min(23, int(os.environ.get('CRM_ENGAGEMENT_REFRESH_HOUR', '6'))))
