@@ -2000,7 +2000,7 @@ def _precheck_generation_sources(user, organization, input_sources, *, manual_do
         "code": "startup_update_sources_unavailable",
         "detail": SOURCES_NEED_ATTENTION if blocked_input else NOTHING_TO_READ,
         "sourceChecks": checks,
-        "sourceWarnings": [skipped_source_entry(c) for c in checks
+        "sourceWarningList": [skipped_source_entry(c) for c in checks
             if c.get("status") != "ready" and c.get("provider") not in UNSKIPPABLE_SOURCES],
     }, status=status.HTTP_409_CONFLICT)
 
@@ -2166,8 +2166,10 @@ def _build_email_draft_payload(
         "stepStates": (run_payload or {}).get("stepStates", {}),
         "inputSources": (run_payload or {}).get("inputSources", []),
         "sourceChecks": (run_payload or {}).get("sourceChecks", []),
-        # Founder-safe list of tools this run left out or only partly read.
-        "sourceWarnings": _top_level_source_warnings(latest_run),
+        # Founder-safe list of tools this run left out or only partly read. Installed
+        # desktop builds read a top-level "sourceWarnings" as a dict of string lists,
+        # so the list ships under its own key.
+        "sourceWarningList": _top_level_source_warnings(latest_run),
         "reviewRequired": bool(latest_run and (latest_run.result or {}).get("review_required")),
         "completedSteps": progress_payload["completedSteps"] if progress_payload else 0,
         "totalSteps": progress_payload["totalSteps"] if progress_payload else len(RUN_STEP_ORDER),
