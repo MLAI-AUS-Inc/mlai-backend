@@ -1153,17 +1153,22 @@ def _basiq_token(*, scope: str, user_id: str = "") -> dict[str, Any]:
     return response.json()
 
 
+BASIQ_CONSENT_PENDING_KEY = "consent_pending"
+
+
 def _build_basiq_consent_url(request, *, next_url: str, organization: Optional[Organization]) -> str:
-    existing_connection = (
-        ExternalServiceConnection.objects.filter(
+    # A row awaiting its first consent is kept as DISCONNECTED (so it is never
+    # shown as connected); it still carries the Basiq user to reuse on retry.
+    existing_connection = next((
+        row for row in ExternalServiceConnection.objects.filter(
             user=request.user,
             provider=ExternalServiceProvider.BANK_FEED,
         )
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
         .exclude(external_account_id="")
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+        .order_by("-updated_at", "-id")[:20]
+        if row.status != ExternalServiceConnectionStatus.DISCONNECTED
+        or (row.provider_metadata or {}).get(BASIQ_CONSENT_PENDING_KEY)
+    ), None)
     basiq_user = {}
     basiq_user_id = str(existing_connection.external_account_id).strip() if existing_connection else ""
 
@@ -1212,6 +1217,17 @@ def _build_basiq_consent_url(request, *, next_url: str, organization: Optional[O
             "consent_action": "connect" if existing_connection else "create",
         }
     )
+    # Never show the feed as connected before the founder consents at Basiq:
+    # an already working feed keeps its status, a new one waits disconnected
+    # until the consent callback marks it syncing or connected.
+    current = ExternalServiceConnection.objects.filter(
+        user=request.user, provider=ExternalServiceProvider.BANK_FEED,
+        organization=organization, external_account_id=basiq_user_id,
+    ).order_by("id").first()
+    working = current is not None and current.status in {
+        ExternalServiceConnectionStatus.CONNECTED, ExternalServiceConnectionStatus.SYNCING,
+    } and not (current.provider_metadata or {}).get(BASIQ_CONSENT_PENDING_KEY)
+    provider_metadata[BASIQ_CONSENT_PENDING_KEY] = not working
     _upsert_connection(
         user=request.user,
         provider=ExternalServiceProvider.BANK_FEED,
@@ -1223,7 +1239,7 @@ def _build_basiq_consent_url(request, *, next_url: str, organization: Optional[O
         scopes=["CLIENT_ACCESS"],
         external_account_id=basiq_user_id,
         account_label="Basiq bank feed",
-        status=ExternalServiceConnectionStatus.SYNCING,
+        status=current.status if working else ExternalServiceConnectionStatus.DISCONNECTED,
         provider_metadata=provider_metadata,
     )
 
@@ -2023,6 +2039,7 @@ def complete_oauth_callback(request, provider: str) -> str:
         if connection:
             metadata = dict(connection.provider_metadata or {})
             metadata["job_ids"] = job_ids
+            metadata[BASIQ_CONSENT_PENDING_KEY] = False
             connection.provider_metadata = metadata
             connection.status = ExternalServiceConnectionStatus.SYNCING if job_ids else ExternalServiceConnectionStatus.CONNECTED
             connection.last_error = ""

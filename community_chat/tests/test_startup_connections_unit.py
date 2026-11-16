@@ -344,3 +344,60 @@ class ExpiredCredentialTests(SimpleTestCase):
         self.assertEqual(source["status"], "needs_reauth")
         self.assertEqual(source["warning"], gmail.GMAIL_REVOKED_WARNING)
         self.assertEqual(prefs.source_capabilities(source)["enabled"], False)
+
+
+@override_settings(BASIQ_API_BASE_URL="https://basiq.example", BASIQ_CONSENT_UI_URL="https://consent.basiq.example")
+class BankFeedConsentTests(SimpleTestCase):
+    """A bank feed is not shown as connected until the founder consents at Basiq."""
+
+    def start(self, rows):
+        from integrations.services import external_connectors as external
+        request = Obj(user=Obj(pk=7, id=7, email="founder@example.test"))
+        organization = Obj(pk=9, id=9)
+        with patch.object(external, "_basiq_token", return_value={"access_token": "synthetic"}), \
+                patch.object(external.requests, "post") as post, \
+                patch.object(external, "_save_state", return_value="state"), \
+                patch.object(external.ExternalServiceConnection, "objects") as manager, \
+                patch.object(external, "_upsert_connection") as upsert:
+            post.return_value.json.return_value = {"id": "basiq-user"}
+            manager.filter.return_value.exclude.return_value.order_by.return_value.__getitem__.return_value = rows
+            manager.filter.return_value.order_by.return_value.first.return_value = rows[0] if rows else None
+            url = external._build_basiq_consent_url(request, next_url="https://chat.example", organization=organization)
+        return url, upsert.call_args.kwargs
+
+    def test_first_consent_waits_disconnected(self):
+        url, saved = self.start([])
+        self.assertTrue(url.startswith("https://consent.basiq.example?"))
+        self.assertEqual(saved["status"], "disconnected")
+        self.assertTrue(saved["provider_metadata"]["consent_pending"])
+
+    def test_abandoned_consent_reuses_basiq_user_and_stays_pending(self):
+        pending = Obj(status="disconnected", external_account_id="basiq-user", provider_metadata={"consent_pending": True, "basiq_user": {"id": "basiq-user"}})
+        url, saved = self.start([pending])
+        self.assertIn("action=connect", url)
+        self.assertEqual(saved["external_account_id"], "basiq-user")
+        self.assertEqual(saved["status"], "disconnected")
+
+    def test_reconsent_keeps_a_working_feed_connected(self):
+        working = Obj(status="connected", external_account_id="basiq-user", provider_metadata={})
+        _url, saved = self.start([working])
+        self.assertEqual(saved["status"], "connected")
+        self.assertFalse(saved["provider_metadata"]["consent_pending"])
+
+    def test_consent_callback_clears_the_pending_marker(self):
+        from integrations.services import external_connectors as external
+        class Session(dict):
+            modified = False
+        request = Obj(user=Obj(pk=7, id=7), session=Session(), GET={})
+        state = external._save_state(request, "bank_feed", "https://chat.example/my-startup/connections?company_id=" + COMPANY,
+            {"organization_id": 9, "basiq_user_id": "basiq-user"})
+        from django.test import RequestFactory
+        callback = RequestFactory().get("/cb", {"state": state})
+        callback.session, callback.user = Session(), request.user
+        record = Obj(provider_metadata={"consent_pending": True}, status="disconnected", last_error="", save=MagicMock())
+        with patch.object(external.Organization, "objects") as orgs, patch.object(external.ExternalServiceConnection, "objects") as rows:
+            orgs.filter.return_value.first.return_value = Obj(pk=9, id=9)
+            rows.filter.return_value.first.return_value = record
+            external.complete_oauth_callback(callback, "bank_feed")
+        self.assertEqual(record.status, "connected")
+        self.assertFalse(record.provider_metadata["consent_pending"])
