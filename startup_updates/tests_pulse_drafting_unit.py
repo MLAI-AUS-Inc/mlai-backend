@@ -64,6 +64,11 @@ class FinancialWindowTests(SimpleTestCase):
         window = services.startup_update_run_financial_window(self.run_request(now))
         self.assertEqual(window, {"financial_start_date": date(2026, 11, 1), "financial_end_date": date(2026, 11, 1)})
 
+    def test_unknown_stored_timezone_falls_back_instead_of_failing(self):
+        window = services.startup_update_run_financial_window({"target_month": "2026-10-01",
+            "reporting_timezone": "Mars/Olympus_Mons", "narrative_period": {"end": "2026-11-01T00:00:00+11:00"}})
+        self.assertEqual(window, {"financial_start_date": date(2026, 10, 1), "financial_end_date": date(2026, 10, 31)})
+
     def test_window_ends_at_the_runs_frozen_cutoff_in_its_timezone(self):
         window = services.startup_update_run_financial_window(self.run_request(utc(2026, 11, 16, 8)))
         self.assertEqual(window["financial_end_date"], date(2026, 11, 16))
@@ -249,10 +254,10 @@ class StripePagedSyncTests(SimpleTestCase):
 class PreflightPartialDraftTests(SimpleTestCase):
     """The source check opens for the tools that work when asked to skip the rest."""
 
-    def post(self, *, skip, checks):
+    def post(self, *, skip, checks, sources=("gmail", "slack"), sync=None):
         from startup_updates import api_views
         from startup_updates.preflight import SourcesNotReady
-        saved = {"input_sources": ["gmail", "slack"], "current_month": "2026-11-01", "target_month": "2026-11-01",
+        saved = {"input_sources": list(sources), "current_month": "2026-11-01", "target_month": "2026-11-01",
             "reporting_timezone": "Australia/Melbourne", "source_preflight_version": 1,
             "narrative_period": {"start": "2026-11-01T00:00:00+11:00", "end": "2026-11-16T19:00:00+11:00"}}
         run = Obj(pk=1, run_id="r1", status="running", run_request=dict(saved), result={})
@@ -260,13 +265,15 @@ class PreflightPartialDraftTests(SimpleTestCase):
         rows = MagicMock()
         rows.select_for_update.return_value.get.return_value = locked
         def fail(**kwargs):
+            if all(check["status"] == "ready" for check in checks):
+                return checks
             raise SourcesNotReady({"sourceChecks": checks})
         request = Obj(data={"skip_unavailable": True} if skip else {}, headers={})
         with patch.object(api_views, "_get_run_or_404", return_value=run), patch.object(
                 api_views, "_get_org_and_binding_for_run", return_value=(Obj(pk=4), Obj(user=Obj(pk=7)), None, None)), patch(
                 "integrations.services.source_accounts.report_account_scope", return_value=nullcontext()), patch(
                 "startup_updates.preflight.require_source_preflight", side_effect=fail), patch(
-                "vibe_raising.views._sync_selected_connector_sources_for_draft", return_value={}), patch(
+                "vibe_raising.views._sync_selected_connector_sources_for_draft", side_effect=sync or (lambda *a, **k: {})), patch(
                 "startup_updates.services.refresh_startup_update_run_source_context") as refresh, patch(
                 "startup_updates.execution.validate_execution"), patch.object(
                 api_views.ContentFactoryRun, "objects", rows), patch.object(
@@ -298,6 +305,31 @@ class PreflightPartialDraftTests(SimpleTestCase):
             {"provider": "slack", "status": "needs_reconnect"}])
         self.assertFalse(response.data["ready"])
         self.assertTrue(response.data["nothingUsable"])
+        refresh.assert_not_called()
+
+    def test_skipping_linear_keeps_xeros_preparation_warnings(self):
+        from integrations.services.external_connectors import ConnectorReconnectRequired
+        calls = []
+        def sync(user, sources, **kwargs):
+            calls.append(list(sources))
+            if "linear" in sources:
+                raise ConnectorReconnectRequired(Obj(pk=3, provider="linear", updated_at=None), "Reconnect Linear.")
+            return {"xero": ["Xero sync failed before draft generation."]} if "xero" in sources else {}
+        checks = [{"provider": "gmail", "status": "ready"}, {"provider": "linear", "status": "ready"},
+            {"provider": "xero", "status": "ready"}]
+        response, locked, refresh = self.post(skip=True, checks=checks, sources=("gmail", "linear", "xero"), sync=sync)
+        self.assertEqual(calls, [["linear"], ["gmail", "xero"]])
+        self.assertEqual(set(locked.run_request["skipped_sources"]), {"linear", "xero"})
+        self.assertEqual(refresh.call_args.kwargs["input_sources"], ["gmail"])
+        self.assertTrue(response.data["ready"])
+
+    def test_documents_still_processing_are_not_reported_as_nothing_to_read(self):
+        response, _, refresh = self.post(skip=True, checks=[{"provider": "gmail", "status": "ready"},
+            {"provider": "slack", "status": "needs_reconnect"},
+            {"provider": "manual_documents", "status": "needs_input"}])
+        self.assertFalse(response.data["ready"])
+        self.assertFalse(response.data["nothingUsable"])
+        self.assertTrue(response.data["inputNotReady"])
         refresh.assert_not_called()
 
     def test_tools_lost_after_refresh_are_not_reported_as_pending(self):

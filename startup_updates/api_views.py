@@ -4743,8 +4743,8 @@ class StartupUpdateSourcePreflightView(APIView):
 
     @_run_accounts_scoped
     def post(self, request, run_id):
-        from startup_updates.preflight import (require_source_preflight, SourcesNotReady, apply_xero_cooldown,
-            source_failure_check, skip_failed_checks)
+        from startup_updates.preflight import (require_source_preflight, SourcesNotReady, UNSKIPPABLE_SOURCES,
+            apply_xero_cooldown, source_failure_check, skip_failed_checks)
         from startup_updates.activity_scope import discover_resource_page
         from startup_updates.services import refresh_startup_update_run_source_context, startup_update_run_financial_window
         run = _get_run_or_404(run_id)
@@ -4770,9 +4770,13 @@ class StartupUpdateSourcePreflightView(APIView):
                 locked.result = {**(locked.result or {}), "source_preflight": {
                     "checks": checks, "ready": False, "checked_at": timezone.now().isoformat()}}
                 locked.save(update_fields=["run_request", "result", "updated_at"])
-            # After a skip request a closed barrier means nothing usable is left.
+            # After a skip request the barrier closes either because nothing usable
+            # is left, or because the founder's own notes or documents are not
+            # ready yet (those are never skipped, so the worker waits for them).
+            input_not_ready = any(c.get("status") != "ready" and c.get("provider") in UNSKIPPABLE_SOURCES
+                and c.get("provider") not in skipped for c in checks)
             return Response({"ready": False, "checks": checks, "skippedSources": summary(),
-                "nothingUsable": skip})
+                "nothingUsable": skip and not input_not_ready, "inputNotReady": input_not_ready})
         def skip_or_fail(checks):
             """Return None to continue with the remaining tools, else the closed barrier."""
             if skip and skip_failed_checks(checks, skipped):
@@ -4831,19 +4835,25 @@ class StartupUpdateSourcePreflightView(APIView):
             # All selected connections have passed. Only now perform the
             # existing period-specific financial collection, outside row locks.
             from vibe_raising.views import _sync_selected_connector_sources_for_draft
-            try:
-                warnings = _sync_selected_connector_sources_for_draft(binding.user, reading(),
-                    organization=organization, automatic_scope=bool(saved.get("automatic_source_scope_requested")))
-            except (ConnectorOAuthError, ConnectorRateLimitError, requests.RequestException) as exc:
-                # Linear is the only preparation branch that raises these;
-                # Xero returns its failures in the warnings mapping.
-                logger.warning("Pulse source preparation failed", extra={"run_id": run.run_id, "provider": "linear"})
-                checks = [{**c, **source_failure_check("linear", exc)}
-                    if c["provider"] == "linear" else c for c in checks]
-                closed = skip_or_fail(checks)
-                if closed is not None:
-                    return closed
-                warnings = {}
+            automatic = bool(saved.get("automatic_source_scope_requested"))
+            warnings = {}
+            # Linear is the only preparation branch that raises; it runs on its
+            # own so skipping it never drops Xero's warnings from the same pass.
+            if "linear" in reading():
+                try:
+                    warnings.update(_sync_selected_connector_sources_for_draft(binding.user, ["linear"],
+                        organization=organization, automatic_scope=automatic))
+                except (ConnectorOAuthError, ConnectorRateLimitError, requests.RequestException) as exc:
+                    logger.warning("Pulse source preparation failed", extra={"run_id": run.run_id, "provider": "linear"})
+                    checks = [{**c, **source_failure_check("linear", exc)}
+                        if c["provider"] == "linear" else c for c in checks]
+                    closed = skip_or_fail(checks)
+                    if closed is not None:
+                        return closed
+            # Xero returns its failures in the warnings mapping.
+            warnings.update(_sync_selected_connector_sources_for_draft(binding.user,
+                [source for source in reading() if source != "linear"],
+                organization=organization, automatic_scope=automatic))
             if any(warnings.values()):
                 checks = apply_xero_cooldown([
                     {**c, "status": "temporarily_unavailable", "message": "This source could not refresh. Check it before continuing."}
@@ -4901,7 +4911,8 @@ class StartupUpdateSourcePreflightView(APIView):
                 final.save(update_fields=["run_request", "result", "updated_at"])
         remaining = [check for check in checks if check.get("provider") not in skipped]
         return Response({"ready": complete, "pending": not complete and bool(remaining) and all(c.get("status") == "ready" for c in remaining),
-            "checks": checks, "skippedSources": summary(), "nothingUsable": not remaining})
+            "checks": checks, "skippedSources": summary(), "nothingUsable": not remaining,
+            "inputNotReady": any(c.get("status") != "ready" and c.get("provider") in UNSKIPPABLE_SOURCES for c in remaining)})
 
 
 class StartupUpdateExecutionView(APIView):
