@@ -1,5 +1,7 @@
 """Invites, blasts and automatic reminders: the rules and Luma-style layouts.
 
+The invite's HTML lives in ``crm/email_layouts.py``.
+
 An invite asks people who haven't registered to join an event: it is a
 marketing email, tied to one event, and it leaves out everyone already on that
 event's guest list or already invited to it. A blast tells the guest list
@@ -190,6 +192,18 @@ def tracked_event_url(event, *, campaign: str) -> str:
     return _safe_url(urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)))
 
 
+def shared_event_url(event) -> str:
+    """The event link people pass on from the Share buttons, marked as shared from an email."""
+
+    url = str(getattr(event, "url", "") or "").strip()
+    if not url.startswith("https://"):
+        return ""
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query))
+    query.update({"utm_source": "mlai-crm", "utm_medium": "share"})
+    return _safe_url(urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)))
+
+
 def _md(text) -> str:
     """Event text inside Markdown: no template braces, no HTML, no link syntax."""
 
@@ -234,11 +248,13 @@ def layout(blast, body: str, *, campaign: str) -> str:
     if event is None or kind not in (INVITE, BLAST, REMINDER):
         return body
     if kind == INVITE:
-        # Cover and event first, then the host's message, then Register again.
-        card = event_card(event, button="Register", campaign=campaign, with_cover=True)
-        url = tracked_event_url(event, campaign=campaign)
-        closing = f"\n\n**[Register →]({url})**" if url else ""
-        return f"{card}\n\n---\n\n{body}{closing}"
+        # Like a Luma invite: host, title, date and place, the message, then Accept / View.
+        from . import email_layouts
+        return email_layouts.invite(
+            event, body,
+            event_url=tracked_event_url(event, campaign=campaign),
+            share_url=shared_event_url(event),
+        )
     card = event_card(event, button="View event", campaign=campaign, with_cover=False)
     return f"{body}\n\n---\n\n{card}"
 

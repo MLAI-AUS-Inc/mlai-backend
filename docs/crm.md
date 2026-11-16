@@ -565,6 +565,7 @@ Steps B4 and B5 of `mlai-chat/docs/mlai/CONTACTS_UI_PLAN_2026-10-23.md`. Domain 
 | `LISTMONK_BASE_URL` | listmonk on the `mlai-shared` network, e.g. `http://listmonk:9000`. Never hard-coded |
 | `LISTMONK_API_USER`, `LISTMONK_API_TOKEN` | The listmonk API user, sent as HTTP Basic auth. Email is `not_configured` without all three |
 | `LISTMONK_TEMPLATE_ID` | The MLAI campaign template's id; blank uses listmonk's default |
+| `CRM_EMAIL_ASSET_BASE_URL` | Where invite emails load the MLAI logo and icons from; defaults to `<DEFAULT_BACKEND_URL>/static/crm/email` |
 | `CRM_SENDING_DOMAINS` | Comma-separated `domain:route` pairs senders may use; route is `resend` or `google_relay` (default `news.mlai.au:resend`). Bad entries are logged and skipped |
 | `CRM_BLAST_DISPATCH_INTERVAL_SECONDS` | Dispatcher pass interval (default 60) |
 | `CRM_LISTMONK_SYNC_INTERVAL_SECONDS` | Feedback sync interval (default 300) |
@@ -573,7 +574,7 @@ Steps B4 and B5 of `mlai-chat/docs/mlai/CONTACTS_UI_PLAN_2026-10-23.md`. Domain 
 
 - **Version and network:** v6.2.x, pinned by digest. listmonk joins the `mlai-shared` network as `listmonk`; mlai-backend's API container (test sends) and scheduler container (both runners) must be on that network too.
 - **API user** for mlai-backend with permissions to manage lists, subscribers and campaigns, send test campaigns, and run **SQL subscriber queries** (`subscribers:sql_query`). The feedback sync filters subscribers with SQL expressions; without that permission the sync fails, which stops the shared scheduler until it is fixed.
-- **Template:** one MLAI-branded campaign template (`LISTMONK_TEMPLATE_ID`) with the sender identity and listmonk's unsubscribe link in the footer.
+- **Template:** one MLAI-branded campaign template (`LISTMONK_TEMPLATE_ID`) with the sender identity and listmonk's unsubscribe link in the footer. The source is `ops/listmonk/templates/mlai-campaign.html`: a plain white, Luma-style shell that invites (`crm/email_layouts.py`) are designed to sit in. Paste it over the template in listmonk to change it.
 - **SMTP:** one SMTP server per sending domain, tagged with that domain (v6.2 per-domain routing). The campaign's From address picks the server, so never add two servers for one domain. Google Workspace domains use `smtp-relay.gmail.com`; Resend domains send from the domain itself, with Resend's return path on `send.` keeping SPF aligned under relaxed DMARC.
 - **Privacy settings:** individual subscriber tracking on (per-person opens and clicks), `List-Unsubscribe` header with one-click unsubscribe, blocklisting allowed.
 - **Bounces:** bounce processing on, with the action "blocklist" for hard bounces.

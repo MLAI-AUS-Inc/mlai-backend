@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from django.test import SimpleTestCase, override_settings
 
-from crm import message_types, reminders, roo_draft
+from crm import blast_email, message_types, reminders, roo_draft
 from crm.blasts import BlastError, check_channel_rules
 from crm.models import Blast, CrmEvent
 
@@ -54,14 +54,53 @@ class RulesTests(SimpleTestCase):
 
 
 class LayoutTests(SimpleTestCase):
-    def test_invite_leads_with_the_event_and_ends_on_register(self):
+    def test_invite_is_laid_out_like_a_luma_invite(self):
         body = message_types.layout(blast("invite", "marketing"), "Come along.", campaign="crm-blast-1")
-        self.assertTrue(body.startswith("![AI Builders Night](https://images.lumacdn.com/c.png)"))
-        self.assertIn("### AI Builders Night", body)
-        self.assertIn("Fri 20 Nov, 6pm · Stone & Chalk, 121 King St, Melbourne", body)
-        self.assertEqual(body.count("Register →"), 2)
-        self.assertIn("utm_campaign=crm-blast-1", body)
-        self.assertLess(body.index("Come along."), body.rindex("Register →"))
+        self.assertTrue(body.startswith("<table"))
+        for text in ("You&rsquo;re invited to", "AI Builders Night", ">NOV<", ">20<", "Friday, 20 November",
+                     "6:00 PM AEDT", "Stone &amp; Chalk, 121 King St, Melbourne", "Accept Invite", "View Event",
+                     "Can&rsquo;t make it?", "Share with friends", "utm_campaign=crm-blast-1"):
+            self.assertIn(text, body)
+        # The message sits between two raw HTML blocks as ordinary Markdown.
+        self.assertIn("\n\nCome along.\n\n</td></tr>", body)
+        self.assertLess(body.index("Come along."), body.index("Accept Invite"))
+        before, _, after = body.partition("\n\nCome along.\n\n")
+        self.assertNotIn("\n\n", before)
+        self.assertNotIn("\n\n", after)
+
+    def test_invite_shows_the_end_time_and_a_hidden_or_online_place(self):
+        item = blast("invite", "marketing")
+        item.event.end_at = datetime(2026, 11, 20, 21, 0, tzinfo=MELBOURNE)
+        item.event.raw_payload = {"geo_address_visibility": "guests-only",
+                                  "geo_address_json": {"address": "Secret HQ", "city_state": "Melbourne, VIC"}}
+        body = message_types.layout(item, "Hi", campaign="c")
+        self.assertIn("6:00 PM – 9:00 PM AEDT", body)
+        self.assertIn("Register to see location", body)
+        self.assertNotIn("Secret HQ", body)
+        item.event.raw_payload = {"meeting_url": "https://zoom.us/j/1"}
+        body = message_types.layout(item, "Hi", campaign="c")
+        self.assertIn("Online event", body)
+        self.assertNotIn("zoom.us", body)
+
+    def test_invite_without_a_public_link_has_no_buttons_or_sharing(self):
+        item = blast("invite", "marketing")
+        item.event.url = ""
+        body = message_types.layout(item, "Hi", campaign="c")
+        self.assertNotIn("Accept Invite", body)
+        self.assertNotIn("Share with friends", body)
+
+    def test_invite_buttons_are_tracked_and_share_links_are_not(self):
+        body = message_types.layout(blast("invite", "marketing"), "See [the agenda](https://mlai.au/a).", campaign="c")
+        tracked = blast_email.track_links(body)
+        self.assertIn("utm_campaign=c@TrackLink", tracked)
+        self.assertIn("(https://mlai.au/a@TrackLink)", tracked)
+        self.assertNotIn("facebook.com/sharer/sharer.php?u=https%3A%2F%2Fluma.com%2Fabc123%3Futm_source%3Dmlai-crm%26utm_medium%3Dshare@TrackLink", tracked)
+        self.assertEqual(tracked.count("data-notrack href"), 4)
+        self.assertTrue(all("@TrackLink" not in part.split('"')[1] for part in tracked.split("data-notrack href=")[1:]))
+        urls = blast_email.tracked_urls(tracked)
+        self.assertIn("https://mlai.au/a", urls)
+        self.assertTrue(any("utm_campaign=c" in url and "&amp;" not in url for url in urls))
+        self.assertFalse(any("facebook.com" in url for url in urls))
 
     def test_blast_puts_the_message_first_and_a_compact_card_below(self):
         body = message_types.layout(blast("blast", "event_update"), "Doors open at 5:45.", campaign="c")
@@ -75,6 +114,13 @@ class LayoutTests(SimpleTestCase):
         body = message_types.layout(item, "Hi", campaign="c")
         self.assertNotIn("{{", body)
         self.assertNotIn("<script>", body)
+        invite = blast("invite", "marketing")
+        invite.event.name = "{{ .Subscriber.Email }} <script>"
+        invite.event.raw_payload = {"geo_address_json": {"address": "{{ x }} <b>", "full_address": "a\\n\\nb"}}
+        body = message_types.layout(invite, "Hi", campaign="c")
+        self.assertNotIn("{{", body)
+        self.assertNotIn("<script>", body)
+        self.assertNotIn("<b>", body)
 
     def test_general_marketing_is_left_alone(self):
         self.assertEqual(message_types.layout(blast("", "marketing"), "Hello", campaign="c"), "Hello")
