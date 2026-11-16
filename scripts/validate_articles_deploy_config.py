@@ -60,8 +60,9 @@ FLAG_KEYS = (
     # host. Empty keeps the host value; no default changes. The stuck-founder
     # alert, the three GitHub linking kill switches below it, the stand-in
     # preview approval switch, the ready-on-merge and no-workflow kill
-    # switches, ARTICLES_SOURCE_FOLLOW_ENABLED and
-    # ARTICLES_PROOF_CARRY_FORWARD_ENABLED are on by default.
+    # switches, ARTICLES_SOURCE_FOLLOW_ENABLED,
+    # ARTICLES_PROOF_CARRY_FORWARD_ENABLED and
+    # ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED are on by default.
     "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED",
     "ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED",
     "MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED",
@@ -86,6 +87,7 @@ FLAG_KEYS = (
     "ARTICLES_SOURCE_REPIN_ENABLED",
     "ARTICLES_SOURCE_FOLLOW_ENABLED",
     "ARTICLES_PROOF_CARRY_FORWARD_ENABLED",
+    "ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED",
     "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED",
     "ARTICLES_MERGE_WORKER_ENABLED",
     "ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED",
@@ -140,6 +142,8 @@ COUNT_KEYS = (
     "ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP",
     "ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD",
     "CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS",
+    # Setup runs per website preparation (default 3, 0 = no cap).
+    "ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT",
 )
 # 0 is refused: the sweep reads it as 1, and a per-IP sign-in limit of 0 removes
 # that ceiling altogether. Raise a limit for a large event instead.

@@ -558,6 +558,7 @@ jobs:
           content_factory.tests_stand_in_preview_approval_unit \
           content_factory.tests_website_live_status \
           content_factory.tests_website_source_carry \
+          content_factory.tests_prepare_setup_cap \
           content_factory.tests_article_flags \
           content_factory.tests_cancellation_reason \
           content_factory.tests_founder_funnel_report \
@@ -1614,6 +1615,8 @@ jobs:
         ARTICLES_SOURCE_REPIN_ENABLED: ${{ vars.ARTICLES_SOURCE_REPIN_ENABLED || '' }}
         ARTICLES_SOURCE_FOLLOW_ENABLED: ${{ vars.ARTICLES_SOURCE_FOLLOW_ENABLED || '' }}
         ARTICLES_PROOF_CARRY_FORWARD_ENABLED: ${{ vars.ARTICLES_PROOF_CARRY_FORWARD_ENABLED || '' }}
+        ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED: ${{ vars.ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED || '' }}
+        ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT: ${{ vars.ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT || '' }}
         ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED: ${{ vars.ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED || '' }}
         ARTICLES_MERGE_WORKER_ENABLED: ${{ vars.ARTICLES_MERGE_WORKER_ENABLED || '' }}
         ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED: ${{ vars.ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED || '' }}
