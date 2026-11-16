@@ -88,8 +88,8 @@ class UnifiedOAuthTests(SimpleTestCase):
         intent = oauth.create_intent(self.query)
         request = Obj(user=Obj(pk=7), auth=Obj(pk="session", user_id=7))
         company = Obj(pk=COMPANY_ID, name="Synthetic startup")
-        with patch.object(VibeRaisingCompany.objects, "filter") as companies:
-            companies.return_value.order_by.return_value = [company]
+        with patch.object(VibeRaisingCompany.objects, "filter") as companies, patch("community_chat.startups.agent_connections.has_community_access", return_value=True):
+            companies.side_effect = lambda **query: Obj(order_by=lambda *fields: [] if query.get("organization__isnull") else [company])
             for error in (PermissionDenied("Native device unavailable."), ValidationError("Native relay unavailable.")):
                 with self.subTest(error=type(error).__name__), patch.object(community, "consent_channels", side_effect=error):
                     response = AgentAuthorizationView().get(request, intent["requestId"])
