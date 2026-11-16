@@ -11,7 +11,7 @@ from integrations import http_client as requests
 logger = logging.getLogger(__name__)
 
 VALLEY_WORKER_UNAVAILABLE_MESSAGE = (
-    "Valley has no worker ready to start your update. Your update is saved; "
+    "MLAI is not ready to start drafting right now. Your update is saved; "
     "please try again shortly."
 )
 
