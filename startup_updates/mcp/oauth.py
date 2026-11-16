@@ -184,7 +184,11 @@ def create_intent(query):
         raise OAuthError("invalid_request", "The callback URL does not match the registered client.")
     if query.get("response_type") != "code":
         raise OAuthError("unsupported_response_type")
+    # Some hosts (Codex before rust-v0.142.0) send no resource at authorize.
+    # Default to the primary server; a value that is present but unknown fails.
     resource = normal_resource(query.get("resource"))
+    if query.get("resource") in (None, ""):
+        resource = mlai_url() if getattr(settings, "MLAI_MCP_ENABLED", False) else mcp_url()
     supported = resource_scopes(resource)
     if not supported:
         raise OAuthError("invalid_target", "Choose the MLAI or Valley MCP resource.")

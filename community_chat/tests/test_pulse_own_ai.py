@@ -416,6 +416,26 @@ class ConnectionLifetimeTests(SimpleTestCase):
             self.valid_session.return_value = False
             self.assertEqual(oauth.valid_grant(later["id"]).user, self.user)
 
+    def test_authorize_without_resource_defaults_to_the_primary_server(self):
+        verifier = "v" * 43
+        query = {"client_id": self.client["client_id"], "redirect_uri": self.client["redirect_uris"][0], "response_type": "code",
+            "scope": " ".join(PULSE), "state": "state", "code_challenge_method": "S256",
+            "code_challenge": base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()}
+        intent = oauth.create_intent(query)
+        self.assertEqual(intent["resource"], config.mlai_url())
+        url = oauth.approve_intent(intent["requestId"], user=self.user, session=Obj(pk="session", user_id=7),
+            company_id=COMPANY_ID, approve=True, scopes=PULSE)
+        tokens = oauth.token_exchange({"grant_type": "authorization_code", "code": parse_qs(urlsplit(url).query)["code"][0],
+            "client_id": self.client["client_id"], "redirect_uri": self.client["redirect_uris"][0], "code_verifier": verifier})
+        self.assertEqual(oauth.authenticate_token(tokens["access_token"], resource=config.mlai_url()).user, self.user)
+        with override_settings(MLAI_MCP_ENABLED=False):
+            self.assertEqual(oauth.create_intent(query)["resource"], config.mcp_url())
+        # A resource that is sent but unknown is still refused.
+        for wrong in ("https://attacker.test/mcp", " "):
+            with self.subTest(wrong=wrong), self.assertRaises(oauth.OAuthError) as caught:
+                oauth.create_intent({**query, "resource": wrong})
+            self.assertEqual(caught.exception.error, "invalid_target")
+
     def test_community_and_personal_agent_grants_stay_bound_to_their_session(self):
         self.stored(id="community", scopes=["community:read", "startup:brief:read"])
         self.assertEqual(oauth.valid_grant("community").user, self.user)

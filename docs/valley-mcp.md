@@ -286,6 +286,9 @@ Applies to `/mcp/mlai` and `/mcp/valley` unless stated. No migration.
   refresh converts them, so a grant whose session was revoked before deploy is
   never revived. Grants with `community:` or `agent:` scopes are still checked
   against the approving account session and device.
+- **Authorize without `resource`.** A request with no `resource` (Codex before
+  rust-v0.142.0) defaults to `/mcp/mlai` when `MLAI_MCP_ENABLED`, otherwise
+  `/mcp/valley`. A `resource` that is present but unknown is still refused.
 - **Sliding expiry.** Each successful refresh moves the grant's expiry to now
   plus `MLAI_MCP_GRANT_IDLE_TTL_DAYS`. Personal-agent grants are excluded.
 - **Refresh.** `resource` may be omitted on the token endpoint and a trailing
