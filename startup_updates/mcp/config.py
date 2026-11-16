@@ -114,14 +114,32 @@ def client_catalog():
             config = base64.b64encode(json.dumps({"url": server_url}, separators=(",", ":")).encode()).decode()
             install = "https://cursor.com/en-US/install-mcp?" + urlencode({"name": brand, "config": config})
             method = "deeplink"
+        # Founder-facing steps: name the app and the buttons to press, and call
+        # the URL the "connection link" as Chat's own-AI panel does. No
+        # protocol words; the link itself is in "config".
         instructions = {
-            "chatgpt": ["Open ChatGPT Settings → Apps and add the MLAI connector using the server URL.", "Sign in to MLAI, select your startup and explicitly choose capabilities and community channels."],
-            "claude": ["Open Claude to add the prefilled Valley connector.", "If Claude asks for an OAuth client, choose Register automatically.", "Sign in to MLAI and choose the startup this agent can access."],
-            "cursor": ["Open Cursor to install the Valley MCP server.", "Use Cursor's Connect action to sign in to MLAI and choose your startup."],
-            "codex": ["In Codex, open Settings → MCP servers → Add server. Choose Streamable HTTP and enter the Valley server URL.", "Save, restart if requested, then choose Authenticate to sign in to MLAI and select your startup."],
+            "chatgpt": [
+                "Open ChatGPT, go to Settings, then Apps, and add a new app.",
+                "Paste the MLAI connection link.",
+                "Sign in to MLAI, choose your startup, then choose what ChatGPT can do and which community channels it can use.",
+            ],
+            "claude": [
+                "Open Claude. The Valley connector is filled in for you; choose Add.",
+                "If Claude asks how to register, choose Register automatically.",
+                "Sign in to MLAI and choose your startup.",
+            ],
+            "cursor": [
+                "Open Cursor and choose Install to add Valley.",
+                "Choose Connect next to Valley, then sign in to MLAI and choose your startup.",
+            ],
+            "codex": [
+                "Open Codex, go to Settings, and add a new connection.",
+                "If Codex asks for a connection type, choose Streamable HTTP, then paste the Valley connection link.",
+                "Save, restart Codex if it asks, then choose Authenticate to sign in to MLAI and choose your startup.",
+            ],
         }[key]
         if key == "codex" and install:
-            instructions = ["Open Valley's plugin listing and choose Install.", "Sign in to MLAI and choose the startup this agent can access."]
+            instructions = ["Open Valley's listing in Codex and choose Install.", "Sign in to MLAI and choose your startup."]
         instructions = [item.replace("Valley", brand) for item in instructions]
         rows.append({"id": key, "name": name, "installUrl": install, "setupUrl": setup,
             "method": method,

@@ -740,6 +740,20 @@ class ConnectionConfigurationTests(SimpleTestCase):
         self.assertIn("Streamable HTTP", " ".join(codex["instructions"]))
         self.assertNotIn("token", json.dumps(rows))
 
+    def test_client_steps_name_the_app_without_protocol_words(self):
+        for unified in (False, True):
+            with override_settings(MLAI_MCP_ENABLED=unified):
+                rows = config.client_catalog()
+            for row in rows:
+                steps = " ".join(row["instructions"])
+                self.assertIn(row["name"], steps)
+                self.assertIn("sign in to MLAI", steps.replace("Sign in", "sign in"))
+                for jargon in ("MCP", "server URL", "remote", "OAuth", "→"):
+                    self.assertNotIn(jargon, steps, (row["id"], jargon))
+                self.assertTrue(row["config"]["url"])
+            self.assertIn("connection link", " ".join(
+                next(item for item in rows if item["id"] == "codex")["instructions"]))
+
     def test_codex_reuses_legacy_chatgpt_listing_without_duplicate_option(self):
         listing = "https://chatgpt.com/plugins/approved-openai-plugin?open_in_app"
         with override_settings(VALLEY_MCP_CLIENT_INSTALL_URLS={"chatgpt": listing}):
