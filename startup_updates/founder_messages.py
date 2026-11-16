@@ -28,6 +28,8 @@ NO_FACTS = (
 _SAFE_PREFIXES = (
     "pulse_context_limit:",  # The chat app rewrites this one itself.
     "MLAI ",
+    "Connect ",
+    "Reconnect ",
     "Your draft is saved",
     "Your update is saved",
     "This run used an older source range",
