@@ -18,6 +18,7 @@ NOTHING_TO_READ = (
     "MLAI could not read any of your tools for this month. "
     "Reconnect a tool or add notes or a document, then try again."
 )
+ADD_NOTES_OR_DOCUMENT = "Add notes or choose a document for this update, then try again."
 NO_FACTS = (
     "MLAI read your tools but found nothing to report for this month. "
     "Add notes or a document, then try again."

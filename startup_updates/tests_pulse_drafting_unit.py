@@ -406,3 +406,50 @@ class DraftPayloadShapeTests(SimpleTestCase):
         self.assertIn('"sourceWarningList": _top_level_source_warnings(latest_run)', source)
         self.assertNotIn('"sourceWarnings": _top_level_source_warnings', source)
         self.assertNotIn('"sourceWarnings": [', inspect.getsource(views._precheck_generation_sources))
+
+
+class CheckedStartTests(SimpleTestCase):
+    """A checked start from the chat app refuses only when nothing could be read."""
+
+    def precheck(self, checks, *, manual_document_ids=(), manual_summary=""):
+        from startup_updates.preflight import SourcesNotReady
+        from vibe_raising import views
+        with patch("startup_updates.preflight.require_source_preflight",
+                side_effect=SourcesNotReady({"sourceChecks": checks})):
+            return views._precheck_generation_sources(Obj(pk=1), Obj(pk=2), [c["provider"] for c in checks],
+                manual_document_ids=list(manual_document_ids), manual_summary=manual_summary)
+
+    def test_documents_still_processing_do_not_refuse(self):
+        checks = [{"provider": "manual_documents", "status": "needs_input"},
+            {"provider": "slack", "status": "needs_reconnect"}]
+        returned, refusal = self.precheck(checks, manual_document_ids=["7"])
+        self.assertIsNone(refusal)
+        self.assertEqual(returned, checks)
+
+    def test_missing_notes_name_the_notes_not_the_tools(self):
+        from startup_updates.founder_messages import ADD_NOTES_OR_DOCUMENT
+        _, refusal = self.precheck([{"provider": "manual_documents", "status": "needs_input"},
+            {"provider": "slack", "status": "needs_reconnect"}])
+        self.assertEqual(refusal.status_code, 409)
+        self.assertEqual(refusal.data["detail"], ADD_NOTES_OR_DOCUMENT)
+
+    def test_nothing_readable_refuses_with_the_tool_list(self):
+        from startup_updates.founder_messages import NOTHING_TO_READ
+        _, refusal = self.precheck([{"provider": "slack", "status": "needs_reconnect"}])
+        self.assertEqual(refusal.data["detail"], NOTHING_TO_READ)
+        self.assertEqual([w["provider"] for w in refusal.data["sourceWarningList"]], ["slack"])
+
+    def test_one_broken_tool_is_left_out_without_refusing(self):
+        _, refusal = self.precheck([{"provider": "gmail", "status": "ready"},
+            {"provider": "slack", "status": "needs_reconnect"}])
+        self.assertIsNone(refusal)
+
+
+class ServiceRunMonthTests(SimpleTestCase):
+    def test_service_run_without_a_month_keeps_the_current_month(self):
+        # Older Valley workers send no month; see StartupUpdateRunView.
+        import inspect
+        from startup_updates import api_views
+        source = inspect.getsource(api_views.StartupUpdateRunView.post)
+        self.assertNotIn("default_startup_update_target_month", source)
+        self.assertEqual(services.parse_startup_update_target_month(None, reference=date(2026, 12, 3)), date(2026, 12, 1))

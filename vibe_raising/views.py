@@ -1983,8 +1983,12 @@ def _build_status_payload(*, user, company, domain):
 
 
 def _precheck_generation_sources(user, organization, input_sources, *, manual_document_ids, manual_summary):
-    """Return (checks, refusal). The refusal is set only when nothing could be read."""
-    from startup_updates.founder_messages import NOTHING_TO_READ, SOURCES_NEED_ATTENTION
+    """Return (checks, refusal). The refusal is set only when nothing could be read.
+
+    Documents that are still processing never refuse a start: the worker waits
+    for them before drafting, as it did before the pre-check existed.
+    """
+    from startup_updates.founder_messages import ADD_NOTES_OR_DOCUMENT, NOTHING_TO_READ
     from startup_updates.preflight import (SourcesNotReady, UNSKIPPABLE_SOURCES, require_source_preflight,
         skip_failed_checks, skipped_source_entry)
     try:
@@ -1992,13 +1996,19 @@ def _precheck_generation_sources(user, organization, input_sources, *, manual_do
             manual_document_ids=manual_document_ids, manual_summary=manual_summary), None
     except SourcesNotReady as exc:
         checks = exc.detail["sourceChecks"]
+    blocked_input = any(c.get("status") != "ready" and c.get("provider") in UNSKIPPABLE_SOURCES for c in checks)
+    documents_processing = blocked_input and bool(manual_document_ids)
     skipped = {}
+    if documents_processing:
+        # The documents remain usable input once processed; the other tools
+        # only decide which ones the run leaves out.
+        skip_failed_checks(checks, skipped)
+        return checks, None
     if skip_failed_checks(checks, skipped):
         return checks, None
-    blocked_input = any(c.get("status") != "ready" and c.get("provider") in UNSKIPPABLE_SOURCES for c in checks)
     return checks, Response({
         "code": "startup_update_sources_unavailable",
-        "detail": SOURCES_NEED_ATTENTION if blocked_input else NOTHING_TO_READ,
+        "detail": ADD_NOTES_OR_DOCUMENT if blocked_input else NOTHING_TO_READ,
         "sourceChecks": checks,
         "sourceWarningList": [skipped_source_entry(c) for c in checks
             if c.get("status") != "ready" and c.get("provider") not in UNSKIPPABLE_SOURCES],
