@@ -317,7 +317,7 @@ class LumaConnectView(APIView):
             return error_response
         try:
             connect_luma_connection(request.user, api_key, company=_company_for_scope(request))
-        except ConnectorConfigurationError as exc:
+        except (ConnectorConfigurationError, ConnectorOAuthError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(serialize_source_status(request.user, organization=scope), status=status.HTTP_200_OK)
 
@@ -344,7 +344,7 @@ class HumanitixConnectView(APIView):
                 company=_company_for_scope(request),
                 account_label=str(request.data.get("accountLabel") or "").strip()[:255],
             )
-        except ConnectorConfigurationError as exc:
+        except (ConnectorConfigurationError, ConnectorOAuthError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(
             serialize_source_status(request.user, organization=scope),

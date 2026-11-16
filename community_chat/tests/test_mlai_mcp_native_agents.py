@@ -168,11 +168,8 @@ class NativeConsentBoundaryTests(SimpleTestCase):
             "refresh_token": old_refresh, "resource": config.mlai_url(),
         }
         with patch.object(oauth, "valid_grant", return_value=value):
-            with self.assertRaises(oauth.OAuthError) as caught:
-                oauth.token_exchange({**request, "scope": " ".join(sorted(DOT_SCOPES))})
-            self.assertEqual(caught.exception.error, "invalid_scope")
-            self.assertNotIn("spent", cache.get(oauth.key("refresh", old_refresh)))
-            refreshed = oauth.token_exchange(request)
+            # Asking for Dot scopes on refresh is ignored, never granted.
+            refreshed = oauth.token_exchange({**request, "scope": " ".join(sorted(DOT_SCOPES))})
         self.assertEqual(refreshed["scope"], "community:read")
         self.assertEqual(value.grant["scopes"], ["community:read"])
         self.assertNotIn("native_agent_grant_id", value.grant)

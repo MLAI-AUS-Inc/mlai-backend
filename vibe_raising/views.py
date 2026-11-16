@@ -454,16 +454,25 @@ def _serialize_binding_summary(binding):
 
 
 def _run_failure_message(run) -> str:
+    """One founder-safe sentence; the raw worker error stays on the run and in logs."""
+    from startup_updates.founder_messages import founder_failure_message
     fallback = "Draft generation failed. Please try again."
     if run is None:
         return fallback
     error_text = str(run.error or "").strip()
     if error_text:
-        return error_text
+        return founder_failure_message(error_text)
     for step in run.steps.order_by("display_order", "id"):
         if step.status == ContentFactoryStepStatus.FAILED and str(step.error or "").strip():
-            return str(step.error).strip()
+            return founder_failure_message(step.error)
     return fallback
+
+
+def _skipped_source_warning_texts(run):
+    """Tools left out of a run, as the legacy {provider: [text]} warning map."""
+    from startup_updates.preflight import run_skipped_sources
+    return {provider: [entry["message"]] for provider, entry in
+        run_skipped_sources(run.run_request, run.result).items() if entry.get("message")}
 
 
 def _serialize_run_summary(run):
@@ -499,6 +508,7 @@ def _serialize_run_summary(run):
         "sourceWarnings": merge_source_warnings(
             {key: value.get("warnings", []) for key, value in ((run.run_request or {}).get("external_context") or {}).items() if isinstance(value, dict)},
             (run.result or {}).get("source_warnings") or {},
+            _skipped_source_warning_texts(run),
         ),
         "createdAt": run.created_at.isoformat(),
         "updatedAt": run.updated_at.isoformat(),
@@ -561,7 +571,7 @@ def _valley_dispatch_failure_payload(run, dispatch_result) -> dict:
         "runId": run.run_id,
         "error": "valley_dispatch_failed",
         "retryable": True,
-        "message": VALLEY_WORKER_UNAVAILABLE_MESSAGE if worker_unavailable else "The update run was saved, but Valley could not be reached. Check Valley connectivity and retry.",
+        "message": VALLEY_WORKER_UNAVAILABLE_MESSAGE if worker_unavailable else "Your update is saved, but MLAI could not start drafting it. Please try again shortly.",
         "valleyDispatch": {
             "status": "failed",
             "failureKind": str(getattr(dispatch_result, "failure_kind", "") or "unknown"),
@@ -586,14 +596,17 @@ def _queued_valley_warning(run):
         if meta.get("last_dispatch_error_kind") == "worker_unavailable":
             from integrations.services.valley_harness import VALLEY_WORKER_UNAVAILABLE_MESSAGE
             return VALLEY_WORKER_UNAVAILABLE_MESSAGE
-        return "Your update is saved, but Valley could not start it. Please try again shortly."
+        return "Your update is saved, but MLAI could not start drafting it. Please try again shortly."
     if run.updated_at and run.updated_at <= timezone.now() - QUEUED_REDISPATCH_AFTER:
-        return "Your update is still queued. Valley has not started reading your sources yet. Your update is saved."
+        return "Your update is saved and waiting to start. MLAI has not started reading your tools yet."
     return None
 
 
-def _requested_target_month_from_request(request) -> date:
+def _requested_target_month_from_request(request, profile=None) -> date:
     raw_value = request.data.get("target_month") or request.data.get("targetMonth")
+    if raw_value in (None, ""):
+        from startup_updates.services import default_startup_update_target_month, founder_timezone_name
+        return default_startup_update_target_month(timezone_name=founder_timezone_name(profile))
     return parse_startup_update_target_month(raw_value)
 
 
@@ -1969,6 +1982,52 @@ def _build_status_payload(*, user, company, domain):
     }
 
 
+def _precheck_generation_sources(user, organization, input_sources, *, manual_document_ids, manual_summary):
+    """Return (checks, refusal). The refusal is set only when nothing could be read.
+
+    Documents that are still processing never refuse a start: the worker waits
+    for them before drafting, as it did before the pre-check existed.
+    """
+    from startup_updates.founder_messages import ADD_NOTES_OR_DOCUMENT, NOTHING_TO_READ
+    from startup_updates.preflight import (SourcesNotReady, UNSKIPPABLE_SOURCES, require_source_preflight,
+        skip_failed_checks, skipped_source_entry)
+    try:
+        return require_source_preflight(user=user, organization=organization, input_sources=input_sources,
+            manual_document_ids=manual_document_ids, manual_summary=manual_summary), None
+    except SourcesNotReady as exc:
+        checks = exc.detail["sourceChecks"]
+    blocked_input = any(c.get("status") != "ready" and c.get("provider") in UNSKIPPABLE_SOURCES for c in checks)
+    documents_processing = blocked_input and bool(manual_document_ids)
+    skipped = {}
+    if documents_processing:
+        # The documents remain usable input once processed; the other tools
+        # only decide which ones the run leaves out.
+        skip_failed_checks(checks, skipped)
+        return checks, None
+    if skip_failed_checks(checks, skipped):
+        return checks, None
+    return checks, Response({
+        "code": "startup_update_sources_unavailable",
+        "detail": ADD_NOTES_OR_DOCUMENT if blocked_input else NOTHING_TO_READ,
+        "sourceChecks": checks,
+        "sourceWarningList": [skipped_source_entry(c) for c in checks
+            if c.get("status") != "ready" and c.get("provider") not in UNSKIPPABLE_SOURCES],
+    }, status=status.HTTP_409_CONFLICT)
+
+
+def _top_level_source_warnings(run):
+    from startup_updates.founder_messages import run_source_warnings
+    from startup_updates.preflight import PROVIDERS as UPDATE_SOURCE_KEYS
+    if run is None:
+        return []
+    legacy = merge_source_warnings(
+        {key: value.get("warnings", []) for key, value in ((run.run_request or {}).get("external_context") or {}).items()
+            if isinstance(value, dict) and key in UPDATE_SOURCE_KEYS},
+        (run.result or {}).get("source_warnings") or {},
+    )
+    return run_source_warnings(run, legacy)
+
+
 def _build_email_draft_payload(
     *,
     request,
@@ -2117,6 +2176,10 @@ def _build_email_draft_payload(
         "stepStates": (run_payload or {}).get("stepStates", {}),
         "inputSources": (run_payload or {}).get("inputSources", []),
         "sourceChecks": (run_payload or {}).get("sourceChecks", []),
+        # Founder-safe list of tools this run left out or only partly read. Installed
+        # desktop builds read a top-level "sourceWarnings" as a dict of string lists,
+        # so the list ships under its own key.
+        "sourceWarningList": _top_level_source_warnings(latest_run),
         "reviewRequired": bool(latest_run and (latest_run.result or {}).get("review_required")),
         "completedSteps": progress_payload["completedSteps"] if progress_payload else 0,
         "totalSteps": progress_payload["totalSteps"] if progress_payload else len(RUN_STEP_ORDER),
@@ -3018,7 +3081,7 @@ class VibeRaisingStartupUpdateRunView(APIView):
             manual_summary=manual_summary,
         )
         try:
-            target_month = _requested_target_month_from_request(request)
+            target_month = _requested_target_month_from_request(request, profile=_startup_profile)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = google_connection_for_org(request.user, organization)
@@ -3169,7 +3232,7 @@ class VibeRaisingEmailDraftStartView(APIView):
             manual_summary=manual_summary,
         )
         try:
-            target_month = _requested_target_month_from_request(request)
+            target_month = _requested_target_month_from_request(request, profile=_startup_profile)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = google_connection_for_org(request.user, organization)
@@ -3178,6 +3241,15 @@ class VibeRaisingEmailDraftStartView(APIView):
             binding.google_connection = google_connection
             binding.save(update_fields=["google_connection", "updated_at"])
 
+        # Opt-in pre-check: probe the selected tools before anything is queued
+        # and report each result. Tools that fail are left out of the draft;
+        # nothing is queued only when no usable input would remain.
+        source_checks = []
+        if request.data.get("checkSources") is True:
+            source_checks, refusal = _precheck_generation_sources(request.user, organization, input_sources,
+                manual_document_ids=manual_document_ids, manual_summary=manual_summary)
+            if refusal is not None:
+                return refusal
         from startup_updates.update_identity import (
             default_generation_date, identity_payload, narrative_window,
             parse_generation_date, resolve_update,
@@ -3268,7 +3340,7 @@ class VibeRaisingEmailDraftStartView(APIView):
             domain=domain, run_id=run.run_id, target_month=target_month)
         payload.update(identity_payload(draft))
         payload["narrativePeriod"] = (run.run_request or {}).get("narrative_period")
-        payload["sourceChecks"] = []
+        payload["sourceChecks"] = source_checks
         return Response(payload, status=200 if existing_run else 201)
 
 

@@ -1783,12 +1783,12 @@
         "locked_runs"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "3dedb617dbe7a3508003014067826a5c609d74ed35ec1e77b5a21c5b87e1e313",
+      "function_sha256": "36a6ae4e4404fc7de79d33f9720590bfb76971a146b2c00ad83bf0deeb8a4f84",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
       ],
-      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority.",
+      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority. A worker snapshot that is blocked only for founder factual review (result.review_required) is stored as completed with resume_available false, so the saved draft does not hold an open run that blocks the next Pulse draft; this happens after the authoritative early return and does not change the guard.",
       "guard": "Fresh locked authoritative_run(existing_run) early return; backend-private keys stripped/preserved.",
       "pending_owner": null
     },
@@ -1804,12 +1804,12 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "3dedb617dbe7a3508003014067826a5c609d74ed35ec1e77b5a21c5b87e1e313",
+      "function_sha256": "36a6ae4e4404fc7de79d33f9720590bfb76971a146b2c00ad83bf0deeb8a4f84",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
       ],
-      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority.",
+      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority. A worker snapshot that is blocked only for founder factual review (result.review_required) is stored as completed with resume_available false, so the saved draft does not hold an open run that blocks the next Pulse draft; this happens after the authoritative early return and does not change the guard.",
       "guard": "Fresh locked authoritative_run(existing_run) early return; backend-private keys stripped/preserved.",
       "pending_owner": null
     },
@@ -1829,12 +1829,12 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "3dedb617dbe7a3508003014067826a5c609d74ed35ec1e77b5a21c5b87e1e313",
+      "function_sha256": "36a6ae4e4404fc7de79d33f9720590bfb76971a146b2c00ad83bf0deeb8a4f84",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
       ],
-      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority.",
+      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority. A worker snapshot that is blocked only for founder factual review (result.review_required) is stored as completed with resume_available false, so the saved draft does not hold an open run that blocks the next Pulse draft; this happens after the authoritative early return and does not change the guard.",
       "guard": "Fresh locked authoritative_run(existing_run) early return; backend-private keys stripped/preserved.",
       "pending_owner": null
     },
@@ -1852,12 +1852,12 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "3dedb617dbe7a3508003014067826a5c609d74ed35ec1e77b5a21c5b87e1e313",
+      "function_sha256": "36a6ae4e4404fc7de79d33f9720590bfb76971a146b2c00ad83bf0deeb8a4f84",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
       ],
-      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority.",
+      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority. A worker snapshot that is blocked only for founder factual review (result.review_required) is stored as completed with resume_available false, so the saved draft does not hold an open run that blocks the next Pulse draft; this happens after the authoritative early return and does not change the guard.",
       "guard": "Fresh locked authoritative_run(existing_run) early return; backend-private keys stripped/preserved.",
       "pending_owner": null
     },
@@ -1925,12 +1925,12 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "3dedb617dbe7a3508003014067826a5c609d74ed35ec1e77b5a21c5b87e1e313",
+      "function_sha256": "36a6ae4e4404fc7de79d33f9720590bfb76971a146b2c00ad83bf0deeb8a4f84",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
       ],
-      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority.",
+      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority. A worker snapshot that is blocked only for founder factual review (result.review_required) is stored as completed with resume_available false, so the saved draft does not hold an open run that blocks the next Pulse draft; this happens after the authoritative early return and does not change the guard.",
       "guard": "Fresh locked authoritative_run(existing_run) early return; backend-private keys stripped/preserved.",
       "pending_owner": null
     },
@@ -1970,12 +1970,12 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "3dedb617dbe7a3508003014067826a5c609d74ed35ec1e77b5a21c5b87e1e313",
+      "function_sha256": "36a6ae4e4404fc7de79d33f9720590bfb76971a146b2c00ad83bf0deeb8a4f84",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
       ],
-      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority.",
+      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority. A worker snapshot that is blocked only for founder factual review (result.review_required) is stored as completed with resume_available false, so the saved draft does not hold an open run that blocks the next Pulse draft; this happens after the authoritative early return and does not change the guard.",
       "guard": "Fresh locked authoritative_run(existing_run) early return; backend-private keys stripped/preserved.",
       "pending_owner": null
     },
@@ -5239,10 +5239,10 @@
         "metric"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "999a8a121fc7cd6d2009af61fe2fd55f9665df681a90b3d7051e4a48b0bc22eb",
+      "function_sha256": "20a4cddaeb4f2bd9899ee557652cfd8caecbb98aae3d16cccafdde06eb228eab",
       "classification": "non_cf_model",
       "test_refs": [],
-      "reason": "metric is FinancialMetric, not ContentFactoryRun.",
+      "reason": "metric is FinancialMetric, not ContentFactoryRun. Selected sources now come from effective_input_sources(run_request, result), so a Xero left out of the run does not suppress Stripe revenue; read-only.",
       "guard": "FinancialMetric query/constructor assignment.",
       "pending_owner": null
     },

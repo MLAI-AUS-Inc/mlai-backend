@@ -30,8 +30,15 @@ class SourcePreferenceTests(SimpleTestCase):
         source = source_capabilities({"provider": "google_drive", "status": "connected", "connectionId": 3, "configured": True})
         self.assertFalse(source["enabled"])
         self.assertFalse(source["usableForUpdates"])
-        self.assertTrue(source["canConnect"])
-        self.assertIn("not available yet", source["warning"])
+        self.assertFalse(source["canConnect"])
+        self.assertTrue(source["canDisconnect"])
+        self.assertIn("does not read Google Drive yet", source["warning"])
+
+    def test_drive_is_hidden_from_pulse_unless_already_connected(self):
+        from community_chat.startups.lifecycle import pulse_source_visible
+        self.assertFalse(pulse_source_visible({"provider": "google_drive", "status": "not_connected", "connectionId": None}))
+        self.assertTrue(pulse_source_visible({"provider": "google_drive", "status": "connected", "connectionId": 3}))
+        self.assertTrue(pulse_source_visible({"key": "gmail", "status": "not_connected"}))
 
     def test_preferences_are_company_scoped(self):
         profile = Obj(progress_configuration={preferences.PREFERENCE_KEY: {"a:2": {"gmail": False, "linear": "false"}, "b": {"gmail": True}}})
