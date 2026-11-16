@@ -268,6 +268,46 @@ LINEAR_UNAVAILABLE_MESSAGE = (
     "Linear is temporarily unavailable. Try again shortly, or remove Linear "
     "from this update to generate with your other sources."
 )
+XERO_RECONNECT_MESSAGE = (
+    "Xero needs to be reconnected. Reconnect Xero in Connections, or remove "
+    "Xero from this update to generate with your other sources."
+)
+GOOGLE_ANALYTICS_RECONNECT_MESSAGE = (
+    "Google Analytics needs to be reconnected. Reconnect Google Analytics in "
+    "Connections, or remove it from this update to generate with your other sources."
+)
+# A stored ERROR whose last_error is one of these is reported as needs_reauth.
+# The older wording is still on rows written before the shared contract.
+RECONNECT_MESSAGES = {
+    "linear": frozenset({LINEAR_RECONNECT_MESSAGE}),
+    "xero": frozenset({XERO_RECONNECT_MESSAGE, "Xero connection needs to be reauthorised."}),
+    "google_analytics": frozenset({
+        GOOGLE_ANALYTICS_RECONNECT_MESSAGE, "Google Analytics connection needs to be reauthorised.",
+    }),
+}
+
+
+def _reconnect_required(connection, message):
+    """Record a revoked or expired credential and raise the reconnect contract."""
+    error = ConnectorReconnectRequired(connection, message)
+    error.persist()
+    raise error from None
+
+
+def _oauth_refresh_rejected(response) -> bool:
+    """Whether a token endpoint refused the stored grant (expired or revoked).
+
+    ``invalid_client`` means MLAI's own app credentials are wrong: an operator
+    problem that reconnecting cannot fix, so it stays a temporary failure.
+    """
+    if getattr(response, "status_code", None) not in {400, 401, 403}:
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    error_code = payload.get("error") if isinstance(payload, dict) else None
+    return error_code != "invalid_client"
 
 
 class ConnectorRateLimitError(Exception):
@@ -1320,9 +1360,7 @@ def _exchange_linear_code(code: str) -> dict[str, Any]:
 
 
 def _linear_reconnect_required(connection):
-    error = ConnectorReconnectRequired(connection, LINEAR_RECONNECT_MESSAGE)
-    error.persist()
-    raise error from None
+    _reconnect_required(connection, LINEAR_RECONNECT_MESSAGE)
 
 
 def _linear_request(url, **kwargs):
@@ -2588,12 +2626,26 @@ def _refresh_xero_connection(connection: ExternalServiceConnection) -> str:
     return token
 
 
+def _xero_grant_rejected(connection: ExternalServiceConnection):
+    """Xero refused the refresh token: every tenant sharing it needs reconnecting."""
+    logger.warning("Xero refused the stored refresh token; marking it for reconnect",
+        extra={"connection_id": connection.pk, "user_id": connection.user_id})
+    grant_id = (connection.provider_metadata or {}).get("oauth_grant_id")
+    if grant_id and connection.refresh_token:
+        siblings = ExternalServiceConnection.objects.filter(
+            user_id=connection.user_id, provider="xero", provider_metadata__oauth_grant_id=grant_id,
+        ).exclude(pk=connection.pk).exclude(status="disconnected")
+        for sibling in siblings:
+            if sibling.refresh_token == connection.refresh_token:
+                ExternalServiceConnection.objects.filter(pk=sibling.pk).update(
+                    status=ExternalServiceConnectionStatus.ERROR, last_error=XERO_RECONNECT_MESSAGE,
+                    updated_at=timezone.now())
+    _reconnect_required(connection, XERO_RECONNECT_MESSAGE)
+
+
 def _refresh_xero_connection_unlocked(connection: ExternalServiceConnection) -> str:
     if not connection.refresh_token:
-        connection.status = ExternalServiceConnectionStatus.ERROR
-        connection.last_error = "Xero connection needs to be reauthorised."
-        connection.save(update_fields=["status", "last_error", "updated_at"])
-        raise ConnectorOAuthError(connection.last_error)
+        _reconnect_required(connection, XERO_RECONNECT_MESSAGE)
 
     response = requests.post(
         "https://identity.xero.com/connect/token",
@@ -2604,8 +2656,14 @@ def _refresh_xero_connection_unlocked(connection: ExternalServiceConnection) -> 
         },
         timeout=(3, 20),
     )
+    # Xero answers an expired (60 days unused) or revoked refresh token with
+    # HTTP 400 invalid_grant: check that before treating the reply as an outage.
+    if _oauth_refresh_rejected(response):
+        _xero_grant_rejected(connection)
     response.raise_for_status()
     token_data = response.json()
+    if token_data.get("error") == "invalid_grant":
+        _xero_grant_rejected(connection)
     if token_data.get("error"):
         message = token_data.get("error_description") or token_data.get("error")
         connection.status = ExternalServiceConnectionStatus.ERROR
@@ -2666,10 +2724,7 @@ def _google_analytics_required_token(connection: ExternalServiceConnection) -> s
 
 def _refresh_google_analytics_connection(connection: ExternalServiceConnection) -> str:
     if not connection.refresh_token:
-        connection.status = ExternalServiceConnectionStatus.ERROR
-        connection.last_error = "Google Analytics connection needs to be reauthorised."
-        connection.save(update_fields=["status", "last_error", "updated_at"])
-        raise ConnectorOAuthError(connection.last_error)
+        _reconnect_required(connection, GOOGLE_ANALYTICS_RECONNECT_MESSAGE)
 
     response = requests.post(
         "https://oauth2.googleapis.com/token",
@@ -2681,8 +2736,15 @@ def _refresh_google_analytics_connection(connection: ExternalServiceConnection) 
         },
         timeout=(3, 20),
     )
+    # Google answers a revoked or expired grant with HTTP 400 invalid_grant.
+    if _oauth_refresh_rejected(response):
+        logger.warning("Google refused the stored Google Analytics refresh token; marking it for reconnect",
+            extra={"connection_id": connection.pk, "user_id": connection.user_id})
+        _reconnect_required(connection, GOOGLE_ANALYTICS_RECONNECT_MESSAGE)
     response.raise_for_status()
     token_data = response.json()
+    if token_data.get("error") == "invalid_grant":
+        _reconnect_required(connection, GOOGLE_ANALYTICS_RECONNECT_MESSAGE)
     if token_data.get("error"):
         message = token_data.get("error_description") or token_data.get("error")
         connection.status = ExternalServiceConnectionStatus.ERROR
@@ -5966,7 +6028,11 @@ def _serialize_google_source(user, organization=_ACTIVE_ORG) -> dict[str, Any]:
         connection = google_connection_for_org(user, organization)
     configured = is_provider_configured("gmail")
     scope_status = gmail_scope_status_payload(connection)
-    if connection and scope_status["hasGmailScope"]:
+    from .gmail import GMAIL_REVOKED_WARNING, gmail_needs_reconnect
+    if connection and scope_status["hasGmailScope"] and gmail_needs_reconnect(connection):
+        status_value = "needs_reauth"
+        warning = GMAIL_REVOKED_WARNING
+    elif connection and scope_status["hasGmailScope"]:
         status_value = "connected"
         warning = None
     elif connection:
@@ -6333,7 +6399,7 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
     if connection:
         status_value = connection.status
         warning = connection.last_error or None
-        if provider == ExternalServiceProvider.LINEAR and status_value == ExternalServiceConnectionStatus.ERROR and warning == LINEAR_RECONNECT_MESSAGE:
+        if status_value == ExternalServiceConnectionStatus.ERROR and warning in RECONNECT_MESSAGES.get(provider, ()):
             status_value = "needs_reauth"
     elif configured:
         status_value = "not_connected"

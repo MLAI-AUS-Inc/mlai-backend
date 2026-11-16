@@ -242,3 +242,105 @@ class NativeOAuthBoundaryTests(SimpleTestCase):
         with patch("community_chat.startups.oauth_context.valid_chat_oauth_context", return_value=False):
             with self.assertRaises(ValueError):
                 github.validate_github_oauth_state(state.raw)
+
+
+def _token_response(status, payload):
+    import json
+    from requests import Response as HttpResponse
+    value = HttpResponse()
+    value.status_code = status
+    value.url = "https://identity.example/token"
+    value._content = json.dumps(payload).encode()
+    return value
+
+
+@override_settings(XERO_CLIENT_ID="synthetic", XERO_CLIENT_SECRET="synthetic",
+    GOOGLE_OAUTH_CLIENT_ID="synthetic", GOOGLE_OAUTH_CLIENT_SECRET="synthetic",
+    CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
+class ExpiredCredentialTests(SimpleTestCase):
+    """Expired or revoked Xero and Google grants read as Reconnect, never "try again shortly"."""
+
+    def connection(self, provider, **extra):
+        from django.utils import timezone
+        return Obj(pk=8, id=8, user_id=2, organization_id=4, provider=provider, refresh_token="synthetic-refresh",
+            updated_at=timezone.now(), provider_metadata={}, status="connected", last_error="", **extra)
+
+    def refresh(self, provider, response):
+        from integrations.services import external_connectors as external
+        refresh = (external._refresh_xero_connection_unlocked if provider == "xero"
+            else external._refresh_google_analytics_connection)
+        connection = self.connection(provider)
+        with patch.object(external.requests, "post", return_value=response), \
+                patch.object(external.ExternalServiceConnection, "objects") as rows:
+            try:
+                refresh(connection)
+            except Exception as exc:  # noqa: BLE001 - the test inspects the raised contract
+                return exc, connection, rows
+        self.fail("refresh should not succeed")
+
+    def test_invalid_grant_marks_xero_and_analytics_for_reconnect(self):
+        from integrations.services import external_connectors as external
+        from startup_updates.preflight import source_failure_check
+        for provider, message in (("xero", external.XERO_RECONNECT_MESSAGE),
+                                  ("google_analytics", external.GOOGLE_ANALYTICS_RECONNECT_MESSAGE)):
+            with self.subTest(provider=provider):
+                exc, connection, rows = self.refresh(provider, _token_response(400, {"error": "invalid_grant"}))
+                self.assertIsInstance(exc, external.ConnectorReconnectRequired)
+                self.assertEqual(str(exc), message)
+                self.assertEqual(connection.status, "error")
+                rows.filter.return_value.update.assert_called_once()
+                self.assertEqual(rows.filter.return_value.update.call_args.kwargs["last_error"], message)
+                self.assertIn(message, external.RECONNECT_MESSAGES[provider])
+                self.assertEqual(source_failure_check(provider, exc)["status"], "needs_reconnect")
+
+    def test_missing_refresh_token_also_needs_reconnect(self):
+        from integrations.services import external_connectors as external
+        connection = self.connection("xero")
+        connection.refresh_token = ""
+        with patch.object(external.ExternalServiceConnection, "objects"), \
+                self.assertRaises(external.ConnectorReconnectRequired):
+            external._refresh_xero_connection_unlocked(connection)
+
+    def test_app_credential_or_outage_failures_stay_temporary(self):
+        import requests
+        from integrations.services import external_connectors as external
+        for status, payload in ((400, {"error": "invalid_client"}), (503, {})):
+            with self.subTest(status=status):
+                exc, connection, rows = self.refresh("xero", _token_response(status, payload))
+                self.assertIsInstance(exc, requests.HTTPError)
+                self.assertEqual(connection.status, "connected")
+                rows.filter.return_value.update.assert_not_called()
+
+    def test_gmail_revoked_grant_reads_as_reconnect_until_reconnected(self):
+        from google.auth.exceptions import RefreshError
+        from integrations.services import gmail
+        from startup_updates.preflight import source_failure_check
+        connection = Obj(pk=5, user_id=2, refresh_token="synthetic-old")
+        credentials = MagicMock()
+        credentials.refresh.side_effect = RefreshError("invalid_grant: Token has been expired or revoked.", {})
+        with patch.object(gmail, "get_refreshed_credentials", return_value=credentials):
+            with self.assertRaises(gmail.GmailReconnectRequired) as raised:
+                gmail.build_gmail_service(connection)
+        self.assertEqual(source_failure_check("gmail", raised.exception)["status"], "needs_reconnect")
+        self.assertTrue(gmail.gmail_needs_reconnect(connection))
+        self.assertFalse(gmail.gmail_needs_reconnect(Obj(pk=5, user_id=2, refresh_token="synthetic-new")))
+        credentials.refresh.side_effect = RefreshError("temporarily unavailable", {})
+        with patch.object(gmail, "get_refreshed_credentials", return_value=credentials), self.assertRaises(RefreshError):
+            gmail.build_gmail_service(Obj(pk=6, user_id=2, refresh_token="other"))
+        self.assertFalse(gmail.gmail_needs_reconnect(Obj(pk=6, user_id=2, refresh_token="other")))
+
+    def test_gmail_status_reports_needs_reauth_for_a_refused_grant(self):
+        from integrations.services import external_connectors as external, gmail
+        connection = Obj(pk=5, id=5, user_id=2, refresh_token="synthetic-old", google_email="founder@example.test")
+        with patch.object(external, "google_connection_for_org", return_value=connection), \
+                patch.object(external, "is_provider_configured", return_value=True), \
+                patch.object(external, "gmail_scope_status_payload", return_value={"hasGmailScope": True}), \
+                patch.object(external, "has_gmail_read_scope", return_value=True), \
+                patch.object(external, "_scope_org", return_value=Obj(pk=4)), \
+                patch.object(external.GoogleConnection, "objects"), \
+                patch("integrations.services.source_accounts.serialize_accounts", return_value={}), \
+                patch.object(gmail, "gmail_needs_reconnect", return_value=True):
+            source = external._serialize_google_source(Obj(pk=2), Obj(pk=4))
+        self.assertEqual(source["status"], "needs_reauth")
+        self.assertEqual(source["warning"], gmail.GMAIL_REVOKED_WARNING)
+        self.assertEqual(prefs.source_capabilities(source)["enabled"], False)
