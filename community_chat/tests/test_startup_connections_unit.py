@@ -401,3 +401,65 @@ class BankFeedConsentTests(SimpleTestCase):
             external.complete_oauth_callback(callback, "bank_feed")
         self.assertEqual(record.status, "connected")
         self.assertFalse(record.provider_metadata["consent_pending"])
+
+
+class ConnectOrganizationTests(SimpleTestCase):
+    """Connect stores tokens on the selected startup's own organisation (the one Sources reads)."""
+
+    def resolve(self, company, *, ensure):
+        from integrations.services import external_connectors as external
+        with patch("founder_tools.services.ensure_company_organization", **ensure) as ensured, \
+                patch.object(external, "resolve_or_create_profile") as profile, \
+                patch.object(external, "bind_user_to_startup") as bind, \
+                patch.object(external, "google_connection_for_org", return_value=None):
+            try:
+                return external.resolve_connector_organization(Obj(pk=7), company=company), ensured, profile, bind
+            except Exception as exc:  # noqa: BLE001 - returned for assertions
+                return exc, ensured, profile, bind
+
+    def test_startup_without_website_uses_its_own_organisation_not_a_sibling(self):
+        own = Obj(pk=31, id=31, domain="startup-5.invalid")
+        company = Obj(pk=5, domain="", organization=None, organization_id=None)
+        organization, ensured, profile, bind = self.resolve(company, ensure={"return_value": own})
+        self.assertIs(organization, own)
+        ensured.assert_called_once_with(company)
+        profile.assert_called_once_with(domain="startup-5.invalid")
+        self.assertIs(bind.call_args.kwargs["organization"], own)
+
+    def test_domain_claimed_by_another_founder_refuses_with_plain_words(self):
+        from founder_tools.services import CompanyDomainClaimedError
+        from integrations.services import external_connectors as external
+        company = Obj(pk=5, domain="taken.example", organization=None, organization_id=None)
+        error, _ensured, _profile, bind = self.resolve(company, ensure={"side_effect": CompanyDomainClaimedError()})
+        self.assertIsInstance(error, external.ConnectorOAuthError)
+        self.assertEqual(str(error), external.CONNECT_DOMAIN_CLAIMED_MESSAGE)
+        bind.assert_not_called()
+
+
+class XeroAccountChoiceTests(SimpleTestCase):
+    def serialize(self, *, accounts, choice):
+        from integrations.services import external_connectors as external
+        connection = Obj(pk=3, id=3, status="connected", last_error="", scopes=[], account_label="A",
+            external_account_id="tenant-a", last_synced_at=None)
+        with patch.object(external.ExternalServiceConnection, "objects") as rows, \
+                patch.object(external, "_scope_org", return_value=Obj(pk=4)), \
+                patch("integrations.services.source_accounts.report_connection", return_value=connection), \
+                patch("integrations.services.source_accounts.report_account_id", return_value=choice), \
+                patch("integrations.services.source_accounts.serialize_accounts", return_value={}), \
+                patch.object(external, "_provider_configuration_error", return_value=None), \
+                patch.object(external, "_xero_can_request_report_scopes", return_value=True), \
+                patch.object(external, "xero_has_report_scope", return_value=True):
+            rows.filter.return_value.exclude.return_value.filter.return_value.count.return_value = accounts
+            return external._serialize_external_source(Obj(pk=2), "xero", Obj(pk=4))
+
+    def test_several_organisations_without_a_choice_ask_for_one(self):
+        from integrations.services import external_connectors as external
+        source = self.serialize(accounts=2, choice=None)
+        self.assertTrue(source["accountChoiceRequired"])
+        self.assertEqual(source["warning"], external.XERO_ACCOUNT_CHOICE_WARNING)
+        self.assertFalse(prefs.source_capabilities(source)["usableForUpdates"])
+        for accounts, choice in ((1, None), (2, 3)):
+            with self.subTest(accounts=accounts, choice=choice):
+                source = self.serialize(accounts=accounts, choice=choice)
+                self.assertFalse(source["accountChoiceRequired"])
+                self.assertTrue(prefs.source_capabilities(source)["usableForUpdates"])

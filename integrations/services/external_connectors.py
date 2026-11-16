@@ -276,6 +276,7 @@ GOOGLE_ANALYTICS_RECONNECT_MESSAGE = (
     "Google Analytics needs to be reconnected. Reconnect Google Analytics in "
     "Connections, or remove it from this update to generate with your other sources."
 )
+XERO_ACCOUNT_CHOICE_WARNING = "Choose which Xero organisation Pulse should read."
 # A stored ERROR whose last_error is one of these is reported as needs_reauth.
 # The older wording is still on rows written before the shared contract.
 RECONNECT_MESSAGES = {
@@ -724,10 +725,43 @@ def _get_active_vibe_raising_company(user):
     return profile.active_company or profile.companies.first()
 
 
+CONNECT_DOMAIN_CLAIMED_MESSAGE = (
+    "This startup's website is linked to another MLAI account. Remove the website "
+    "in Startup details, or connect from the account that owns it."
+)
+
+
+def _selected_company_organization(user, company) -> Organization:
+    """The selected startup's own organisation: the same one its sources list reads.
+
+    Uses ``ensure_company_organization`` (with its claim check), so a startup
+    without a website gets its own placeholder organisation instead of
+    borrowing the founder's most recent binding. Refuses rather than falls back.
+    """
+    from founder_tools.services import DomainOwnershipError, ensure_company_organization
+    try:
+        organization = ensure_company_organization(company)
+    except DomainOwnershipError as exc:
+        raise ConnectorOAuthError(CONNECT_DOMAIN_CLAIMED_MESSAGE) from exc
+    if organization is None:
+        raise ConnectorOAuthError("This startup could not be connected. Start again in MLAI Chat.")
+    resolve_or_create_profile(domain=organization.domain)
+    bind_user_to_startup(
+        user=user,
+        organization=organization,
+        google_connection=google_connection_for_org(user, organization, adopt_unassigned=True),
+        role="founder",
+        is_default_for_gmail=True,
+    )
+    return organization
+
+
 def resolve_connector_organization(user, company=None) -> Optional[Organization]:
     # An explicit company (validated as the user's own by the caller) pins the
     # connect flow to that startup; otherwise the active company decides.
-    company = company if company is not None else _get_active_vibe_raising_company(user)
+    if company is not None:
+        return _selected_company_organization(user, company)
+    company = _get_active_vibe_raising_company(user)
     domain = normalize_domain(getattr(company, "domain", "") or "")
     if domain:
         organization, _startup_profile = resolve_or_create_profile(domain=domain)
@@ -6504,8 +6538,21 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
             payload["warning"] = payload.get("warning") or XERO_REPORT_SCOPE_WARNING
         elif status_value in {"connected", "syncing"} and needs_report_scope_configuration:
             payload["warning"] = payload.get("warning") or XERO_REPORT_SCOPE_CONFIGURATION_WARNING
+        # One Xero sign-in can authorise several organisations. Until the
+        # founder picks one (reportAccountId), Pulse would read whichever was
+        # updated last, so ask for the choice instead.
+        from .source_accounts import report_account_id
+        account_choice_required = (
+            bool(connection) and status_value in {"connected", "syncing"}
+            and report_account_id(user, organization, provider) is None
+            and queryset.count() > 1
+        )
+        if account_choice_required:
+            payload["warning"] = XERO_ACCOUNT_CHOICE_WARNING
         payload.update(
             {
+                "accountChoiceRequired": account_choice_required,
+                "account_choice_required": account_choice_required,
                 "hasReportScope": has_report_scope,
                 "has_report_scope": has_report_scope,
                 "needsReportReconnect": needs_report_reconnect,
