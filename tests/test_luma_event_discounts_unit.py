@@ -296,3 +296,85 @@ class LumaEventDiscountTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MemberPerkTicketTests(unittest.TestCase):
+    """Automatic member perks: which events and tickets qualify, and the price."""
+
+    def setUp(self):
+        self.session = Mock()
+        self.service = LumaEventDiscountService(
+            api_key="test-not-a-real-key", base_url="https://public-api.luma.com",
+            session=self.session, max_pages=3,
+        )
+
+    def pick(self, *, event=None, tickets=None):
+        self.session.request.side_effect = [
+            response(EVENT if event is None else event),
+            response({"entries": [TICKET] if tickets is None else tickets}),
+        ]
+        return self.service.member_perk_ticket("evt-test", now=NOW)
+
+    def test_points_follow_the_ticket_price_rounded_up(self):
+        from roo.event_ticket_policy import member_perk_points
+
+        self.assertEqual(member_perk_points(4000, "half_price"), 20)
+        self.assertEqual(member_perk_points(4000, "free_ticket"), 36)
+        self.assertEqual(member_perk_points(2500, "half_price"), 13)
+        self.assertEqual(member_perk_points(2500, "free_ticket"), 23)
+        self.assertEqual(member_perk_points(9999, "free_ticket"), 90)
+        self.assertEqual(member_perk_points(1, "half_price"), 1)
+        for bad in (0, -100, 10.5, True, "4000"):
+            with self.assertRaises(ValueError):
+                member_perk_points(bad, "half_price")
+        with self.assertRaises(ValueError):
+            member_perk_points(4000, "quarter_price")
+
+    def test_only_events_the_mlai_calendar_hosts_on_luma_qualify(self):
+        for event in ({**EVENT, "access": "view"}, {**EVENT, "platform": "external"}):
+            with self.assertRaises(LumaEventDiscountError) as error:
+                self.pick(event=event)
+            self.assertEqual(error.exception.code, "event_not_managed")
+
+    def test_picks_the_dearest_eligible_ticket_and_expires_at_the_earlier_deadline(self):
+        tickets = [
+            {**TICKET, "id": "ttype-free", "type": "free", "cents": 0},
+            {**TICKET, "id": "ttype-student", "cents": 2000},
+            {**TICKET, "id": "ttype-vip", "cents": 15000},
+            {**TICKET, "id": "ttype-hidden", "cents": 9000, "is_hidden": True},
+            {**TICKET, "id": "ttype-usd", "cents": 6000, "currency": "usd"},
+            {**TICKET, "id": "ttype-closed", "cents": 7000, "valid_end_at": "2026-10-19T00:00:00Z"},
+            {**TICKET, "id": "ttype-general", "cents": 4000, "valid_end_at": "2026-10-28T00:00:00Z"},
+        ]
+        pick = self.pick(tickets=tickets)
+        self.assertEqual(pick["event_ticket_type_id"], "ttype-general")
+        self.assertEqual(pick["cents"], 4000)
+        self.assertEqual(pick["valid_end_at"], "2026-10-28T00:00:00Z")
+        pick = self.pick(tickets=[TICKET])
+        self.assertEqual(pick["valid_end_at"], "2026-10-30T07:00:00Z")
+
+    def test_no_paid_aud_ticket_under_100_is_not_eligible(self):
+        for tickets in ([], [{**TICKET, "cents": 10000}], [{**TICKET, "type": "free", "cents": 0}],
+                        [{**TICKET, "is_flexible": True}]):
+            with self.assertRaises(LumaEventDiscountError) as error:
+                self.pick(tickets=tickets)
+            self.assertEqual(error.exception.code, "ticket_not_paid_aud")
+
+    def test_a_changed_price_invalidates_the_frozen_quote(self):
+        self.session.request.side_effect = [response(EVENT), response({"entries": [{**TICKET, "cents": 6000}]})]
+        terms = {**TERMS, "ticket": {"cents": 5000, "requires_approval": False}}
+        with self.assertRaises(LumaEventDiscountError) as error:
+            self.service.validate_offer(terms, now=NOW)
+        self.assertEqual(error.exception.code, "ticket_terms_changed")
+
+    def test_private_events_need_an_explicit_test_listing(self):
+        from django.test import override_settings
+
+        private = {**EVENT, "visibility": "private"}
+        self.session.request.side_effect = [response(private), response({"entries": [TICKET]})]
+        with self.assertRaises(LumaEventDiscountError) as error:
+            self.service.validate_offer(TERMS, now=NOW)
+        self.assertEqual(error.exception.code, "event_registration_closed")
+        self.session.request.side_effect = [response(private), response({"entries": [TICKET]})]
+        with override_settings(ROO_EVENT_PERKS_TEST_EVENT_IDS=("evt-test",)):
+            self.assertEqual(self.service.validate_offer(TERMS, now=NOW)["ticket"]["cents"], 5000)

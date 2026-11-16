@@ -20,7 +20,15 @@ from integrations.services.luma import LumaAPIError, LumaAttendeeReportService, 
 from .models import EventDiscountOffer, EventDiscountQuote, EventDiscountRedemption, PointsAccount, RewardsCatalog
 from .permissions import InsufficientBalanceError
 from .services import PointsService
-from .event_ticket_policy import EVENT_TICKET_POINTS, EVENT_HALF_TICKET_POINTS
+from .event_ticket_policy import (
+    EVENT_HALF_TICKET_POINTS,
+    EVENT_TICKET_POINTS,
+    MEMBER_PERK_PERCENT_OFF,
+    auto_perks_allowed,
+    is_auto_offer,
+    member_perk_points,
+    price_based,
+)
 
 
 class EventDiscountError(ValueError):
@@ -61,14 +69,31 @@ def _account_scope(user):
 
 
 def member_perk_terms(offer, perk):
-    """Derive the two server-priced tiers from an enabled full-ticket offer."""
-    if not isinstance(perk, str) or perk not in {"half_price", "free_ticket"}:
+    """Derive a half-price or free tier's coupon terms from a full-ticket offer."""
+    if not isinstance(perk, str) or perk not in MEMBER_PERK_PERCENT_OFF:
         raise EventDiscountError("invalid_perk", "Choose a half-price or free ticket.", 400)
-    if offer.discount_type != "percent" or offer.percent_off != 100 or offer.reward.cost_points != EVENT_TICKET_POINTS:
+    if offer.discount_type != "percent" or offer.percent_off != 100 or (
+        not price_based(offer) and offer.reward.cost_points != EVENT_TICKET_POINTS
+    ):
         raise EventDiscountError("offer_unavailable", "Member perks are not available for this event.", 404)
     terms = _offer_terms(offer)
-    terms["discount"] = {"discount_type": "percent", "percent_off": 50 if perk == "half_price" else 100}
-    return terms, EVENT_HALF_TICKET_POINTS if perk == "half_price" else EVENT_TICKET_POINTS
+    terms["discount"] = {"discount_type": "percent", "percent_off": MEMBER_PERK_PERCENT_OFF[perk]}
+    return terms
+
+
+def member_perk_cost(offer, perk, ticket_cents):
+    """Roo Points for one tier: from the ticket price, or the legacy fixed price."""
+    if price_based(offer):
+        try:
+            return member_perk_points(ticket_cents, perk)
+        except ValueError as exc:
+            raise EventDiscountError("offer_unavailable", "Member perks are not available for this event.", 404) from exc
+    return EVENT_HALF_TICKET_POINTS if perk == "half_price" else EVENT_TICKET_POINTS
+
+
+def _auto_offer_allowed(offer, user):
+    if is_auto_offer(offer) and not auto_perks_allowed(offer.event_id, user):
+        raise EventDiscountError("offer_unavailable", "Member perks are not available for this event.", 404)
 
 
 def _scope(scope):
@@ -219,12 +244,20 @@ class EventDiscountService:
         _available_offer(offer, now)
         if EventDiscountRedemption.objects.filter(user=user, event_id=offer.event_id, status__in=("processing", "fulfilled")).exists():
             raise EventDiscountError("already_redeemed", "You already have a redemption for this event. Ask Roo to show your event discounts.")
+        _auto_offer_allowed(offer, user)
         fingerprint = _fingerprint(offer)
-        terms, points_cost = member_perk_terms(offer, account_perk) if account_perk is not None else (_offer_terms(offer), offer.reward.cost_points)
+        terms = member_perk_terms(offer, account_perk) if account_perk is not None else _offer_terms(offer)
         try:
             snapshot = LumaEventDiscountService().validate_offer(terms, now=now)
         except LumaEventDiscountError as exc:
             raise EventDiscountError(exc.code, exc.message, 503 if exc.retryable else 409) from exc
+        if account_perk is not None:
+            points_cost = member_perk_cost(offer, account_perk, snapshot["ticket"]["cents"])
+        elif is_auto_offer(offer):
+            # An automatic offer is a 100% coupon: the free-ticket price.
+            points_cost = member_perk_cost(offer, "free_ticket", snapshot["ticket"]["cents"])
+        else:
+            points_cost = offer.reward.cost_points
         snapshot.update(points_cost=points_cost, reward_code=offer.reward_id)
         if account_perk is not None:
             snapshot["member_perk"] = account_perk
@@ -282,6 +315,7 @@ class EventDiscountService:
         if quote.expires_at <= now or quote.offer_fingerprint != _fingerprint(offer):
             raise EventDiscountError("stale_quote", "This quote expired or changed. Ask Roo for a new quote.")
         _available_offer(offer, now)
+        _auto_offer_allowed(offer, user)
         if EventDiscountRedemption.objects.filter(user=user, event_id=offer.event_id, status__in=("processing", "fulfilled")).exists():
             raise EventDiscountError("already_redeemed", "You already have a redemption for this event.")
         if reward.max_per_user is not None and reward.max_per_user < 1:
@@ -441,7 +475,11 @@ class EventDiscountService:
                 # worker must never invalidate a newer worker's fulfilled code;
                 # uncertain consumption/expiry requires reviewed reconciliation.
                 return EventDiscountService._defer(row.pk, token, "offer_expired_or_member_inactive", review=True)
-            return EventDiscountService._settle(row.pk, token, coupon)
+            settled = EventDiscountService._settle(row.pk, token, coupon)
+            if settled.status == EventDiscountRedemption.Status.FULFILLED:
+                from .event_perk_delivery import email_event_perk_code
+                email_event_perk_code(settled)
+            return settled
         except LumaEventDiscountError as exc:
             # A prior uncertain write cannot be disproved by a later auth or
             # read failure. Never release such a hold just because a retry failed.
