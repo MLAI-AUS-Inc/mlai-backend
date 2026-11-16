@@ -96,6 +96,8 @@ class StartupUpdateRunCreateSerializer(serializers.Serializer):
     inputSources = serializers.ListField(child=serializers.CharField(), required=False)
     target_month = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     targetMonth = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    # The monthly schedule asks for every healthy connection instead of Gmail only.
+    use_connected_sources = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
         """Preserve legacy omission while rejecting empty or conflicting selections."""
@@ -106,7 +108,7 @@ class StartupUpdateRunCreateSerializer(serializers.Serializer):
             attrs[key] = selected_sources(attrs[key])
         if len(fields) == 2 and attrs[fields[0]] != attrs[fields[1]]:
             raise serializers.ValidationError({"input_sources": "Provide one consistent source selection."})
-        if not fields:
+        if not fields and not attrs.get("use_connected_sources"):
             attrs["input_sources"] = ["gmail"]
         return attrs
 

@@ -748,6 +748,51 @@ def parse_startup_update_target_month(
     return target_month
 
 
+DEFAULT_FOUNDER_TIMEZONE = "Australia/Melbourne"
+# During the first week of a month a founder is writing up the month just
+# finished; afterwards the default is the month in progress.
+PREVIOUS_MONTH_DEFAULT_LAST_DAY = 7
+
+
+def founder_timezone_name(profile=None) -> str:
+    """Return the founder's reporting timezone, or MLAI's home timezone.
+
+    ``StartupProfile.reporting_timezone`` defaults to UTC, which in practice
+    means "never chosen", so UTC also falls back to Melbourne here. This only
+    picks the default month; evidence windows keep the profile's timezone.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    name = str(getattr(profile, "reporting_timezone", "") or "").strip()
+    if not name or name == "UTC":
+        return DEFAULT_FOUNDER_TIMEZONE
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return DEFAULT_FOUNDER_TIMEZONE
+    return name
+
+
+def default_startup_update_target_month(
+    *,
+    reference: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
+) -> date:
+    """Pick the reporting month a founder most likely means right now.
+
+    Days 1 to 7 of a month (in the founder's timezone) default to the previous
+    month; later days default to the current month.
+    """
+    from zoneinfo import ZoneInfo
+    now = reference or timezone.now()
+    if timezone.is_naive(now):
+        now = timezone.make_aware(now, timezone=dt_timezone.utc)
+    local_day = now.astimezone(ZoneInfo(timezone_name or DEFAULT_FOUNDER_TIMEZONE)).date()
+    month = date(local_day.year, local_day.month, 1)
+    if local_day.day <= PREVIOUS_MONTH_DEFAULT_LAST_DAY:
+        month = date(month.year - 1, 12, 1) if month.month == 1 else date(month.year, month.month - 1, 1)
+    return month
+
+
 def _aware_utc_datetime(day: date, boundary: time) -> datetime:
     return datetime.combine(day, boundary, tzinfo=dt_timezone.utc)
 
@@ -779,6 +824,28 @@ def build_startup_update_target_windows(
         "financial_start_date": financial_start,
         "financial_end_date": narrative_end.date(),
     }
+
+
+def startup_update_run_financial_window(run_request: dict) -> dict[str, date]:
+    """Financial dates for a run's frozen month in its own reporting timezone.
+
+    The run pinned its month and cutoff when it was created, so this never
+    compares against "now" in UTC (which rejected the new month for founders
+    ahead of UTC during the first hours of a month).
+    """
+    from zoneinfo import ZoneInfo
+    request = run_request or {}
+    month = date.fromisoformat(str(request.get("target_month") or request.get("current_month")))
+    month = date(month.year, month.month, 1)
+    zone = ZoneInfo(request.get("reporting_timezone") or "UTC")
+    period = request.get("narrative_period") or {}
+    cutoff = parse_datetime(str(period.get("end") or ""))
+    if cutoff is not None and cutoff.tzinfo is not None:
+        # The narrative period end is exclusive; its last instant is inside.
+        end_date = (cutoff - timedelta(microseconds=1)).astimezone(zone).date()
+    else:
+        end_date = min(_month_end(month), timezone.now().astimezone(zone).date())
+    return {"financial_start_date": month, "financial_end_date": max(month, min(end_date, _month_end(month)))}
 
 
 def get_startup_update_run_target_month(run: ContentFactoryRun) -> Optional[date]:
@@ -3620,6 +3687,23 @@ def _iter_startup_update_runs(*, organization: Organization, statuses: Optional[
     return list(queryset.order_by("-updated_at"))
 
 
+def settle_review_required_run(run: ContentFactoryRun) -> bool:
+    """Close a run whose saved draft only waits for the founder's factual review.
+
+    Older workers left such runs "blocked", which counts as open and stopped
+    the founder from drafting another update. The draft itself stays saved and
+    marked for review; only the run is finished.
+    """
+    if (run.workflow == STARTUP_UPDATE_WORKFLOW and run.status == ContentFactoryRunStatus.BLOCKED
+            and (run.result or {}).get("review_required")):
+        run.status = ContentFactoryRunStatus.COMPLETED
+        run.resume_available = False
+        run.error = ""
+        run.save(update_fields=["status", "resume_available", "error", "updated_at"])
+        return True
+    return False
+
+
 def get_open_startup_update_run(
     *,
     organization: Organization,
@@ -3627,10 +3711,10 @@ def get_open_startup_update_run(
     target_month: Optional[date] = None,
     input_sources: Optional[list[str]] = None,
 ) -> Optional[ContentFactoryRun]:
-    runs = _iter_startup_update_runs(
+    runs = [run for run in _iter_startup_update_runs(
         organization=organization,
         statuses=OPEN_RUN_STATUSES,
-    )
+    ) if not settle_review_required_run(run)]
     target = _month_start(target_month) if target_month is not None else None
 
     def matches_target(run: ContentFactoryRun) -> bool:
