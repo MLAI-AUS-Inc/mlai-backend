@@ -1109,12 +1109,12 @@ class StartupUpdateRunView(APIView):
         input_sources = normalize_startup_update_input_sources(explicit_sources)
         raw_target_month = data.get("target_month") or data.get("targetMonth")
         try:
-            if raw_target_month in (None, ""):
-                from startup_updates.services import default_startup_update_target_month, founder_timezone_name
-                target_month = default_startup_update_target_month(timezone_name=founder_timezone_name(
-                    getattr(binding.organization, "startup_profile", None)))
-            else:
-                target_month = parse_startup_update_target_month(raw_target_month)
+            # A service run without a month keeps the current month. Older
+            # Valley workers send no month and only skip a company that already
+            # has a draft for the current UTC month, so a previous-month default
+            # here would start a new scheduled run on every ops pass during
+            # days 1-7. Current workers always send an explicit month.
+            target_month = parse_startup_update_target_month(raw_target_month or None)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = google_connection_for_binding(binding)
