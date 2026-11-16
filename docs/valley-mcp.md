@@ -56,8 +56,10 @@ normal Chat sign-in rather than introducing another account system. A founder
 can disconnect all grants for the selected startup with `DELETE agent-connection/`.
 A company-wide revocation epoch is checked on every request, so disconnection
 revokes even a grant missing from the cached connection-list index. Account
-session revocation/expiry, device ownership changes, account auth-version
-changes and removal of startup ownership also revoke effective access.
+auth-version changes, loss of approved membership and removal of startup
+ownership also end effective access. Since 16 November 2026 a startup or article
+grant no longer depends on the browser sign-in that approved it; see
+[Own-AI connections that last](#own-ai-connections-that-last--16-november-2026).
 
 ## HTTP contract
 
@@ -102,9 +104,10 @@ the client's Accept header, while retaining throttling and method restrictions.
   timezone-aware financial reporting period, narrative activity window and
   narrative-writing instructions. Optional `activityWindow` input contains
   `startInclusive` and `endExclusive` timezone-aware ISO timestamps. The range
-  must be increasing, at most 31 days, and end no later than the current time
-  plus five minutes of clock tolerance. This permits a rolling last-30-days
-  narrative even when it crosses a month boundary. Without this argument the
+  must be increasing, at most 31 days and one hour (a whole month that ends
+  daylight saving), and end no later than the current time plus five minutes of
+  clock tolerance. This permits a rolling last-30-days narrative even when it
+  crosses a month boundary. The result also lists `existingDrafts` for the month. Without this argument the
   narrative window remains the selected calendar month, capped at now. The
   `reportingPeriod` and saved draft's financial month are unchanged.
 - `save_narrative_draft`: accept supported narrative sections, source references,
@@ -201,12 +204,15 @@ settings intact. The host upsert refuses to replace a differing ownership token;
 reconcile an existing plugin's proof explicitly before changing it.
 
 Authorization intents expire after ten minutes, authorization codes after five
-minutes, access tokens after one hour and grants/refresh tokens after at most
-thirty days. Refresh tokens rotate once; correct-client reuse of a spent token
-revokes its grant and every rotated descendant. Only hashed token-family linkage
-is retained until the grant expires. Unknown tokens and wrong-client attempts
-cannot revoke that family. Account-session expiry may end a grant
-earlier. Cache loss fails closed and requires reconnection. Redis needs adequate
+minutes and access tokens after one hour. Grants and refresh tokens end after
+`MLAI_MCP_GRANT_IDLE_TTL_DAYS` (default 180) without a refresh; personal-agent
+grants keep a fixed thirty days. Refresh tokens rotate once. A correct-client
+retry of a spent token within `MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS` (default
+60) returns the tokens already issued; after that window, reuse revokes the
+grant and every rotated descendant. Only hashed token-family linkage is retained
+until the grant expires. Unknown tokens and wrong-client attempts cannot revoke
+that family. Account-session expiry ends only grants that hold community or
+personal-agent permissions. Cache loss fails closed and requires reconnection. Redis needs adequate
 capacity and the normal operational durability settings; this is revocable
 connection state, not the durable draft store. Roll back by disabling
 `VALLEY_MCP_ENABLED`; existing draft revisions remain in the database.
@@ -259,6 +265,54 @@ PKCE/resource/callback checks, code/refresh replay, no-company denial, account a
 device revocation, ownership isolation, financial-field rejection, exact revision
 matching, retry identity and selected-company disconnection. The second command
 performs Django system and migration-drift checks without a database connection.
+
+## Own-AI connections that last — 16 November 2026
+
+Applies to `/mcp/mlai` and `/mcp/valley` unless stated. No migration.
+
+- **Scope hint.** The 401 challenge carries
+  `scope="startup:brief:read startup:draft:write"` beside `resource_metadata`, so
+  hosts that follow the MCP authorization specification request Pulse only.
+- **Pulse is one capability (`/mcp/mlai` only).** Approving either Pulse scope
+  grants both. `/mcp/valley` still grants exactly the requested scopes.
+- **Account binding.** Grants made only of `startup:` and `article:` scopes are
+  checked against user id and `auth_version`. Grants with `community:` or
+  `agent:` scopes are still also checked against the approving account session
+  and device.
+- **Sliding expiry.** Each successful refresh moves the grant's expiry to now
+  plus `MLAI_MCP_GRANT_IDLE_TTL_DAYS`. Personal-agent grants are excluded.
+- **Refresh.** `resource` may be omitted on the token endpoint and a trailing
+  slash is accepted; a different resource is refused. Scopes sent on refresh
+  that were not granted are ignored. A parallel refresh waits up to three
+  seconds; the refresh lock lasts thirty seconds. The replayed successor is
+  stored encrypted with a key derived from the spent refresh token.
+- **Revocation.** The per-startup disconnect marker never expires. Revoking a
+  grant also writes a separate tombstone, so a refresh racing a revocation
+  cannot write the grant back as live.
+- **Reasons.** Membership and startup problems answer HTTP 403
+  `{"error": "<code>", "error_description": "<sentence>"}` without a challenge.
+  Codes: `community_membership_required`, `startup_unavailable`,
+  `startup_not_authorised`, `origin_not_allowed`. Inside `tools/call` they are
+  an `isError` result with the same code in `structuredContent`. The token
+  endpoint returns `invalid_grant` with the sentence and a `reason` code.
+  A missing permission still gets the `insufficient_scope` challenge.
+- **Authorize errors.** A request that accepts `text/html` gets a short page;
+  other requests get JSON as before. Unknown requested scopes are ignored when
+  at least one supported scope remains.
+- **Brief.** `existingDrafts: [{updateId, revisionId, status, title, updatedAt}]`
+  lists the month's updates with unpublished work. Tool text explains creating a
+  new update versus revising one, and says "MLAI" on `/mcp/mlai`.
+- **Chat endpoints** (`/api/v1/community-chat/startups/`):
+  `agent-connection/authorization/{id}/` adds `eligibility: {ok, reason, code}`
+  and `unavailableCompanies: [{id, name, reason}]`, and loads for a member whose
+  approval is pending so the reason can be shown (approving stays refused).
+  `agent-connection/` adds `serviceName`. `POST agent-draft-task/?company_id=`
+  with `{month, updateId?, timezone?}` returns
+  `{prompt, month, windowStart, windowEnd, requestId, serviceName}`: the request
+  a founder gives their AI, covering the whole chosen month in their timezone.
+
+Tests: `python scripts/test_without_database.py community_chat.tests.test_pulse_own_ai`
+runs the whole journey (registration to a retried refresh) without a database.
 
 ## Platform references
 

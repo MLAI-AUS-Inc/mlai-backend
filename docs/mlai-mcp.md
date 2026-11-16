@@ -25,8 +25,9 @@ and token exchange. A new consent requires a nonempty, explicit `scopes` list
 that is a subset of the host's requested permissions. An absent OAuth `scope`
 allows the new capability catalogue to be offered on the consent screen, because
 Claude/Cursor native configurations do not document a requested-scope field.
-Only `startup:brief:read` is selected by default in that screen; approval still
-requires an explicit selected scope list. An explicit host scope constrains the
+Approval still requires an explicit selected scope list; since 16 November 2026
+selecting either Pulse scope grants both, and the 401 challenge asks hosts for
+the Pulse scopes only (see [Own-AI connections that last](valley-mcp.md#own-ai-connections-that-last--16-november-2026)). An explicit host scope constrains the
 available choices. This fallback never expands an existing grant or refresh. Canonical OAuth resumes at the account-only `/connections/mcp` route; the legacy founder route remains unchanged. The browser displays requested capability
 groups and lets the member opt in separately. Article and Pulse grants bind one
 currently owned startup; a Community-only grant may omit the startup.

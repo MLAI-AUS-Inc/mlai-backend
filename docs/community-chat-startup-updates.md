@@ -357,6 +357,12 @@ keeps Xero/Stripe financial evidence server-owned and requires founder review.
 See [the MCP contract and rollout guide](valley-mcp.md). Local implementation is
 not evidence of deployment or a ChatGPT directory approval.
 
+An untouched AI-supplied draft is approved with the ordinary publish call:
+`reviewed: true` with the exact `revisionId`, `revisionHash` and the saved
+`audienceVisibility`. The consent, connection and own-AI request endpoints added
+on 16 November 2026 are described in
+[Own-AI connections that last](valley-mcp.md#own-ai-connections-that-last--16-november-2026).
+
 ## Financial disclosure policy
 
 - Community responses disclose financial information only as `financialChart: {revenue, costs}`: two relative values between 0 and 1, normalized to the larger aggregate total (both are 0 when both totals are 0). The chart requires selected canonical `revenue` and `monthlyCosts`/`monthly_costs` values with compatible currency, provenance and accepted quality. Missing, conflicting, partial or unverified totals produce no chart. Amounts, currency strings, custom metrics and financial line items are never returned: `metrics` and `metricEvidence` are empty and both `displayConfig` lists are empty. Raw evidence, attachment metadata, storage paths, provider identifiers, exact financial charts and private analysis stay private.
