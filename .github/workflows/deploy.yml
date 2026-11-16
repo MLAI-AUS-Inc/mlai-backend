@@ -208,6 +208,7 @@ jobs:
           community_chat.tests.test_startup_lifecycle \
           community_chat.tests.test_startup_mcp \
           community_chat.tests.test_startup_mcp_readability \
+          community_chat.tests.test_pulse_own_ai \
           community_chat.tests.test_startup_readability \
           community_chat.tests.test_mlai_mcp \
           community_chat.tests.test_mlai_mcp_native_agents \
