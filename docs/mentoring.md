@@ -56,7 +56,7 @@ Everything returns 404 `mentor_booking_disabled` while the flag is off.
 | GET, PUT `mentor/profile/` | The mentor's own profile, weekly `availability` list and optional `busy_calendar_email` |
 | POST `mentor/sessions/` | Founder request: `mentor_id` (whole number), `starts_at`, `brief`, `client_request_id`, and `expected_price` (required, the whole-number price the founder was shown) |
 | GET `mentor/sessions/?role=founder\|mentor&status=` | My sessions |
-| POST `mentor/application/check/` | Invited user checks an invite `{token}`: `state` ready, submitted or approved. 404 `invite_invalid`, 403 `invite_wrong_user`, 410 `invite_expired` or `invite_revoked` |
+| POST `mentor/application/check/` | Invited user checks an invite `{token}`: `state` ready, submitted or approved. 404 `invite_invalid`, 403 `invite_wrong_user` (the detail names the invited address, masked, for an address-only invite), 410 `invite_expired` or `invite_revoked` |
 | POST `mentor/application/` | Invited user submits the profile form with `token`; creates or updates their profile with `is_active` false. 409 `invite_used`, 409 `already_a_mentor` |
 | POST `mentor/sessions/<uuid>/accept/` | Mentor accepts; the founder is charged now (409 `founder_insufficient_points` and the request stays open if they cannot pay) |
 | POST `mentor/sessions/<uuid>/meeting/retry/` | Mentor asks for the Meet link again when `meeting_status` is `failed` or `unavailable` (409 `meeting_pending` while one is being made) |
@@ -70,13 +70,16 @@ Under `mentor/admin/`, same flag, authentication and throttles. Allowed callers 
 Chat owner or admin on a verified device, or an active Django staff or superuser
 account; anyone else gets 403 `mentoring_admin_required`. `mentor/admin/access/` is
 open to every signed-in member and returns `{"is_admin": bool}` so the client knows
-whether to show the tab.
+whether to show the tab, plus `features.invite_email` (true while
+`MENTOR_INVITE_EMAIL_ENABLED` is on and system email is configured).
 
 | Method and path | Purpose |
 | --- | --- |
-| GET `access/` | `{is_admin}` for the caller |
-| GET `members/?q=` | Active members by name or email (2+ characters, 10 results) |
-| GET, POST `invites/` | List (`?status=pending\|used\|expired\|revoked`) or create `{user_id}`; the create response carries `link` once, only its hash is stored |
+| GET `access/` | `{is_admin, features: {invite_email}}` for the caller |
+| GET `members/?q=` | `{members, email_candidate}`: active members by name or email (2+ characters, 10 results), never Slack placeholder accounts (`@slack.placeholder.com`, which cannot sign in). Each member has `is_mentor` and `pending_invite`. `email_candidate` is the typed address when it is a valid email no account owns |
+| GET, POST `invites/` | List (`?status=pending\|used\|expired\|revoked`) or create `{user_id}` or `{email}`, with optional `send_email` (true) and `note` (plain text, 600 max). Creating revokes the person's earlier unused invites. With `send_email` and the email switched on, the invite is emailed and the response has `email: {status: "sent", to}` and no `link`. Otherwise, or when the email fails (`email.status` `failed` or `suppressed`), the response carries `link` once; only its hash is stored. Rows add `invited_email`, `has_account`, `emailed_at`, `send_count` and `email_status` (`none`, `sent`, `delivered`, `delayed`, `bounced`, `complained`, `failed`, `suppressed`) |
+| POST `invites/preview/` | `{user_id}` or `{email}` and `note`: `{subject, from, reply_to, to, html, text}` of the email as it would go out, with a dummy link. Creates nothing. 409 `invite_email_off` |
+| POST `invites/<id>/resend/` | Waiting or expired invite: new token (the old link stops working), 14 more days, emailed again with optional `note`. 409 `invite_used`, `invite_revoked`, `invite_email_off` |
 | POST `invites/<id>/revoke/` | Revoke an unused invite (records `revoked_by`); 409 `invite_used` if used |
 | GET `applications/?state=pending\|rejected` | Inactive profiles that came from a used invite and were never approved or paused |
 | GET `applications/<profile_id>/` | The full application |
@@ -259,7 +262,12 @@ PostgreSQL CI lane. Migration execution requires approval for that environment.
 ## Becoming a mentor (invite only)
 
 Nobody can apply without an invite. Staff issue an invite through Mentoring admin or add a Mentor invite in Django admin for an
-existing user; the single-use link (`<chat url>/mentoring/apply?mentor_invite=<token>`) is
+existing user or for an email address with no account yet. With `MENTOR_INVITE_EMAIL_ENABLED`
+on, Mentoring admin emails the invite (system_email, `mentor_invite`; replies go to the staff
+member who sent it) after a confirm step with a preview; staff can still choose to copy a link
+instead. An address-only invite is bound to the account that first opens it signed in with
+that address (including an alias); signing up through MLAI Chat's email code proves the
+address. The single-use link (`<chat url>/mentoring/apply?mentor_invite=<token>`) is
 shown once and only its SHA-256 is stored. It expires after 14 days by default and can
 be revoked from the list. The invited user, signed in as that user, fills the form
 (headline, bio, topics, price 1 to 1000 Roo default 40, session length, location,

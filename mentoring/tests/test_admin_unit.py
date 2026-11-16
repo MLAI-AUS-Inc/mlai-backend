@@ -272,15 +272,60 @@ class SessionTests(Fixture):
 class MemberSearchTests(Fixture):
     def test_short_or_missing_query_returns_nothing_without_touching_the_database(self):
         for q in (None, '', ' a ', 5):
-            self.assertEqual(MentoringAdminService.search_members(q), [])
+            self.assertEqual(MentoringAdminService.search_members(q), {'members': [], 'email_candidate': None})
+
+    def _search(self, text, found, *, mentors=(), pending=(), owner=None):
+        users = MagicMock()
+        chain = users.objects.filter.return_value.exclude.return_value.exclude.return_value
+        chain.order_by.return_value.__getitem__.return_value = list(found)
+        users.objects.resolve_email.return_value = owner
+        profiles = MagicMock()
+        profiles.objects.filter.return_value.values_list.return_value = list(mentors)
+        profiles.objects.filter.return_value.exists.return_value = False
+        invites = MagicMock()
+        invites.objects.filter.return_value.order_by.return_value = list(pending)
+        with patch.object(svc, 'get_user_model', return_value=users), patch.object(svc, 'MentorProfile', profiles), \
+                patch.object(svc, 'MentorInvite', invites), patch.object(svc, '_open_invites_for') as open_invites:
+            open_invites.return_value.filter.return_value.first.return_value = None
+            return MentoringAdminService.search_members(text), users
 
     def test_search_matches_and_hides_inactive(self):
-        users = MagicMock()
-        users.objects.filter.return_value.order_by.return_value.__getitem__.return_value = [user()]
-        with patch.object(svc, 'get_user_model', return_value=users):
-            result = MentoringAdminService.search_members('ada')
-        self.assertEqual(result, [{'id': 5, 'name': 'Ada Lovelace', 'email': 'ada@example.com', 'avatar_url': None}])
+        result, users = self._search('ada', [user()])
+        self.assertEqual(result, {'members': [{
+            'id': 5, 'name': 'Ada Lovelace', 'email': 'ada@example.com', 'avatar_url': None,
+            'is_mentor': False, 'pending_invite': None,
+        }], 'email_candidate': None})
         self.assertTrue(users.objects.filter.call_args.kwargs['is_active'])
+
+    def test_search_leaves_out_slack_placeholders_and_empty_emails(self):
+        _result, users = self._search('sonia', [])
+        excluded = users.objects.filter.return_value.exclude
+        self.assertEqual(excluded.call_args.kwargs, {'email__iendswith': '@slack.placeholder.com'})
+        self.assertEqual(excluded.return_value.exclude.call_args.kwargs, {'email': ''})
+
+    def test_search_labels_mentors_and_waiting_invites(self):
+        waiting = invite(user=user(), expires_at=NOW + timedelta(days=3))
+        waiting.user_id = 5
+        result, _users = self._search('ada', [user()], mentors=[5], pending=[waiting])
+        row = result['members'][0]
+        self.assertTrue(row['is_mentor'])
+        self.assertEqual(row['pending_invite'], {'id': 3, 'expires_at': (NOW + timedelta(days=3)).isoformat()})
+
+    def test_an_unknown_email_address_is_offered_as_a_candidate(self):
+        result, _users = self._search('New.Person@Example.com', [])
+        self.assertEqual(result['email_candidate'], 'new.person@example.com')
+
+    def test_placeholder_or_invalid_addresses_are_never_candidates(self):
+        for text in ('sonia@slack.placeholder.com', 'not an@email', 'a@b'):
+            result, _users = self._search(text, [])
+            self.assertIsNone(result['email_candidate'], text)
+
+    def test_an_address_owned_by_an_account_returns_that_member_not_a_candidate(self):
+        owner = user(8, 'Sonia Kaurah', 'sonia@talathrive.com')
+        owner.is_active = True
+        result, _users = self._search('sonia@talathrive.com', [], owner=owner)
+        self.assertIsNone(result['email_candidate'])
+        self.assertEqual(result['members'][0]['id'], 8)
 
 
 if __name__ == '__main__':

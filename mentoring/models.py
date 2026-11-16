@@ -99,6 +99,9 @@ class MentorProfile(models.Model):
 
 
 INVITE_TTL_DAYS = 14
+# Slack-imported people who never signed up get this address. Nobody can sign in
+# with it, so an invite to one can never be used.
+PLACEHOLDER_EMAIL_SUFFIX = '@slack.placeholder.com'
 
 
 def invite_link(token):
@@ -110,16 +113,33 @@ def hash_invite_token(token):
     return hashlib.sha256(str(token).encode('utf-8')).hexdigest()
 
 
-class MentorInvite(models.Model):
-    """A single-use, expiring invitation for one existing user to apply as a mentor.
+def is_placeholder_email(email):
+    return str(email or '').strip().lower().endswith(PLACEHOLDER_EMAIL_SUFFIX)
 
-    Only the SHA-256 of the token is stored; the link is shown to staff once, at
-    creation. The invited user must be logged in as that user to use it.
+
+def mask_email(email):
+    """``s•••@example.com``: enough for the invited person to recognise it, no more."""
+    local, _, domain = str(email or '').partition('@')
+    if not local or not domain:
+        return ''
+    return f'{local[0]}\u2022\u2022\u2022@{domain}'
+
+
+class MentorInvite(models.Model):
+    """A single-use, expiring invitation for one person to apply as a mentor.
+
+    The invite names an existing user, or only an email address for someone who
+    has no account yet. An address-only invite is bound to the account that signs
+    in with that address the first time the link is opened. Only the SHA-256 of
+    the token is stored; the plaintext goes into the invite email or is shown to
+    staff once.
     """
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='mentor_invites'
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.CASCADE, related_name='mentor_invites',
     )
+    email = models.EmailField(max_length=320, blank=True, default='')
     token_hash = models.CharField(max_length=64, unique=True, editable=False)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True,
@@ -133,25 +153,52 @@ class MentorInvite(models.Model):
         settings.AUTH_USER_MODEL, null=True, blank=True,
         on_delete=models.SET_NULL, related_name='+', editable=False,
     )
+    # The latest invite email: when, and its system_email.SystemEmail row (no FK,
+    # so the apps stay independent). send_count also numbers the idempotency key.
+    emailed_at = models.DateTimeField(null=True, blank=True)
+    email_log_id = models.UUIDField(null=True, blank=True)
+    send_count = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
         ordering = ('-created_at', '-pk')
-        indexes = [models.Index(fields=('user', 'used_at'), name='mentor_invite_user_idx')]
+        indexes = [
+            models.Index(fields=('user', 'used_at'), name='mentor_invite_user_idx'),
+            models.Index(fields=('email',), name='mentor_invite_email_idx'),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(user__isnull=False) | ~Q(email=''),
+                name='mentor_invite_has_target',
+            ),
+        ]
 
     def __str__(self):
-        return f'Mentor invite for user {self.user_id}'
+        if self.user_id:
+            return f'Mentor invite for user {self.user_id}'
+        return f'Mentor invite {self.pk} by email'
 
     @classmethod
-    def issue(cls, user, created_by=None, ttl_days=INVITE_TTL_DAYS):
+    def issue(cls, user=None, created_by=None, ttl_days=INVITE_TTL_DAYS, email=''):
         """Create an invite and return (invite, plaintext token)."""
+        address = str(email or getattr(user, 'email', '') or '').strip().lower()
+        if user is None and not address:
+            raise ValueError('An invite needs a user or an email address.')
         token = secrets.token_urlsafe(32)
         invite = cls.objects.create(
             user=user,
+            email=address,
             token_hash=hash_invite_token(token),
             created_by=created_by,
             expires_at=timezone.now() + timedelta(days=ttl_days),
         )
         return invite, token
+
+    def rotate(self, ttl_days=INVITE_TTL_DAYS):
+        """A new token and a fresh expiry; the old link stops working. Caller saves."""
+        token = secrets.token_urlsafe(32)
+        self.token_hash = hash_invite_token(token)
+        self.expires_at = timezone.now() + timedelta(days=ttl_days)
+        return token
 
 
 class MentorAvailabilityRule(models.Model):

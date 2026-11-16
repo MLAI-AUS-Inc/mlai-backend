@@ -23,6 +23,16 @@ bounces never pause CRM senders (the CRM webhook ignores senders outside
 | `article_content_ready` | "Article ready for {domain}" | same |
 | `article_report_ready` | Article performance brief | `content_analytics/services/report_notifications.py` |
 | `monthly_update_7d`, `monthly_update_1d` | Coworking-rate reminders | `startup_updates/monthly_update_reminders.py` |
+| `mentor_invite` | "{Name} invited you to mentor at MLAI" | `mentoring/invite_email.py` (Mentoring admin) |
+
+`mentor_invite` has no legacy provider and is not listed in
+`SYSTEM_EMAIL_RESEND_MESSAGES`: it always goes through Resend, and only while
+`MENTOR_INVITE_EMAIL_ENABLED` is true. It is laid out like the CRM event invite
+(`crm/email_layouts.py`) and uses the same hosted icons
+(`CRM_EMAIL_ASSET_BASE_URL`). Replies go to the staff member who sent it
+(`send(..., reply_to=...)`), not `SYSTEM_EMAIL_REPLY_TO`. Test it with
+`python manage.py send_system_email_test mentor_invite` (sample context in
+`system_email/fixtures.py`, dummy link).
 
 Templates live in `system_email/templates/system_email/`. The four
 notification messages above `monthly_*` use the subject and body their

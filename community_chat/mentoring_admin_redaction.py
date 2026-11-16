@@ -10,8 +10,14 @@ def person(data):
 
 
 def invite(data):
-    return {**fields(data, 'id status created_at expires_at used_at revoked_at'),
-            **{key: person(data.get(key)) for key in ('user', 'created_by', 'revoked_by')}}
+    # No invited address: read-only staff see whether and how the email went, not to whom.
+    result = {**fields(data, 'id status created_at expires_at used_at revoked_at '
+                             'has_account emailed_at send_count email_status'),
+              **{key: person(data.get(key)) for key in ('user', 'created_by', 'revoked_by')}}
+    if data.get('has_account') is False:
+        # An address-only invite names its person by the address; show neither.
+        result['user'] = {'id': None, 'name': 'Invited by email'}
+    return result
 
 
 def application(data):

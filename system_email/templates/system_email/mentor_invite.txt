@@ -1,0 +1,23 @@
+{% autoescape off %}Hi {{ first_name|default:"there" }},
+{% if note %}
+{{ note }}
+{% endif %}
+{{ inviter_name }} would love you to join MLAI's mentors. Mentors give founders in the MLAI community short, focused sessions on the things they are stuck on. You set your topics, your hours and your price, and you only take the sessions you want.
+
+- 30 to 60 minute sessions, on the weekly hours you choose
+- Video or at the MLAI space; we create the Google Meet link for you
+- Founders book with Roo Points; you accept or decline each request
+
+Accepting takes about five minutes: sign in to MLAI Chat with this email address, fill in a short profile, and we'll switch it on.
+
+Accept the invite:
+{{ accept_url }}
+
+How mentoring works:
+{{ explainer_url }}
+
+This invite is for {{ invited_email }} and works until {{ expires_on }}. Not for you right now? No worries, you can ignore this email.
+
+You're getting this because {{ inviter_name }} at MLAI invited you personally to mentor. Reply to this email if you'd rather not hear about mentoring.
+MLAI · Suite 350, 585 Little Collins St, Melbourne VIC 3000 · hi@mlai.au
+{% endautoescape %}
