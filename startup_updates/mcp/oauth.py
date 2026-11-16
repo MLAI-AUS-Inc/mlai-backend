@@ -324,10 +324,6 @@ def approve_intent(request_id, *, user, session, company_id, approve, scopes=Non
         legacy = intent["resource"] == mcp_url()
         if legacy and selected != set(intent["scopes"]):
             raise ValidationError("Reconnect Valley to change its permissions.")
-        if not legacy and selected & SCOPES:
-            # Pulse is one capability: an AI that may read the brief must also
-            # be able to save the private draft it was asked to write.
-            selected |= SCOPES
         native = bool(selected & DOT_SCOPES)
         if native and (legacy or not DOT_SCOPES <= selected or not native_installation_id):
             raise ValidationError("Select all personal agent permissions and an enrolled agent.")

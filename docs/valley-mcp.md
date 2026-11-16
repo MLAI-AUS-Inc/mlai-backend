@@ -273,8 +273,9 @@ Applies to `/mcp/mlai` and `/mcp/valley` unless stated. No migration.
 - **Scope hint.** The 401 challenge carries
   `scope="startup:brief:read startup:draft:write"` beside `resource_metadata`, so
   hosts that follow the MCP authorization specification request Pulse only.
-- **Pulse is one capability (`/mcp/mlai` only).** Approving either Pulse scope
-  grants both. `/mcp/valley` still grants exactly the requested scopes.
+- **Pulse consent.** Chat offers one preselected choice for reading the brief and
+  saving private drafts when the host requests both. A partial approval grants
+  only the selected scope, including when an older client submits it.
 - **Account binding.** Grants made only of `startup:` and `article:` scopes are
   checked against user id and `auth_version`, so signing in again does not end
   them. They record the approving session's installation and device key

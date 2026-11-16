@@ -171,10 +171,9 @@ class OwnAiJourneyTests(SimpleTestCase):
         self.assertEqual(screen.data["companies"], [{"id": COMPANY_ID, "name": "Example Startup"}])
         self.assertEqual(screen.data["unavailableCompanies"], [])
 
-        # 4. Allow with what older screens tick by default: read only. Pulse is
-        #    one capability, so the connection can still save the draft.
+        # 4. Accept the one Pulse choice shown by Chat for the requested pair.
         approved = self.consent(request_id, "post", {"requestId": request_id, "approve": True,
-            "companyId": COMPANY_ID, "scopes": ["startup:brief:read"]})
+            "companyId": COMPANY_ID, "scopes": screen.data["capabilities"][0]["scopes"]})
         self.assertEqual(approved.status_code, 200, approved.data)
         callback = parse_qs(urlsplit(approved.data["redirectUrl"]).query)
         self.assertEqual(callback["state"], ["client-state"])
@@ -295,13 +294,13 @@ class ConnectionLifetimeTests(SimpleTestCase):
             company_id=COMPANY_ID, approve=True, scopes=selected)
         return cache.get(oauth.key("grant", cache.get(oauth.key("code", parse_qs(urlsplit(url).query)["code"][0]))["grant_id"]))
 
-    def test_either_pulse_permission_grants_the_whole_pulse_capability_on_mlai_only(self):
+    def test_partial_pulse_consent_never_adds_an_unselected_scope(self):
         for selected in (["startup:brief:read"], ["startup:draft:write"]):
             with self.subTest(selected=selected):
-                self.assertEqual(self.approve(PULSE, selected)["scopes"], PULSE)
-        # Even when the host asked for one half, and alongside other choices.
-        self.assertEqual(self.approve(["startup:brief:read"], ["startup:brief:read"])["scopes"], PULSE)
-        self.assertEqual(self.approve([*PULSE, "article:read"], ["article:read", "startup:brief:read"])["scopes"], ["article:read", *PULSE])
+                self.assertEqual(self.approve(PULSE, selected)["scopes"], selected)
+                self.assertEqual(self.approve(selected, selected)["scopes"], selected)
+        mixed = ["article:read", "startup:brief:read"]
+        self.assertEqual(self.approve([*PULSE, "article:read"], mixed)["scopes"], mixed)
         # Nothing Pulse was chosen, so nothing Pulse is granted.
         self.assertEqual(self.approve([*PULSE, "article:read"], ["article:read"])["scopes"], ["article:read"])
         # The legacy resource still grants exactly what was requested.
