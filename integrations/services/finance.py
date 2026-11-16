@@ -207,7 +207,10 @@ def calculate_and_publish_monthly_revenue(*, run: ContentFactoryRun) -> dict[str
 
 def publish_financial_metric_observations(*, organization: Organization, run: Optional[ContentFactoryRun] = None) -> list[StartupMetricObservation]:
     """One Revenue metric: Xero books win; never add invoices or bill payments."""
-    selected_sources = set((run.run_request or {}).get("input_sources") or []) if run else set()
+    from startup_updates.preflight import effective_input_sources
+    # A Xero that was left out of this run (for example it needs reconnecting)
+    # must not suppress the Stripe revenue figure.
+    selected_sources = set(effective_input_sources(run.run_request, run.result)) if run else set()
     if (not selected_sources or "xero" in selected_sources) and ExternalServiceConnection.objects.filter(organization=organization, provider=ExternalServiceProvider.XERO).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED).exists():
         from startup_updates.services import publish_xero_metric_observations
         from startup_updates.models import StartupProfile
@@ -356,30 +359,106 @@ def _financial_connections(
     return list(queryset.order_by("provider", "-updated_at"))
 
 
+def _stripe_page(
+    connection: ExternalServiceConnection,
+    path: str,
+    params: Optional[dict[str, Any]] = None,
+    starting_after: Optional[str] = None,
+) -> tuple[list[dict[str, Any]], Optional[str]]:
+    """Read one Stripe list page; return its items and the next cursor, if any."""
+    request_params = dict(params or {})
+    if starting_after:
+        request_params["starting_after"] = starting_after
+    response = requests.get(
+        f"{STRIPE_API_BASE_URL}{path}",
+        headers={
+            "Authorization": f"Bearer {connection.access_token}",
+            "Stripe-Version": str(getattr(settings, "STRIPE_API_VERSION", "2026-07-29.dahlia")),
+        },
+        params=request_params,
+        timeout=(3, 20),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    page_items = payload.get("data") if isinstance(payload.get("data"), list) else []
+    items = [item for item in page_items if isinstance(item, dict)]
+    if not payload.get("has_more"):
+        return items, None
+    next_cursor = page_items[-1].get("id") if page_items and isinstance(page_items[-1], dict) else None
+    if not next_cursor or next_cursor == request_params.get("starting_after"):
+        raise ValueError("Stripe returned an incomplete page without an advancing cursor.")
+    return items, next_cursor
+
+
 def _stripe_collection(connection: ExternalServiceConnection, path: str, params: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     request_params = dict(params or {})
+    cursor = request_params.pop("starting_after", None)
     while True:
-        response = requests.get(
-            f"{STRIPE_API_BASE_URL}{path}",
-            headers={
-                "Authorization": f"Bearer {connection.access_token}",
-                "Stripe-Version": str(getattr(settings, "STRIPE_API_VERSION", "2026-07-29.dahlia")),
-            },
-            params=request_params,
-            timeout=(3, 20),
-        )
-        response.raise_for_status()
-        payload = response.json()
-        page_items = payload.get("data") if isinstance(payload.get("data"), list) else []
-        results.extend(item for item in page_items if isinstance(item, dict))
-        if not payload.get("has_more"):
-            break
-        next_cursor = page_items[-1].get("id") if page_items else None
-        if not next_cursor or next_cursor == request_params.get("starting_after"):
-            raise ValueError("Stripe returned an incomplete page without an advancing cursor.")
-        request_params["starting_after"] = next_cursor
-    return results
+        items, cursor = _stripe_page(connection, path, request_params, cursor)
+        results.extend(items)
+        if not cursor:
+            return results
+
+
+# One Pulse request must finish well inside the web worker timeout (90 s).
+# Each Stripe page call can take up to 23 s, so stop starting pages after 30 s.
+STRIPE_PAGE_TIME_BUDGET_SECONDS = 30
+_STRIPE_SYNC_PHASES = (
+    ("invoices", "/v1/invoices", {"limit": 100}),
+    ("subscriptions", "/v1/subscriptions", {"limit": 100, "status": "all"}),
+)
+
+
+def sync_stripe_connection_page(
+    connection: ExternalServiceConnection,
+    state: Optional[dict[str, Any]] = None,
+    *,
+    time_budget_seconds: float = STRIPE_PAGE_TIME_BUDGET_SECONDS,
+) -> dict[str, Any]:
+    """Advance a resumable Stripe sync by the pages that fit in one request.
+
+    ``state`` is the value returned by the previous call. Every page is saved
+    as it is read, so a timed-out or retried request continues from the last
+    saved cursor instead of starting again from the first page.
+    """
+    import time as _time
+    if connection.provider != ExternalServiceProvider.STRIPE:
+        raise ConnectorConfigurationError("Connection is not a Stripe connection.")
+    if not connection.access_token:
+        raise ConnectorOAuthError("Stripe connection is missing an access token.")
+    state = dict(state or {})
+    if state.get("complete"):
+        return state
+    upserts = {"invoices": _upsert_stripe_invoices, "subscriptions": _upsert_stripe_subscriptions}
+    deadline = _time.monotonic() + max(float(time_budget_seconds), 0)
+    while True:
+        phase = state.get("phase") or "invoices"
+        _, path, params = next(item for item in _STRIPE_SYNC_PHASES if item[0] == phase)
+        items, next_cursor = _stripe_page(connection, path, params, state.get("starting_after"))
+        with transaction.atomic():
+            count = upserts[phase](connection, items)
+        state[f"{phase}_synced"] = int(state.get(f"{phase}_synced") or 0) + count
+        if next_cursor:
+            state["starting_after"] = next_cursor
+        elif phase == "invoices":
+            state.update(phase="subscriptions", starting_after=None)
+        else:
+            synced_at = timezone.now()
+            connection.status = ExternalServiceConnectionStatus.CONNECTED
+            connection.last_error = ""
+            connection.last_synced_at = synced_at
+            connection.sync_cursor = {
+                **(connection.sync_cursor or {}),
+                "last_synced_at": synced_at.isoformat(),
+                "stripe_invoices_synced": state.get("invoices_synced", 0),
+                "stripe_subscriptions_synced": state.get("subscriptions_synced", 0),
+            }
+            connection.save(update_fields=["status", "last_error", "last_synced_at", "sync_cursor", "updated_at"])
+            state.update(starting_after=None, complete=True)
+            return state
+        if _time.monotonic() >= deadline:
+            return state
 
 
 def _upsert_stripe_invoices(connection: ExternalServiceConnection, invoices: list[dict[str, Any]]) -> int:
