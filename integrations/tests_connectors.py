@@ -1491,7 +1491,8 @@ class ConnectorEndpointTests(TestCase):
         self.assertTrue(response.data["errors"])
         connection.refresh_from_db()
         self.assertEqual(connection.status, ExternalServiceConnectionStatus.ERROR)
-        self.assertIn("Refresh token expired", connection.last_error)
+        # A refused refresh asks the founder to reconnect; the provider text stays in logs.
+        self.assertIn("Xero needs to be reconnected", connection.last_error)
 
     def test_xero_preview_and_invoices_endpoints_return_normalized_data(self):
         connection = ExternalServiceConnection.objects.create(
@@ -1747,7 +1748,8 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(mock_post.call_count, 3)
         connection = ExternalServiceConnection.objects.get(user=self.user, provider=ExternalServiceProvider.BANK_FEED)
         self.assertEqual(connection.external_account_id, "basiq-user-123")
-        self.assertEqual(connection.status, ExternalServiceConnectionStatus.SYNCING)
+        # Not connected until Basiq confirms the founder's consent.
+        self.assertEqual(connection.status, ExternalServiceConnectionStatus.DISCONNECTED)
 
     def test_bank_feed_connect_reuses_existing_basiq_user_for_additional_bank(self):
         ExternalServiceConnection.objects.create(

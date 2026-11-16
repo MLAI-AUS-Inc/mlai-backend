@@ -699,9 +699,12 @@ def local_redirect_uri_problem(provider: str) -> Optional[str]:
     """Outside DEBUG, a provider redirect URI on localhost can never complete.
 
     Linear's default is a localhost URL, so a deploy that sets only the
-    client id and secret would otherwise look "Ready to connect".
+    client id and secret would otherwise look "Ready to connect". Every other
+    provider's callback is written by deploy.sh, so only Linear is checked.
     """
     if getattr(settings, "DEBUG", False) or getattr(settings, "IS_LOCAL_ENV", False):
+        return None
+    if normalize_provider(provider) != ExternalServiceProvider.LINEAR:
         return None
     name = OAUTH_REDIRECT_URI_SETTINGS.get(provider)
     if not name:
