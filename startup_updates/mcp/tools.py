@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import F, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import ValidationError
@@ -162,10 +163,16 @@ def _activity_window(value, period, now):
 
 def existing_drafts(company, month):
     """This month's updates with unpublished work, newest first, so an AI can revise one."""
-    rows = MonthlyUpdateDraft.objects.filter(organization=company.organization, month=month).order_by("-updated_at", "-pk")[:20]
+    # Filter before slicing, so many published updates cannot hide an older draft.
+    # Null-safe "current revision differs from the published one".
+    unpublished = (Q(published_at__isnull=True)
+        | Q(current_revision__isnull=True, published_revision__isnull=False)
+        | Q(current_revision__isnull=False, published_revision__isnull=True)
+        | (Q(current_revision__isnull=False, published_revision__isnull=False) & ~Q(current_revision=F("published_revision"))))
+    rows = MonthlyUpdateDraft.objects.filter(organization=company.organization, month=month).filter(unpublished).order_by("-updated_at", "-pk")[:20]
     return [{"updateId": row.pk, "revisionId": row.current_revision_id, "status": row.status, "title": row.title,
         "updatedAt": row.updated_at.isoformat() if row.updated_at else None}
-        for row in rows if not row.published_at or row.current_revision_id != row.published_revision_id]
+        for row in rows]
 
 
 def _brief(company, month, activity_window=None, *, existing=(), brand="Valley"):

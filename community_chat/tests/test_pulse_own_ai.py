@@ -42,8 +42,11 @@ class Drafts:
     def select_related(self, *fields):
         return self
 
-    def filter(self, **query):
-        return Drafts([row for row in self.rows if all(
+    def filter(self, *unpublished, **query):
+        # A positional Q is existing_drafts' "has unpublished work" condition.
+        rows = [row for row in self.rows if not unpublished
+            or not row.published_at or row.current_revision_id != row.published_revision_id]
+        return Drafts([row for row in rows if all(
             getattr(row, "pk" if name == "pk" else name, None) == value for name, value in query.items() if name in {"pk", "month"})])
 
     def order_by(self, *fields):
@@ -631,18 +634,23 @@ class ConsentEligibilityTests(SimpleTestCase):
 class BriefAndSchemaTests(SimpleTestCase):
     def test_existing_drafts_lists_unpublished_work_for_the_month_newest_first(self):
         stamp = datetime(2026, 10, 9, 1, 0, tzinfo=datetime_timezone.utc)
+        # The database leaves out fully published updates before the newest 20 are taken.
         rows = [
             Obj(pk=3, current_revision_id=30, published_revision_id=None, published_at=None, status="draft", title="October update #2", updated_at=stamp),
-            Obj(pk=2, current_revision_id=20, published_revision_id=20, published_at=stamp, status="ready", title="October update", updated_at=stamp),
             Obj(pk=4, current_revision_id=41, published_revision_id=40, published_at=stamp, status="draft", title="October update #3", updated_at=stamp),
             Obj(pk=5, current_revision_id=None, published_revision_id=None, published_at=None, status="draft", title="October update #4", updated_at=None),
         ]
         company = Obj(organization=Obj(pk=8))
         with patch.object(tools.MonthlyUpdateDraft, "objects") as drafts:
-            drafts.filter.return_value.order_by.return_value.__getitem__.return_value = rows
+            unpublished = drafts.filter.return_value.filter
+            unpublished.return_value.order_by.return_value.__getitem__.return_value = rows
             value = tools.existing_drafts(company, date(2026, 10, 1))
             drafts.filter.assert_called_once_with(organization=company.organization, month=date(2026, 10, 1))
-            drafts.filter.return_value.order_by.assert_called_once_with("-updated_at", "-pk")
+            where = str(unpublished.call_args.args[0])
+            for clause in ("published_at__isnull", "current_revision__isnull", "published_revision__isnull", "F(published_revision)"):
+                self.assertIn(clause, where)
+            unpublished.return_value.order_by.assert_called_once_with("-updated_at", "-pk")
+            unpublished.return_value.order_by.return_value.__getitem__.assert_called_once_with(slice(None, 20))
         self.assertEqual(value, [
             {"updateId": 3, "revisionId": 30, "status": "draft", "title": "October update #2", "updatedAt": stamp.isoformat()},
             {"updateId": 4, "revisionId": 41, "status": "draft", "title": "October update #3", "updatedAt": stamp.isoformat()},
