@@ -1,0 +1,28 @@
+{
+  "dynamic_adapters": [
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "_record_setup_verification_refusal",
+      "field": "code",
+      "expression": "error.code",
+      "site_sha256": "685a0816eaaf8e5b81db44599e14163443e8c2157145a903bd459a84af1b2766",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.vibe_marketing_views",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "The final setup verification guard supplied this code for the observed PR head. The durable receipt records the refusal after rechecking the run under lock.",
+      "test": "content_factory.tests_setup_merge_proof.SetupMergeProofTests.test_refusal_is_saved_on_the_run_without_overwriting_a_later_merge"
+    },
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "_merge_setup_pr_for_run",
+      "field": "code",
+      "expression": "outcome['code']",
+      "site_sha256": "2c6f371c08f805dd6beb830deb3ff019a812901ab187ecfb5229b9337421c781",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.vibe_marketing_views",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "The manual Publish response forwards the existing guarded merge outcome code to the caller.",
+      "test": "content_factory.tests_setup_pr_changes_unit.SecondPublishDuringRecheckTests.test_a_finished_or_other_head_check_still_uses_the_exact_head_guard"
+    }
+  ]
+}

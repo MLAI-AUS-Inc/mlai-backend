@@ -549,7 +549,9 @@ def verify_live_url_deployment(config, target, *, setup_run_id="", renew=True):
         target.capabilities = {**(target.capabilities or {}), "publishingReady": True, "previewSupported": True}
         target.save(update_fields=["verified_at", "contract", "capabilities", "updated_at"])
         from .models import OrganizationContentConfig
-        saved = OrganizationContentConfig.objects.get(website_connection=current)
+        saved = OrganizationContentConfig.objects.select_for_update().get(website_connection=current)
+        if saved.default_publish_target_id and saved.default_publish_target_id != target.target_key:
+            raise WebsiteAuthorityError("website_configuration_changed", "The selected target changed during the live check.")
         if not saved.default_publish_target_id:
             saved.default_publish_target_id = target.target_key
         saved.publish_targets = [row for row in (saved.publish_targets or []) if row.get("target_id") != target.target_key] + [target.contract]

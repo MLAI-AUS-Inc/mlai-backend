@@ -296,12 +296,17 @@ class MergeGuardOrderTests(SimpleTestCase):
                 patch.object(views, "_github_pull_checks_state_lenient",
                              return_value=({"head": {"sha": NEW}, "merged": False}, {"state": "success"})), \
                 patch.object(authority, "validate_setup_merge_source", side_effect=errors) as guard, \
-                patch.object(views, "_setup_pr_changes_outcome", return_value=changes) as changed:
+                patch.object(views, "_setup_pr_changes_outcome", return_value=changes) as changed, \
+                patch.object(views, "_record_setup_verification_refusal") as refusal:
             try:
                 outcome = views._attempt_setup_publish_merge_authorized.__wrapped__(
                     run=run, context=SimpleNamespace(organization=SimpleNamespace(domain="example.test")))
             except WebsiteAuthorityError as exc:
                 outcome = exc
+        if guard.call_count == 2:
+            refusal.assert_called_once_with(run, NEW, outcome)
+        else:
+            refusal.assert_not_called()
         return outcome, guard, changed
 
     def test_a_changed_head_waits_for_its_check(self):
@@ -355,7 +360,8 @@ class SecondPublishDuringRecheckTests(SimpleTestCase):
                 patch.object(authority, "validate_setup_merge_source", side_effect=refused) as guard, \
                 patch.object(views, "_request_setup_pr_reverification",
                              side_effect=AssertionError("An active check must not be requested again")), \
-                patch.object(views, "_schedule_setup_pr_merge") as schedule:
+                patch.object(views, "_schedule_setup_pr_merge") as schedule, \
+                patch.object(views, "_record_setup_verification_refusal"):
             proven = authority.verified_setup_head(self.run)
             merged, error = views._merge_setup_pr_for_run(run=self.run, context=self.context)
         return proven, merged, error, guard, schedule
@@ -375,5 +381,5 @@ class SecondPublishDuringRecheckTests(SimpleTestCase):
                 self.run.result["setup_pr_reverification"] = record
                 _, merged, error, guard, _ = self.publish()
                 self.assertIsNone(merged)
-                self.assertEqual(error.status_code, 409)
+                self.assertEqual((error.status_code, error.data["code"]), (409, "setup_verification_required"))
                 self.assertEqual(guard.call_count, 2)
