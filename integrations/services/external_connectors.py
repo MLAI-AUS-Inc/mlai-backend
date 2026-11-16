@@ -226,6 +226,10 @@ class ConnectorOAuthError(Exception):
     pass
 
 
+class ConnectorStateError(ConnectorOAuthError):
+    """The signed connection state is missing, expired, replayed or no longer valid."""
+
+
 class ConnectorReconnectRequired(ConnectorOAuthError):
     """A scoped credential rejection that can be recorded after run rollback."""
 
@@ -941,7 +945,7 @@ def _consume_state(request, provider: str, state: str) -> dict[str, Any]:
         request.session.modified = True
 
     if not state:
-        raise ConnectorOAuthError("Invalid connector OAuth state.")
+        raise ConnectorStateError("Invalid connector OAuth state.")
 
     try:
         signed_payload = signing.loads(
@@ -950,25 +954,25 @@ def _consume_state(request, provider: str, state: str) -> dict[str, Any]:
             max_age=CONNECTOR_OAUTH_STATE_MAX_AGE_SECONDS,
         )
     except signing.SignatureExpired as exc:
-        raise ConnectorOAuthError("Expired connector OAuth state. Please try connecting again.") from exc
+        raise ConnectorStateError("Expired connector OAuth state. Please try connecting again.") from exc
     except signing.BadSignature as exc:
         # In-flight legacy session-bound states remain valid during rollout.
         if session_matches and ":" not in state:
             return payload
-        raise ConnectorOAuthError("Invalid connector OAuth state.") from exc
+        raise ConnectorStateError("Invalid connector OAuth state.") from exc
 
     if not isinstance(signed_payload, dict):
-        raise ConnectorOAuthError("Invalid connector OAuth state.")
+        raise ConnectorStateError("Invalid connector OAuth state.")
     if signed_payload.get("provider") != provider:
-        raise ConnectorOAuthError("Invalid connector OAuth state.")
+        raise ConnectorStateError("Invalid connector OAuth state.")
     if str(signed_payload.get("user_id") or "") != str(request.user.id):
-        raise ConnectorOAuthError("Invalid connector OAuth state.")
+        raise ConnectorStateError("Invalid connector OAuth state.")
     from community_chat.startups.oauth_context import valid_chat_oauth_context
     if not valid_chat_oauth_context(signed_payload, request.user.id):
-        raise ConnectorOAuthError("This connection session expired. Start again in MLAI Chat.")
+        raise ConnectorStateError("This connection session expired. Start again in MLAI Chat.")
     key = "connector-oauth-used:" + hashlib.sha256(state.encode()).hexdigest()
     if not cache.add(key, True, timeout=CONNECTOR_OAUTH_STATE_MAX_AGE_SECONDS + 1):
-        raise ConnectorOAuthError("This connection link was already used. Start again in MLAI Chat.")
+        raise ConnectorStateError("This connection link was already used. Start again in MLAI Chat.")
     return signed_payload
 
 

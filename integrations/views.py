@@ -30,6 +30,7 @@ from integrations.services.external_connectors import (
 )
 from integrations import http_client as requests
 from integrations.services.chat_oauth_return import oauth_return_redirect
+from integrations.services import connector_returns
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -271,15 +272,21 @@ def google_connect(request):
         resolve_connector_organization,
     )
 
+    chat_started = bool(getattr(request, "chat_oauth_context", None))
     company, company_ok = company_for_user_from_request(user, request)
     if not company_ok:
+        if chat_started:
+            return connector_returns.chat_error_redirect(request.GET.get("next"), connector_returns.FAILED, provider="gmail")
         return HttpResponseBadRequest("Company not found.")
 
     try:
         organization = resolve_connector_organization(user, company=company)
-    except Exception:
+    except Exception as exc:
         # Do not silently turn a selected startup into an unscoped credential.
         logger.exception("Unable to resolve Google OAuth startup for user %s", user.pk)
+        if chat_started:
+            return connector_returns.chat_error_redirect(request.GET.get("next"),
+                connector_returns.reason_for_exception(exc, at_start=True), provider="gmail", exc=exc)
         return HttpResponseBadRequest("This startup could not be connected. Please try again.")
     if organization is not None:
         request.session[GOOGLE_OAUTH_ORG_SESSION_KEY] = organization.id
@@ -317,14 +324,32 @@ def google_callback(request):
     """
     Handles the callback from Google.
     """
+    # A Chat-started sign-in returns to Chat with a reason on every failure.
+    # ?error is read before the one-time state is consumed, so pressing
+    # Cancel (and then Back) never shows "Invalid state".
+    chat_state = connector_returns.chat_state_payload(request.GET.get("state", ""))
+    if chat_state is not None and chat_state.get("provider") != "gmail":
+        chat_state = None
+
+    def chat_failure(reason, exc=None):
+        return connector_returns.chat_error_redirect(chat_state.get("next"), reason, provider="gmail", exc=exc)
+
+    if chat_state is not None and request.GET.get("error"):
+        return chat_failure(connector_returns.provider_error_reason(request.GET.get("error")))
+
     user = _resolve_google_oauth_user(request)
     user_id = connector_oauth_state_user_id(provider="gmail", state=request.GET.get("state", ""))
     if user_id is not None and str(getattr(user, "pk", "")) != str(user_id):
         from django.contrib.auth import get_user_model
         user = get_user_model().objects.filter(pk=user_id, is_active=True).first()
     if user is None:
+        if chat_state is not None:
+            return chat_failure(connector_returns.EXPIRED)
         return redirect(_vibe_raising_login_url(None))
     request.user = user
+
+    if request.GET.get("error"):
+        return HttpResponseBadRequest(f"OAuth error: {request.GET.get('error')}")
 
     # 1) Validate state
     state = request.GET.get("state")
@@ -337,7 +362,9 @@ def google_callback(request):
     else:
         try:
             state_payload = _consume_state(request, "gmail", state)
-        except ConnectorOAuthError:
+        except ConnectorOAuthError as exc:
+            if chat_state is not None:
+                return chat_failure(connector_returns.EXPIRED, exc)
             return HttpResponseBadRequest("Invalid state. Start again in MLAI Chat.")
     request.session.pop(GOOGLE_OAUTH_STATE_SESSION_KEY, None)
     request.session.pop(GOOGLE_OAUTH_NEXT_SESSION_KEY, None)
@@ -348,14 +375,14 @@ def google_callback(request):
 
     organization = Organization.objects.filter(id=org_id).first() if org_id else None
     if org_id and organization is None:
+        if chat_state is not None:
+            return chat_failure(connector_returns.FAILED)
         return HttpResponseBadRequest("The startup selected for this connection no longer exists.")
-
-    # 2) Handle errors
-    if request.GET.get("error"):
-        return HttpResponseBadRequest(f"OAuth error: {request.GET.get('error')}")
 
     code = request.GET.get("code")
     if not code:
+        if chat_state is not None:
+            return chat_failure(connector_returns.FAILED)
         return HttpResponseBadRequest("Missing code")
 
     # 3) Exchange code for tokens
@@ -373,12 +400,16 @@ def google_callback(request):
         )
         token_resp.raise_for_status()
         token_data = token_resp.json()
-    except requests.RequestException:
+    except requests.RequestException as exc:
         logger.exception("Failed to exchange Google OAuth code for user %s", user.id)
+        if chat_state is not None:
+            return chat_failure(connector_returns.FAILED, exc)
         return HttpResponseBadRequest("Failed to exchange Google OAuth code.")
 
     access_token = token_data.get("access_token")
     if not access_token:
+        if chat_state is not None:
+            return chat_failure(connector_returns.FAILED)
         return HttpResponseBadRequest("Missing access token in Google OAuth response.")
 
     # 4) Fetch the user's Google email
@@ -390,8 +421,10 @@ def google_callback(request):
         )
         ui_resp.raise_for_status()
         userinfo = ui_resp.json()
-    except (requests.RequestException, ValueError):
+    except (requests.RequestException, ValueError) as exc:
         logger.exception("Failed to fetch Google userinfo for user %s", user.id)
+        if chat_state is not None:
+            return chat_failure(connector_returns.FAILED, exc)
         return HttpResponseBadRequest("Failed to fetch Google account details.")
 
     from integrations.services.source_accounts import store_google_account
@@ -400,6 +433,8 @@ def google_callback(request):
             raise ValueError("Google did not return account details.")
         store_google_account(user=user, organization=organization, userinfo=userinfo, token_data=token_data)
     except ValueError as exc:
+        if chat_state is not None:
+            return chat_failure(connector_returns.FAILED, exc)
         return HttpResponseBadRequest(str(exc))
 
     # Redirect to frontend
@@ -429,11 +464,18 @@ def connector_connect(request, provider):
 
     _ensure_django_session_for_user(request, user)
 
+    chat_started = bool(getattr(request, "chat_oauth_context", None))
     try:
         return redirect(build_authorization_url(request, normalized_provider))
-    except ConnectorConfigurationError as exc:
-        return HttpResponse(str(exc), status=503)
-    except ConnectorOAuthError as exc:
+    except (ConnectorConfigurationError, ConnectorOAuthError, requests.RequestException) as exc:
+        if chat_started:
+            return connector_returns.chat_error_redirect(request.GET.get("next"),
+                connector_returns.reason_for_exception(exc, at_start=True), provider=normalized_provider, exc=exc)
+        if isinstance(exc, requests.RequestException):
+            logger.exception("Connector start failed", extra={"provider": normalized_provider})
+            return HttpResponse("This connection is temporarily unavailable. Please try again.", status=503)
+        if isinstance(exc, ConnectorConfigurationError):
+            return HttpResponse(str(exc), status=503)
         return HttpResponseBadRequest(str(exc))
 
 
@@ -450,19 +492,34 @@ def connector_callback(request, provider):
     if normalized_provider == "gmail":
         return google_callback(request)
 
+    # A Chat-started connection returns to Chat with a reason on every
+    # failure, including the founder pressing Cancel at the provider.
+    chat_state = connector_returns.chat_state_payload(request.GET.get("state", ""))
+    if chat_state is not None and chat_state.get("provider") != normalized_provider:
+        chat_state = None
+    if chat_state is not None and request.GET.get("error"):
+        return connector_returns.chat_error_redirect(chat_state.get("next"),
+            connector_returns.provider_error_reason(request.GET.get("error")), provider=normalized_provider)
+
     user = _resolve_google_oauth_user(request)
     user_id = connector_oauth_state_user_id(provider=normalized_provider, state=str(request.GET.get("state") or ""))
     if user_id is not None and str(getattr(user, "pk", "")) != str(user_id):
         from django.contrib.auth import get_user_model
         user = get_user_model().objects.filter(pk=user_id, is_active=True).first()
     if user is None:
+        if chat_state is not None:
+            return connector_returns.chat_error_redirect(chat_state.get("next"), connector_returns.EXPIRED,
+                provider=normalized_provider)
         return redirect(_vibe_raising_login_url(None))
 
     request.user = user
 
     try:
         return oauth_return_redirect(complete_oauth_callback(request, normalized_provider))
-    except ConnectorOAuthError as exc:
+    except (ConnectorOAuthError, ConnectorConfigurationError) as exc:
+        if chat_state is not None:
+            return connector_returns.chat_error_redirect(chat_state.get("next"),
+                connector_returns.reason_for_exception(exc), provider=normalized_provider, exc=exc)
         return HttpResponseBadRequest(str(exc))
 
 
