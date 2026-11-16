@@ -21,7 +21,14 @@ WORKFLOW_ID = 123
 RUN_ID = 456
 
 
-def api_fixture(*, artifact_tree=TREE_SHA, expired=False, run_pull_number=42):
+def api_fixture(
+    *,
+    artifact_tree=TREE_SHA,
+    expired=False,
+    run_pull_number=42,
+    run_attempt=1,
+    artifact_attempt=1,
+):
     def api_get(path, params=None):
         if path.endswith(f"/commits/{COMMIT_SHA}/pulls"):
             return [
@@ -45,7 +52,7 @@ def api_fixture(*, artifact_tree=TREE_SHA, expired=False, run_pull_number=42):
                             if run_pull_number is None
                             else [{"number": run_pull_number}]
                         ),
-                        "run_attempt": 1,
+                        "run_attempt": run_attempt,
                     }
                 ]
             }
@@ -54,7 +61,7 @@ def api_fixture(*, artifact_tree=TREE_SHA, expired=False, run_pull_number=42):
                 "artifacts": [
                     {
                         "expired": expired,
-                        "name": attestation_name(artifact_tree, HEAD_SHA, 1),
+                        "name": attestation_name(artifact_tree, HEAD_SHA, artifact_attempt),
                     }
                 ]
             }
@@ -95,6 +102,25 @@ class ReusePrChecksTests(TestCase):
 
     def test_expired_attestation_falls_back_to_full_checks(self):
         reuse, _reason = self.route(api_fixture(expired=True))
+
+        self.assertFalse(reuse)
+
+    def test_reuses_attestation_kept_from_an_earlier_attempt_of_the_run(self):
+        # Re-running only a failed job keeps the checks job from attempt 1.
+        reuse, reason = self.route(api_fixture(run_attempt=2, artifact_attempt=1))
+
+        self.assertTrue(reuse)
+        self.assertIn(str(RUN_ID), reason)
+
+    def test_attestation_from_a_later_attempt_than_the_run_is_not_reused(self):
+        reuse, _reason = self.route(api_fixture(run_attempt=1, artifact_attempt=2))
+
+        self.assertFalse(reuse)
+
+    def test_expired_earlier_attempt_attestation_falls_back_to_full_checks(self):
+        reuse, _reason = self.route(
+            api_fixture(run_attempt=2, artifact_attempt=1, expired=True)
+        )
 
         self.assertFalse(reuse)
 

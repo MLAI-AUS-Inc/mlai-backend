@@ -405,6 +405,12 @@ DATABASES = {
     'default': default_config
 }
 
+# PostgreSQL CI jobs clone one migrated template per run instead of applying
+# the whole migration chain for every `manage.py test` call. See
+# mlai/test_runner.py; unset keeps Django's default runner.
+if os.getenv('MLAI_TEST_DATABASE_TEMPLATE'):
+    TEST_RUNNER = 'mlai.test_runner.TemplateDatabaseRunner'
+
 
 # Watt Unity session tickets must be shared across gunicorn workers: the request that MINTS a ticket
 # (unity-sessions/current/) and the one that REDEEMS it (redeem-ticket/) are typically served by
