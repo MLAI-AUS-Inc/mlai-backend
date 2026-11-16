@@ -13,6 +13,9 @@
   @media only screen and (max-width: 620px) {
     .mlai-shell { padding: 24px 20px !important; }
     .mlai-invite-title { font-size: 24px !important; line-height: 30px !important; }
+    .mlai-btn { display: block !important; width: 100% !important; text-align: center !important; }
+    .mlai-btn-gap { display: block !important; width: 100% !important; height: 10px !important; }
+    .mlai-btn-row { width: 100% !important; }
   }
 </style>
 </head>
@@ -31,7 +34,7 @@
         <tr><td class="mlai-invite-title" style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:28px;line-height:34px;font-weight:700;color:#111827;padding:2px 0 0 0">Mentor MLAI founders</td></tr>
         {% include "system_email/_mentor_invite_divider.html" with padding="20px 0 20px 0" %}
         {% include "system_email/_mentor_invite_fact.html" with icon="clock.png" title="30 to 60 minute sessions" detail="On the weekly hours you choose" %}
-        {% include "system_email/_mentor_invite_fact.html" with icon="video.png" title="Video or at the MLAI space" detail="We create the Google Meet link for you" %}
+        {% include "system_email/_mentor_invite_fact.html" with icon="video-call.png" title="Video or at the MLAI space" detail="We create the Google Meet link for you" %}
         {% include "system_email/_mentor_invite_fact.html" with icon="coins.png" title="Founders book with Roo Points" detail="You accept or decline each request" %}
         {% include "system_email/_mentor_invite_divider.html" with padding="6px 0 8px 0" %}
         <tr><td style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:16px;line-height:26px;color:#111827">
@@ -40,10 +43,10 @@
           <p style="margin:0 0 16px 0">{{ inviter_name }} would love you to join MLAI&rsquo;s mentors. Mentors give founders in the MLAI community short, focused sessions on the things they are stuck on. You set your topics, your hours and your price, and you only take the sessions you want.</p>
           <p style="margin:0">Accepting takes about five minutes: sign in to MLAI Chat with this email address, fill in a short profile, and we&rsquo;ll switch it on.</p>
         </td></tr>
-        <tr><td style="padding:24px 0 0 0"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
-          <td style="background:#2fd8bf;border-radius:8px;mso-padding-alt:12px 22px"><a href="{{ accept_url }}" style="display:inline-block;padding:12px 22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:16px;line-height:20px;font-weight:600;color:#0a0a0a;text-decoration:none;border-radius:8px">Accept Invite</a></td>
-          <td style="width:10px;font-size:0;line-height:0">&nbsp;</td>
-          <td style="background:#f3f4f6;border-radius:8px;mso-padding-alt:12px 22px"><a href="{{ explainer_url }}" style="display:inline-block;padding:12px 22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:16px;line-height:20px;font-weight:600;color:#4b5563;text-decoration:none;border-radius:8px">How mentoring works</a></td>
+        <tr><td style="padding:24px 0 0 0"><table role="presentation" class="mlai-btn-row" cellpadding="0" cellspacing="0" border="0"><tr>
+          <td class="mlai-btn" style="background:#2fd8bf;border-radius:8px;mso-padding-alt:12px 22px"><a href="{{ accept_url }}" style="display:inline-block;padding:12px 22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:16px;line-height:20px;font-weight:600;color:#0a0a0a;text-decoration:none;border-radius:8px;white-space:nowrap">Accept Invite</a></td>
+          <td class="mlai-btn-gap" style="width:10px;font-size:0;line-height:0">&nbsp;</td>
+          <td class="mlai-btn" style="background:#f3f4f6;border-radius:8px;mso-padding-alt:12px 22px"><a href="{{ explainer_url }}" style="display:inline-block;padding:12px 22px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:16px;line-height:20px;font-weight:600;color:#4b5563;text-decoration:none;border-radius:8px;white-space:nowrap">How mentoring works</a></td>
         </tr></table></td></tr>
         <tr><td style="padding:24px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:22px;color:#6b7280">This invite is for {{ invited_email }} and works until {{ expires_on }}. Not for you right now? No worries, you can ignore this email.</td></tr>
         <tr><td style="padding:36px 0 0 0"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="border-top:1px solid #e5e7eb;font-size:0;line-height:0;height:1px">&nbsp;</td></tr></table></td></tr>
