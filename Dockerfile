@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc libpq-dev \
 COPY requirements.txt requirements-engine.txt requirements.lock ./
 RUN pip install --no-cache-dir --prefix=/install --require-hashes -r requirements.lock
 
-FROM python:3.11-slim AS application
+FROM python:3.11-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -16,6 +16,15 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=dependencies /install /usr/local
+
+# Only the Jobs worker launches browsers. Installing Chromium here, before any
+# application code is copied, keeps the layer cached across code-only releases
+# (playwright is hash-pinned in requirements.lock, so it changes only with it).
+FROM base AS browsers
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN python -m playwright install --with-deps chromium
+
+FROM base AS application
 
 COPY . /app/
 
@@ -29,10 +38,12 @@ EXPOSE 8000
 
 CMD ["sh", "/app/scripts/start-web.sh"]
 
-# Only the Jobs worker launches browsers. Other services reuse the common image.
-FROM application AS jobs
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN python -m playwright install --with-deps chromium
+# The Jobs worker is the application image plus the cached browser layer.
+# Other services reuse the common image.
+FROM browsers AS jobs
+COPY --from=application /app /app
+EXPOSE 8000
+CMD ["sh", "/app/scripts/start-web.sh"]
 
 # Keep an ordinary `docker build .` lean too.
 FROM application AS runtime

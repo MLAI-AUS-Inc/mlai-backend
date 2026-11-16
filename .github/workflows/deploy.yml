@@ -779,6 +779,9 @@ jobs:
       ORG_MEMORY_EMBEDDING_MODEL: text-embedding-3-small
       ORG_MEMORY_EMBEDDING_VERSION: openai-text-embedding-3-small-v1
       ORG_MEMORY_EMBEDDING_DIMENSIONS: "1536"
+      # Each `manage.py test` clones one migrated template database instead of
+      # re-applying every migration (mlai/test_runner.py).
+      MLAI_TEST_DATABASE_TEMPLATE: "1"
     steps:
     - uses: actions/checkout@v6
       with:
@@ -1009,6 +1012,9 @@ jobs:
       ORG_MEMORY_EMBEDDING_MODEL: text-embedding-3-small
       ORG_MEMORY_EMBEDDING_VERSION: openai-text-embedding-3-small-v1
       ORG_MEMORY_EMBEDDING_DIMENSIONS: "1536"
+      # Each `manage.py test` clones one migrated template database instead of
+      # re-applying every migration (mlai/test_runner.py).
+      MLAI_TEST_DATABASE_TEMPLATE: "1"
     steps:
     - uses: actions/checkout@v6
 
@@ -1280,6 +1286,9 @@ jobs:
       ORG_MEMORY_EMBEDDING_MODEL: text-embedding-3-small
       ORG_MEMORY_EMBEDDING_VERSION: openai-text-embedding-3-small-v1
       ORG_MEMORY_EMBEDDING_DIMENSIONS: "1536"
+      # Same environment as postgres-search. With one test run, this job
+      # builds its database from the full migration chain as before.
+      MLAI_TEST_DATABASE_TEMPLATE: "1"
     steps:
     - uses: actions/checkout@v6
     - uses: actions/setup-python@v6
