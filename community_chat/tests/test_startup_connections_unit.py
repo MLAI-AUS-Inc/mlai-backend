@@ -250,7 +250,7 @@ def _token_response(status, payload):
     value = HttpResponse()
     value.status_code = status
     value.url = "https://identity.example/token"
-    value._content = json.dumps(payload).encode()
+    value._content = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
     return value
 
 
@@ -304,8 +304,9 @@ class ExpiredCredentialTests(SimpleTestCase):
     def test_app_credential_or_outage_failures_stay_temporary(self):
         import requests
         from integrations.services import external_connectors as external
-        for status, payload in ((400, {"error": "invalid_client"}), (503, {})):
-            with self.subTest(status=status):
+        for status, payload in ((400, {"error": "invalid_client"}), (400, {"error": "unauthorized_client"}),
+                (403, b"<html>Access denied</html>"), (401, {}), (503, {})):
+            with self.subTest(status=status, payload=payload):
                 exc, connection, rows = self.refresh("xero", _token_response(status, payload))
                 self.assertIsInstance(exc, requests.HTTPError)
                 self.assertEqual(connection.status, "connected")

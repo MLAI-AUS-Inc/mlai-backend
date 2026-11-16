@@ -302,8 +302,10 @@ def _reconnect_required(connection, message):
 def _oauth_refresh_rejected(response) -> bool:
     """Whether a token endpoint refused the stored grant (expired or revoked).
 
-    ``invalid_client`` means MLAI's own app credentials are wrong: an operator
-    problem that reconnecting cannot fix, so it stays a temporary failure.
+    Xero and Google both answer an expired or revoked refresh token with
+    ``invalid_grant``. Anything else (``invalid_client``, ``unauthorized_client``,
+    a non-JSON page from an edge proxy) is an operator or temporary problem
+    that reconnecting cannot fix, so it stays a temporary failure.
     """
     if getattr(response, "status_code", None) not in {400, 401, 403}:
         return False
@@ -311,8 +313,7 @@ def _oauth_refresh_rejected(response) -> bool:
         payload = response.json()
     except ValueError:
         payload = None
-    error_code = payload.get("error") if isinstance(payload, dict) else None
-    return error_code != "invalid_client"
+    return isinstance(payload, dict) and payload.get("error") == "invalid_grant"
 
 
 class ConnectorRateLimitError(Exception):
