@@ -1530,6 +1530,14 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
         recorded = str(result.get("source_sha") or "")
         if recorded and recorded == current_scan_source(website):
             base_sha = recorded
+        elif (recorded and not hosted_enabled(website)
+                and recorded == observed_source_sha(website)):
+            # La Vie setup 6b19e4b1 (16 Nov 2026): the only scan for the generation
+            # had incomplete discovery, so current_scan_source was None and every
+            # Publish answered 409 although the PR head was the verified preview.
+            # The server-observed branch head is the same identity the scan would
+            # pin; the caller still requires GitHub's branch head to equal it.
+            base_sha = recorded
     hosted = hosted_enabled(website)
     source_matches = base_sha == current_scan_source(website) if hosted else not website.verified_sha or website.verified_sha == base_sha
     build_passed = gates.get("local_build") is True and gates.get("local_build_skipped") is False

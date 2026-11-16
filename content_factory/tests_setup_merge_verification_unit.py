@@ -58,8 +58,27 @@ class SetupMergeVerificationUnitTests(SimpleTestCase):
         for scan in ("c" * 40, None):
             with self.subTest(scan=scan), \
                     patch("content_factory.website_hosted_build.current_scan_source", return_value=scan), \
+                    patch.object(authority, "observed_source_sha", return_value=""), \
                     self.assertRaises(WebsiteAuthorityError):
                 self.validate()
+
+    def test_first_setup_falls_back_to_the_observed_branch_head_when_the_scan_is_incomplete(self):
+        # La Vie setup 6b19e4b1 (16 Nov 2026): the generation's only scan had
+        # incomplete discovery, so current_scan_source was None and Publish 409'd.
+        self.run.run_request.pop("expected_source_sha")
+        scan = patch("content_factory.website_hosted_build.current_scan_source", return_value=None)
+        with scan, patch.object(authority, "observed_source_sha", return_value=self.base):
+            self.validate()
+        for observed in ("c" * 40, ""):
+            with self.subTest(observed=observed), scan, \
+                    patch.object(authority, "observed_source_sha", return_value=observed), \
+                    self.assertRaises(WebsiteAuthorityError):
+                self.validate()
+        with self.subTest("hosted sites keep the complete-scan rule"), scan, \
+                patch.object(authority, "observed_source_sha", return_value=self.base), \
+                patch("content_factory.website_hosted_build.enabled", return_value=True), \
+                self.assertRaises(WebsiteAuthorityError):
+            self.validate()
 
     def code_review(self):
         # La Vie setup c12e1329 (23 Oct 2026): the preview worker could not run the
