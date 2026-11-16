@@ -166,6 +166,7 @@ class MaekSafetyConfigTests(unittest.TestCase):
         "AGENT_RUNTIME_DOT_MESSAGING_ENABLED": "false",
         "MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED": "false",
         "MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS": "60",
+        "MLAI_MCP_GRANT_IDLE_TTL_DAYS": "180",
     }
 
     def test_optional_flags_can_stay_off_while_pilot_is_on(self):
