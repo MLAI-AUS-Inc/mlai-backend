@@ -1,0 +1,11 @@
+Hi {{ first_name|default:"there" }},
+
+You used {{ points_cost }} Roo Point{{ points_cost|pluralize }} for {{ event_name }}. Your {{ perk_label|lower }} code is:
+
+{{ coupon_code }}
+
+Get your ticket: {{ checkout_url }}
+
+The code works once, for this event only, until {{ expires_display }}.{% if requires_approval %} The organiser approves registrations for this event, so your place is confirmed once they approve it.{% endif %} It is also saved in MLAI Chat under Member perks for this event.
+
+MLAI · https://mlai.au

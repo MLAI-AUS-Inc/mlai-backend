@@ -13,6 +13,7 @@ from community_chat.account_sessions import issue_account_session
 from community_chat.models import CommunityChatEmailCodeChallenge
 from integrations.services.luma_event_discounts import LumaEventDiscountError
 from roo.models import (
+    EventDiscountOffer,
     EventDiscountQuote,
     EventDiscountRedemption,
     Ledger,
@@ -341,3 +342,151 @@ class MemberPerksTests(TestCase):
             self.assertEqual(response.status_code, 503)
         anonymous = APIClient()
         self.assertIn(anonymous.get(self.url).status_code, (401, 403))
+
+
+@override_settings(
+    ROO_EVENT_DISCOUNTS_ENABLED=True,
+    ROO_EVENT_DISCOUNT_WORKER_ENABLED=True,
+    LUMA_API_KEY="synthetic",
+    COMMUNITY_CHAT_ALLOWED_ORIGINS=["https://chat.mlai.au"],
+    ROO_EVENT_PERKS_AUTO="on",
+)
+class AutomaticMemberPerksTests(TestCase):
+    """Any MLAI-hosted event qualifies, priced from its ticket (1 point = A$1)."""
+
+    EVENT = "evt-auto-synthetic"
+    # Reuse the fixture helpers without re-running the legacy-priced tests.
+    token = MemberPerksTests.token
+    create_coupon = MemberPerksTests.create_coupon
+    quote = MemberPerksTests.quote
+    confirm = MemberPerksTests.confirm
+
+    def setUp(self):
+        MemberPerksTests.setUp(self)
+        self.url = f"/api/v1/community-chat/event-discounts/events/{self.EVENT}/"
+        self.ticket_cents = 4000
+        self.gateway.member_perk_ticket.side_effect = lambda event_id, now=None: {
+            "event_ticket_type_id": "ttype-auto", "cents": self.ticket_cents, "name": "Synthetic Auto Meetup",
+            "valid_end_at": (timezone.now() + timedelta(days=10)).replace(microsecond=0).isoformat(),
+        }
+        base = self.gateway.validate_offer.side_effect
+
+        def priced(terms, **kwargs):
+            if "ticket" in terms and terms["ticket"]["cents"] != self.ticket_cents:
+                raise LumaEventDiscountError("ticket_terms_changed", "The ticket price changed.")
+            snapshot = base(terms, **kwargs)
+            snapshot["ticket"]["cents"] = self.ticket_cents
+            return snapshot
+
+        self.gateway.validate_offer.side_effect = priced
+
+    def options(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200, response.data)
+        return response
+
+    def test_mlai_hosted_event_gets_half_and_free_at_50_and_90_percent(self):
+        response = self.options()
+        self.assertEqual([o["points_cost"] for o in response.data["options"]], [20, 36])
+        self.assertEqual(response.data["ticket_price_cents"], 4000)
+        offer = EventDiscountOffer.objects.get(event_id=self.EVENT)
+        self.assertTrue(offer.reward_id.startswith("EVENT_PERK_"))
+        self.assertEqual((offer.event_ticket_type_id, offer.percent_off), ("ttype-auto", 100))
+        self.options()
+        self.assertEqual(EventDiscountOffer.objects.filter(event_id=self.EVENT).count(), 1)
+        self.assertFalse(EventDiscountQuote.objects.exists())
+
+    def test_half_price_spends_20_and_issues_a_single_use_50_percent_code(self):
+        quote = self.quote("half_price")
+        self.assertEqual(quote["points_cost"], 20)
+        receipt = self.confirm(quote)
+        self.assertEqual(receipt.status_code, 200, receipt.data)
+        self.assertEqual(receipt.data["remaining_balance"], 35)
+        sent = self.gateway.create_coupon.call_args.args[0]
+        self.assertEqual(sent["discount"]["percent_off"], 50)
+        self.assertEqual(sent["event_ticket_type_id"], "ttype-auto")
+        self.assertEqual(self.client.post(self.url, {"action": "quote", "perk": "free_ticket"}, format="json").status_code, 409)
+
+    def test_free_ticket_spends_36(self):
+        receipt = self.confirm(self.quote("free_ticket"))
+        self.assertEqual(receipt.data["points_cost"], 36)
+        self.assertEqual(receipt.data["remaining_balance"], 19)
+        self.assertEqual(self.gateway.create_coupon.call_args.args[0]["discount"]["percent_off"], 100)
+
+    def test_events_mlai_does_not_host_have_no_perk_and_no_offer(self):
+        self.gateway.member_perk_ticket.side_effect = LumaEventDiscountError(
+            "event_not_managed", "Member perks only cover events MLAI hosts on its Luma calendar."
+        )
+        response = self.options()
+        self.assertEqual((response.data["options"], response.data["reason_code"]), ([], "event_not_managed"))
+        self.assertFalse(EventDiscountOffer.objects.filter(event_id=self.EVENT).exists())
+        self.gateway.member_perk_ticket.side_effect = LumaEventDiscountError("luma_rejected", "no", status_code=404)
+        self.assertEqual(self.options().data["reason_code"], "event_not_managed")
+
+    def test_price_change_after_quote_releases_the_hold_without_spending(self):
+        quote = self.quote("half_price")
+        self.ticket_cents = 6000
+        receipt = self.confirm(quote)
+        self.assertEqual(receipt.data["status"], "failed", receipt.data)
+        self.assertEqual(receipt.data["remaining_balance"], 55)
+        self.gateway.create_coupon.assert_not_called()
+        self.assertFalse(Ledger.objects.filter(user=self.owner, source="EVENT").exists())
+
+    @override_settings(ROO_EVENT_PERKS_AUTO="test", ROO_EVENT_PERKS_TEST_EVENT_IDS=(EVENT,))
+    def test_test_mode_is_staff_only_and_listed_events_only(self):
+        self.assertEqual(self.options().data["options"], [])
+        self.gateway.member_perk_ticket.assert_not_called()
+        self.owner.is_staff = True
+        self.owner.save()
+        self.assertEqual([o["points_cost"] for o in self.options().data["options"]], [20, 36])
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.other_token}")
+        self.assertEqual(self.options().data["options"], [])
+        response = self.client.post(self.url, {"action": "quote", "perk": "half_price"}, format="json")
+        self.assertEqual(response.status_code, 404, response.data)
+
+    def test_switching_off_hides_automatic_offers(self):
+        self.options()
+        with override_settings(ROO_EVENT_PERKS_AUTO="off"):
+            self.assertEqual(self.options().data["options"], [])
+            response = self.client.post(self.url, {"action": "quote", "perk": "half_price"}, format="json")
+            self.assertEqual(response.status_code, 404, response.data)
+
+    @override_settings(SYSTEM_EMAIL_RESEND_MESSAGES=("event_perk_code",))
+    def test_issued_code_is_emailed_once(self):
+        with patch("system_email.api.send") as send:
+            receipt = self.confirm(self.quote("half_price"))
+        self.assertEqual(send.call_count, 1)
+        args, kwargs = send.call_args
+        self.assertEqual(args[0], "event_perk_code")
+        self.assertEqual(kwargs["to"], self.owner.email)
+        self.assertEqual(kwargs["idempotency_key"], f"event-perk/{receipt.data['id']}")
+        self.assertEqual(kwargs["context"]["coupon_code"], receipt.data["coupon_code"])
+        self.assertEqual(kwargs["context"]["points_cost"], 20)
+        self.assertEqual(kwargs["context"]["perk_label"], "Half-price ticket")
+
+    @override_settings(SYSTEM_EMAIL_RESEND_MESSAGES=("event_perk_code",))
+    def test_email_failure_never_affects_the_code_or_points(self):
+        with patch("system_email.api.send", side_effect=RuntimeError("synthetic")):
+            receipt = self.confirm(self.quote("half_price"))
+        self.assertEqual(receipt.data["status"], "fulfilled")
+        self.assertEqual(receipt.data["remaining_balance"], 35)
+
+    def test_cancel_disables_the_unused_code_and_refunds_exactly(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        receipt = self.confirm(self.quote("half_price")).data
+
+        def disable(event_id, code):
+            self.coupons[code]["remaining_count"] = 0
+
+        self.gateway.disable_coupon.side_effect = disable
+        with patch("roo.management.commands.cancel_event_perk.LumaEventDiscountService", return_value=self.gateway):
+            call_command("cancel_event_perk", "--redemption", receipt["id"])
+            self.assertEqual(EventDiscountRedemption.objects.get(pk=receipt["id"]).status, "fulfilled")
+            call_command("cancel_event_perk", "--redemption", receipt["id"], "--apply")
+            with self.assertRaises(CommandError):
+                call_command("cancel_event_perk", "--redemption", receipt["id"], "--apply")
+        self.assertEqual(EventDiscountRedemption.objects.get(pk=receipt["id"]).status, "cancelled")
+        self.assertEqual(self.client.get(self.url).data["eligible_balance"], 55)
+        self.assertEqual(Ledger.objects.filter(user=self.owner, kind="REFUND", source="EVENT").count(), 1)

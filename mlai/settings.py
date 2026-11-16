@@ -1121,6 +1121,12 @@ STUDIO_REPORT_SOURCE_CONFIG = os.getenv('STUDIO_REPORT_SOURCE_CONFIG', '')
 ROO_EVENT_DISCOUNTS_ENABLED = _env_is_true('ROO_EVENT_DISCOUNTS_ENABLED', False)
 ROO_EVENT_DISCOUNT_WORKER_ENABLED = _env_is_true('ROO_EVENT_DISCOUNT_WORKER_ENABLED', False)
 ROO_EVENT_DISCOUNTS_SLACK_TEAM_ID = os.getenv('ROO_EVENT_DISCOUNTS_SLACK_TEAM_ID', '').strip()
+# Member perks on every eligible MLAI-hosted Luma event, priced from the ticket:
+# off (hand-made offers only), test (ROO_EVENT_PERKS_TEST_EVENT_IDS, staff only), on.
+ROO_EVENT_PERKS_AUTO = os.getenv('ROO_EVENT_PERKS_AUTO', 'off').strip().lower()
+ROO_EVENT_PERKS_TEST_EVENT_IDS = tuple(
+    value.strip() for value in os.getenv('ROO_EVENT_PERKS_TEST_EVENT_IDS', '').split(',') if value.strip()
+)
 # Additional report-only access for verified Roo requests in one shared chat.
 COWORKING_REPORT_SLACK_TEAM_ID = os.getenv('COWORKING_REPORT_SLACK_TEAM_ID', '').strip()
 COWORKING_REPORT_SLACK_CHANNEL_ID = os.getenv('COWORKING_REPORT_SLACK_CHANNEL_ID', '').strip()

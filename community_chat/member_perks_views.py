@@ -17,15 +17,24 @@ from roo.event_discounts import (
     EventDiscountService,
     _available_offer,
     account_perks_enabled,
+    member_perk_cost,
     member_perk_terms,
     quote_payload,
     serialize_redemption,
 )
+from roo.event_perk_offers import ensure_auto_offer
+from roo.event_ticket_policy import MEMBER_PERK_PERCENT_OFF, auto_perks_allowed, is_auto_offer
 from roo.models import EventDiscountOffer, EventDiscountRedemption
 from roo.services import PointsService
 
 from .authentication import CommunityChatAccountAuthentication
 from .throttles import CommunityChatScopedThrottle
+
+
+NOT_AVAILABLE = (
+    "No member perk is available for this event. Perks cover paid AUD "
+    "tickets priced below A$100 at events MLAI hosts."
+)
 
 
 class MemberPerksView(APIView):
@@ -117,22 +126,35 @@ class MemberPerksView(APIView):
                     "message": "Member perks are not available yet.",
                 }
             )
-        offer = (
-            EventDiscountOffer.objects.select_related("reward")
-            .filter(event_id=event_id)
-            .first()
-        )
+        unavailable_codes = {
+            "event_not_managed", "event_registration_closed",
+            "group_registration_enabled", "event_offer_expired",
+            "event_sold_out", "ticket_unavailable", "ticket_not_paid_aud",
+            "ticket_price_limit", "ticket_not_supported", "ticket_sales_closed",
+            "ticket_sold_out", "invalid_luma_event",
+        }
+        gateway = LumaEventDiscountService()
+        try:
+            offer = ensure_auto_offer(event_id, request.user, gateway=gateway)
+        except LumaEventDiscountError as exc:
+            if exc.code == "luma_rejected" and exc.status_code in (400, 404):
+                # Luma will not show this event to the MLAI calendar key.
+                return self._unavailable(event_id, "event_not_managed", NOT_AVAILABLE)
+            if exc.retryable or exc.code not in unavailable_codes:
+                raise
+            return self._unavailable(event_id, exc.code, str(exc))
+        if offer is not None and is_auto_offer(offer) and not auto_perks_allowed(event_id, request.user):
+            offer = None
         if offer is None:
             return self._unavailable(
                 event_id,
                 "offer_unavailable",
-                "No member perk is available for this event. "
-                "Perks cover selected paid AUD tickets priced below A$100.",
+                NOT_AVAILABLE,
             )
         try:
             _available_offer(offer, timezone.now())
-            terms, _ = member_perk_terms(offer, "free_ticket")
-            snapshot = LumaEventDiscountService().validate_offer(terms, now=timezone.now())
+            terms = member_perk_terms(offer, "free_ticket")
+            snapshot = gateway.validate_offer(terms, now=timezone.now())
         except EventDiscountError as exc:
             if exc.code != "offer_unavailable":
                 raise
@@ -142,13 +164,7 @@ class MemberPerksView(APIView):
                 "Perks cover selected paid AUD tickets priced below A$100.",
             )
         except LumaEventDiscountError as exc:
-            if exc.retryable or exc.code not in {
-                "event_not_managed", "event_registration_closed",
-                "group_registration_enabled", "event_offer_expired",
-                "event_sold_out", "ticket_unavailable", "ticket_not_paid_aud",
-                "ticket_price_limit", "ticket_not_supported", "ticket_sales_closed",
-                "ticket_sold_out",
-            }:
+            if exc.retryable or exc.code not in unavailable_codes:
                 raise
             return self._unavailable(event_id, exc.code, str(exc))
         balance = PointsService.microroo_to_legacy_whole(
@@ -159,13 +175,13 @@ class MemberPerksView(APIView):
             ("half_price", "Half-price ticket"),
             ("free_ticket", "Free ticket"),
         ):
-            _, cost = member_perk_terms(offer, perk)
+            cost = member_perk_cost(offer, perk, snapshot["ticket"]["cents"])
             options.append(
                 {
                     "id": perk,
                     "label": label,
                     "points_cost": cost,
-                    "percent_off": 50 if perk == "half_price" else 100,
+                    "percent_off": MEMBER_PERK_PERCENT_OFF[perk],
                     "can_afford": balance >= cost,
                 }
             )
@@ -195,6 +211,14 @@ class MemberPerksView(APIView):
                 raise EventDiscountError(
                     "invalid_perk", "Choose a half-price or free ticket.", 400
                 )
+            try:
+                offer = ensure_auto_offer(event_id, request.user, gateway=LumaEventDiscountService())
+            except LumaEventDiscountError as exc:
+                if exc.retryable:
+                    raise
+                offer = None
+            if offer is None:
+                raise EventDiscountError("offer_unavailable", NOT_AVAILABLE, 404)
             quote = EventDiscountService.quote(
                 user=request.user,
                 event_query=event_id,

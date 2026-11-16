@@ -21,6 +21,11 @@ SAMPLE_CONTEXT = {
     },
     "monthly_update_7d": {"first_name": "Sam", "startups": _STARTUPS},
     "monthly_update_1d": {"first_name": "Sam", "startups": _STARTUPS},
+    "event_perk_code": {
+        "first_name": "Sam", "event_name": "Example Meetup", "perk_label": "Half-price ticket",
+        "coupon_code": "ROO-ABCDEFGHJKLMNPQR", "checkout_url": "https://luma.com/example?coupon=ROO-ABCDEFGHJKLMNPQR",
+        "points_cost": 20, "expires_display": "Thu 19 Nov 2026, 5:30 PM AEDT", "requires_approval": False,
+    },
     "mentor_invite": {
         "first_name": "Sam", "inviter_name": "Sam Donegan", "inviter_first_name": "Sam",
         "note": "You helped three founders at the last demo night. We'd love more people to get that.",
