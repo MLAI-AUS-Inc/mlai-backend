@@ -233,7 +233,7 @@ class ConnectView(ChatStartupAccess, APIView):
         if provider not in PROVIDERS:
             raise ValidationError("This source does not support browser connection.")
         if provider in HIDDEN_PULSE_PROVIDERS:
-            raise ValidationError("Pulse does not read this tool yet.")
+            raise ValidationError({"detail": "Pulse does not read this tool yet."})
         if provider == "github":
             refusal = _new_journey_github_refusal(self.company)
             if refusal is not None:
