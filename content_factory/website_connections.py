@@ -1488,14 +1488,21 @@ def settled_setup_run(connection, *, source_sha):
     Another setup on that head would only re-stamp its own marker and open a new
     PR; the next step is the branch's own CI proof. A setup without the kit
     (native CI needed configuration) is not settled: installing the kit is next.
+
+    A website verified by its live URL (``website_live_verification.selected``)
+    never gets a kit: MLAI's build proof plus the live page prove it. Its merged
+    setup is settled without one. Requiring the kit there sent every such merge
+    back to a second full setup and pull request (La Vie, 16 Nov 2026).
     """
     from workflow_runs.models import ContentFactoryRun
+    from .website_live_verification import selected as live_url_selected
     if not source_sha:
         return None
+    kit_optional = live_url_selected(getattr(connection, "organization", None))
     rows = ContentFactoryRun.objects.filter(_current_run_scope_filter(connection),
         organization_id=connection.organization_id, workflow="article_system_setup",
         status="completed").order_by("-updated_at")[:10]
-    return next((row for row in rows if setup_settled_at(row, source_sha) and setup_installed_kit(row)
+    return next((row for row in rows if setup_settled_at(row, source_sha) and (kit_optional or setup_installed_kit(row))
         and str(row.github_repo or "").casefold() == str(connection.github_repo or "").casefold()), None)
 
 
