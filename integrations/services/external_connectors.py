@@ -681,6 +681,36 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
     return None
 
 
+OAUTH_REDIRECT_URI_SETTINGS = {
+    "gmail": "GOOGLE_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.STRIPE: "STRIPE_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.XERO: "XERO_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.NOTION: "NOTION_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.GOOGLE_DRIVE: "GOOGLE_DRIVE_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.GOOGLE_ANALYTICS: "GOOGLE_ANALYTICS_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.SLACK: "SLACK_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.LINEAR: "LINEAR_OAUTH_REDIRECT_URI",
+}
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def local_redirect_uri_problem(provider: str) -> Optional[str]:
+    """Outside DEBUG, a provider redirect URI on localhost can never complete.
+
+    Linear's default is a localhost URL, so a deploy that sets only the
+    client id and secret would otherwise look "Ready to connect".
+    """
+    if getattr(settings, "DEBUG", False) or getattr(settings, "IS_LOCAL_ENV", False):
+        return None
+    name = OAUTH_REDIRECT_URI_SETTINGS.get(provider)
+    if not name:
+        return None
+    host = (urllib.parse.urlparse(str(getattr(settings, name, "") or "").strip()).hostname or "").lower()
+    if host in _LOCAL_HOSTS or host.endswith(".localhost"):
+        return f"{CONNECTOR_DEFINITIONS[provider].label} OAuth redirect URI points at localhost. Set {name} to the public callback URL."
+    return None
+
+
 def is_provider_configured(provider: str) -> bool:
     provider = normalize_provider(provider)
     if provider == "gmail":
@@ -1011,6 +1041,10 @@ def build_authorization_url(request, provider: str) -> str:
     configuration_error = _provider_configuration_error(provider)
     if configuration_error:
         raise ConnectorConfigurationError(configuration_error)
+    local_redirect = local_redirect_uri_problem(provider)
+    if local_redirect:
+        logger.error("Refusing to start an OAuth connection: %s", local_redirect, extra={"provider": provider})
+        raise ConnectorConfigurationError(local_redirect)
 
     next_url = normalize_connector_next(request.GET.get("next"))
     company, company_ok = company_for_user_from_request(request.user, request)
@@ -6449,7 +6483,7 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
     ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
     queryset = queryset.filter(organization=organization)
     connection = report_connection(queryset, user=user, organization=organization, provider=provider)
-    configuration_error = _provider_configuration_error(provider)
+    configuration_error = _provider_configuration_error(provider) or local_redirect_uri_problem(provider)
     configured = configuration_error is None
     if connection:
         status_value = connection.status

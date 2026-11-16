@@ -455,3 +455,34 @@ class ChatConnectionReturnTests(SimpleTestCase):
             self.assertEqual(connections.connect_browser(self.request({"ticket": ticket + "x"})).status_code, 400)
         with patch.object(connections, "enabled", return_value=False):
             self.returned(connections.connect_browser(self.request({"ticket": ticket})), "unavailable")
+
+
+class LocalRedirectUriTests(SimpleTestCase):
+    """C6: a localhost provider callback outside DEBUG is refused with a clear log."""
+
+    @override_settings(DEBUG=False, IS_LOCAL_ENV=False, LINEAR_CLIENT_ID="synthetic-linear-client",
+        LINEAR_CLIENT_SECRET="synthetic-linear-secret-value", LINEAR_OAUTH_SCOPES=["read"],
+        LINEAR_OAUTH_REDIRECT_URI="http://localhost:8000/integrations/callback/linear")
+    def test_linear_localhost_redirect_is_refused_outside_debug(self):
+        request = RequestFactory().get("/connect", {"next": NATIVE})
+        request.session, request.user = Session(), Obj(pk=7, id=7)
+        with self.assertLogs("integrations.services.external_connectors", level="ERROR") as logs, \
+                self.assertRaises(external.ConnectorConfigurationError):
+            external.build_authorization_url(request, "linear")
+        self.assertIn("LINEAR_OAUTH_REDIRECT_URI", logs.output[0])
+        self.assertIn("LINEAR_OAUTH_REDIRECT_URI", external.local_redirect_uri_problem("linear"))
+        with override_settings(LINEAR_OAUTH_REDIRECT_URI="https://api.mlai.au/integrations/callback/linear"):
+            self.assertIsNone(external.local_redirect_uri_problem("linear"))
+        with override_settings(DEBUG=True):
+            self.assertIsNone(external.local_redirect_uri_problem("linear"))
+        with override_settings(IS_LOCAL_ENV=True):
+            self.assertIsNone(external.local_redirect_uri_problem("linear"))
+
+    def test_deploy_provisions_the_linear_callback_like_other_providers(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[2]
+        deploy = (root / "deploy.sh").read_text()
+        self.assertIn('upsert_env_value LINEAR_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/linear"', deploy)
+        example = (root / ".env.example").read_text()
+        for key in ("LINEAR_CLIENT_ID=", "LINEAR_CLIENT_SECRET=", "LINEAR_OAUTH_REDIRECT_URI="):
+            self.assertIn(key, example)

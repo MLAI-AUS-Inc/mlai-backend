@@ -299,6 +299,14 @@ def google_connect(request):
     else:
         request.session.pop(GOOGLE_OAUTH_NEXT_SESSION_KEY, None)
 
+    from integrations.services.external_connectors import local_redirect_uri_problem
+    local_redirect = local_redirect_uri_problem("gmail")
+    if local_redirect:
+        logger.error("Refusing to start an OAuth connection: %s", local_redirect, extra={"provider": "gmail"})
+        if chat_started:
+            return connector_returns.chat_error_redirect(request.GET.get("next"), connector_returns.UNAVAILABLE, provider="gmail")
+        return HttpResponse("Google sign-in is not available yet. Please try again later.", status=503)
+
     scopes = _google_oauth_scopes_for_request(request)
     state = _save_state(request, "gmail", next_url or _default_google_success_url(), {
         "organization_id": organization.id if organization else None,
