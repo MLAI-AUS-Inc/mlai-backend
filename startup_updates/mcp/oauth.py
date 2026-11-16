@@ -364,7 +364,7 @@ def approve_intent(request_id, *, user, session, company_id, approve, scopes=Non
                     native_agents.bind_native_grant(user, session, value, native_installation_id)
                 remaining = max(1, int(value["expiresAt"] - time.time()))
                 cache.set(key("grant", grant_id), value, timeout=remaining)
-                with lock("index", f"{user.pk}:{grant_subject(company.pk if company else None)}"):
+                with lock("index", f"{user.pk}:{grant_subject(company.pk if company else None)}", wait=REFRESH_LOCK_WAIT):
                     index_key = key("index", f"{user.pk}:{grant_subject(company.pk if company else None)}")
                     earlier = cache.get(index_key) or []
                     live = cache.get_many([key("grant", item) for item in earlier])
@@ -481,12 +481,22 @@ def token_exchange(data):
                 # A lost response or a parallel refresh: hand back the tokens
                 # this rotation already issued instead of ending the connection.
                 return successor
-            # A refresh never alters the authorised scopes. Hosts often resend
-            # what they first asked for, so anything not granted is ignored.
-            principal = Principal(user=principal.user, grant=_slide_grant(principal.grant))
-            tokens = issue_tokens(record["grant_id"], principal)
-            remaining = max(1, int(principal.grant["expiresAt"] - time.time()))
-            cache.set(key("refresh", refresh), {**record, "spent": True}, timeout=remaining)
+            # The lock is short so a dead worker cannot strand the connection;
+            # this claim makes sure only one refresh ever rotates this token even
+            # if a slow one outlives that lock.
+            claim = key("rotating", refresh)
+            if not cache.add(claim, True, timeout=max(1, int(principal.grant["expiresAt"] - time.time()))):
+                raise OAuthError("temporarily_unavailable", "This request is already being processed.")
+            try:
+                # A refresh never alters the authorised scopes. Hosts often resend
+                # what they first asked for, so anything not granted is ignored.
+                principal = Principal(user=principal.user, grant=_slide_grant(principal.grant))
+                tokens = issue_tokens(record["grant_id"], principal)
+                remaining = max(1, int(principal.grant["expiresAt"] - time.time()))
+                cache.set(key("refresh", refresh), {**record, "spent": True}, timeout=remaining)
+            except Exception:
+                cache.delete(claim)
+                raise
             if replay_grace():
                 cache.set(key("replay", refresh), _replay_cipher(refresh).encrypt(json.dumps(tokens).encode()).decode(), timeout=replay_grace())
             return tokens
@@ -543,6 +553,11 @@ def _slide_grant(grant):
     # Grants made before this change referenced a marker and an index that
     # expired after 30 days. Keep both for as long as the grant can live.
     cache.touch(key("epoch", subject), None)
+    if grant["id"] in (cache.get(key("index", subject)) or []):
+        # The common case only needs the longer lifetime, which needs no lock,
+        # so a refresh never makes a new approval for this startup wait.
+        cache.touch(key("index", subject), INDEX_TTL)
+        return grant
     try:
         with lock("index", subject):
             listed = cache.get(key("index", subject)) or []

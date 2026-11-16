@@ -294,7 +294,10 @@ Applies to `/mcp/mlai` and `/mcp/valley` unless stated. No migration.
 - **Refresh.** `resource` may be omitted on the token endpoint and a trailing
   slash is accepted; a different resource is refused. Scopes sent on refresh
   that were not granted are ignored. A parallel refresh waits up to three
-  seconds; the refresh lock lasts thirty seconds. The replayed successor is
+  seconds; the refresh lock lasts thirty seconds, and a separate atomic claim
+  stops a refresh that outlives that lock from being rotated twice. A refresh of
+  an already-listed grant does not take the listing lock, so it never makes a new
+  approval wait; approval waits up to three seconds for that lock. The replayed successor is
   stored encrypted with a key derived from the spent refresh token.
 - **Revocation.** The per-startup disconnect marker never expires. Revoking a
   grant also writes a separate tombstone, so a refresh racing a revocation

@@ -436,6 +436,35 @@ class ConnectionLifetimeTests(SimpleTestCase):
                 oauth.create_intent({**query, "resource": wrong})
             self.assertEqual(caught.exception.error, "invalid_target")
 
+    def test_a_refresh_that_outlives_its_lock_cannot_be_rotated_twice(self):
+        self.stored()
+        tokens = oauth.issue_tokens("grant")
+        # A slow first worker claimed the rotation, then its lock expired.
+        cache.add(oauth.key("rotating", tokens["refresh_token"]), True, timeout=60)
+        with self.assertRaises(oauth.OAuthError) as caught:
+            self.refresh(tokens["refresh_token"])
+        self.assertEqual(caught.exception.error, "temporarily_unavailable")
+        self.assertNotIn("spent", cache.get(oauth.key("refresh", tokens["refresh_token"])))
+
+    def test_a_failed_rotation_releases_its_claim(self):
+        self.stored()
+        tokens = oauth.issue_tokens("grant")
+        with patch.object(oauth, "issue_tokens", side_effect=RuntimeError("cache down")), self.assertRaises(RuntimeError):
+            self.refresh(tokens["refresh_token"])
+        self.assertIn("access_token", self.refresh(tokens["refresh_token"]))
+
+    def test_refreshing_a_listed_grant_does_not_hold_up_a_new_approval(self):
+        value = self.approve(PULSE, PULSE)
+        tokens = oauth.issue_tokens(value["id"])
+        subject = f"7:{COMPANY_ID}"
+        # Hold the listing lock as a concurrent approval would.
+        cache.add(oauth.key("lock-index", subject), "approval", timeout=60)
+        with patch.object(oauth, "lock", wraps=oauth.lock) as locks:
+            self.assertIn("access_token", self.refresh(tokens["refresh_token"]))
+        self.assertNotIn("index", [item.args[0] for item in locks.call_args_list])
+        self.assertEqual(cache.get(oauth.key("index", subject)), [value["id"]])
+        cache.delete(oauth.key("lock-index", subject))
+
     def test_community_and_personal_agent_grants_stay_bound_to_their_session(self):
         self.stored(id="community", scopes=["community:read", "startup:brief:read"])
         self.assertEqual(oauth.valid_grant("community").user, self.user)
