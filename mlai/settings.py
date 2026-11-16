@@ -2572,7 +2572,11 @@ AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED = _env_is_true("AGENT_RUNTIME_DOT_ACCOUNTS_EN
 AGENT_RUNTIME_DOT_MEMBERS_ENABLED = _env_is_true("AGENT_RUNTIME_DOT_MEMBERS_ENABLED", False)
 AGENT_RUNTIME_DOT_MESSAGING_ENABLED = _env_is_true("AGENT_RUNTIME_DOT_MESSAGING_ENABLED", False)
 MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED = _env_is_true("MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED", False)
-MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS = _native_bounded_int("MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS", 0, 0, 300)
+# A refresh retried within this window (a lost response, two parallel refreshes)
+# receives the tokens already issued instead of ending the connection. 0 disables.
+MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS = _native_bounded_int("MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS", 60, 0, 300)
+# A startup AI connection ends after this many days without a token refresh.
+MLAI_MCP_GRANT_IDLE_TTL_DAYS = _native_bounded_int("MLAI_MCP_GRANT_IDLE_TTL_DAYS", 180, 1, 730)
 AGENT_RUNTIME_SLACK_WORKSPACES = _env_list("AGENT_RUNTIME_SLACK_WORKSPACES", [])
 AGENT_RUNTIME_SLACK_CHANNEL_IDS = _env_list("AGENT_RUNTIME_SLACK_CHANNEL_IDS", [])
 AGENT_RUNTIME_WORKER_KEY = os.getenv("AGENT_RUNTIME_WORKER_KEY", "")

@@ -67,8 +67,11 @@ def capture_snapshot(organization, month, *, run=None, manual_metrics=None, base
         organization=organization, period_month=month, metric_key__in=keys,
     ).order_by("-observed_at", "-id")
     if run is not None:
-        sources = set((run.run_request or {}).get("input_sources") or [])
-        if sources:
+        from startup_updates.preflight import effective_input_sources
+        # A tool left out of this run (needs reconnecting, unavailable) must not
+        # contribute older figures to the draft either.
+        sources = set(effective_input_sources(run.run_request, run.result))
+        if (run.run_request or {}).get("input_sources"):
             providers = sources | ({"financial"} if "stripe" in sources else set())
             observations = observations.filter(source_provider__in=providers)
     by_key = {}

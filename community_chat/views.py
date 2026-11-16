@@ -952,7 +952,7 @@ class AccountSessionLogoutView(APIView):
                 str(request.headers.get("Origin") or "").strip().rstrip("/")
             )
         try:
-            revoke_account_session(
+            signed_out = revoke_account_session(
                 raw_token, required_origin=required_origin,
                 required_public_key=(
                     request.headers.get("X-MLAI-Public-Key") if not explicit_token else None
@@ -970,6 +970,10 @@ class AccountSessionLogoutView(APIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
             return clear_account_session_cookies(response)
+        # AI connections this device approved for a startup end with an
+        # explicit sign-out (signing in again keeps them).
+        from startup_updates.mcp.oauth import end_installation_grants
+        end_installation_grants(signed_out.user_id, signed_out.installation_id)
         response = Response({"status": "signed_out"}, status=status.HTTP_200_OK)
         return clear_account_session_cookies(response)
 

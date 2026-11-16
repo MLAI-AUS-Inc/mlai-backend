@@ -12,7 +12,9 @@ from typing import Iterable, Optional
 import httplib2
 import google_auth_httplib2
 from django.conf import settings
+from django.core.cache import cache
 from django.utils import timezone
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -170,9 +172,52 @@ def is_gmail_insufficient_permissions_error(exc: Exception) -> bool:
     )
 
 
+GMAIL_REVOKED_WARNING = "Gmail needs to be reconnected. Reconnect Gmail to keep using it in Pulse."
+# GoogleConnection has no status column. The marker is keyed by the stored
+# refresh token, so a reconnect (which stores a new token) clears it, and a
+# lost cache entry is simply re-detected on the next read.
+GMAIL_RECONNECT_MARKER_SECONDS = 180 * 24 * 60 * 60
+
+
+class GmailReconnectRequired(PermissionError):
+    """Google refused the stored refresh token: the founder must reconnect Gmail."""
+
+
+def _gmail_reconnect_key(connection: GoogleConnection) -> str:
+    token = hashlib.sha256(str(connection.refresh_token or "").encode()).hexdigest()[:32]
+    return f"gmail-reconnect-required:{connection.pk}:{token}"
+
+
+def gmail_needs_reconnect(connection: GoogleConnection) -> bool:
+    """Whether Google last refused this exact stored credential."""
+    try:
+        return bool(cache.get(_gmail_reconnect_key(connection)))
+    except Exception:  # noqa: BLE001 - a status read must not fail on the cache
+        logger.warning("Could not read the Gmail reconnect marker", exc_info=True)
+        return False
+
+
+def _gmail_grant_revoked(exc: RefreshError) -> bool:
+    return "invalid_grant" in str(exc)
+
+
 def build_gmail_service(connection: GoogleConnection, *, cache_discovery: bool = False):
     creds = get_refreshed_credentials(connection)
     http = httplib2.Http(timeout=_gmail_api_http_timeout_seconds())
+    # Refresh up front (the first request would do it anyway) so a revoked or
+    # expired grant is reported as "reconnect Gmail", not as a passing outage.
+    try:
+        creds.refresh(google_auth_httplib2.Request(http))
+    except RefreshError as exc:
+        if not _gmail_grant_revoked(exc):
+            raise
+        logger.warning("Google refused the stored Gmail refresh token; marking it for reconnect",
+            extra={"google_connection_id": connection.pk, "user_id": connection.user_id})
+        try:
+            cache.set(_gmail_reconnect_key(connection), True, timeout=GMAIL_RECONNECT_MARKER_SECONDS)
+        except Exception:  # noqa: BLE001 - the reconnect error below still reaches the caller
+            logger.warning("Could not store the Gmail reconnect marker", exc_info=True)
+        raise GmailReconnectRequired(GMAIL_REVOKED_WARNING) from None
     authorized_http = google_auth_httplib2.AuthorizedHttp(creds, http=http)
     return build("gmail", "v1", http=authorized_http, cache_discovery=cache_discovery)
 
