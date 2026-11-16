@@ -833,11 +833,14 @@ def startup_update_run_financial_window(run_request: dict) -> dict[str, date]:
     compares against "now" in UTC (which rejected the new month for founders
     ahead of UTC during the first hours of a month).
     """
-    from zoneinfo import ZoneInfo
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
     request = run_request or {}
     month = date.fromisoformat(str(request.get("target_month") or request.get("current_month")))
     month = date(month.year, month.month, 1)
-    zone = ZoneInfo(request.get("reporting_timezone") or "UTC")
+    try:
+        zone = ZoneInfo(request.get("reporting_timezone") or "UTC")
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = ZoneInfo(DEFAULT_FOUNDER_TIMEZONE)
     period = request.get("narrative_period") or {}
     cutoff = parse_datetime(str(period.get("end") or ""))
     if cutoff is not None and cutoff.tzinfo is not None:
