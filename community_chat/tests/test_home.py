@@ -99,6 +99,16 @@ class CommunityHomeTests(APITestCase):
         with override_settings(COMMUNITY_CHAT_RELAY_URL="wss://other.example.test"):
             self.assertIsNone(self.client.get(self.url).data["roo_slack_user_id"])
 
+    @override_settings(
+        COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TMLAI",
+        COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
+    )
+    def test_home_tells_a_chat_only_member_roo_needs_a_slack_link(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.data["roo_requests"], "slack_not_linked")
+        with override_settings(COMMUNITY_CHAT_RELAY_URL="wss://other.example.test"):
+            self.assertIsNone(self.client.get(self.url).data["roo_requests"])
+
     def task(self, title, **overrides):
         values = {
             "title": title,
@@ -164,7 +174,7 @@ class CommunityHomeTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(
             set(response.data),
-            {"points", "earn_actions", "rewards", "feature_flags", "roo_public_key", "roo_slack_user_id"},
+            {"points", "earn_actions", "rewards", "feature_flags", "roo_public_key", "roo_slack_user_id", "roo_requests"},
         )
         self.assertEqual(
             response.data["points"],

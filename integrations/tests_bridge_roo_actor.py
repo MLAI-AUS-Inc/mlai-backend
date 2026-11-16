@@ -186,13 +186,35 @@ class BridgeRooActorTests(SimpleTestCase):
         self.assertEqual(resolve_roo_actor(**{**CONTEXT, "thread_ts": CONTEXT["message_id"]})["user_id"], "USAM")
 
     def test_legacy_revoked_wrong_workspace_and_bot_identities_are_denied(self):
-        for identity in (None, {**self.identity, "identity_source": "legacy_key"},
+        for identity in ({**self.identity, "identity_source": "legacy_key"},
                          {**self.identity, "slack_workspace_id": "TOTHER"},
                          {**self.identity, "user_profile_id": ""},
                          {**self.identity, "slack_user_id": "UBRIDGE"}):
             with self.subTest(identity=identity):
                 self.resolve.return_value = identity
                 self.assert_rejected("bridge_actor_unverified")
+
+    def test_verified_chat_only_author_is_told_slack_is_unlinked(self):
+        # A genuine bot-mode delivery by a verified account with no Slack link
+        # gets its own code so Roo can explain the fix. It never resolves.
+        self.resolve.return_value = None
+        self.assert_rejected("bridge_actor_slack_unlinked")
+        self.consent.assert_not_called()
+
+    def test_unlinked_code_needs_every_delivery_check_to_pass_first(self):
+        self.resolve.return_value = None
+        self.account.return_value = None
+        self.assert_rejected("bridge_actor_unverified")
+        self.account.return_value = {"user_id": 42, "user_profile_id": "profile-id", "public_key": "bc" * 32}
+        self.assert_rejected("unknown_bridge_sender", 404, bridge_user_id="UOTHERBOT")
+        self.link.channel.enabled = False
+        self.assert_rejected("bridge_context_revoked")
+
+    def test_member_mode_without_identity_stays_unverified(self):
+        self.resolve.return_value = None
+        self.link.destination_payload = {"poster": {"kind": "member"}}
+        with patch(f"{MODULE}._verified_member_poster"):
+            self.assert_rejected("bridge_actor_unverified", bridge_user_id="USAM")
 
     def test_withdrawn_consent_is_denied(self):
         self.consent.return_value = False

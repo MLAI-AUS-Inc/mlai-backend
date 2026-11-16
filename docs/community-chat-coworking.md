@@ -45,6 +45,32 @@ standalone unittest suite with dummy database settings, mocked domain calls and
 real DRF dispatch. It does not execute migrations or prove SQL locking/token
 validation; those remain covered by the existing integration suites.
 
+## Channel notice after a Chat booking
+
+When `POST` creates a booking (201, not a repeat 200), the backend posts one
+best-effort notice into the Slack coworking channel mirrored to Chat's
+`cowork-and-chill-melbourne`, after the booking commits:
+"`<name>` is booked in for coworking today." plus the no-food reminder. Linked
+members are shown as a Slack mention; Chat-only members by account name. It is
+sent by Public Roo's bot token without a Roo mention, so Roo never acts on it.
+A failed notice is logged (`coworking_announce_failed`) and never changes the
+booking or the receipt. Kill switch: `COMMUNITY_CHAT_COWORKING_ANNOUNCE_ENABLED`
+(default true). Code: `community_chat/coworking_announcement.py`.
+
+## Roo requests from Chat members without Slack
+
+Roo acts only for a member it can tie to a Slack user. `GET community-chat/home/`
+returns `roo_requests`: `ready`, `slack_not_linked`, `ai_sharing_off`, or `null`
+when Public Roo is not configured (`community_chat/roo_readiness.py`). Chat uses
+it to warn before sending an `@Roo` message that Roo would refuse.
+
+The Roo actor lookup (`GET integrations/bridge/roo/actor`) answers
+`403 bridge_actor_slack_unlinked` for a genuine bot-mode delivery by a verified
+MLAI account that has no Slack identity link. It is raised only after every
+delivery check has passed, and grants nothing; Public Roo uses it to reply once
+in the thread explaining how to fix it. Every other refusal keeps its old code.
+Release Public Roo's support for this code before this backend change.
+
 ## Legacy chat-message handoff
 
 Older clients can still submit the signed message

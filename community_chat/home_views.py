@@ -17,6 +17,8 @@ from roo.event_discounts import account_perks_enabled as event_discounts_enabled
 from integrations.services.community_bridge.coworking import coworking_booking_available
 from integrations.services.slack_roo import public_roo_target
 
+from .roo_readiness import roo_request_readiness
+
 from .authentication import (
     CommunityChatAccountAuthentication,
     CommunityChatBootstrapAuthentication,
@@ -123,6 +125,7 @@ class CommunityHomeView(APIView):
             {
                 "roo_public_key": roo_public_key,
                 "roo_slack_user_id": slack_roo[1] if slack_roo else None,
+                "roo_requests": roo_request_readiness(request.user),
                 "points": {
                     "balance": PointsService.microroo_to_legacy_whole(
                         available_microroo

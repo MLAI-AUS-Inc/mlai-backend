@@ -3,6 +3,7 @@
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+from django.db import transaction
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -13,6 +14,7 @@ from roo.permissions import InsufficientBalanceError
 from roo.services import CoworkingService
 
 from .authentication import CommunityChatAccountAuthentication
+from .coworking_announcement import announce_booking
 from .throttles import CommunityChatScopedThrottle
 
 
@@ -92,6 +94,11 @@ class CoworkingTodayView(APIView):
             return Response(
                 {"code": "booking_unavailable", "detail": str(error)}, status=409
             )
+        if created:
+            # Tell the coworking channel after the booking is durable. A failed
+            # notice never changes the booking or the member's receipt.
+            user = request.user
+            transaction.on_commit(lambda: announce_booking(user, booking))
         return Response(
             self._receipt(day, booking, booking.points_cost),
             status=201 if created else 200,
