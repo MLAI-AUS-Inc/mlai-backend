@@ -9255,6 +9255,11 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                 if key in (existing_run.result or {}):
                     result[key] = existing_run.result[key]
             data["result"] = result
+            if data.get("status") == "blocked" and result.get("review_required"):
+                # A saved draft waiting for the founder's factual review is
+                # finished work, not an open run that blocks the next draft.
+                data["status"], data["resume_available"] = "completed", False
+                active_snapshot = False
         if active_snapshot:
             # Clean after the Django-owned merge as a final invariant: no local
             # augmentation may reintroduce a blocker into an active snapshot.

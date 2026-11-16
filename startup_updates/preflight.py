@@ -37,6 +37,10 @@ class ManualInputNotReady(ValueError):
     """Selected founder documents are missing or have not finished parsing."""
 
 
+class AccountChoiceRequired(PermissionError):
+    """Several accounts are connected and the founder has not chosen one for Pulse."""
+
+
 def rate_limited_check(provider, retry_after_seconds):
     """Expose a safe provider deadline without treating quota as revoked OAuth."""
     seconds = max(int(retry_after_seconds), 1)
@@ -78,6 +82,112 @@ def selected_sources(values, *, manual=False):
     return result
 
 
+SOURCE_LABELS = {
+    "gmail": "Gmail", "slack": "Slack", "linear": "Linear", "notion": "Notion",
+    "google_analytics": "Google Analytics", "xero": "Xero", "stripe": "Stripe",
+    "bank_feed": "your bank feed", "humanitix": "Humanitix", "luma": "Luma",
+    "manual_documents": "your documents", "google_drive": "Google Drive",
+}
+# Founder notes and documents are the founder's own input. A draft never
+# silently leaves them out, so they are never skipped.
+UNSKIPPABLE_SOURCES = frozenset({"manual_documents"})
+
+
+def source_label(provider):
+    return SOURCE_LABELS.get(provider, str(provider or "").replace("_", " ").title())
+
+
+def skipped_source_entry(check, *, stage="check"):
+    """A founder-safe record of a tool MLAI left out of this draft."""
+    provider = check.get("provider")
+    label = source_label(provider)
+    status = check.get("status")
+    if stage == "collection":
+        code, action = "collection_failed", "retry"
+        message = f"MLAI could not finish reading {label}, so this draft may miss some of it."
+    elif check.get("reason") == "account_choice_required":
+        code, action = "account_choice_required", "reconnect"
+        message = f"Choose which {label} organisation MLAI should read. This draft leaves {label} out until you do."
+    elif status == "needs_reconnect":
+        code, action = "needs_reconnect", "reconnect"
+        message = f"{label[:1].upper()}{label[1:]} needs reconnecting, so MLAI drafted this update without it."
+    elif status == "unsupported":
+        code, action = "unsupported", None
+        message = f"MLAI cannot read {label} yet, so this draft leaves it out."
+    else:
+        code, action = (check.get("reason") or "temporarily_unavailable"), "retry"
+        message = f"MLAI could not read {label} just now, so this draft leaves it out."
+    return {"provider": provider, "code": code, "message": message, "action": action}
+
+
+def run_skipped_sources(run_request, result=None):
+    """Tools left out of a run: by the backend check, or by the worker during reading."""
+    skipped = {}
+    for group in ((run_request or {}).get("skipped_sources"), (result or {}).get("skipped_sources")):
+        if isinstance(group, dict):
+            for key, value in group.items():
+                if isinstance(value, dict):
+                    skipped.setdefault(key, value)
+    return skipped
+
+
+def effective_input_sources(run_request, result=None):
+    """The selected tools this run still reads, in selection order."""
+    skipped = run_skipped_sources(run_request, result)
+    return [source for source in (run_request or {}).get("input_sources") or [] if source not in skipped]
+
+
+def skip_failed_checks(checks, skipped):
+    """Skip every failing tool that may be skipped; report whether any input remains.
+
+    ``skipped`` is updated in place. Returns False when nothing usable is left,
+    in which case the caller keeps the run's barrier closed.
+    """
+    for check in checks:
+        provider = check.get("provider")
+        if check.get("status") != "ready" and provider not in skipped and provider not in UNSKIPPABLE_SOURCES:
+            skipped[provider] = skipped_source_entry(check)
+    remaining = [check for check in checks if check.get("provider") not in skipped]
+    return bool(remaining) and all(check.get("status") == "ready" for check in remaining)
+
+
+AUTOMATIC_SOURCE_PROVIDERS = (
+    "gmail", "slack", "linear", "notion", "google_analytics",
+    "xero", "stripe", "bank_feed", "humanitix", "luma",
+)
+
+
+def connected_update_sources(user, organization):
+    """Return every healthy connection Pulse can read for a scheduled draft.
+
+    Used when nobody picked sources by hand (the monthly schedule). A source
+    the founder switched off for Pulse stays off, and broken connections are
+    left out rather than failing the run.
+    """
+    from integrations.models import ExternalServiceConnection, ExternalServiceConnectionStatus
+    from integrations.services.external_connectors import google_connection_for_org, has_gmail_read_scope
+
+    if organization is None:
+        return []
+    switched_off = set()
+    profile = getattr(organization, "startup_profile", None)
+    if profile is not None:
+        from community_chat.startups.source_preferences import PREFERENCE_KEY
+        choices = ((profile.progress_configuration or {}).get(PREFERENCE_KEY) or {})
+        for key, values in choices.items():
+            if str(key).endswith(f":{user.pk}") and isinstance(values, dict):
+                switched_off.update(provider for provider, enabled in values.items() if enabled is False)
+    found = set()
+    google = google_connection_for_org(user, organization)
+    if google is not None and has_gmail_read_scope(google):
+        found.add("gmail")
+    found.update(ExternalServiceConnection.objects.filter(
+        user=user, organization=organization, provider__in=AUTOMATIC_SOURCE_PROVIDERS,
+        status__in=[ExternalServiceConnectionStatus.CONNECTED, ExternalServiceConnectionStatus.SYNCING],
+    ).values_list("provider", flat=True))
+    return [provider for provider in AUTOMATIC_SOURCE_PROVIDERS if provider in found and provider not in switched_off]
+
+
 def _get(url, *, token, headers=None, params=None):
     response = requests.get(
         url,
@@ -105,7 +215,11 @@ def probe_source(provider, *, user, organization):
             raise PermissionError()
         list_message_page(connection, query="", max_results=1)
         return {"connectionId": connection.pk}
-    from integrations.services.source_accounts import report_connection
+    from integrations.services.source_accounts import account_choice_required, report_connection
+    if provider == "xero" and account_choice_required(user, organization, provider):
+        # One Xero sign-in can cover several organisations. Never guess which
+        # one's revenue and cash belong in this update.
+        raise AccountChoiceRequired()
     connection = report_connection(ExternalServiceConnection.objects.filter(
         user=user, organization=organization, provider=provider,
     ).exclude(status="disconnected"), user=user, organization=organization, provider=provider)
@@ -217,6 +331,9 @@ def source_failure_check(provider, exc):
         return rate_limited_check(provider, seconds)
     if isinstance(exc, NotImplementedError):
         code, message = "unsupported", "This connection does not support Pulse imports yet."
+    elif isinstance(exc, AccountChoiceRequired):
+        return {"provider": provider, "status": "needs_reconnect", "reason": "account_choice_required",
+            "message": "Choose which organisation MLAI should read for this startup."}
     elif isinstance(exc, ManualInputNotReady):
         code, message = "needs_input", "Add notes or wait for selected documents to finish processing."
     elif status in (401, 403) or (isinstance(exc, (PermissionError, ec.ConnectorOAuthError)) and not isinstance(exc, ec.ConnectorTemporarilyUnavailable)):

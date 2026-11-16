@@ -1,7 +1,9 @@
 """Single-use company-bound browser handoff into existing provider OAuth."""
 import hashlib
+import re
 import secrets
 from urllib.parse import parse_qs, urlencode, urlsplit
+from uuid import UUID
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core import signing
@@ -22,7 +24,7 @@ from integrations.models import ExternalServiceConnection, GoogleConnection
 from integrations.services.external_connectors import disconnect_external_connection
 from integrations.views import connector_connect
 from startup_updates.data_deletion import disconnect_gmail_for_user
-from .lifecycle import OAUTH_PROVIDERS, UPDATE_PROVIDERS
+from .lifecycle import HIDDEN_PULSE_PROVIDERS, OAUTH_PROVIDERS, UPDATE_PROVIDERS
 from .source_preferences import set_source_preference
 from .views import ChatStartupAccess, enabled
 
@@ -30,6 +32,64 @@ SALT = "chat-startup-source-v1"
 PROVIDERS = OAUTH_PROVIDERS | {"google", "google_search_console", "github"}
 PROVIDER_ALIASES = {"google-drive": "google_drive", "google-analytics": "google_analytics",
     "google-search-console": "google_search_console", "bank-feed": "bank_feed"}
+_UPDATE_ID = re.compile(r"[1-9][0-9]{0,17}")
+
+
+def pulse_return_context(data):
+    """The Pulse draft to return to after a connect: from=updates and the update id.
+
+    Only these two routing values are kept; anything else is discarded.
+    """
+    data = data if isinstance(data, dict) or hasattr(data, "get") else {}
+    if data.get("from") != "updates":
+        return {}
+    context = {"from": "updates"}
+    update_id = data.get("updateId", data.get("update_id"))
+    if isinstance(update_id, bool):
+        update_id = None
+    if isinstance(update_id, int):
+        update_id = str(update_id)
+    if isinstance(update_id, str) and _UPDATE_ID.fullmatch(update_id):
+        context["update_id"] = update_id
+    return context
+
+
+def chat_connection_return_url(company_id, provider, *, return_to=None, context=None, error=None):
+    """Where Chat shows the result of a connect.
+
+    Web: ``/my-startup/connections?company_id=…&connected=<provider>`` plus the
+    Pulse context (``from=updates``, ``update_id``) and, on failure,
+    ``error=<reason>``. Native: the fixed ``mlaichat://connections`` link,
+    which already names the provider and accepts no other parameters.
+    """
+    if return_to in {"mobile", "desktop-dev"}:
+        scheme = "mlaichat-dev" if return_to == "desktop-dev" else "mlaichat"
+        return f"{scheme}://connections?" + urlencode({"company_id": str(company_id), "provider": provider})
+    params = {"company_id": str(company_id), "connected": provider, **pulse_return_context(context or {})}
+    if error:
+        params["error"] = error
+    return settings.COMMUNITY_CHAT_FRONTEND_URL.rstrip("/") + "/my-startup/connections?" + urlencode(params)
+
+
+def _bad_ticket_redirect(ticket, reason):
+    """Return a signed but unusable non-GitHub ticket to Chat with a reason.
+
+    The signature proves the routing data is ours; its age is not checked and
+    nothing else in it is used. Chat checks ownership of the company itself.
+    """
+    from integrations.services.chat_oauth_return import oauth_return_redirect
+    try:
+        payload = signing.loads(ticket, salt=SALT)
+    except (signing.BadSignature, ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("provider") not in PROVIDERS - {"github"}:
+        return None
+    try:
+        company_id = str(UUID(str(payload.get("company"))))
+    except (ValueError, TypeError):
+        return None
+    return oauth_return_redirect(chat_connection_return_url(company_id, payload["provider"],
+        return_to=payload.get("return_to"), context=payload.get("return_context"), error=reason))
 
 
 def consume_ticket(ticket):
@@ -172,6 +232,8 @@ class ConnectView(ChatStartupAccess, APIView):
             return response
         if provider not in PROVIDERS:
             raise ValidationError("This source does not support browser connection.")
+        if provider in HIDDEN_PULSE_PROVIDERS:
+            raise ValidationError("Pulse does not read this tool yet.")
         if provider == "github":
             refusal = _new_journey_github_refusal(self.company)
             if refusal is not None:
@@ -180,6 +242,7 @@ class ConnectView(ChatStartupAccess, APIView):
             "session": str(request.auth.pk), "provider": provider,
             "return_to": getattr(request, "data", {}).get("returnTo") if getattr(request, "data", {}).get("returnTo") in {"mobile", "desktop-dev"} else None,
             "github_settings_return": github_settings_return(getattr(request, "data", {}).get("returnUrl"), self.company.pk) if provider == "github" else None,
+            "return_context": pulse_return_context(getattr(request, "data", {})) or None,
             "nonce": secrets.token_urlsafe(24)}, salt=SALT)
         url = request.build_absolute_uri(reverse("chat_startups_connect_browser"))
         return Response({"authorizationUrl": f"{url}?{urlencode({'ticket': ticket})}"})
@@ -249,6 +312,10 @@ def connect_browser(request):
             organization = _new_journey_organization(peeked_company) if peeked_company is not None else None
             if organization is not None:
                 return _new_journey_redirect(reasons.UNAVAILABLE, peeked, peeked_company, organization)
+        from integrations.services.connector_returns import UNAVAILABLE
+        returned = _bad_ticket_redirect(request.GET.get("ticket", ""), UNAVAILABLE)
+        if returned is not None:
+            return returned
         return HttpResponseBadRequest("Startup connections are unavailable.")
     try:
         payload = consume_ticket(request.GET.get("ticket", ""))
@@ -271,6 +338,10 @@ def connect_browser(request):
             fixed = reasons.state_expired_redirect()
             if fixed is not None:
                 return fixed
+        from integrations.services.connector_returns import EXPIRED
+        returned = _bad_ticket_redirect(bad_ticket, EXPIRED)
+        if returned is not None:
+            return returned
         return HttpResponseBadRequest("This connection link expired or was already used. Start again in MLAI Chat.")
     new_journey_org = (_new_journey_organization(company)
                        if provider == "github" and reasons.redirects_enabled() else None)
@@ -280,15 +351,14 @@ def connect_browser(request):
         request.chat_oauth_context["organization_id"] = company.organization_id
     query = QueryDict(mutable=True)
     frontend = settings.COMMUNITY_CHAT_FRONTEND_URL.rstrip("/")
-    return_url = f"{frontend}/my-startup/connections?" + urlencode({"company_id": str(company.pk), "connected": provider})
+    return_url = chat_connection_return_url(company.pk, provider, context=payload.get("return_context"))
     editor_return = github_settings_return(payload.get("github_settings_return"), company.pk)
     if provider == "github" and editor_return:
         return_url = f"{frontend}{editor_return}"
     if new_journey_org is not None:
         return_url = _new_journey_return(payload, company)
     if payload.get("return_to") in {"mobile", "desktop-dev"}:
-        scheme = "mlaichat-dev" if payload["return_to"] == "desktop-dev" else "mlaichat"
-        return_url = f"{scheme}://connections?" + urlencode({"company_id": str(company.pk), "provider": provider})
+        return_url = chat_connection_return_url(company.pk, provider, return_to=payload["return_to"])
     query.update({"company_id": str(company.pk), "next": return_url})
     if provider == "gmail":
         query["scope"] = "gmail"

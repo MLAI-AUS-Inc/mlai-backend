@@ -91,11 +91,11 @@ def capabilities(user, company):
 def account(user, company):
     """Expose account-owned connection readiness, never tokens or provider data."""
     from integrations.services.external_connectors import serialize_source_status
-    from community_chat.startups.lifecycle import source_capabilities
+    from community_chat.startups.lifecycle import pulse_source_visible, source_capabilities
     from community_chat.startups.website_connections import website_connection_sources
     context = context_for(user, company)
     state = serialize_source_status(user, organization=context.organization)
-    sources = [source_capabilities(item) for item in state.get("sources", [])]
+    sources = [source_capabilities(item) for item in state.get("sources", []) if pulse_source_visible(item)]
     sources.extend(website_connection_sources(user, company))
     allowed = ("provider", "key", "label", "name", "status", "configured", "available",
                "enabled", "usableForUpdates", "canConnect", "warning", "capability")

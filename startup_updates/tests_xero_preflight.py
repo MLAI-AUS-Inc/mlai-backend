@@ -39,6 +39,7 @@ class XeroPreflightHttpTests(SimpleTestCase):
     def check(self):
         with patch.object(ExternalServiceConnection.objects, "filter", return_value=self.query), \
              patch("integrations.services.source_accounts.report_account_id", return_value=None), \
+             patch("integrations.services.source_accounts.account_choice_required", return_value=False), \
              patch.object(ec, "_xero_required_token", return_value="synthetic-token"):
             return check_sources(["xero"], lambda _: probe_source("xero", user="user-a", organization="startup-a"))[0]
 

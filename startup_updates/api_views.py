@@ -1,6 +1,7 @@
 from integrations.services.source_accounts import google_connection_for_binding
 
 from integrations.services.slack_source_privacy import slack_source_queryset
+import logging
 import time
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 from functools import wraps
@@ -17,6 +18,8 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+logger = logging.getLogger(__name__)
 
 from integrations import http_client as requests
 from organizations.models import Organization
@@ -190,6 +193,16 @@ EXTRACTABLE_RELEVANCE_LABELS = [
     GmailRelevanceLabel.RELEVANT,
     GmailRelevanceLabel.AMBIGUOUS,
 ]
+
+
+def classified_needs_thread_context(item):
+    """Hydrate and extract every email the classifier kept, not only some.
+
+    Hydration and extraction only consider messages with this flag. The model
+    was never told what the flag means, so a confident "update_worthy" result
+    often arrived with it unset and the email silently never reached the draft.
+    """
+    return bool(item.get("needs_thread_context")) or item.get("relevance_label") in EXTRACTABLE_RELEVANCE_LABELS
 VALLEY_META_KEY = "_valley_meta"
 TRANSIENT_SQLITE_LOCK_MARKERS = (
     "database is locked",
@@ -1085,12 +1098,23 @@ class StartupUpdateRunView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        input_sources = normalize_startup_update_input_sources(
-            data.get("input_sources") or data.get("inputSources") or []
-        )
+        explicit_sources = data.get("input_sources") or data.get("inputSources") or []
+        if data.get("use_connected_sources") and not explicit_sources:
+            from startup_updates.preflight import connected_update_sources
+            explicit_sources = connected_update_sources(binding.user, binding.organization)
+            if not explicit_sources:
+                return Response({"error": "no_connected_sources",
+                    "detail": "Connect a tool to MLAI before Pulse can draft this update."},
+                    status=status.HTTP_400_BAD_REQUEST)
+        input_sources = normalize_startup_update_input_sources(explicit_sources)
         raw_target_month = data.get("target_month") or data.get("targetMonth")
         try:
-            target_month = parse_startup_update_target_month(raw_target_month)
+            if raw_target_month in (None, ""):
+                from startup_updates.services import default_startup_update_target_month, founder_timezone_name
+                target_month = default_startup_update_target_month(timezone_name=founder_timezone_name(
+                    getattr(binding.organization, "startup_profile", None)))
+            else:
+                target_month = parse_startup_update_target_month(raw_target_month)
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         google_connection = google_connection_for_binding(binding)
@@ -1610,7 +1634,7 @@ class StartupUpdateClassificationResultsView(APIView):
             artifact.relevance_label = item["relevance_label"]
             artifact.relevance_score = item.get("relevance_score", 0.0)
             artifact.relevance_reason = item.get("relevance_reason", "")
-            artifact.needs_thread_context = bool(item.get("needs_thread_context", False))
+            artifact.needs_thread_context = classified_needs_thread_context(item)
             from startup_updates.source_evidence import classification_version
             artifact.header_values = {**(artifact.header_values or {}), "reporting_classifier_version": classification_version(run)}
             artifact.classified_at = timezone.now()
@@ -3280,6 +3304,23 @@ def _save_notion_run_store(connection, run_id: str, store: dict[str, Any]) -> No
     connection.save(update_fields=["sync_cursor", "last_synced_at", "last_error", "updated_at"])
 
 
+def notion_results_reached_before_period(results, period):
+    """True once a search page (newest edits first) reaches pages older than the month.
+
+    Every later page was last edited even earlier, so it cannot hold anything
+    from the reporting month; the backfill stops instead of walking the whole
+    workspace.
+    """
+    window = activity_window(period) if period else None
+    if not window:
+        return False
+    for page in results:
+        edited = parse_datetime(str((page or {}).get("last_edited_time") or "")) if isinstance(page, dict) else None
+        if edited is not None and edited.tzinfo is not None and edited < window[0]:
+            return True
+    return False
+
+
 class StartupUpdateNotionBackfillView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
@@ -3413,9 +3454,11 @@ class StartupUpdateNotionBackfillView(APIView):
                     "chunk_count": max(1, (len(text) + 15599) // 15600)}
             pages_synced += 1
 
+        has_more = bool(payload.get("has_more")) and not notion_results_reached_before_period(
+            payload.get("results") or [], run_activity_period(run.run_request or {}))
         store["pages"] = list(existing_by_chunk.values())
-        store["next_cursor"] = payload.get("next_cursor")
-        store["index_partial"] = bool(payload.get("has_more"))
+        store["next_cursor"] = payload.get("next_cursor") if has_more else None
+        store["index_partial"] = has_more
         _save_notion_run_store(connection, run.run_id, store)
 
         run_request = dict(run.run_request or {})
@@ -3447,7 +3490,7 @@ class StartupUpdateNotionBackfillView(APIView):
                 "pagesSynced": pages_synced,
                 "chunks_indexed": len(store.get("pages") or []),
                 "chunksIndexed": len(store.get("pages") or []),
-                "has_more": bool(payload.get("has_more")),
+                "has_more": has_more,
                 "index_partial": bool(store.get("index_partial")),
                 "indexPartial": bool(store.get("index_partial")),
                 "warnings": warnings,
@@ -4549,13 +4592,50 @@ class StartupUpdateEvidenceSnapshotView(APIView):
         return Response({"snapshots": snapshots})
 
 
+# A tool whose evidence refresh keeps failing is left out after this many tries.
+SOURCE_REFRESH_MAX_FAILURES = 3
+
+
 class StartupUpdateSourceEvidenceRefreshView(APIView):
-    """Refresh selected evidence with provider I/O outside database transactions."""
+    """Refresh selected evidence with provider I/O outside database transactions.
+
+    Each request does a bounded amount of provider work and saves its progress,
+    so a retry continues where the previous one stopped. A tool that needs
+    reconnecting, or keeps failing, is left out of the run with a founder-safe
+    warning instead of failing the whole draft.
+    """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    def _leave_out(self, request, run_id, provider, exc=None):
+        """Record a refresh failure; skip the tool once it cannot recover."""
+        from startup_updates.preflight import skipped_source_entry, source_failure_check
+        check = source_failure_check(provider, exc) if exc is not None else {"provider": provider, "status": "needs_reconnect"}
+        with transaction.atomic():
+            run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id, request=request)
+            cancelled = _reject_if_run_cancelled(run)
+            if cancelled is not None:
+                return cancelled
+            progress = dict((run.result or {}).get("event_source_progress") or {})
+            entry = dict(progress.get(provider) or {})
+            entry["failures"] = int(entry.get("failures") or 0) + 1
+            progress[provider] = entry
+            run.result = {**(run.result or {}), "event_source_progress": progress}
+            skip = check["status"] == "needs_reconnect" or entry["failures"] >= SOURCE_REFRESH_MAX_FAILURES
+            if skip:
+                run_request = dict(run.run_request or {})
+                run_request["skipped_sources"] = {**(run_request.get("skipped_sources") or {}),
+                    provider: skipped_source_entry(check)}
+                run.run_request = run_request
+            run.save(update_fields=["run_request", "result", "updated_at"])
+        if skip:
+            return Response({"pending": True, "provider": provider, "skipped": True})
+        return Response({"error": "source_refresh_wait", "detail": "MLAI could not read this tool just now. Your progress is saved.",
+            "retryable": True, "retry_after_seconds": 15}, status=503)
+
     def post(self, request, run_id):
         from startup_updates.source_evidence import refresh_manual_documents, EXTRACTION_VERSION
+        from startup_updates.preflight import effective_input_sources
         with transaction.atomic():
             run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id, request=request)
             cancelled = _reject_if_run_cancelled(run)
@@ -4564,7 +4644,7 @@ class StartupUpdateSourceEvidenceRefreshView(APIView):
             run_request = dict(run.run_request or {})
             if run_request.get("source_evidence_refreshed"):
                 return Response(run_request["source_evidence_refreshed"])
-        sources = set(run_request.get("input_sources", []))
+        sources = set(effective_input_sources(run_request, run.result))
         from startup_updates.event_sources import fetch_event_page, commit_event_page
         from startup_updates.bank_sources import fetch_bank_page, commit_bank_page
         progress = (run.result or {}).get("event_source_progress") or {}
@@ -4574,11 +4654,9 @@ class StartupUpdateSourceEvidenceRefreshView(APIView):
             try:
                 rows, page = (fetch_bank_page(run, binding, progress.get(provider, {}))
                     if provider == "bank_feed" else fetch_event_page(run, binding, provider, progress.get(provider, {})))
-            except PermissionError:
-                return Response({"detail": f"Reconnect {provider} before continuing."}, status=409)
-            except Exception:
-                return Response({"detail": f"{provider} could not refresh. Your progress is saved.",
-                    "retryable": True, "retry_after_seconds": 15}, status=503)
+            except Exception as exc:
+                logger.warning("Pulse evidence refresh failed", extra={"run_id": run.run_id, "provider": provider}, exc_info=True)
+                return self._leave_out(request, run_id, provider, exc)
             with transaction.atomic():
                 run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id, request=request)
                 if provider == "bank_feed":
@@ -4590,7 +4668,7 @@ class StartupUpdateSourceEvidenceRefreshView(APIView):
         warnings = refresh_manual_documents(organization, run) if "manual_documents" in sources else []
         stripe_complete = False
         if "stripe" in sources:
-            from integrations.services.finance import sync_stripe_connection, publish_financial_metric_observations
+            from integrations.services.finance import sync_stripe_connection_page, publish_financial_metric_observations
             connections = ExternalServiceConnection.objects.filter(organization=organization,
                 user=binding.user, provider=ExternalServiceProvider.STRIPE).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
             pin = (run_request.get("source_connection_pins") or {}).get("stripe")
@@ -4598,13 +4676,28 @@ class StartupUpdateSourceEvidenceRefreshView(APIView):
                 connections = connections.filter(pk=pin)
             connections = list(connections)
             if not connections:
-                return Response({"error": "source_unavailable", "detail": "Reconnect Stripe before continuing."}, status=409)
+                return self._leave_out(request, run_id, "stripe")
+            stripe_progress = dict(progress.get("stripe") or {})
             for stripe in connections:
+                state = (stripe_progress.get("connections") or {}).get(str(stripe.pk)) or {}
+                if state.get("complete"):
+                    continue
                 try:
-                    sync_stripe_connection(stripe)
-                except Exception:
-                    return Response({"error": "source_refresh_wait", "detail": "Stripe could not refresh. Your progress is saved.",
-                        "retryable": True, "retry_after_seconds": 15}, status=503)
+                    state = sync_stripe_connection_page(stripe, state)
+                except Exception as exc:
+                    logger.warning("Pulse Stripe refresh failed", extra={"run_id": run.run_id, "connection_id": stripe.pk}, exc_info=True)
+                    return self._leave_out(request, run_id, "stripe", exc)
+                with transaction.atomic():
+                    run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id, request=request)
+                    saved_progress = dict((run.result or {}).get("event_source_progress") or {})
+                    saved_stripe = dict(saved_progress.get("stripe") or {})
+                    saved_stripe["connections"] = {**(saved_stripe.get("connections") or {}), str(stripe.pk): state}
+                    saved_stripe.pop("failures", None)
+                    saved_progress["stripe"] = saved_stripe
+                    run.result = {**(run.result or {}), "event_source_progress": saved_progress}
+                    run.save(update_fields=["result", "updated_at"])
+                if not state.get("complete"):
+                    return Response({"pending": True, "provider": "stripe"})
             stripe_complete = True
         with transaction.atomic():
             run, organization, binding, connection, profile = _locked_pipeline_run_context(run_id, request=request)
@@ -4619,7 +4712,7 @@ class StartupUpdateSourceEvidenceRefreshView(APIView):
             current["source_evidence_refreshed"] = receipt
             current["external_context"] = {**(current.get("external_context") or {}), "source_refresh": receipt}
             run.run_request = current
-            if stripe_complete and "xero" not in sources:
+            if stripe_complete and "xero" not in effective_input_sources(current, run.result):
                 publish_financial_metric_observations(organization=organization, run=run)
             run.save(update_fields=["run_request", "updated_at"])
         return Response(receipt)
@@ -4637,20 +4730,34 @@ def _run_accounts_scoped(function):
 
 
 class StartupUpdateSourcePreflightView(APIView):
-    """Check every selected source and checkpoint bounded discovery before collection."""
+    """Check every selected source and checkpoint bounded discovery before collection.
+
+    With ``skip_unavailable`` (sent by the worker once waiting no longer
+    helps), a tool that cannot be read is left out of this run and recorded in
+    ``run_request["skipped_sources"]`` with a founder-safe reason, and the
+    barrier opens for the rest. The barrier stays closed only when nothing
+    usable remains.
+    """
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
     @_run_accounts_scoped
     def post(self, request, run_id):
-        from startup_updates.preflight import require_source_preflight, SourcesNotReady, apply_xero_cooldown, source_failure_check
+        from startup_updates.preflight import (require_source_preflight, SourcesNotReady, UNSKIPPABLE_SOURCES,
+            apply_xero_cooldown, source_failure_check, skip_failed_checks)
         from startup_updates.activity_scope import discover_resource_page
-        from startup_updates.services import refresh_startup_update_run_source_context, build_startup_update_target_windows
+        from startup_updates.services import refresh_startup_update_run_source_context, startup_update_run_financial_window
         run = _get_run_or_404(run_id)
         organization, binding, _google, _profile = _get_org_and_binding_for_run(run)
         if run.status in {"cancelled", "completed"}:
             return Response({"error": "run_cancelled"}, status=409)
         saved = dict(run.run_request or {})
+        skip = isinstance(request.data, dict) and request.data.get("skip_unavailable") is True
+        skipped = dict(saved.get("skipped_sources") or {})
+        def reading():
+            return [source for source in saved.get("input_sources") or [] if source not in skipped]
+        def summary():
+            return list(skipped.values())
         def failed_checks(checks):
             """Keep every failure durable even when a later preparation probe fails."""
             with transaction.atomic():
@@ -4663,57 +4770,97 @@ class StartupUpdateSourcePreflightView(APIView):
                 locked.result = {**(locked.result or {}), "source_preflight": {
                     "checks": checks, "ready": False, "checked_at": timezone.now().isoformat()}}
                 locked.save(update_fields=["run_request", "result", "updated_at"])
-            return Response({"ready": False, "checks": checks})
+            # After a skip request the barrier closes either because nothing usable
+            # is left, or because the founder's own notes or documents are not
+            # ready yet (those are never skipped, so the worker waits for them).
+            input_not_ready = any(c.get("status") != "ready" and c.get("provider") in UNSKIPPABLE_SOURCES
+                and c.get("provider") not in skipped for c in checks)
+            return Response({"ready": False, "checks": checks, "skippedSources": summary(),
+                "nothingUsable": skip and not input_not_ready, "inputNotReady": input_not_ready})
+        def skip_or_fail(checks):
+            """Return None to continue with the remaining tools, else the closed barrier."""
+            if skip and skip_failed_checks(checks, skipped):
+                return None
+            return failed_checks(checks)
         # Probes and provider I/O never hold a run/organization transaction.
         from django.utils.dateparse import parse_datetime
         previous = (run.result or {}).get("source_preflight") or {}
         checks = previous.get("checks")
         checked_at = parse_datetime(str(previous.get("checked_at") or ""))
         expired = checked_at is None or checked_at.tzinfo is None or (timezone.now() - checked_at).total_seconds() > 120
-        if not checks or expired or any(check.get("status") != "ready" for check in checks):
+        if not checks or expired or any(check.get("status") != "ready" for check in checks if check.get("provider") not in skipped):
             checked_at = timezone.now()
+            if not reading():
+                return failed_checks(checks or [])
             try:
                 checks = require_source_preflight(user=binding.user, organization=organization,
-                    input_sources=saved.get("input_sources"), manual_document_ids=saved.get("manual_document_ids"),
+                    input_sources=reading(), manual_document_ids=saved.get("manual_document_ids"),
                     manual_summary=saved.get("manual_summary", ""), connection_pins=saved.get("source_connection_pins"))
             except SourcesNotReady as exc:
                 checks = exc.detail["sourceChecks"]
-                return failed_checks(checks)
+                closed = skip_or_fail(checks)
+                if closed is not None:
+                    return closed
+            # Earlier skipped tools stay listed so the founder sees every result.
+            checks = [*checks, *[check for check in previous.get("checks") or []
+                if check.get("provider") in skipped and check.get("provider") not in {c.get("provider") for c in checks}]]
         pins = saved.get("source_connection_pins") or {}
         mismatches = {c["provider"] for c in checks if pins.get(c["provider"]) is not None
+            and c.get("status") == "ready" and c["provider"] not in skipped
             and str(c.get("connectionId")) != str(pins[c["provider"]])}
         if mismatches:
-            return failed_checks([{**c, "status": "needs_reconnect",
+            checks = [{**c, "status": "needs_reconnect",
                 "message": "This account changed. Start again with the intended connection."}
-                if c["provider"] in mismatches else c for c in checks])
+                if c["provider"] in mismatches else c for c in checks]
+            closed = skip_or_fail(checks)
+            if closed is not None:
+                return closed
         discovery = dict((run.result or {}).get("source_discovery") or {})
         if saved.get("automatic_source_scope_requested"):
-            for provider in sorted(set(saved.get("input_sources", [])) & {"slack", "linear", "google_analytics"}):
+            for provider in sorted(set(reading()) & {"slack", "linear", "google_analytics"}):
                 if not discovery.get(provider, {}).get("complete"):
                     try:
                         discovery[provider] = discover_resource_page(binding.user, organization, provider, discovery.get(provider))
                     except Exception as exc:
-                        return failed_checks([{**c, **source_failure_check(provider, exc)}
-                            if c["provider"] == provider else c for c in checks])
+                        checks = [{**c, **source_failure_check(provider, exc)}
+                            if c["provider"] == provider else c for c in checks]
+                        closed = skip_or_fail(checks)
+                        if closed is not None:
+                            return closed
+                        continue
                     break
         complete = not saved.get("automatic_source_scope_requested") or all(discovery.get(p, {}).get("complete") for p in
-            set(saved.get("input_sources", [])) & {"slack", "linear", "google_analytics"})
+            set(reading()) & {"slack", "linear", "google_analytics"})
         if complete:
             # All selected connections have passed. Only now perform the
             # existing period-specific financial collection, outside row locks.
             from vibe_raising.views import _sync_selected_connector_sources_for_draft
-            try:
-                warnings = _sync_selected_connector_sources_for_draft(binding.user, saved["input_sources"],
-                    organization=organization, automatic_scope=bool(saved.get("automatic_source_scope_requested")))
-            except (ConnectorOAuthError, ConnectorRateLimitError, requests.RequestException) as exc:
-                # Linear is the only preparation branch that raises these;
-                # Xero returns its failures in the warnings mapping.
-                return failed_checks([{**c, **source_failure_check("linear", exc)}
-                    if c["provider"] == "linear" else c for c in checks])
+            automatic = bool(saved.get("automatic_source_scope_requested"))
+            warnings = {}
+            # Linear is the only preparation branch that raises; it runs on its
+            # own so skipping it never drops Xero's warnings from the same pass.
+            if "linear" in reading():
+                try:
+                    warnings.update(_sync_selected_connector_sources_for_draft(binding.user, ["linear"],
+                        organization=organization, automatic_scope=automatic))
+                except (ConnectorOAuthError, ConnectorRateLimitError, requests.RequestException) as exc:
+                    logger.warning("Pulse source preparation failed", extra={"run_id": run.run_id, "provider": "linear"})
+                    checks = [{**c, **source_failure_check("linear", exc)}
+                        if c["provider"] == "linear" else c for c in checks]
+                    closed = skip_or_fail(checks)
+                    if closed is not None:
+                        return closed
+            # Xero returns its failures in the warnings mapping.
+            warnings.update(_sync_selected_connector_sources_for_draft(binding.user,
+                [source for source in reading() if source != "linear"],
+                organization=organization, automatic_scope=automatic))
             if any(warnings.values()):
-                return failed_checks(apply_xero_cooldown([
+                checks = apply_xero_cooldown([
                     {**c, "status": "temporarily_unavailable", "message": "This source could not refresh. Check it before continuing."}
-                    if warnings.get(c["provider"]) else c for c in checks]))
+                    if warnings.get(c["provider"]) else c for c in checks])
+                closed = skip_or_fail(checks)
+                if closed is not None:
+                    return closed
         with transaction.atomic():
             locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
             from startup_updates.execution import validate_execution
@@ -4721,37 +4868,51 @@ class StartupUpdateSourcePreflightView(APIView):
             if locked.status == "cancelled" or locked.run_request != saved:
                 return Response({"error": "run_cancelled", "detail": "The generation request changed."}, status=409)
             locked.result = {**(locked.result or {}), "source_preflight": {"checks": checks, "ready": False, "checked_at": checked_at.isoformat()}, "source_discovery": discovery}
+            current = dict(locked.run_request or {})
+            if skipped:
+                current["skipped_sources"] = skipped
             if complete:
-                current = dict(locked.run_request or {})
                 if saved.get("automatic_source_scope_requested"):
-                    current["automatic_source_scope"] = {p: item["ids"] for p, item in discovery.items()}
+                    current["automatic_source_scope"] = {p: item["ids"] for p, item in discovery.items() if p not in skipped}
                 current["source_preflight_complete"] = False
-                current["source_connection_pins"] = {c["provider"]: c.get("connectionId") for c in checks if c.get("connectionId")}
-                locked.run_request = current
+                current["source_connection_pins"] = {c["provider"]: c.get("connectionId") for c in checks
+                    if c.get("connectionId") and c["provider"] not in skipped}
+            locked.run_request = current
             locked.save(update_fields=["result", "run_request", "updated_at"])
         if complete:
             # Preserve the established connector -> run lock order. Never take
             # Slack authority locks while already holding the run row lock.
-            from datetime import date
-            windows = build_startup_update_target_windows(date.fromisoformat(saved["current_month"]))
+            try:
+                windows = startup_update_run_financial_window(saved)
+            except (TypeError, ValueError):
+                logger.exception("Pulse run has an unreadable reporting month", extra={"run_id": run.run_id})
+                return Response({"error": "invalid_reporting_period",
+                    "detail": "MLAI could not read this update's month. Start the draft again."}, status=400)
             refresh_startup_update_run_source_context(run=locked, organization=organization,
-                input_sources=saved["input_sources"], start_date=windows["financial_start_date"],
+                input_sources=reading(), start_date=windows["financial_start_date"],
                 end_date=windows["financial_end_date"], manual_document_ids=saved.get("manual_document_ids"),
                 manual_summary=saved.get("manual_summary", ""),
                 execution_token=request.headers.get("X-Pulse-Execution-Token"))
             # A quota can be reached after the lightweight probe, including by
             # another worker. Never open the barrier on partially refreshed data.
             checks = apply_xero_cooldown(checks)
-            complete = all(check.get("status") == "ready" for check in checks)
+            if skip:
+                skip_failed_checks(checks, skipped)
+            remaining = [check for check in checks if check.get("provider") not in skipped]
+            complete = bool(remaining) and all(check.get("status") == "ready" for check in remaining)
             with transaction.atomic():
                 final = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
                 validate_execution(final, request.headers.get("X-Pulse-Execution-Token"))
                 if final.status == "cancelled":
                     return Response({"error": "run_cancelled"}, status=409)
-                final.run_request = {**(final.run_request or {}), "source_preflight_complete": complete}
+                final.run_request = {**(final.run_request or {}), "source_preflight_complete": complete,
+                    **({"skipped_sources": skipped} if skipped else {})}
                 final.result = {**(final.result or {}), "source_preflight": {"checks": checks, "ready": complete, "checked_at": checked_at.isoformat()}}
                 final.save(update_fields=["run_request", "result", "updated_at"])
-        return Response({"ready": complete, "pending": not complete and all(c.get("status") == "ready" for c in checks), "checks": checks})
+        remaining = [check for check in checks if check.get("provider") not in skipped]
+        return Response({"ready": complete, "pending": not complete and bool(remaining) and all(c.get("status") == "ready" for c in remaining),
+            "checks": checks, "skippedSources": summary(), "nothingUsable": not remaining,
+            "inputNotReady": any(c.get("status") != "ready" and c.get("provider") in UNSKIPPABLE_SOURCES for c in remaining)})
 
 
 class StartupUpdateExecutionView(APIView):

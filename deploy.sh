@@ -962,6 +962,10 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF | tee "$remote_deploy_log"
     upsert_env_value GOOGLE_ANALYTICS_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/google-analytics"
     upsert_env_value FT_SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
     upsert_env_value SLACK_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/slack"
+    # Linear's settings default is a localhost URL; the Linear OAuth app must
+    # list this exact callback. LINEAR_CLIENT_ID/SECRET stay hand-set, like
+    # the other founder OAuth apps.
+    upsert_env_value LINEAR_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/linear"
     # Keep Slack's daily digest to three genuinely featured jobs. Other matches
     # remain available on the public daily jobs page.
     upsert_env_value JOBS_TOP_PICK_LIMIT "3"

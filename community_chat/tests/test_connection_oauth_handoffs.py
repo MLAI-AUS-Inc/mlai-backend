@@ -73,7 +73,7 @@ class OAuthHandoffTests(SimpleTestCase):
         view.company = self.company
         request = Obj(user=self.user, auth=Obj(pk="session"), data={"returnTo": "mobile", "returnUrl": "https://evil.example"},
             build_absolute_uri=lambda path: "https://api.example" + path)
-        for provider in connections.PROVIDERS:
+        for provider in connections.PROVIDERS - connections.HIDDEN_PULSE_PROVIDERS:
             with self.subTest(provider=provider):
                 response = view.post(request, provider)
                 ticket = parse_qs(urlsplit(response.data["authorizationUrl"]).query)["ticket"][0]
@@ -90,6 +90,8 @@ class OAuthHandoffTests(SimpleTestCase):
         view.company = self.company
         request = Obj(user=self.user, auth=Obj(pk="session"), data={}, build_absolute_uri=lambda path: "https://api.example" + path)
         for alias, canonical in connections.PROVIDER_ALIASES.items():
+            if canonical in connections.HIDDEN_PULSE_PROVIDERS:
+                continue  # Not offered in Pulse until MLAI reads it.
             response = view.post(request, alias)
             ticket = parse_qs(urlsplit(response.data["authorizationUrl"]).query)["ticket"][0]
             self.assertEqual(connections.consume_ticket(ticket)["provider"], canonical)
@@ -199,7 +201,11 @@ class OAuthHandoffTests(SimpleTestCase):
             request.session[views.GOOGLE_OAUTH_STATE_SESSION_KEY] = state
             with self.subTest(state=state[:10]), patch.object(views, "_resolve_google_oauth_user", return_value=self.user), patch.object(views.requests, "post") as exchange:
                 response = views.google_callback(request)
-                self.assertEqual(response.status_code, 400)
+                if state is expired:
+                    # A Chat-started sign-in returns to the app; the native link is fixed.
+                    self.assertEqual((response.status_code, response["Location"]), (302, NATIVE))
+                else:
+                    self.assertEqual(response.status_code, 400)
                 exchange.assert_not_called()
 
     def test_signed_initiator_overrides_unrelated_browser_account(self):
@@ -330,3 +336,153 @@ class OAuthHandoffTests(SimpleTestCase):
         self.assertTrue(all(not row["usableForUpdates"] and not row["enabled"] for row in sources))
         google.assert_called_once_with(self.user, self.organization)
         self.assertEqual(configs.filter.call_args.kwargs["organization"], self.organization)
+
+
+WEB = "https://chat.example/my-startup/connections?" + urlencode(
+    {"company_id": COMPANY, "connected": "xero", "from": "updates", "update_id": "42"})
+
+
+@override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
+    ROOT_URLCONF="community_chat.startups.urls",
+    COMMUNITY_CHAT_FRONTEND_URL="https://chat.example", DEFAULT_FRONTEND_URL="https://website.example")
+class ChatConnectionReturnTests(SimpleTestCase):
+    """Every refusal or failure of a Chat-started connect returns to Chat with a reason."""
+
+    setUp = OAuthHandoffTests.setUp
+    request = OAuthHandoffTests.request
+    state = OAuthHandoffTests.state
+
+    def returned(self, response, reason):
+        self.assertEqual(response.status_code, 302)
+        location = urlsplit(response["Location"])
+        self.assertEqual((location.scheme, location.netloc, location.path), ("https", "chat.example", "/my-startup/connections"))
+        self.assertEqual(parse_qs(location.query), {"company_id": [COMPANY], "connected": ["xero"], "from": ["updates"],
+            "update_id": ["42"], "error": [reason]})
+        self.assertNotIn("api.", response["Location"])
+
+    def test_web_return_keeps_pulse_context_and_names_the_provider(self):
+        view = connections.ConnectView()
+        view.company = self.company
+        data = {"from": "updates", "updateId": 42, "returnUrl": "https://evil.example"}
+        request = Obj(user=self.user, auth=Obj(pk="session"), data=data, build_absolute_uri=lambda path: "https://api.example" + path)
+        ticket = parse_qs(urlsplit(view.post(request, "xero").data["authorizationUrl"]).query)["ticket"][0]
+        payload = connections.consume_ticket(ticket)
+        self.assertEqual(payload["return_context"], {"from": "updates", "update_id": "42"})
+        browser = self.request({"ticket": "synthetic"})
+        with patch.object(connections, "enabled", return_value=True), patch.object(connections, "consume_ticket", return_value=payload), \
+                patch.object(connections.CommunityChatAccountSession, "objects") as sessions, \
+                patch.object(connections, "_valid_session", return_value=True), \
+                patch.object(connections.VibeRaisingCompany, "objects") as companies, \
+                patch.object(connections, "connector_connect", return_value=Response(status=302)):
+            sessions.select_related.return_value.filter.return_value.first.return_value = Obj(pk="session", user=self.user)
+            companies.get.return_value = self.company
+            connections.connect_browser(browser)
+        self.assertEqual(browser.GET["next"], WEB)
+        for bad in ({"from": "articles", "updateId": 4}, {"from": "updates", "updateId": "4; x"}, {"from": "updates", "updateId": True}):
+            with self.subTest(bad=bad):
+                self.assertEqual(connections.pulse_return_context(bad), {} if bad["from"] != "updates" else {"from": "updates"})
+        native = connections.chat_connection_return_url(COMPANY, "xero", return_to="mobile", context={"from": "updates", "updateId": 4}, error="cancelled")
+        self.assertEqual(native, "mlaichat://connections?" + urlencode({"company_id": COMPANY, "provider": "xero"}))
+
+    def test_cancel_at_provider_returns_before_spending_the_state(self):
+        state = self.state("xero", native=WEB, chat=True)
+        request = self.request({"state": state, "error": "access_denied"}, authenticated=False)
+        with patch.object(views, "complete_oauth_callback") as complete:
+            response = views.connector_callback(request, "xero")
+        self.returned(response, "cancelled")
+        complete.assert_not_called()
+        with patch("community_chat.startups.oauth_context.valid_chat_oauth_context", return_value=True):
+            external._consume_state(self.request(), "xero", state)  # Still unused.
+
+    def test_gmail_cancel_is_read_before_the_one_time_state(self):
+        state = self.state("gmail", native=WEB, chat=True)
+        response = views.google_callback(self.request({"state": state, "error": "access_denied"}, authenticated=False))
+        self.returned(response, "cancelled")
+        with patch("community_chat.startups.oauth_context.valid_chat_oauth_context", return_value=True):
+            external._consume_state(self.request(), "gmail", state)
+        other = self.request({"state": self.state("gmail", native=WEB, chat=True), "error": "server_error"}, authenticated=False)
+        self.returned(views.google_callback(other), "failed")
+
+    def test_provider_and_configuration_failures_return_with_a_reason(self):
+        cases = ((external.ConnectorConfigurationError("Xero did not return an authorised organisation."), "failed"),
+                 (external.ConnectorStateError("This connection link was already used."), "expired"),
+                 (external.ConnectorOAuthError(external.CONNECT_DOMAIN_CLAIMED_MESSAGE), "domain_claimed"))
+        for error, reason in cases:
+            with self.subTest(reason=reason), patch.object(views, "_resolve_google_oauth_user", return_value=self.user), \
+                    patch.object(views, "complete_oauth_callback", side_effect=error):
+                response = views.connector_callback(self.request({"state": self.state("xero", native=WEB, chat=True), "code": "c"}), "xero")
+                self.returned(response, reason)
+        # Outside Chat a configuration failure is a plain 400, no longer a server error.
+        with patch.object(views, "_resolve_google_oauth_user", return_value=self.user), \
+                patch.object(views, "complete_oauth_callback", side_effect=cases[0][0]):
+            self.assertEqual(views.connector_callback(self.request({"state": self.state("xero"), "code": "c"}), "xero").status_code, 400)
+
+    def test_expired_chat_state_without_browser_session_returns_to_chat(self):
+        with patch("django.core.signing.time.time", return_value=time.time() - 10000):
+            state = self.state("xero", native=WEB, chat=True)
+        with patch.object(views, "_resolve_google_oauth_user", return_value=None):
+            self.returned(views.connector_callback(self.request({"state": state, "code": "c"}, authenticated=False), "xero"), "expired")
+
+    def test_connect_start_failures_return_to_chat(self):
+        import requests as http
+        for error, reason in ((external.ConnectorConfigurationError("XERO_CLIENT_ID missing"), "unavailable"),
+                              (http.ConnectionError("basiq down"), "failed")):
+            request = self.request({"next": WEB, "company_id": COMPANY})
+            request.chat_oauth_context = {"chat_session_id": "session", "chat_company_id": COMPANY}
+            with self.subTest(reason=reason), patch.object(views, "_resolve_google_oauth_user", return_value=self.user), \
+                    patch.object(views, "_ensure_django_session_for_user"), \
+                    patch.object(views, "build_authorization_url", side_effect=error):
+                response = views.connector_connect(request, "xero")
+                self.returned(response, reason)
+                self.assertNotIn("XERO_CLIENT_ID", response["Location"])
+        request = self.request({"next": WEB})
+        with patch.object(views, "_resolve_google_oauth_user", return_value=self.user), patch.object(views, "_ensure_django_session_for_user"), \
+                patch.object(views, "build_authorization_url", side_effect=http.ConnectionError("down")):
+            self.assertEqual(views.connector_connect(request, "bank_feed").status_code, 503)
+
+    def test_native_return_is_unchanged_on_failure(self):
+        state = self.state("xero", chat=True)
+        response = views.connector_callback(self.request({"state": state, "error": "access_denied"}, authenticated=False), "xero")
+        self.assertEqual(response["Location"], NATIVE)
+
+    def test_expired_or_used_ticket_returns_to_chat_but_tampering_does_not(self):
+        with patch("django.core.signing.time.time", return_value=time.time() - 10000):
+            ticket = signing.dumps({"uid": 7, "company": COMPANY, "session": "s", "provider": "xero",
+                "return_to": None, "return_context": {"from": "updates", "update_id": "42"}}, salt=connections.SALT)
+        with patch.object(connections, "enabled", return_value=True):
+            response = connections.connect_browser(self.request({"ticket": ticket}))
+            self.returned(response, "expired")
+            self.assertEqual(connections.connect_browser(self.request({"ticket": ticket + "x"})).status_code, 400)
+        with patch.object(connections, "enabled", return_value=False):
+            self.returned(connections.connect_browser(self.request({"ticket": ticket})), "unavailable")
+
+
+class LocalRedirectUriTests(SimpleTestCase):
+    """C6: a localhost provider callback outside DEBUG is refused with a clear log."""
+
+    @override_settings(DEBUG=False, IS_LOCAL_ENV=False, LINEAR_CLIENT_ID="synthetic-linear-client",
+        LINEAR_CLIENT_SECRET="synthetic-linear-secret-value", LINEAR_OAUTH_SCOPES=["read"],
+        LINEAR_OAUTH_REDIRECT_URI="http://localhost:8000/integrations/callback/linear")
+    def test_linear_localhost_redirect_is_refused_outside_debug(self):
+        request = RequestFactory().get("/connect", {"next": NATIVE})
+        request.session, request.user = Session(), Obj(pk=7, id=7)
+        with self.assertLogs("integrations.services.external_connectors", level="ERROR") as logs, \
+                self.assertRaises(external.ConnectorConfigurationError):
+            external.build_authorization_url(request, "linear")
+        self.assertIn("LINEAR_OAUTH_REDIRECT_URI", logs.output[0])
+        self.assertIn("LINEAR_OAUTH_REDIRECT_URI", external.local_redirect_uri_problem("linear"))
+        with override_settings(LINEAR_OAUTH_REDIRECT_URI="https://api.mlai.au/integrations/callback/linear"):
+            self.assertIsNone(external.local_redirect_uri_problem("linear"))
+        with override_settings(DEBUG=True):
+            self.assertIsNone(external.local_redirect_uri_problem("linear"))
+        with override_settings(IS_LOCAL_ENV=True):
+            self.assertIsNone(external.local_redirect_uri_problem("linear"))
+
+    def test_deploy_provisions_the_linear_callback_like_other_providers(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[2]
+        deploy = (root / "deploy.sh").read_text()
+        self.assertIn('upsert_env_value LINEAR_OAUTH_REDIRECT_URI "https://api.mlai.au/integrations/callback/linear"', deploy)
+        example = (root / ".env.example").read_text()
+        for key in ("LINEAR_CLIENT_ID=", "LINEAR_CLIENT_SECRET=", "LINEAR_OAUTH_REDIRECT_URI="):
+            self.assertIn(key, example)

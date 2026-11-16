@@ -226,6 +226,10 @@ class ConnectorOAuthError(Exception):
     pass
 
 
+class ConnectorStateError(ConnectorOAuthError):
+    """The signed connection state is missing, expired, replayed or no longer valid."""
+
+
 class ConnectorReconnectRequired(ConnectorOAuthError):
     """A scoped credential rejection that can be recorded after run rollback."""
 
@@ -268,6 +272,48 @@ LINEAR_UNAVAILABLE_MESSAGE = (
     "Linear is temporarily unavailable. Try again shortly, or remove Linear "
     "from this update to generate with your other sources."
 )
+XERO_RECONNECT_MESSAGE = (
+    "Xero needs to be reconnected. Reconnect Xero in Connections, or remove "
+    "Xero from this update to generate with your other sources."
+)
+GOOGLE_ANALYTICS_RECONNECT_MESSAGE = (
+    "Google Analytics needs to be reconnected. Reconnect Google Analytics in "
+    "Connections, or remove it from this update to generate with your other sources."
+)
+XERO_ACCOUNT_CHOICE_WARNING = "Choose which Xero organisation Pulse should read."
+# A stored ERROR whose last_error is one of these is reported as needs_reauth.
+# The older wording is still on rows written before the shared contract.
+RECONNECT_MESSAGES = {
+    "linear": frozenset({LINEAR_RECONNECT_MESSAGE}),
+    "xero": frozenset({XERO_RECONNECT_MESSAGE, "Xero connection needs to be reauthorised."}),
+    "google_analytics": frozenset({
+        GOOGLE_ANALYTICS_RECONNECT_MESSAGE, "Google Analytics connection needs to be reauthorised.",
+    }),
+}
+
+
+def _reconnect_required(connection, message):
+    """Record a revoked or expired credential and raise the reconnect contract."""
+    error = ConnectorReconnectRequired(connection, message)
+    error.persist()
+    raise error from None
+
+
+def _oauth_refresh_rejected(response) -> bool:
+    """Whether a token endpoint refused the stored grant (expired or revoked).
+
+    Xero and Google both answer an expired or revoked refresh token with
+    ``invalid_grant``. Anything else (``invalid_client``, ``unauthorized_client``,
+    a non-JSON page from an edge proxy) is an operator or temporary problem
+    that reconnecting cannot fix, so it stays a temporary failure.
+    """
+    if getattr(response, "status_code", None) not in {400, 401, 403}:
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    return isinstance(payload, dict) and payload.get("error") == "invalid_grant"
 
 
 class ConnectorRateLimitError(Exception):
@@ -636,6 +682,36 @@ def _provider_configuration_error(provider: str) -> Optional[str]:
     return None
 
 
+OAUTH_REDIRECT_URI_SETTINGS = {
+    "gmail": "GOOGLE_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.STRIPE: "STRIPE_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.XERO: "XERO_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.NOTION: "NOTION_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.GOOGLE_DRIVE: "GOOGLE_DRIVE_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.GOOGLE_ANALYTICS: "GOOGLE_ANALYTICS_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.SLACK: "SLACK_OAUTH_REDIRECT_URI",
+    ExternalServiceProvider.LINEAR: "LINEAR_OAUTH_REDIRECT_URI",
+}
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def local_redirect_uri_problem(provider: str) -> Optional[str]:
+    """Outside DEBUG, a provider redirect URI on localhost can never complete.
+
+    Linear's default is a localhost URL, so a deploy that sets only the
+    client id and secret would otherwise look "Ready to connect".
+    """
+    if getattr(settings, "DEBUG", False) or getattr(settings, "IS_LOCAL_ENV", False):
+        return None
+    name = OAUTH_REDIRECT_URI_SETTINGS.get(provider)
+    if not name:
+        return None
+    host = (urllib.parse.urlparse(str(getattr(settings, name, "") or "").strip()).hostname or "").lower()
+    if host in _LOCAL_HOSTS or host.endswith(".localhost"):
+        return f"{CONNECTOR_DEFINITIONS[provider].label} OAuth redirect URI points at localhost. Set {name} to the public callback URL."
+    return None
+
+
 def is_provider_configured(provider: str) -> bool:
     provider = normalize_provider(provider)
     if provider == "gmail":
@@ -684,10 +760,43 @@ def _get_active_vibe_raising_company(user):
     return profile.active_company or profile.companies.first()
 
 
+CONNECT_DOMAIN_CLAIMED_MESSAGE = (
+    "This startup's website is linked to another MLAI account. Remove the website "
+    "in Startup details, or connect from the account that owns it."
+)
+
+
+def _selected_company_organization(user, company) -> Organization:
+    """The selected startup's own organisation: the same one its sources list reads.
+
+    Uses ``ensure_company_organization`` (with its claim check), so a startup
+    without a website gets its own placeholder organisation instead of
+    borrowing the founder's most recent binding. Refuses rather than falls back.
+    """
+    from founder_tools.services import DomainOwnershipError, ensure_company_organization
+    try:
+        organization = ensure_company_organization(company)
+    except DomainOwnershipError as exc:
+        raise ConnectorOAuthError(CONNECT_DOMAIN_CLAIMED_MESSAGE) from exc
+    if organization is None:
+        raise ConnectorOAuthError("This startup could not be connected. Start again in MLAI Chat.")
+    resolve_or_create_profile(domain=organization.domain)
+    bind_user_to_startup(
+        user=user,
+        organization=organization,
+        google_connection=google_connection_for_org(user, organization, adopt_unassigned=True),
+        role="founder",
+        is_default_for_gmail=True,
+    )
+    return organization
+
+
 def resolve_connector_organization(user, company=None) -> Optional[Organization]:
     # An explicit company (validated as the user's own by the caller) pins the
     # connect flow to that startup; otherwise the active company decides.
-    company = company if company is not None else _get_active_vibe_raising_company(user)
+    if company is not None:
+        return _selected_company_organization(user, company)
+    company = _get_active_vibe_raising_company(user)
     domain = normalize_domain(getattr(company, "domain", "") or "")
     if domain:
         organization, _startup_profile = resolve_or_create_profile(domain=domain)
@@ -867,7 +976,7 @@ def _consume_state(request, provider: str, state: str) -> dict[str, Any]:
         request.session.modified = True
 
     if not state:
-        raise ConnectorOAuthError("Invalid connector OAuth state.")
+        raise ConnectorStateError("Invalid connector OAuth state.")
 
     try:
         signed_payload = signing.loads(
@@ -876,25 +985,25 @@ def _consume_state(request, provider: str, state: str) -> dict[str, Any]:
             max_age=CONNECTOR_OAUTH_STATE_MAX_AGE_SECONDS,
         )
     except signing.SignatureExpired as exc:
-        raise ConnectorOAuthError("Expired connector OAuth state. Please try connecting again.") from exc
+        raise ConnectorStateError("Expired connector OAuth state. Please try connecting again.") from exc
     except signing.BadSignature as exc:
         # In-flight legacy session-bound states remain valid during rollout.
         if session_matches and ":" not in state:
             return payload
-        raise ConnectorOAuthError("Invalid connector OAuth state.") from exc
+        raise ConnectorStateError("Invalid connector OAuth state.") from exc
 
     if not isinstance(signed_payload, dict):
-        raise ConnectorOAuthError("Invalid connector OAuth state.")
+        raise ConnectorStateError("Invalid connector OAuth state.")
     if signed_payload.get("provider") != provider:
-        raise ConnectorOAuthError("Invalid connector OAuth state.")
+        raise ConnectorStateError("Invalid connector OAuth state.")
     if str(signed_payload.get("user_id") or "") != str(request.user.id):
-        raise ConnectorOAuthError("Invalid connector OAuth state.")
+        raise ConnectorStateError("Invalid connector OAuth state.")
     from community_chat.startups.oauth_context import valid_chat_oauth_context
     if not valid_chat_oauth_context(signed_payload, request.user.id):
-        raise ConnectorOAuthError("This connection session expired. Start again in MLAI Chat.")
+        raise ConnectorStateError("This connection session expired. Start again in MLAI Chat.")
     key = "connector-oauth-used:" + hashlib.sha256(state.encode()).hexdigest()
     if not cache.add(key, True, timeout=CONNECTOR_OAUTH_STATE_MAX_AGE_SECONDS + 1):
-        raise ConnectorOAuthError("This connection link was already used. Start again in MLAI Chat.")
+        raise ConnectorStateError("This connection link was already used. Start again in MLAI Chat.")
     return signed_payload
 
 
@@ -933,6 +1042,10 @@ def build_authorization_url(request, provider: str) -> str:
     configuration_error = _provider_configuration_error(provider)
     if configuration_error:
         raise ConnectorConfigurationError(configuration_error)
+    local_redirect = local_redirect_uri_problem(provider)
+    if local_redirect:
+        logger.error("Refusing to start an OAuth connection: %s", local_redirect, extra={"provider": provider})
+        raise ConnectorConfigurationError(local_redirect)
 
     next_url = normalize_connector_next(request.GET.get("next"))
     company, company_ok = company_for_user_from_request(request.user, request)
@@ -1113,17 +1226,22 @@ def _basiq_token(*, scope: str, user_id: str = "") -> dict[str, Any]:
     return response.json()
 
 
+BASIQ_CONSENT_PENDING_KEY = "consent_pending"
+
+
 def _build_basiq_consent_url(request, *, next_url: str, organization: Optional[Organization]) -> str:
-    existing_connection = (
-        ExternalServiceConnection.objects.filter(
+    # A row awaiting its first consent is kept as DISCONNECTED (so it is never
+    # shown as connected); it still carries the Basiq user to reuse on retry.
+    existing_connection = next((
+        row for row in ExternalServiceConnection.objects.filter(
             user=request.user,
             provider=ExternalServiceProvider.BANK_FEED,
         )
-        .exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
         .exclude(external_account_id="")
-        .order_by("-updated_at", "-id")
-        .first()
-    )
+        .order_by("-updated_at", "-id")[:20]
+        if row.status != ExternalServiceConnectionStatus.DISCONNECTED
+        or (row.provider_metadata or {}).get(BASIQ_CONSENT_PENDING_KEY)
+    ), None)
     basiq_user = {}
     basiq_user_id = str(existing_connection.external_account_id).strip() if existing_connection else ""
 
@@ -1172,6 +1290,17 @@ def _build_basiq_consent_url(request, *, next_url: str, organization: Optional[O
             "consent_action": "connect" if existing_connection else "create",
         }
     )
+    # Never show the feed as connected before the founder consents at Basiq:
+    # an already working feed keeps its status, a new one waits disconnected
+    # until the consent callback marks it syncing or connected.
+    current = ExternalServiceConnection.objects.filter(
+        user=request.user, provider=ExternalServiceProvider.BANK_FEED,
+        organization=organization, external_account_id=basiq_user_id,
+    ).order_by("id").first()
+    working = current is not None and current.status in {
+        ExternalServiceConnectionStatus.CONNECTED, ExternalServiceConnectionStatus.SYNCING,
+    } and not (current.provider_metadata or {}).get(BASIQ_CONSENT_PENDING_KEY)
+    provider_metadata[BASIQ_CONSENT_PENDING_KEY] = not working
     _upsert_connection(
         user=request.user,
         provider=ExternalServiceProvider.BANK_FEED,
@@ -1183,7 +1312,7 @@ def _build_basiq_consent_url(request, *, next_url: str, organization: Optional[O
         scopes=["CLIENT_ACCESS"],
         external_account_id=basiq_user_id,
         account_label="Basiq bank feed",
-        status=ExternalServiceConnectionStatus.SYNCING,
+        status=current.status if working else ExternalServiceConnectionStatus.DISCONNECTED,
         provider_metadata=provider_metadata,
     )
 
@@ -1320,9 +1449,7 @@ def _exchange_linear_code(code: str) -> dict[str, Any]:
 
 
 def _linear_reconnect_required(connection):
-    error = ConnectorReconnectRequired(connection, LINEAR_RECONNECT_MESSAGE)
-    error.persist()
-    raise error from None
+    _reconnect_required(connection, LINEAR_RECONNECT_MESSAGE)
 
 
 def _linear_request(url, **kwargs):
@@ -1985,6 +2112,7 @@ def complete_oauth_callback(request, provider: str) -> str:
         if connection:
             metadata = dict(connection.provider_metadata or {})
             metadata["job_ids"] = job_ids
+            metadata[BASIQ_CONSENT_PENDING_KEY] = False
             connection.provider_metadata = metadata
             connection.status = ExternalServiceConnectionStatus.SYNCING if job_ids else ExternalServiceConnectionStatus.CONNECTED
             connection.last_error = ""
@@ -2588,12 +2716,26 @@ def _refresh_xero_connection(connection: ExternalServiceConnection) -> str:
     return token
 
 
+def _xero_grant_rejected(connection: ExternalServiceConnection):
+    """Xero refused the refresh token: every tenant sharing it needs reconnecting."""
+    logger.warning("Xero refused the stored refresh token; marking it for reconnect",
+        extra={"connection_id": connection.pk, "user_id": connection.user_id})
+    grant_id = (connection.provider_metadata or {}).get("oauth_grant_id")
+    if grant_id and connection.refresh_token:
+        siblings = ExternalServiceConnection.objects.filter(
+            user_id=connection.user_id, provider="xero", provider_metadata__oauth_grant_id=grant_id,
+        ).exclude(pk=connection.pk).exclude(status="disconnected")
+        for sibling in siblings:
+            if sibling.refresh_token == connection.refresh_token:
+                ExternalServiceConnection.objects.filter(pk=sibling.pk).update(
+                    status=ExternalServiceConnectionStatus.ERROR, last_error=XERO_RECONNECT_MESSAGE,
+                    updated_at=timezone.now())
+    _reconnect_required(connection, XERO_RECONNECT_MESSAGE)
+
+
 def _refresh_xero_connection_unlocked(connection: ExternalServiceConnection) -> str:
     if not connection.refresh_token:
-        connection.status = ExternalServiceConnectionStatus.ERROR
-        connection.last_error = "Xero connection needs to be reauthorised."
-        connection.save(update_fields=["status", "last_error", "updated_at"])
-        raise ConnectorOAuthError(connection.last_error)
+        _reconnect_required(connection, XERO_RECONNECT_MESSAGE)
 
     response = requests.post(
         "https://identity.xero.com/connect/token",
@@ -2604,8 +2746,14 @@ def _refresh_xero_connection_unlocked(connection: ExternalServiceConnection) -> 
         },
         timeout=(3, 20),
     )
+    # Xero answers an expired (60 days unused) or revoked refresh token with
+    # HTTP 400 invalid_grant: check that before treating the reply as an outage.
+    if _oauth_refresh_rejected(response):
+        _xero_grant_rejected(connection)
     response.raise_for_status()
     token_data = response.json()
+    if token_data.get("error") == "invalid_grant":
+        _xero_grant_rejected(connection)
     if token_data.get("error"):
         message = token_data.get("error_description") or token_data.get("error")
         connection.status = ExternalServiceConnectionStatus.ERROR
@@ -2666,10 +2814,7 @@ def _google_analytics_required_token(connection: ExternalServiceConnection) -> s
 
 def _refresh_google_analytics_connection(connection: ExternalServiceConnection) -> str:
     if not connection.refresh_token:
-        connection.status = ExternalServiceConnectionStatus.ERROR
-        connection.last_error = "Google Analytics connection needs to be reauthorised."
-        connection.save(update_fields=["status", "last_error", "updated_at"])
-        raise ConnectorOAuthError(connection.last_error)
+        _reconnect_required(connection, GOOGLE_ANALYTICS_RECONNECT_MESSAGE)
 
     response = requests.post(
         "https://oauth2.googleapis.com/token",
@@ -2681,8 +2826,15 @@ def _refresh_google_analytics_connection(connection: ExternalServiceConnection) 
         },
         timeout=(3, 20),
     )
+    # Google answers a revoked or expired grant with HTTP 400 invalid_grant.
+    if _oauth_refresh_rejected(response):
+        logger.warning("Google refused the stored Google Analytics refresh token; marking it for reconnect",
+            extra={"connection_id": connection.pk, "user_id": connection.user_id})
+        _reconnect_required(connection, GOOGLE_ANALYTICS_RECONNECT_MESSAGE)
     response.raise_for_status()
     token_data = response.json()
+    if token_data.get("error") == "invalid_grant":
+        _reconnect_required(connection, GOOGLE_ANALYTICS_RECONNECT_MESSAGE)
     if token_data.get("error"):
         message = token_data.get("error_description") or token_data.get("error")
         connection.status = ExternalServiceConnectionStatus.ERROR
@@ -5966,7 +6118,11 @@ def _serialize_google_source(user, organization=_ACTIVE_ORG) -> dict[str, Any]:
         connection = google_connection_for_org(user, organization)
     configured = is_provider_configured("gmail")
     scope_status = gmail_scope_status_payload(connection)
-    if connection and scope_status["hasGmailScope"]:
+    from .gmail import GMAIL_REVOKED_WARNING, gmail_needs_reconnect
+    if connection and scope_status["hasGmailScope"] and gmail_needs_reconnect(connection):
+        status_value = "needs_reauth"
+        warning = GMAIL_REVOKED_WARNING
+    elif connection and scope_status["hasGmailScope"]:
         status_value = "connected"
         warning = None
     elif connection:
@@ -6328,12 +6484,12 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
     ).exclude(status=ExternalServiceConnectionStatus.DISCONNECTED)
     queryset = queryset.filter(organization=organization)
     connection = report_connection(queryset, user=user, organization=organization, provider=provider)
-    configuration_error = _provider_configuration_error(provider)
+    configuration_error = _provider_configuration_error(provider) or local_redirect_uri_problem(provider)
     configured = configuration_error is None
     if connection:
         status_value = connection.status
         warning = connection.last_error or None
-        if provider == ExternalServiceProvider.LINEAR and status_value == ExternalServiceConnectionStatus.ERROR and warning == LINEAR_RECONNECT_MESSAGE:
+        if status_value == ExternalServiceConnectionStatus.ERROR and warning in RECONNECT_MESSAGES.get(provider, ()):
             status_value = "needs_reauth"
     elif configured:
         status_value = "not_connected"
@@ -6421,8 +6577,21 @@ def _serialize_external_source(user, provider: str, organization=_ACTIVE_ORG) ->
             payload["warning"] = payload.get("warning") or XERO_REPORT_SCOPE_WARNING
         elif status_value in {"connected", "syncing"} and needs_report_scope_configuration:
             payload["warning"] = payload.get("warning") or XERO_REPORT_SCOPE_CONFIGURATION_WARNING
+        # One Xero sign-in can authorise several organisations. Until the
+        # founder picks one (reportAccountId), Pulse would read whichever was
+        # updated last, so ask for the choice instead.
+        from .source_accounts import report_account_id
+        account_choice_required = (
+            bool(connection) and status_value in {"connected", "syncing"}
+            and report_account_id(user, organization, provider) is None
+            and queryset.count() > 1
+        )
+        if account_choice_required:
+            payload["warning"] = XERO_ACCOUNT_CHOICE_WARNING
         payload.update(
             {
+                "accountChoiceRequired": account_choice_required,
+                "account_choice_required": account_choice_required,
                 "hasReportScope": has_report_scope,
                 "has_report_scope": has_report_scope,
                 "needsReportReconnect": needs_report_reconnect,
