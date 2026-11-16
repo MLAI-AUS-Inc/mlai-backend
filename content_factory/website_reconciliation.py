@@ -382,6 +382,10 @@ def handle_website_github_event(event_type, payload):
             if payload.get("ref") != f"refs/heads/{website.branch}" or website.verified_sha == source_sha:
                 continue
             owned_merge = _find_owned_merge(website, config.organization_id, source_sha)
+            # One read-only compare, outside the authority locks: a push that
+            # leaves MLAI's articles files alone keeps the current proof.
+            from .website_source_carry import apply_carry, carry_decision
+            carry = carry_decision(website, config, source_sha, owned_merge=bool(owned_merge))
             from organizations.models import Organization
             with transaction.atomic():
                 Organization.objects.select_for_update().get(pk=config.organization_id)
@@ -401,18 +405,26 @@ def handle_website_github_event(event_type, payload):
                     website.configuration_version += 1
                     from .website_goal_scope import record_source_transition
                     record_source_transition(website, previous_revision=previous_revision, source_sha=source_sha)
-                    if not owned_merge:
+                    carried_from = carry.get("from_sha") if apply_carry(
+                        website, config.default_publish_target_id, source_sha, carry) else ""
+                    if carried_from:
+                        result["carried"] = result.get("carried", 0) + 1
+                    elif not owned_merge:
                         website.capabilities = {**website.capabilities, "publishingReady": False, "previewSupported": False}
                     WebsiteConnectionOperation.objects.get_or_create(
                         idempotency_key=f"{website.pk}:source-reverify:{website.generation}:{source_sha}", defaults={
                             "connection": website, "generation": website.generation, "action": "source-reverify",
                             "payload": {"source_sha": source_sha, "target_id": config.default_publish_target_id,
                                 "previous_configuration_revision": previous_revision, "configuration_revision": website.configuration_version,
-                                "owned_merge_run_id": owned_merge["run_id"] if owned_merge else "", "scan_required": not bool(owned_merge)},
+                                "owned_merge_run_id": owned_merge["run_id"] if owned_merge else "",
+                                # A carried proof is re-checked in the background
+                                # for free: no paid scan of unchanged setup files.
+                                "scan_required": not bool(owned_merge or carried_from),
+                                "carried_from": carried_from},
                             "receipt": {"status": "verification_queued", "repository_modified": False}})
-                    if not owned_merge:
+                    if not owned_merge and not carried_from:
                         website.blockers = [item for item in website.blockers if item.get("code") != "repository_source_changed"] + [{"code": "repository_source_changed", "message": "The repository changed. Scan and verify the current source before publishing.", "source_sha": source_sha}]
-                    website.save(update_fields=["configuration_version", "capabilities", "blockers", "updated_at"])
+                    website.save(update_fields=["configuration_version", "capabilities", "blockers", "verified_sha", "updated_at"])
                     result["invalidated"] += 1
                     prepare_wakes.append((website.pk, config.organization_id, owned_merge["run_id"] if owned_merge else ""))
         # Run no provider calls while the webhook transaction owns authority
@@ -1634,6 +1646,14 @@ def _process_source_reverification(identifier, now):
             state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
                 "target_id": target.target_key, "ci_operation_id": "", "ci_reused": False, "method": receipt.get("method") or "live_url",
                 "deployment_operation_id": verified["operation_id"], "repository_modified": False}
+        elif op.payload.get("carried_from") and target.source_sha == op.payload["source_sha"]:
+            # A push that left MLAI's articles files alone carried the build
+            # proof forward (website_source_carry); re-check it for free.
+            from .website_source_carry import recheck_carried
+            checked = recheck_carried(website, target, op.payload["source_sha"])
+            state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
+                "target_id": target.target_key, "ci_operation_id": "", "ci_reused": False, **checked,
+                "deployment_operation_id": "", "repository_modified": False}
         elif (op.payload.get("purpose") == VERIFICATION_REFRESH_PURPOSE and getattr(website, "verified_sha", None) == op.payload["source_sha"]
                 and target.source_sha == op.payload["source_sha"] and _renews_build_proof_only(website, target)
                 and not website.operations.filter(generation=website.generation, action="ci-verify", state="completed",
@@ -1693,6 +1713,14 @@ def _process_source_reverification(identifier, now):
         # re-check reports the cause instead of an hourly retry forever.
         state = "needs_attention"
         receipt.update(status="needs_attention", retryable=False)
+    if op.payload.get("carried_from") and state in {"pending", "needs_attention"}:
+        from .website_source_carry import lock_carried_source, recheck_failed
+        if recheck_failed(op, receipt, now=now):
+            # The background re-check of a carried proof failed for good: only
+            # now do articles lock, as every push did before.
+            lock_carried_source(op)
+            state = "needs_attention"
+            receipt.update(status="needs_attention", retryable=False)
     WebsiteConnectionOperation.objects.filter(pk=identifier, attempts=attempt, state="pending").update(
         state=state, receipt=receipt, next_attempt_at=now + timedelta(seconds=min(3600, 15 * 2 ** min(attempt, 8))), updated_at=timezone.now())
     return state
