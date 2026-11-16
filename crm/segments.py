@@ -73,6 +73,11 @@ RULE_TYPES = {
         "keys": {"event_ids", "statuses", "checked_in"},
         "available": True,
     },
+    "event_in_city": {
+        "label": "Registered for an event in a city",
+        "keys": {"city"},
+        "available": True,
+    },
     "events_attended_count": {
         "label": "Number of events attended",
         "keys": {"op", "value"},
@@ -186,6 +191,33 @@ def _event_registration(rule: dict, at: tuple) -> dict:
     }
 
 
+MAX_CITY = 80
+
+
+def _event_in_city(rule: dict, at: tuple) -> dict:
+    city = " ".join(_text(MAX_CITY)(rule.get("city"), at + ("city",)).split())
+    if len(city) < 2:
+        raise _invalid(_pointer(*at, "city"), "required")
+    return {"city": city}
+
+
+def event_in_city_q(city: str) -> Q:
+    """Events whose name, Luma city or address mentions ``city`` (any case).
+
+    Matches every past and future event, so a new Sydney event joins a Sydney
+    audience without anyone editing it.
+    """
+
+    geo = "raw_payload__geo_address_json__"
+    return (
+        Q(name__icontains=city)
+        | Q(**{f"{geo}city__icontains": city})
+        | Q(**{f"{geo}city_state__icontains": city})
+        | Q(**{f"{geo}full_address__icontains": city})
+        | Q(**{f"{geo}address__icontains": city})
+    )
+
+
 def _events_attended_count(rule: dict, at: tuple) -> dict:
     return {
         "op": _choice(COUNT_OPS)(rule.get("op"), at + ("op",)),
@@ -262,6 +294,7 @@ def _blast_engagement(rule: dict, at: tuple) -> dict:
 
 _RULE_VALIDATORS = {
     "event_registration": _event_registration,
+    "event_in_city": _event_in_city,
     "events_attended_count": _events_attended_count,
     "engagement_stars": _engagement_stars,
     "last_attended_within_days": _last_attended_within_days,
@@ -448,6 +481,11 @@ def _rule_q(rule: dict, at: tuple, now: datetime, *, activity_as_of=None) -> Q:
         if rule["checked_in"] is not None:
             registrations = registrations.filter(checked_in_at__isnull=not rule["checked_in"])
         return Q(Exists(registrations))
+    if rule_type == "event_in_city":
+        # Removed and declined guests are not registered, as for event_registration.
+        return Q(Exists(EventRegistration.objects.filter(
+            registered_q(), contact=OuterRef("pk"),
+            event__in=CrmEvent.objects.filter(event_in_city_q(rule["city"])))))
     if rule_type == "events_attended_count":
         return Q(**{f"events_attended_count__{_COUNT_LOOKUPS[rule['op']]}": rule["value"]})
     if rule_type == "engagement_stars":

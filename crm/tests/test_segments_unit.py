@@ -34,6 +34,7 @@ EVERY_RULE = [
     {"type": "source", "values": ["import"]},
     {"type": "reachable", "channel": "sms"},
     {"type": "engagement_stars", "op": "gte", "value": 4},
+    {"type": "event_in_city", "city": "Sydney"},
 ]
 
 
