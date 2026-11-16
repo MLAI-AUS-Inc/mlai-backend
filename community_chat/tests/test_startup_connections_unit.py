@@ -173,12 +173,34 @@ class SourcePreferenceStorageTests(SimpleTestCase):
             self.assertFalse(prefs.source_capabilities({"key": provider, "status": status_value, "selected": selected})["usableForUpdates"])
         self.assertTrue(prefs.source_capabilities({"key": "slack", "status": "connected", "selected": True}, preferences={"slack": False})["usableForUpdates"])
 
-    def test_default_inclusion_requires_saved_connection_but_explicit_choice_survives_revoke(self):
-        for status_value in ("not_connected", "unavailable"):
-            self.assertFalse(prefs.source_capabilities({"key": "slack", "status": status_value})["enabled"])
-        for status_value in ("connected", "syncing", "needs_reauth", "expired"):
+    def test_default_inclusion_requires_working_connection_but_explicit_choice_survives_revoke(self):
+        for status_value in ("not_connected", "unavailable", "needs_reauth", "expired", "error"):
+            source = prefs.source_capabilities({"key": "slack", "status": status_value, "connectionId": 4})
+            self.assertFalse(source["enabled"])
+            self.assertFalse(source["usableForUpdates"])
+        for status_value in ("connected", "syncing"):
             self.assertTrue(prefs.source_capabilities({"key": "slack", "status": status_value})["enabled"])
         self.assertTrue(prefs.source_capabilities({"key": "slack", "status": "not_connected"}, preferences={"slack": True})["enabled"])
+        revoked = prefs.source_capabilities({"key": "slack", "status": "needs_reauth"}, preferences={"slack": True})
+        self.assertTrue(revoked["enabled"])
+        self.assertFalse(revoked["usableForUpdates"])
+
+    def test_broken_connection_reads_as_reconnect_in_chat_vocabulary(self):
+        for provider in ("gmail", "xero", "bank_feed"):
+            source = prefs.source_capabilities({"key": provider, "status": "error", "connectionId": 4, "configured": True})
+            self.assertEqual(source["status"], "needs_reauth")
+            self.assertEqual(source["connectionStatus"], "error")
+            self.assertTrue(source["needsReconnect"])
+            self.assertTrue(source["canConnect"])
+            self.assertTrue(source["canDisconnect"])
+        healthy = prefs.source_capabilities({"key": "xero", "status": "connected", "connectionId": 4})
+        self.assertFalse(healthy["needsReconnect"])
+        self.assertNotIn("connectionStatus", healthy)
+
+    def test_xero_with_several_organisations_needs_a_choice_before_use(self):
+        source = prefs.source_capabilities({"key": "xero", "status": "connected", "connectionId": 4, "accountChoiceRequired": True})
+        self.assertFalse(source["usableForUpdates"])
+        self.assertEqual(source["status"], "connected")
 
 
 class NativeOAuthBoundaryTests(SimpleTestCase):

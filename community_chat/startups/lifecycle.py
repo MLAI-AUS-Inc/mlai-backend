@@ -16,24 +16,46 @@ OAUTH_PROVIDERS = frozenset({
 })
 API_KEY_PROVIDERS = frozenset({"humanitix", "luma"})
 UPDATE_PROVIDERS = OAUTH_PROVIDERS | API_KEY_PROVIDERS
+# Connectable but not read by MLAI yet. Not offered to founders in Pulse;
+# an existing connection stays listed so it can still be disconnected.
+HIDDEN_PULSE_PROVIDERS = frozenset({"google_drive"})
+
+# Status vocabulary Chat receives for a Pulse source (see
+# docs/community-chat-startup-updates.md, "Pulse source status vocabulary").
+HEALTHY_STATUSES = frozenset({"connected", "ready", "syncing"})
+RECONNECT_STATUSES = frozenset({"needs_reauth", "needs_action", "expired", "auth_required", "error"})
+
+
+def pulse_source_visible(source):
+    """Hide providers MLAI cannot read unless the founder already connected one."""
+    provider = source.get("provider") or source.get("key")
+    return provider not in HIDDEN_PULSE_PROVIDERS or bool(source.get("connectionId"))
 
 
 def source_capabilities(source, *, preferences=None):
     """Keep default inclusion, data readiness and connection actions independent."""
     source = dict(source)
     provider = source.get("provider") or source.get("key")
+    if source.get("status") == "error":
+        # A broken connection is repaired by reconnecting; Chat shows
+        # "Reconnect" only for needs_reauth. Keep the stored value for diagnostics.
+        source.update({"status": "needs_reauth", "connectionStatus": "error"})
     mode = "oauth" if provider in OAUTH_PROVIDERS else "api_key" if provider in API_KEY_PROVIDERS else None
-    ready = source.get("status") in {"connected", "ready"} and source.get("usableForUpdates") is not False and source.get("available") is not False
-    usable = provider in UPDATE_PROVIDERS and ready and provider != "google_drive"
-    default_enabled = provider != "google_drive" and bool(source.get("connectionId") or source.get("status") in {
-        "connected", "ready", "syncing", "needs_reauth", "needs_action", "expired", "auth_required"})
+    ready = (source.get("status") in {"connected", "ready"} and source.get("usableForUpdates") is not False
+        and source.get("available") is not False and not source.get("accountChoiceRequired"))
+    usable = provider in UPDATE_PROVIDERS and ready and provider not in HIDDEN_PULSE_PROVIDERS
+    # Only a working connection is included by default; a broken one must be
+    # reconnected first so a draft never silently counts on it.
+    default_enabled = provider not in HIDDEN_PULSE_PROVIDERS and source.get("status") in HEALTHY_STATUSES
     source.update({"connectMode": mode,
-        "canConnect": bool(mode and source.get("configured", source.get("status") != "unavailable")),
+        "canConnect": bool(mode and provider not in HIDDEN_PULSE_PROVIDERS
+            and source.get("configured", source.get("status") != "unavailable")),
         "canDisconnect": bool(source.get("connectionId") or (provider == "gmail" and source.get("status") == "connected")),
         "usableForUpdates": usable, "enabled": (preferences or {}).get(provider, default_enabled),
+        "needsReconnect": source.get("status") in RECONNECT_STATUSES,
         "activityWindowDays": None, "activityPeriod": "reporting_month", "selectionMode": "recent_activity"})
-    if provider == "google_drive" and source.get("status") == "connected":
-        source["warning"] = "Google Drive is connected. Update imports are not available yet."
+    if provider in HIDDEN_PULSE_PROVIDERS and source.get("connectionId"):
+        source["warning"] = "Pulse does not read Google Drive yet. You can disconnect it here."
     return source
 
 @transaction.atomic

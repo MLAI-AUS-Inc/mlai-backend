@@ -22,7 +22,7 @@ from integrations.models import ExternalServiceConnection, GoogleConnection
 from integrations.services.external_connectors import disconnect_external_connection
 from integrations.views import connector_connect
 from startup_updates.data_deletion import disconnect_gmail_for_user
-from .lifecycle import OAUTH_PROVIDERS, UPDATE_PROVIDERS
+from .lifecycle import HIDDEN_PULSE_PROVIDERS, OAUTH_PROVIDERS, UPDATE_PROVIDERS
 from .source_preferences import set_source_preference
 from .views import ChatStartupAccess, enabled
 
@@ -172,6 +172,8 @@ class ConnectView(ChatStartupAccess, APIView):
             return response
         if provider not in PROVIDERS:
             raise ValidationError("This source does not support browser connection.")
+        if provider in HIDDEN_PULSE_PROVIDERS:
+            raise ValidationError("Pulse does not read this tool yet.")
         if provider == "github":
             refusal = _new_journey_github_refusal(self.company)
             if refusal is not None:

@@ -22,7 +22,7 @@ from vibe_raising import views as founder
 from workflow_runs.models import ContentFactoryRun
 from .presentation import update_payload
 from .publication import approved_updates
-from .lifecycle import delete_update, source_capabilities, validate_generation_sources
+from .lifecycle import delete_update, pulse_source_visible, source_capabilities, validate_generation_sources
 from .source_preferences import source_preferences
 from vibe_raising.financial_refresh_views import FinancialRefreshView, FinancialRefreshStatusView
 
@@ -186,7 +186,8 @@ class SourcesView(ChatStartupAccess, ConnectorSourcesStatusView):
         response = super().get(request)
         if response.status_code == 200:
             preferences = source_preferences(self.company)
-            sources = [source_capabilities(source, preferences=preferences) for source in response.data.get("sources", [])]
+            sources = [source_capabilities(source, preferences=preferences)
+                for source in response.data.get("sources", []) if pulse_source_visible(source)]
             from .website_connections import website_connection_sources
             sources.extend(website_connection_sources(request.user, self.company))
             from crm.access import crm_access

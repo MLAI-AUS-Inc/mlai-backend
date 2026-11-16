@@ -73,7 +73,7 @@ class OAuthHandoffTests(SimpleTestCase):
         view.company = self.company
         request = Obj(user=self.user, auth=Obj(pk="session"), data={"returnTo": "mobile", "returnUrl": "https://evil.example"},
             build_absolute_uri=lambda path: "https://api.example" + path)
-        for provider in connections.PROVIDERS:
+        for provider in connections.PROVIDERS - connections.HIDDEN_PULSE_PROVIDERS:
             with self.subTest(provider=provider):
                 response = view.post(request, provider)
                 ticket = parse_qs(urlsplit(response.data["authorizationUrl"]).query)["ticket"][0]
@@ -90,6 +90,8 @@ class OAuthHandoffTests(SimpleTestCase):
         view.company = self.company
         request = Obj(user=self.user, auth=Obj(pk="session"), data={}, build_absolute_uri=lambda path: "https://api.example" + path)
         for alias, canonical in connections.PROVIDER_ALIASES.items():
+            if canonical in connections.HIDDEN_PULSE_PROVIDERS:
+                continue  # Not offered in Pulse until MLAI reads it.
             response = view.post(request, alias)
             ticket = parse_qs(urlsplit(response.data["authorizationUrl"]).query)["ticket"][0]
             self.assertEqual(connections.consume_ticket(ticket)["provider"], canonical)
