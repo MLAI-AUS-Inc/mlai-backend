@@ -300,6 +300,15 @@ class PreflightPartialDraftTests(SimpleTestCase):
         self.assertTrue(response.data["nothingUsable"])
         refresh.assert_not_called()
 
+    def test_tools_lost_after_refresh_are_not_reported_as_pending(self):
+        checks = [{"provider": "gmail", "status": "ready"}, {"provider": "slack", "status": "ready"}]
+        limited = lambda items: [{**item, "status": "temporarily_unavailable"} for item in items]
+        with patch("startup_updates.preflight.apply_xero_cooldown", side_effect=limited):
+            response, _, _ = self.post(skip=True, checks=checks)
+        self.assertFalse(response.data["ready"])
+        self.assertFalse(response.data["pending"])
+        self.assertTrue(response.data["nothingUsable"])
+
 
 class EvidenceRefreshSkipTests(SimpleTestCase):
     def call(self, error, failures=0):

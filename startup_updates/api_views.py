@@ -4900,7 +4900,7 @@ class StartupUpdateSourcePreflightView(APIView):
                 final.result = {**(final.result or {}), "source_preflight": {"checks": checks, "ready": complete, "checked_at": checked_at.isoformat()}}
                 final.save(update_fields=["run_request", "result", "updated_at"])
         remaining = [check for check in checks if check.get("provider") not in skipped]
-        return Response({"ready": complete, "pending": not complete and all(c.get("status") == "ready" for c in remaining),
+        return Response({"ready": complete, "pending": not complete and bool(remaining) and all(c.get("status") == "ready" for c in remaining),
             "checks": checks, "skippedSources": summary(), "nothingUsable": not remaining})
 
 
