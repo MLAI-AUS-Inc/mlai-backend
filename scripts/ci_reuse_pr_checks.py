@@ -149,14 +149,17 @@ def find_reusable_validation(
                 if isinstance(artifacts_response, dict)
                 else []
             )
-            expected_artifact = attestation_name(
-                current_tree,
-                head_sha,
-                run_attempt,
-            )
+            # Re-running only the failed jobs keeps the checks job (and its
+            # attestation) from an earlier attempt. The run's success covers
+            # every job of its latest attempt, so an attestation written by any
+            # attempt of this same run binds the same head and tree.
+            expected_artifacts = {
+                attestation_name(current_tree, head_sha, attempt)
+                for attempt in range(1, run_attempt + 1)
+            }
             if any(
                 isinstance(artifact, dict)
-                and artifact.get("name") == expected_artifact
+                and artifact.get("name") in expected_artifacts
                 and artifact.get("expired") is False
                 for artifact in artifacts
             ):

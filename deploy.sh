@@ -428,9 +428,27 @@ verify_current_main_release() {
 verify_current_main_release
 echo "🚀 Deploying release $APP_RELEASE to $DEPLOY_SSH_TARGET ($DROPLET_IP)..."
 
+# Reuse one SSH connection for the many short host commands below. Each .env
+# upsert used to open its own connection (about 3.6 s each, over 5 minutes per
+# deploy). Commands, their order and their stdin are unchanged; only the
+# transport is shared. An idle master exits on its own after ControlPersist, so
+# an early failure cannot leave it running, and a dead master makes ssh fall
+# back to a fresh connection.
+deploy_ssh_control_dir=$(mktemp -d -t mlai-deploy-ssh.XXXXXX)
+DEPLOY_SSH_OPTIONS="-o ControlMaster=auto -o ControlPath=$deploy_ssh_control_dir/%C -o ControlPersist=60 -o ServerAliveInterval=30 -o ServerAliveCountMax=4"
+ssh() {
+    # shellcheck disable=SC2086 # The options are fixed words without spaces.
+    command ssh $DEPLOY_SSH_OPTIONS "$@"
+}
+close_deploy_ssh_master() {
+    # shellcheck disable=SC2086
+    command ssh $DEPLOY_SSH_OPTIONS -O exit "$DEPLOY_SSH_TARGET" >/dev/null 2>&1 || true
+    rm -rf "$deploy_ssh_control_dir"
+}
+
 # 1. Sync files to the server
 echo "📦 Syncing files..."
-rsync -avz --delete --exclude-from scripts/deploy-excludes.txt . "$DEPLOY_SSH_TARGET:$PROJECT_DIR"
+rsync -avz -e "ssh $DEPLOY_SSH_OPTIONS" --delete --exclude-from scripts/deploy-excludes.txt . "$DEPLOY_SSH_TARGET:$PROJECT_DIR"
 
 install_remote_env_secret() {
     local key="$1"
@@ -2137,4 +2155,5 @@ if payload.get("status") != "ok" or payload.get("release") != sys.argv[1]:
     raise SystemExit("Production release verification failed")
 ' "$APP_RELEASE_SHORT"
 
+close_deploy_ssh_master
 echo "✅ Deployment complete! Check http://$DROPLET_IP or https://api.mlai.au"
