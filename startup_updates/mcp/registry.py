@@ -42,6 +42,8 @@ def catalogue(principal):
             if not set(required) <= set(principal.grant["scopes"]):
                 continue
             value = deepcopy(item)
+            if module is tools:
+                value["description"] = tools.branded(value["description"], principal.grant["resource"])
             security = [{"type": "oauth2", "scopes": required}]
             value["securitySchemes"] = security
             value.setdefault("_meta", {})["securitySchemes"] = deepcopy(security)

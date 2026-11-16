@@ -108,7 +108,7 @@ remains `24h`. Changing these defaults is a separate owner deployment action.
 | `AGENT_RUNTIME_DOT_MEMBERS_ENABLED` | `false` | true / false |
 | `AGENT_RUNTIME_DOT_MESSAGING_ENABLED` | `false` | true / false |
 | `MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED` | `false` | true / false |
-| `MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS` | `0` | 0–300 |
+| `MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS` | `60` | 0–300 (0 turns the retry window off) |
 
 
 Safety fixes apply independently of the later rollout switches. Scheduler stages

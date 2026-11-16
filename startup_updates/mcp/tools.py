@@ -37,23 +37,30 @@ ACTIVITY_WINDOW = {**object_schema({
     "startInclusive": {"type": "string", "format": "date-time"},
     "endExclusive": {"type": "string", "format": "date-time"},
 }, ["startInclusive", "endExclusive"]),
-    "description": "Optional narrative source window, with timezone-aware timestamps, at most 31 days and ending no later than now (five-minute clock tolerance). Does not change the calendar financial reporting period."}
+    "description": "Optional narrative source window, with timezone-aware timestamps, at most one calendar month (31 days and one hour) and ending no later than now (five-minute clock tolerance). Does not change the calendar financial reporting period."}
 TOOLS = [
     {"name": "list_startups", "title": "List authorised startups", "description": "List startups this account has explicitly authorised this agent to access.",
         "inputSchema": object_schema({}, []), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "get_monthly_update_brief", "title": "Get monthly update brief", "description": "Get startup context and reporting dates. Search the user's already-connected sources for these dates; save a narrative draft with citations. Financial figures come from Valley's direct connections.",
+    {"name": "get_monthly_update_brief", "title": "Get monthly update brief", "description": "Get startup context, reporting dates and the drafts already saved for this month (existingDrafts). Search the user's already-connected sources for these dates; save a narrative draft with citations. Financial charts are attached by Valley from the founder's connected Xero and Stripe.",
         "inputSchema": object_schema({"companyId": COMPANY, "month": MONTH, "activityWindow": ACTIVITY_WINDOW}, ["companyId", "month"]), "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "save_narrative_draft", "title": "Save a private narrative draft", "description": "Save a private monthly update for founder review. Only narrative and source references are accepted. Financial metrics and publishing cannot be changed. Retry using the same requestId; existing draft edits require expectedRevision.",
-        "inputSchema": object_schema({"companyId": COMPANY, "month": MONTH, "requestId": {"type": "string", "format": "uuid"},
-            "updateId": {"type": "integer", "minimum": 1}, "expectedRevision": {"type": ["integer", "null"]},
+    {"name": "save_narrative_draft", "title": "Save a private narrative draft", "description": "Save a private monthly update for founder review. Only narrative and source references are accepted. Financial metrics and publishing cannot be changed. New update: omit updateId and expectedRevision. Revise an existing draft: pass its updateId and, as expectedRevision, the revisionId last returned for it (by this tool, get_draft_status or the brief's existingDrafts), with a new requestId. Retry an uncertain save using the same requestId and identical content.",
+        "inputSchema": object_schema({"companyId": COMPANY, "month": MONTH,
+            "requestId": {"type": "string", "format": "uuid", "description": "A UUID you generate for each distinct save. Reuse it only to retry the identical save; it stops a retry creating a duplicate."},
+            "updateId": {"type": "integer", "minimum": 1, "description": "The existing update to revise, from the brief's existingDrafts or an earlier result. Omit to create a new update for the month."},
+            "expectedRevision": {"type": ["integer", "null"], "description": "With updateId: the revisionId you last saw for that update. The save is refused if the founder changed it since, so their edits are never overwritten. Omit or null for a new update, or for an update that has no revisionId yet."},
             "narrative": object_schema({field: {"type": "string", "maxLength": 2000 if field == "startupOverview" else 20000} for field in NARRATIVE_FIELDS}, ["summary"]),
             "sources": {"type": "array", "maxItems": 100, "items": object_schema({field: {"type": "string"} for field in SOURCE_FIELDS}, ["provider", "title"])},
             "coverageNotes": {"type": "string", "maxLength": 10000}}, ["companyId", "month", "requestId", "narrative"]),
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "get_draft_status", "title": "Check draft status", "description": "Check the saved revision and open its private review link.",
-        "inputSchema": object_schema({"companyId": COMPANY, "updateId": {"type": "integer", "minimum": 1}}, ["companyId", "updateId"]),
+    {"name": "get_draft_status", "title": "Check draft status", "description": "Check the saved revision and open its private review link. The returned revisionId is the expectedRevision for the next revise.",
+        "inputSchema": object_schema({"companyId": COMPANY, "updateId": {"type": "integer", "minimum": 1, "description": "The updateId returned by save_narrative_draft or listed in the brief's existingDrafts."}}, ["companyId", "updateId"]),
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
 ]
+
+
+def branded(text, resource):
+    """The unified server is installed as "MLAI"; only the legacy one is "Valley"."""
+    return text.replace("Valley", "MLAI") if resource == mlai_url() else text
 
 
 def month_date(value):
@@ -145,14 +152,23 @@ def _activity_window(value, period, now):
             raise ValidationError("Activity window timestamps must include a timezone.")
         bounds.append(stamp)
     start, end = bounds
-    if not timedelta(0) < end - start <= timedelta(days=31):
+    # One hour over 31 days admits a whole 31-day month that ends daylight saving.
+    if not timedelta(0) < end - start <= timedelta(days=31, hours=1):
         raise ValidationError("Choose an increasing activity window of at most 31 days.")
     if end > now + timedelta(minutes=5):
         raise ValidationError("The activity window cannot end in the future.")
     return {"startInclusive": start.isoformat(), "endExclusive": end.isoformat()}
 
 
-def _brief(company, month, activity_window=None):
+def existing_drafts(company, month):
+    """This month's updates with unpublished work, newest first, so an AI can revise one."""
+    rows = MonthlyUpdateDraft.objects.filter(organization=company.organization, month=month).order_by("-updated_at", "-pk")[:20]
+    return [{"updateId": row.pk, "revisionId": row.current_revision_id, "status": row.status, "title": row.title,
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None}
+        for row in rows if not row.published_at or row.current_revision_id != row.published_revision_id]
+
+
+def _brief(company, month, activity_window=None, *, existing=(), brand="Valley"):
     profile = StartupProfile.objects.filter(organization=company.organization).first()
     zone = getattr(profile, "reporting_timezone", "UTC") or "UTC"
     now = timezone.now()
@@ -164,6 +180,7 @@ def _brief(company, month, activity_window=None):
         "description": getattr(profile, "short_description", ""), "stage": getattr(profile, "stage", ""),
         "problemSolved": getattr(profile, "problem_solved", ""), "targetAudience": getattr(profile, "target_audience", "")},
         "month": month.isoformat()[:7], "reportingPeriod": period, "activityWindow": window,
+        "existingDrafts": list(existing),
         "sections": list(NARRATIVE_FIELDS), "instructions": [
             "Write for both the founder's team and a community reader who has never heard of this startup. Use simple conversational language, not jargon or unexplained acronyms.",
             "Start with startupOverview: one or two short sentences describing what the startup does, who it helps and the problem it solves, using only the supplied startup description, problemSolved and targetAudience. Leave it blank if this context is missing; do not guess.",
@@ -175,7 +192,8 @@ def _brief(company, month, activity_window=None):
             "Distinguish completed work from plans; include source links and dated evidence when available.",
             f"Record the narrative source window in coverageNotes as startInclusive={window['startInclusive']}; endExclusive={window['endExclusive']}. These dates describe agent-supplied coverage, not verified financial evidence.",
             "Describe unavailable sources and incomplete coverage in coverageNotes; exclude unrelated personal information.",
-            "Leave financial figures to Valley's direct Xero/Stripe evidence. Do not submit financial metric fields.",
+            f"Financial charts and figures are attached by {brand} from the founder's connected Xero and Stripe. Do not submit financial metric fields; they are not accepted. Mention a financial result in words only when the founder's own tools show it.",
+            "existingDrafts lists this month's updates that are saved but not yet published. If the founder asked you to revise one, pass its updateId, and its revisionId as expectedRevision, to save_narrative_draft with a new requestId. Otherwise omit updateId and expectedRevision to create a new update. Never guess an updateId.",
             "Save a private draft using save_narrative_draft and return its reviewUrl. The founder reviews and publishes in MLAI Chat."]}
 
 
@@ -262,7 +280,7 @@ def save_draft(principal, arguments):
 def call_tool(principal, name, arguments):
     definition = next((item for item in TOOLS if item["name"] == name), None)
     if not definition:
-        raise ValidationError("Unknown Valley tool.")
+        raise ValidationError(branded("Unknown Valley tool.", principal.grant["resource"]))
     schema = definition["inputSchema"]
     if not isinstance(arguments, dict) or set(arguments) - schema["properties"].keys() or set(schema["required"]) - arguments.keys():
         raise ValidationError("Provide the required supported tool arguments only.")
@@ -279,7 +297,9 @@ def call_tool(principal, name, arguments):
     if name == "get_monthly_update_brief":
         if "activityWindow" in arguments and not isinstance(arguments["activityWindow"], dict):
             raise ValidationError("Activity windows require startInclusive and endExclusive only.")
-        return _brief(company, month_date(arguments["month"]), arguments.get("activityWindow"))
+        month = month_date(arguments["month"])
+        return _brief(company, month, arguments.get("activityWindow"), existing=existing_drafts(company, month),
+            brand=branded("Valley", principal.grant["resource"]))
     if name == "save_narrative_draft":
         return save_draft(principal, arguments)
     update_id = arguments.get("updateId")
