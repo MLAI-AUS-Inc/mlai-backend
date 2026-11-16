@@ -119,9 +119,10 @@ def client_catalog():
         # protocol words; the link itself is in "config".
         instructions = {
             "chatgpt": [
-                "Open ChatGPT, go to Settings, then Apps, and add a new app.",
-                "Paste the MLAI connection link.",
+                "Open ChatGPT, go to Settings, then Apps, then Advanced settings, and turn on Developer mode.",
+                "Back in Apps, choose Create, name it MLAI, and paste the MLAI connection link.",
                 "Sign in to MLAI, choose your startup, then choose what ChatGPT can do and which community channels it can use.",
+                "In each new chat that should use MLAI, choose + and turn on MLAI.",
             ],
             "claude": [
                 "Open Claude. The Valley connector is filled in for you; choose Add.",
