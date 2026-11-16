@@ -11,7 +11,9 @@ Only pull requests MLAI opened are touched. A candidate must be an
 created before the newer run, with its pull request number recorded on the run.
 GitHub must then confirm the pull request is still open and unmerged, was
 opened by a GitHub App (a bot account, never a person), comes from a branch in
-the same repository (never a fork) and is not the website's own branch. A
+the same repository (never a fork), targets the website's branch and is not
+that branch itself. The website access is rechecked just before the write.
+One GitHub already shows closed is only recorded as closed locally. A
 founder's pull request carries no MLAI run, so it can never be selected.
 
 Closing never fails preparation: every error is logged and the pass carries on.
@@ -133,14 +135,25 @@ def _close_one(connection, run, number, *, child, new_number) -> bool:
     token, _ = _github_token_for_repo_operation(domain=connection.organization.domain, github_repo=repo,
         permission_mode="write")
     pull = _github_api_request("GET", f"/repos/{repo}/pulls/{number}", token=token)
-    head = _mapping(pull.get("head"))
+    head, base = _mapping(pull.get("head")), _mapping(pull.get("base"))
     head_repo = str(_mapping(head.get("repo")).get("full_name") or "")
+    base_repo = str(_mapping(base.get("repo")).get("full_name") or "")
     branch = _recorded_branch(run)
-    if (pull.get("state") != "open" or pull.get("merged") or pull.get("merged_at")
+    if (pull.get("merged") or pull.get("merged_at")
             or _mapping(pull.get("user")).get("type") != "Bot"
             or head_repo.casefold() != str(repo).casefold()
+            or (base_repo and base_repo.casefold() != str(repo).casefold())
+            or (base.get("ref") and str(base.get("ref")) != str(connection.branch or ""))
             or str(head.get("ref") or "") == str(connection.branch or "")
             or (branch and str(head.get("ref") or "") != branch)):
+        logger.info("website_prepare superseded_setup_pr_left_open run=%s pr=%s", run.run_id, number)
+        return False
+    if pull.get("state") == "closed":
+        # Already closed on GitHub (an earlier pass whose local record failed):
+        # record that outcome so no lookup resumes this run as an open PR.
+        _mark_closed(run, superseded_by=child.run_id)
+        return True
+    if pull.get("state") != "open" or not _still_current(connection):
         logger.info("website_prepare superseded_setup_pr_left_open run=%s pr=%s", run.run_id, number)
         return False
     new_url = _pull_request_url_from_run(child) or f"https://github.com/{repo}/pull/{new_number}"
@@ -152,6 +165,13 @@ def _close_one(connection, run, number, *, child, new_number) -> bool:
     logger.info("website_prepare superseded_setup_pr_closed run=%s pr=%s superseded_by=%s pr=%s",
         run.run_id, number, child.run_id, new_number)
     return True
+
+
+def _still_current(connection) -> bool:
+    """Recheck, just before writing to GitHub, that this website access is still current."""
+    from .website_models import WebsiteConnection
+    return WebsiteConnection.objects.filter(pk=connection.pk, generation=connection.generation, state="connected",
+        github_repo__iexact=connection.github_repo, branch=connection.branch or "").exists()
 
 
 def _mark_closed(run, *, superseded_by) -> None:

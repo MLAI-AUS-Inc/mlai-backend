@@ -60,7 +60,7 @@ def reached(op) -> bool:
 
 
 def hold(op, *, now) -> None:
-    """Wait for staff instead of dispatching another setup; alert them now."""
+    """Wait for staff instead of dispatching another setup (``alert`` tells them once saved)."""
     runs = dispatched(op)
     op.state, op.next_attempt_at = "needs_attention", None
     # An earlier step failure is not why this stopped. Leaving its occurrence
@@ -76,6 +76,12 @@ def hold(op, *, now) -> None:
                       "held_at": now.isoformat()}})
     logger.warning("website_prepare setup_dispatch_cap operation=%s connection=%s generation=%s dispatched=%s limit=%s",
         op.pk, op.connection_id, op.generation, len(runs), limit())
+
+
+def alert(op, *, now) -> None:
+    """Queue the staff alert for a held operation once its stop is saved; never raises."""
+    if op.state != "needs_attention" or not isinstance((op.receipt or {}).get(HELD_KEY), dict):
+        return
     try:
         from .founder_stuck_alerts import queue_operation_stopped_alert
         queue_operation_stopped_alert(op, code=CODE, now=now)

@@ -114,6 +114,15 @@ class SetupDispatchCapPrepareTests(SimpleTestCase):
         setup.assert_not_called()
         self.assertEqual(self.op.state, "needs_attention")
 
+    def test_no_alert_when_the_stop_was_not_saved(self):
+        self.op.receipt = {setup_cap.RECEIPT_KEY: ["setup-1", "setup-2", "setup-3"]}
+        setup = Mock(return_value={"run_id": "setup-4"})
+        with patch.object(stuck, "queue_operation_stopped_alert") as alert, \
+                patch.object(prepare, "_finish_prepare", return_value=None):
+            self.replay.advance({"setup": setup})
+        setup.assert_not_called()
+        alert.assert_not_called()
+
     @override_settings(ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT=0)
     def test_with_the_cap_off_setup_is_dispatched(self):
         self.op.receipt = {setup_cap.RECEIPT_KEY: ["setup-1", "setup-2", "setup-3"]}
@@ -165,9 +174,11 @@ def setup_run(run_id, number, *, created, generation=3, merge_status="not_merged
         run_request={"website_connection_id": "website", "connection_generation": generation})
 
 
-def pull(number, *, state="open", user="Bot", head_repo="fixture/site", ref=None, merged=False):
+def pull(number, *, state="open", user="Bot", head_repo="fixture/site", ref=None, merged=False, base="main",
+         base_repo="fixture/site"):
     return {"number": number, "state": state, "merged": merged, "user": {"type": user},
-        "head": {"ref": ref or f"cf-setup/{number}", "repo": {"full_name": head_repo}}}
+        "head": {"ref": ref or f"cf-setup/{number}", "repo": {"full_name": head_repo}},
+        "base": {"ref": base, "repo": {"full_name": base_repo}}}
 
 
 class SupersededSetupPullRequestTests(SimpleTestCase):
@@ -179,6 +190,7 @@ class SupersededSetupPullRequestTests(SimpleTestCase):
         self.older = setup_run("setup-37", 37, created=NOW - timedelta(hours=1))
         self.pulls = {37: pull(37)}
         self.calls = []
+        self.current = True
 
     def github(self, method, path, *, token, body=None, expected=(200,)):
         self.calls.append((method, path, body))
@@ -194,7 +206,8 @@ class SupersededSetupPullRequestTests(SimpleTestCase):
                 patch("content_factory.vibe_marketing_views._github_token_for_repo_operation",
                       return_value=("token", "github_app_installation")) as token, \
                 patch("content_factory.vibe_marketing_views._github_api_request", side_effect=self.github), \
-                patch("content_factory.run_provider_facts.save_provider_result") as save:
+                patch("content_factory.run_provider_facts.save_provider_result") as save, \
+                patch.object(superseded, "_still_current", return_value=self.current):
             summary = superseded.close_superseded_setup_prs(self.op, self.child)
         self.token, self.save = token, save
         return summary
@@ -241,12 +254,32 @@ class SupersededSetupPullRequestTests(SimpleTestCase):
         self.pulls[37] = pull(37, ref="cf-setup/other")
         self.assertEqual(self.close()["closed"], [])
 
-    def test_an_already_closed_or_merged_pull_request_is_not_touched(self):
-        for case in (pull(37, state="closed"), pull(37, merged=True)):
+    def test_a_merged_pull_request_is_not_touched(self):
+        self.pulls[37] = pull(37, merged=True, state="closed")
+        self.assertEqual(self.close()["closed"], [])
+        self.assertEqual(len(self.calls), 1)
+        self.save.assert_not_called()
+
+    def test_one_already_closed_on_github_is_only_recorded_as_closed(self):
+        # An earlier pass closed it on GitHub but failed to record that locally.
+        self.pulls[37] = pull(37, state="closed")
+        self.assertEqual(self.close()["closed"], [37])
+        self.assertEqual(self.methods(), [("GET", "/repos/fixture/site/pulls/37")])
+        self.assertEqual(self.save.call_args.args[1]["merge_status"], "pr_closed")
+
+    def test_a_pull_request_into_another_branch_or_repository_is_left_open(self):
+        for case in (pull(37, base="staging"), pull(37, base_repo="someone/site")):
             self.op.receipt, self.calls = {}, []
             self.pulls[37] = case
             self.assertEqual(self.close()["closed"], [])
             self.assertEqual(len(self.calls), 1)
+            self.save.assert_not_called()
+
+    def test_no_github_write_once_website_access_changed(self):
+        self.current = False
+        self.assertEqual(self.close()["closed"], [])
+        self.assertEqual(self.methods(), [("GET", "/repos/fixture/site/pulls/37")])
+        self.save.assert_not_called()
 
     def test_the_newer_pull_request_itself_is_never_closed(self):
         self.assertEqual(self.close([setup_run("setup-dup", 38, created=NOW - timedelta(hours=2))])["closed"], [])

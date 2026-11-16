@@ -1163,7 +1163,11 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 # Facts that change on every pass never repeat a digest; this
                 # operation's own setup count bounds that loop instead.
                 setup_cap.hold(op, now=now)
-                return _finish_prepare(op, now=now)
+                saved = _finish_prepare(op, now=now)
+                if saved is not None:
+                    # Only a stop that was saved is one staff can act on.
+                    setup_cap.alert(saved, now=now)
+                return saved
             op.receipt.update(current_step=step, blocked_step=None, reason_code="", retryable=False,
                 status="working", message=f"Preparing articles: {step.replace('-', ' ')}.", user_action=None)
             handler = (handlers or {}).get(step)
