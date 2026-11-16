@@ -336,3 +336,41 @@ class EvidenceRefreshSkipTests(SimpleTestCase):
         response, run = self.call(ValueError("Bank pagination did not advance."), failures=2)
         self.assertTrue(response.data["skipped"])
         self.assertEqual(run.run_request["skipped_sources"]["bank_feed"]["action"], "retry")
+
+
+class XeroAccountChoicePreflightTests(SimpleTestCase):
+    def test_choice_needed_only_for_several_organisations_without_a_saved_choice(self):
+        from integrations.services import source_accounts
+        user, organization = Obj(pk=2), Obj(pk=4)
+        for saved, count, expected in ((None, 2, True), (None, 1, False), (7, 2, False)):
+            with self.subTest(saved=saved, count=count), \
+                    patch.object(source_accounts, "_saved_report_account_id", return_value=saved), \
+                    patch.object(source_accounts.ExternalServiceConnection, "objects") as rows:
+                rows.filter.return_value.exclude.return_value.count.return_value = count
+                # A run pin taken from the latest sibling is a guess, not a choice.
+                with source_accounts.report_account_scope(user, organization, {"xero": 9}):
+                    self.assertIs(source_accounts.account_choice_required(user, organization, "xero"), expected)
+
+    def test_preflight_refuses_to_guess_the_xero_organisation(self):
+        with patch("integrations.services.source_accounts.account_choice_required", return_value=True), \
+                patch("integrations.services.source_accounts.report_connection") as report_connection:
+            with self.assertRaises(preflight.AccountChoiceRequired) as raised:
+                preflight.probe_source("xero", user=Obj(pk=2), organization=Obj(pk=4))
+        report_connection.assert_not_called()
+        check = preflight.source_failure_check("xero", raised.exception)
+        self.assertEqual((check["status"], check["reason"]), ("needs_reconnect", "account_choice_required"))
+        self.assertEqual(preflight.skipped_source_entry(check), {
+            "provider": "xero", "code": "account_choice_required", "action": "reconnect",
+            "message": "Choose which Xero organisation MLAI should read. This draft leaves Xero out until you do."})
+
+
+class DraftPayloadShapeTests(SimpleTestCase):
+    def test_top_level_warning_list_does_not_reuse_the_legacy_key(self):
+        # Installed desktop builds read a top-level "sourceWarnings" as a dict of
+        # string lists and crash on a list, so the list ships under its own key.
+        import inspect
+        from vibe_raising import views
+        source = inspect.getsource(views._build_email_draft_payload)
+        self.assertIn('"sourceWarningList": _top_level_source_warnings(latest_run)', source)
+        self.assertNotIn('"sourceWarnings": _top_level_source_warnings', source)
+        self.assertNotIn('"sourceWarnings": [', inspect.getsource(views._precheck_generation_sources))

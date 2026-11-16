@@ -37,6 +37,10 @@ class ManualInputNotReady(ValueError):
     """Selected founder documents are missing or have not finished parsing."""
 
 
+class AccountChoiceRequired(PermissionError):
+    """Several accounts are connected and the founder has not chosen one for Pulse."""
+
+
 def rate_limited_check(provider, retry_after_seconds):
     """Expose a safe provider deadline without treating quota as revoked OAuth."""
     seconds = max(int(retry_after_seconds), 1)
@@ -101,6 +105,9 @@ def skipped_source_entry(check, *, stage="check"):
     if stage == "collection":
         code, action = "collection_failed", "retry"
         message = f"MLAI could not finish reading {label}, so this draft may miss some of it."
+    elif check.get("reason") == "account_choice_required":
+        code, action = "account_choice_required", "reconnect"
+        message = f"Choose which {label} organisation MLAI should read. This draft leaves {label} out until you do."
     elif status == "needs_reconnect":
         code, action = "needs_reconnect", "reconnect"
         message = f"{label[:1].upper()}{label[1:]} needs reconnecting, so MLAI drafted this update without it."
@@ -208,7 +215,11 @@ def probe_source(provider, *, user, organization):
             raise PermissionError()
         list_message_page(connection, query="", max_results=1)
         return {"connectionId": connection.pk}
-    from integrations.services.source_accounts import report_connection
+    from integrations.services.source_accounts import account_choice_required, report_connection
+    if provider == "xero" and account_choice_required(user, organization, provider):
+        # One Xero sign-in can cover several organisations. Never guess which
+        # one's revenue and cash belong in this update.
+        raise AccountChoiceRequired()
     connection = report_connection(ExternalServiceConnection.objects.filter(
         user=user, organization=organization, provider=provider,
     ).exclude(status="disconnected"), user=user, organization=organization, provider=provider)
@@ -320,6 +331,9 @@ def source_failure_check(provider, exc):
         return rate_limited_check(provider, seconds)
     if isinstance(exc, NotImplementedError):
         code, message = "unsupported", "This connection does not support Pulse imports yet."
+    elif isinstance(exc, AccountChoiceRequired):
+        return {"provider": provider, "status": "needs_reconnect", "reason": "account_choice_required",
+            "message": "Choose which organisation MLAI should read for this startup."}
     elif isinstance(exc, ManualInputNotReady):
         code, message = "needs_input", "Add notes or wait for selected documents to finish processing."
     elif status in (401, 403) or (isinstance(exc, (PermissionError, ec.ConnectorOAuthError)) and not isinstance(exc, ec.ConnectorTemporarilyUnavailable)):
