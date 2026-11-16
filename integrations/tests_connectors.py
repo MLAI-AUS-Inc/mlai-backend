@@ -172,7 +172,7 @@ def _xero_balance_sheet_report(*, total_bank: str, as_of: str = "30 Apr 2026") -
     SLACK_OAUTH_REDIRECT_URI="http://localhost:8000/integrations/callback/slack",
     LINEAR_CLIENT_ID="linear-client-id",
     LINEAR_CLIENT_SECRET="linear-client-secret",
-    LINEAR_OAUTH_REDIRECT_URI="http://localhost:8000/integrations/callback/linear",
+    LINEAR_OAUTH_REDIRECT_URI="https://api.example.test/integrations/callback/linear",
     BASIQ_API_KEY="YXBwLWtleS1mb3ItYmFzaXEtc2FuZGJveA==",
     BASIQ_API_BASE_URL="https://au-api.basiq.io",
     BASIQ_CONSENT_UI_URL="https://consent.basiq.io/home",
@@ -737,7 +737,7 @@ class ConnectorEndpointTests(TestCase):
             if slug == "linear":
                 self.assertEqual(params["response_type"], ["code"])
                 self.assertEqual(params["client_id"], ["linear-client-id"])
-                self.assertEqual(params["redirect_uri"], ["http://localhost:8000/integrations/callback/linear"])
+                self.assertEqual(params["redirect_uri"], ["https://api.example.test/integrations/callback/linear"])
                 self.assertEqual(params["scope"], ["read"])
             if slug == "google-analytics":
                 self.assertEqual(params["response_type"], ["code"])
