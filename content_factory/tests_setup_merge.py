@@ -10,7 +10,7 @@ later disconnect. Org auto-publish opt-in does not change these authority fences
 from types import SimpleNamespace
 from unittest import mock
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from content_factory.website_connections import contract_for
 from content_factory.website_models import WebsiteConnection, WebsiteConnectionTarget
@@ -369,6 +369,19 @@ class SettledSetupDatabaseTests(TestCase):
             result={"status": "merged", "merge_status": "merged", "merge_sha": merge_sha, "pr_number": 3,
                 "adoption": {"kit_paths": [".mlai/articles-verification.json"]},
                 "article_system_setup": {"status": "merged", "merge_status": "merged"}})
+
+    def test_a_kitless_setup_settles_only_where_the_live_url_proves_the_site(self):
+        # La Vie, 16 Nov 2026: a no-workflow setup has no kit, and requiring one
+        # sent its own merge back to a second full setup and pull request.
+        from content_factory.website_connections import settled_setup_run
+        run = self.merged_run("no-workflow-setup", "b" * 40)
+        run.result = {**run.result, "adoption": {"kit_paths": []}}
+        run.save(update_fields=["result"])
+        with override_settings(ARTICLES_LIVE_URL_VERIFICATION_ENABLED=True, ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED=True):
+            self.assertEqual(settled_setup_run(self.website, source_sha="b" * 40).run_id, "no-workflow-setup")
+            self.assertIsNone(settled_setup_run(self.website, source_sha="c" * 40))
+        with override_settings(ARTICLES_LIVE_URL_VERIFICATION_ENABLED=False):
+            self.assertIsNone(settled_setup_run(self.website, source_sha="b" * 40))
 
     def test_settled_setup_and_owned_merge_use_this_generations_merge_commit(self):
         from content_factory.website_connections import settled_setup_run

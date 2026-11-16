@@ -1488,14 +1488,21 @@ def settled_setup_run(connection, *, source_sha):
     Another setup on that head would only re-stamp its own marker and open a new
     PR; the next step is the branch's own CI proof. A setup without the kit
     (native CI needed configuration) is not settled: installing the kit is next.
+
+    A website verified by its live URL (``website_live_verification.selected``)
+    never gets a kit: MLAI's build proof plus the live page prove it. Its merged
+    setup is settled without one. Requiring the kit there sent every such merge
+    back to a second full setup and pull request (La Vie, 16 Nov 2026).
     """
     from workflow_runs.models import ContentFactoryRun
+    from .website_live_verification import selected as live_url_selected
     if not source_sha:
         return None
+    kit_optional = live_url_selected(getattr(connection, "organization", None))
     rows = ContentFactoryRun.objects.filter(_current_run_scope_filter(connection),
         organization_id=connection.organization_id, workflow="article_system_setup",
         status="completed").order_by("-updated_at")[:10]
-    return next((row for row in rows if setup_settled_at(row, source_sha) and setup_installed_kit(row)
+    return next((row for row in rows if setup_settled_at(row, source_sha) and (kit_optional or setup_installed_kit(row))
         and str(row.github_repo or "").casefold() == str(connection.github_repo or "").casefold()), None)
 
 
@@ -1522,6 +1529,14 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
         # GitHub's branch head to equal it.
         recorded = str(result.get("source_sha") or "")
         if recorded and recorded == current_scan_source(website):
+            base_sha = recorded
+        elif (recorded and not hosted_enabled(website)
+                and recorded == observed_source_sha(website)):
+            # La Vie setup 6b19e4b1 (16 Nov 2026): the only scan for the generation
+            # had incomplete discovery, so current_scan_source was None and every
+            # Publish answered 409 although the PR head was the verified preview.
+            # The server-observed branch head is the same identity the scan would
+            # pin; the caller still requires GitHub's branch head to equal it.
             base_sha = recorded
     hosted = hosted_enabled(website)
     source_matches = base_sha == current_scan_source(website) if hosted else not website.verified_sha or website.verified_sha == base_sha

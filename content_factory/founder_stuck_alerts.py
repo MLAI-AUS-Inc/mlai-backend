@@ -402,6 +402,23 @@ def _queue(conditions, *, organization_ids) -> int:
     return queued
 
 
+def queue_operation_stopped_alert(op, *, code, now=None) -> int:
+    """Queue the stopped-operation alert for ``op`` now, instead of on the next sweep.
+
+    It is the same receipt the sweep would queue for this ``needs_attention``
+    operation (same slot), so staff get one alert, not two. Honours
+    ``ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED``. Returns how many were queued.
+    """
+    if not getattr(settings, "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED", True):
+        return 0
+    now = now or timezone.now()
+    organization_id = op.connection.organization_id
+    condition = _operation_condition({"id": op.pk, "connection__organization_id": organization_id, "action": op.action,
+                                      "state": op.state, "attempts": op.attempts, "receipt__reason_code": code},
+                                     kind="stopped", stuck_since=now)
+    return _queue([condition], organization_ids={organization_id})
+
+
 # --- Plain descriptions ------------------------------------------------------
 
 def describe(condition: StuckCondition, *, now) -> dict:

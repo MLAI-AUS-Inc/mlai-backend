@@ -2730,6 +2730,20 @@ ARTICLES_SOURCE_REPIN_ENABLED = _env_is_true("ARTICLES_SOURCE_REPIN_ENABLED", Fa
 # copy-ready run no longer stops because the site moved. Content Factory's
 # CONTENT_FACTORY_SOURCE_FOLLOW_ENABLED is the paired switch.
 ARTICLES_SOURCE_FOLLOW_ENABLED = _env_is_true("ARTICLES_SOURCE_FOLLOW_ENABLED", True)
+# Kill switch, default on: a push that leaves the articles setup files alone
+# (one GitHub compare) keeps the website Ready; the proof is re-checked in the
+# background for free and articles lock only if that re-check fails.
+ARTICLES_PROOF_CARRY_FORWARD_ENABLED = _env_is_true("ARTICLES_PROOF_CARRY_FORWARD_ENABLED", True)
+# Setup runs one website preparation may dispatch across all its attempts
+# (owner Try again and the replacement of a closed pull request included).
+# Past it, preparation waits for staff with a stuck-founder alert instead of
+# opening yet another setup pull request. A new preparation starts at zero.
+# 0 switches the cap off.
+ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT = max(0, int(os.getenv("ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT") or "3"))
+# Kill switch, default on: when preparation opens a newer setup pull request,
+# MLAI's own older open setup pull requests of the same connection generation
+# are closed with a comment that links the new one.
+ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED = _env_is_true("ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED", True)
 ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED = _env_is_true("ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
 ARTICLES_DISPATCH_RELIABILITY_ENABLED = _env_is_true("ARTICLES_DISPATCH_RELIABILITY_ENABLED", False)
 ARTICLES_NO_CODELESS_TERMINAL_ENABLED = _env_is_true("ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False)

@@ -1060,6 +1060,11 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 child = None
             if child:
                 _reconcile_setup_approval_receipt(op, child, now=now)
+                if child.workflow == "article_system_setup":
+                    # MLAI's own older open setup pull requests of this generation
+                    # are superseded by this one (La Vie #37 beside #38, 16 Nov 2026).
+                    from .website_superseded_setup_prs import close_superseded_setup_prs
+                    close_superseded_setup_prs(op, child)
             owner_action = _setup_owner_action(child, setup, op.connection) if child and child.workflow == "article_system_setup" else None
             if owner_action:
                 if owns_goal(op) and not any(item["name"] == "previewed" and item["state"] == "passed"
@@ -1153,6 +1158,16 @@ def _advance_claimed_prepare(op, *, now, handlers):
             digest = evidence_digest({"prerequisites": journey.get("prerequisites"), "capabilities": journey.get("capabilities")})
             if op.receipt.get("last_completed") == {"step": step, "facts_digest": digest}:
                 raise WebsiteAuthorityError("prepare_no_progress", blocked.get("reason") or next_action.get("label") or "Website preparation needs attention.", retryable=False)
+            from . import website_prepare_setup_cap as setup_cap
+            if step == "setup" and setup_cap.reached(op):
+                # Facts that change on every pass never repeat a digest; this
+                # operation's own setup count bounds that loop instead.
+                setup_cap.hold(op, now=now)
+                saved = _finish_prepare(op, now=now)
+                if saved is not None:
+                    # Only a stop that was saved is one staff can act on.
+                    setup_cap.alert(saved, now=now)
+                return saved
             op.receipt.update(current_step=step, blocked_step=None, reason_code="", retryable=False,
                 status="working", message=f"Preparing articles: {step.replace('-', ' ')}.", user_action=None)
             handler = (handlers or {}).get(step)
@@ -1162,6 +1177,7 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 if step == "setup":
                     from .website_hosted_setup_lineage import discard_for_new_setup
                     discard_for_new_setup(op)
+                    setup_cap.record(op, run_id)
                 op.receipt.update(child_run_id=run_id, **{f"{step}_run_id": run_id})
                 op.payload = {**op.payload, "run_id": run_id}
                 break
