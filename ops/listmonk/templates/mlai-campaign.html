@@ -63,7 +63,7 @@
         </tr>
         <tr>
           <td style="padding:14px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:20px;color:#9ca3af">
-            {{ .Subscriber.Attribs.consent_reason }}<br>
+            {{ if .Subscriber.Attribs.consent_reason }}{{ .Subscriber.Attribs.consent_reason }}<br>{{ end }}
             MLAI &middot; Suite 350, 585 Little Collins St, Melbourne VIC 3000 &middot; <a href="mailto:hi@mlai.au" style="color:#9ca3af;text-decoration:underline">hi@mlai.au</a><br>
             <a href="{{ UnsubscribeURL }}" style="color:#9ca3af;text-decoration:underline">Unsubscribe from MLAI emails</a>
           </td>
@@ -73,6 +73,5 @@
     </td>
   </tr>
 </table>
-{{ TrackView }}
 </body>
 </html>
