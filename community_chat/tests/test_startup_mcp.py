@@ -36,7 +36,8 @@ OTHER_COMPANY_ID = "7e399ce7-8d85-4970-ad8e-aa13bc3b028c"
 def grant(**changes):
     return {"id": "grant", "user_id": 7, "auth_version": 3, "session_id": "session", "company_id": COMPANY_ID,
         "client_id": "client", "clientName": "Claude", "scopes": sorted(config.SCOPES), "resource": config.mcp_url(),
-        "redirectOrigin": "https://claude.ai", "createdAt": timezone.now().isoformat(), "expiresAt": int(time.time()) + 3600, "revoked": False, **changes}
+        "redirectOrigin": "https://claude.ai", "createdAt": timezone.now().isoformat(), "expiresAt": int(time.time()) + 3600, "revoked": False,
+        "binding": "account", "boundAt": time.time() - 60, **changes}
 
 
 def principal():

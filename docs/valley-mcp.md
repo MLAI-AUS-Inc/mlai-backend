@@ -276,9 +276,16 @@ Applies to `/mcp/mlai` and `/mcp/valley` unless stated. No migration.
 - **Pulse is one capability (`/mcp/mlai` only).** Approving either Pulse scope
   grants both. `/mcp/valley` still grants exactly the requested scopes.
 - **Account binding.** Grants made only of `startup:` and `article:` scopes are
-  checked against user id and `auth_version`. Grants with `community:` or
-  `agent:` scopes are still also checked against the approving account session
-  and device.
+  checked against user id and `auth_version`, so signing in again does not end
+  them. They record the approving session's installation and device key
+  (`"binding": "account"`) and still end when that device is revoked (Chat device
+  removal, account merge, ban: any `CommunityChatDevice` revoked after approval)
+  or when that installation explicitly signs out (`auth/session/logout/` writes a
+  non-expiring per-installation marker). Grants made before this rule have no
+  marker and keep the old session and device check until their first successful
+  refresh converts them, so a grant whose session was revoked before deploy is
+  never revived. Grants with `community:` or `agent:` scopes are still checked
+  against the approving account session and device.
 - **Sliding expiry.** Each successful refresh moves the grant's expiry to now
   plus `MLAI_MCP_GRANT_IDLE_TTL_DAYS`. Personal-agent grants are excluded.
 - **Refresh.** `resource` may be omitted on the token endpoint and a trailing

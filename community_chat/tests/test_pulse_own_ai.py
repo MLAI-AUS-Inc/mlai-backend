@@ -331,17 +331,90 @@ class ConnectionLifetimeTests(SimpleTestCase):
         self.assertAlmostEqual(self.approve(PULSE, PULSE)["expiresAt"], time.time() + 45 * 86400, delta=5)
 
     def test_grant_made_before_this_change_keeps_working_and_gains_sliding_expiry(self):
-        # Thirty-day grant bound to a browser sign-in that has since been replaced.
-        value = self.stored(id="older", scopes=["startup:brief:read"], expiresAt=int(time.time()) + 2 * 86400)
-        self.valid_session.return_value = False
-        self.sessions.select_related.return_value.filter.return_value.first.return_value = None
+        # Thirty-day grant made before account binding, its sign-in still live.
+        session_id, installation = str(uuid4()), str(uuid4())
+        value = self.stored(id="older", scopes=["startup:brief:read"], expiresAt=int(time.time()) + 2 * 86400,
+            session_id=session_id, binding=None, boundAt=None)
+        self.sessions.filter.return_value.first.return_value = Obj(pk=UUID(session_id), installation_id=UUID(installation), public_key="AB" * 32)
         tokens = oauth.issue_tokens("older")
-        rotated = self.refresh(tokens["refresh_token"], resource=config.mlai_url())
-        self.assertGreater(cache.get(oauth.key("grant", "older"))["expiresAt"], time.time() + 179 * 86400)
-        self.assertEqual(rotated["scope"], "startup:brief:read")  # Existing grants are never widened.
-        # Its listing entry had lapsed with the old thirty-day index; refresh restores it.
-        self.assertEqual([row["id"] for row in oauth.grants_for(self.user, COMPANY_ID)], ["older"])
-        self.sessions.select_related.assert_not_called()
+        with patch.object(oauth.CommunityChatDevice, "objects") as devices:
+            devices.filter.return_value.exists.return_value = False
+            rotated = self.refresh(tokens["refresh_token"], resource=config.mlai_url())
+            saved = cache.get(oauth.key("grant", "older"))
+            self.assertGreater(saved["expiresAt"], time.time() + 179 * 86400)
+            self.assertEqual(rotated["scope"], "startup:brief:read")  # Existing grants are never widened.
+            # Its listing entry had lapsed with the old thirty-day index; refresh restores it.
+            self.assertEqual([row["id"] for row in oauth.grants_for(self.user, COMPANY_ID)], ["older"])
+            # From its first refresh it follows the account and that sign-in's device.
+            self.assertEqual((saved["binding"], saved["installation_id"], saved["public_key"]), ("account", installation, "ab" * 32))
+            self.valid_session.return_value = False  # Signed in again later.
+            self.assertEqual(oauth.authenticate_token(rotated["access_token"], resource=config.mlai_url()).user, self.user)
+
+    def test_grant_made_before_this_change_whose_session_was_revoked_stays_ended(self):
+        # Signed out, or its device was revoked, before account binding shipped.
+        value = self.stored(id="older", scopes=sorted(config.SCOPES), session_id=str(uuid4()), binding=None, boundAt=None)
+        tokens = oauth.issue_tokens("older")
+        self.valid_session.return_value = False
+        with self.assertRaises(AuthenticationFailed):
+            self.refresh(tokens["refresh_token"])
+        with self.assertRaises(AuthenticationFailed):
+            oauth.valid_grant("older")
+        saved = cache.get(oauth.key("grant", "older"))
+        self.assertNotIn("binding", {name for name, item in saved.items() if item})
+        self.assertEqual(saved["expiresAt"], value["expiresAt"])
+        self.assertNotIn("spent", cache.get(oauth.key("refresh", tokens["refresh_token"])))
+
+    def approve_on_device(self):
+        session = Obj(pk=uuid4(), user_id=7, installation_id=uuid4(), public_key="CD" * 32)
+        intent = oauth.create_intent({"client_id": self.client["client_id"], "redirect_uri": self.client["redirect_uris"][0],
+            "response_type": "code", "resource": config.mlai_url(), "scope": " ".join(PULSE), "code_challenge": "x" * 43,
+            "code_challenge_method": "S256", "state": "state"})
+        url = oauth.approve_intent(intent["requestId"], user=self.user, session=session, company_id=COMPANY_ID, approve=True, scopes=PULSE)
+        value = cache.get(oauth.key("grant", cache.get(oauth.key("code", parse_qs(urlsplit(url).query)["code"][0]))["grant_id"]))
+        return session, value
+
+    def test_revoking_the_approving_device_ends_a_startup_grant(self):
+        session, value = self.approve_on_device()
+        self.assertEqual((value["binding"], value["installation_id"], value["public_key"]), ("account", str(session.installation_id), "cd" * 32))
+        with patch.object(oauth.CommunityChatDevice, "objects") as devices:
+            devices.filter.return_value.exists.return_value = False
+            tokens = oauth.issue_tokens(value["id"])
+            self.valid_session.return_value = False  # Signing in again does not end it.
+            self.assertEqual(oauth.valid_grant(value["id"]).user, self.user)
+            query = devices.filter.call_args
+            self.assertEqual(query.kwargs["user_id"], 7)
+            self.assertAlmostEqual(query.kwargs["revoked_at__gte"].timestamp(), value["boundAt"], delta=0.001)
+            self.assertIn(("public_key", "cd" * 32), query.args[0].children)
+            self.assertIn(("installation_id", str(session.installation_id)), query.args[0].children)
+            # Removed in Chat, or revoked by an account merge or ban.
+            devices.filter.return_value.exists.return_value = True
+            with self.assertRaises(AuthenticationFailed):
+                oauth.valid_grant(value["id"])
+            with self.assertRaises(AuthenticationFailed):
+                self.refresh(tokens["refresh_token"])
+
+    def test_signing_out_ends_startup_grants_that_device_approved_but_signing_in_again_does_not(self):
+        with patch.object(oauth.CommunityChatDevice, "objects") as devices:
+            devices.filter.return_value.exists.return_value = False
+            session, value = self.approve_on_device()
+            self.valid_session.return_value = False
+            self.assertEqual(oauth.valid_grant(value["id"]).user, self.user)
+            # Another device signing out changes nothing.
+            oauth.end_installation_grants(7, str(uuid4()))
+            self.assertEqual(oauth.valid_grant(value["id"]).user, self.user)
+            from community_chat import views as chat_views
+            with patch.object(chat_views, "revoke_account_session", return_value=Obj(user_id=7, installation_id=session.installation_id)):
+                response = chat_views.AccountSessionLogoutView.as_view()(APIRequestFactory().post(
+                    "/api/v1/community-chat/auth/session/logout/", {"refresh_token": "synthetic"}, format="json"))
+            self.assertEqual(response.status_code, 200)
+            with self.assertRaises(AuthenticationFailed):
+                oauth.valid_grant(value["id"])
+            # A connection approved after signing back in on that device works.
+            time.sleep(0.01)
+            self.valid_session.return_value = True
+            _, later = self.approve_on_device()
+            self.valid_session.return_value = False
+            self.assertEqual(oauth.valid_grant(later["id"]).user, self.user)
 
     def test_community_and_personal_agent_grants_stay_bound_to_their_session(self):
         self.stored(id="community", scopes=["community:read", "startup:brief:read"])

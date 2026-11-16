@@ -17,17 +17,19 @@ import secrets
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone as dt_timezone
 from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.exceptions import APIException, AuthenticationFailed, PermissionDenied, ValidationError
 
 from community_chat.account_sessions import InvalidAccountSession, _valid_session, _validate_device_owner
-from community_chat.models import CommunityChatAccountSession
+from community_chat.models import CommunityChatAccountSession, CommunityChatDevice
 from community_chat.onboarding import require_community_access
 from founder_tools.models import VibeRaisingCompany
 from .config import ALL_SCOPES, DOT_MESSAGES_SCOPE, DOT_SCOPES, SCOPES, availability, mcp_url, mlai_url, public_base, resource_scopes
@@ -255,6 +257,43 @@ def assert_device_owner(session):
         raise AuthenticationFailed("Account device authorisation was revoked.") from exc
 
 
+def account_binding(session):
+    """Grant fields that let a startup grant outlive its session but not its device."""
+    try:
+        installation_id = str(UUID(str(getattr(session, "installation_id", ""))))
+    except ValueError:
+        installation_id = ""
+    public_key = getattr(session, "public_key", "")
+    return {"binding": "account", "boundAt": time.time(), "installation_id": installation_id,
+        "public_key": public_key.strip().lower() if isinstance(public_key, str) else ""}
+
+
+def end_installation_grants(user_id, installation_id):
+    """Record a sign-out: account-bound grants that device approved end with it.
+
+    Signing in again revokes the old session too, which must not end them, so
+    only an explicit sign-out (and device revocation, checked in the database)
+    does. The marker never expires: grants can slide indefinitely.
+    """
+    if installation_id:
+        cache.set(key("signed-out", f"{user_id}:{installation_id}"), time.time(), timeout=None)
+
+
+def assert_installation_live(user, grant):
+    """Fail an account-bound grant once its approving device signed out or was revoked."""
+    bound_at = float(grant.get("boundAt") or 0)
+    installation_id, public_key = grant.get("installation_id") or "", grant.get("public_key") or ""
+    signed_out = cache.get(key("signed-out", f"{user.pk}:{installation_id}")) if installation_id else None
+    if signed_out is not None and float(signed_out) >= bound_at:
+        raise AuthenticationFailed("You signed out of MLAI on the device that approved this connection.")
+    device = Q(public_key=public_key) if public_key else Q()
+    if installation_id:
+        device = (device | Q(installation_id=installation_id)) if public_key else Q(installation_id=installation_id)
+    if (public_key or installation_id) and CommunityChatDevice.objects.filter(device, user_id=user.pk,
+            revoked_at__gte=datetime.fromtimestamp(bound_at, tz=dt_timezone.utc)).exists():
+        raise AuthenticationFailed("The device that approved this connection was removed from your account.")
+
+
 def grant_subject(company_id):
     """Use one canonical revocation/index identity for a company or account grant."""
     return str(_company_uuid(company_id)) if company_id else "account"
@@ -305,6 +344,7 @@ def approve_intent(request_id, *, user, session, company_id, approve, scopes=Non
             "session_id": str(session.pk), "company_id": str(company.pk) if company else None, "client_id": intent["client_id"],
             "clientName": intent["clientName"], "redirectOrigin": intent["redirectOrigin"], "scopes": sorted(selected), "resource": intent["resource"], "community_channels": channels,
             "createdAt": timezone.now().isoformat(), "expiresAt": int(time.time()) + (GRANT_TTL if native else grant_idle_ttl()), "revoked": False,
+            **({} if session_bound(selected) else account_binding(session)),
             "revocation_epoch": cache.get(key("epoch", f"{user.pk}:{grant_subject(company.pk if company else None)}")) or ""}
         # A disconnect marker must outlive every grant issued after it.
         cache.touch(key("epoch", f"{user.pk}:{grant_subject(company.pk if company else None)}"), None)
@@ -357,11 +397,15 @@ def valid_grant(grant_id, *, scope=None):
     user = get_user_model().objects.filter(pk=grant["user_id"], is_active=True).first()
     if user is None or user.auth_version != grant["auth_version"]:
         raise AuthenticationFailed("Account authorisation was revoked.")
-    if session_bound(grant["scopes"]):
+    if session_bound(grant["scopes"]) or grant.get("binding") != "account":
+        # Grants made before account binding keep their session check, so one
+        # whose session was signed out or whose device was revoked stays ended.
         session = CommunityChatAccountSession.objects.select_related("user").filter(pk=grant["session_id"], user=user).first()
         if not _valid_session(session, timezone.now()):
             raise AuthenticationFailed("Account session was revoked.")
         assert_device_owner(session)
+    else:
+        assert_installation_live(user, grant)
     # Pulse and Articles are reviewed and published in MLAI Chat, whose startup
     # APIs all require an approved membership, so startup-only grants need it too.
     try:
@@ -473,11 +517,24 @@ def _slide_grant(grant):
     """
     if set(grant["scopes"]) & (DOT_SCOPES | {DOT_MESSAGES_SCOPE}) or grant.get("native_agent_grant_id"):
         return grant
+    changes = {}
+    if grant.get("binding") != "account" and not session_bound(grant["scopes"]):
+        # A grant made before account binding just passed its session check:
+        # from now on it follows the account and that session's device.
+        try:
+            session_id = UUID(str(grant.get("session_id")))
+        except ValueError:
+            session_id = None
+        session = CommunityChatAccountSession.objects.filter(pk=session_id).first() if session_id else None
+        if session is not None:
+            changes.update(account_binding(session))
     expires = int(time.time()) + grant_idle_ttl()
-    if expires <= grant["expiresAt"]:
+    if expires > grant["expiresAt"]:
+        changes["expiresAt"] = expires
+    if not changes:
         return grant
-    grant = {**grant, "expiresAt": expires}
-    cache.set(key("grant", grant["id"]), grant, timeout=grant_idle_ttl())
+    grant = {**grant, **changes}
+    cache.set(key("grant", grant["id"]), grant, timeout=max(1, int(grant["expiresAt"] - time.time())))
     subject = f"{grant['user_id']}:{grant_subject(grant.get('company_id'))}"
     # Grants made before this change referenced a marker and an index that
     # expired after 30 days. Keep both for as long as the grant can live.
