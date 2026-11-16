@@ -37,6 +37,7 @@ from roo.services import PointsService
 from . import google, scheduling
 from .models import (
     hash_invite_token,
+    mask_email,
     NEW_MENTOR_PRICE_ROO,
     NEW_MENTOR_SESSION_MINUTES,
     LOCATION_MLAI_SPACE,
@@ -832,7 +833,13 @@ class MentoringService:
 
     @staticmethod
     def _load_invite(token, user, *, lock=False):
-        """The invite for this token, or a MentoringError. Never consumes it."""
+        """The invite for this token, or a MentoringError. Never consumes it.
+
+        An invite made for an email address (no account yet) belongs to whoever
+        signs in with that address: the first time its owner opens it, it is bound
+        to their account. Anyone else is told which address to sign in with,
+        masked.
+        """
         if not isinstance(token, str) or not 20 <= len(token) <= 200:
             raise MentoringError('invite_invalid', 'This invite link is not valid.', 404)
         query = MentorInvite.objects.select_for_update() if lock else MentorInvite.objects
@@ -840,10 +847,19 @@ class MentoringService:
             invite = query.get(token_hash=hash_invite_token(token))
         except MentorInvite.DoesNotExist:
             raise MentoringError('invite_invalid', 'This invite link is not valid.', 404)
+        if invite.user_id is None and invite.revoked_at is None and getattr(invite, 'email', ''):
+            owner = get_user_model().objects.resolve_email(invite.email)
+            if owner is not None and owner.pk == user.pk:
+                with transaction.atomic():
+                    # Bind once, under the row lock, so two tabs cannot race.
+                    MentorInvite.objects.select_for_update().filter(pk=invite.pk, user__isnull=True).update(user=user)
+                invite.user_id = user.pk
         if invite.user_id != user.pk:
+            hint = mask_email(getattr(invite, 'email', ''))
             raise MentoringError(
                 'invite_wrong_user',
-                'This invite was sent to a different account. Sign in as the invited person.', 403,
+                f'This invite was sent to {hint}. Sign in with that email address.' if hint
+                else 'This invite was sent to a different account. Sign in as the invited person.', 403,
             )
         if invite.revoked_at is not None:
             raise MentoringError('invite_revoked', 'This invite is no longer valid.', 410)

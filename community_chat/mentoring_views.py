@@ -15,6 +15,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from mentoring import invite_email
 from mentoring.admin_service import MentoringAdminService
 from mentoring.models import MentorSession
 from mentoring.service import MentoringError, MentoringService, serialize_session
@@ -212,14 +213,18 @@ class MentoringAdminAccessView(MentoringBaseView):
     """Tells the client whether to show the Mentoring admin tab. Never an error for members."""
 
     def get(self, request):
-        return Response({'is_admin': is_mentoring_admin(request)})
+        is_admin = is_mentoring_admin(request)
+        return Response({
+            'is_admin': is_admin,
+            'features': {'invite_email': bool(is_admin and invite_email.available())},
+        })
 
 
 class MentoringAdminMembersView(MentoringAdminView):
     requires_editor = True
 
     def get(self, request):
-        return Response({'members': MentoringAdminService.search_members(request.query_params.get('q', ''))})
+        return Response(MentoringAdminService.search_members(request.query_params.get('q', '')))
 
 
 class MentoringAdminInvitesView(MentoringAdminView):
@@ -229,7 +234,34 @@ class MentoringAdminInvitesView(MentoringAdminView):
                                      for row in MentoringAdminService.list_invites(status)]})
 
     def post(self, request):
-        return Response(MentoringAdminService.create_invite(request.user, _body(request).get('user_id')), status=201)
+        body = _body(request)
+        return Response(MentoringAdminService.create_invite(
+            request.user,
+            user_id=body.get('user_id'),
+            email=body.get('email') if body.get('user_id') is None else None,
+            send_email=body.get('send_email') is True,
+            note=body.get('note'),
+        ), status=201)
+
+
+class MentoringAdminInvitePreviewView(MentoringAdminView):
+    """The invite email as it would go out. POST so a note never sits in a URL."""
+
+    requires_editor = True
+
+    def post(self, request):
+        body = _body(request)
+        return Response(MentoringAdminService.preview_invite(
+            request.user,
+            user_id=body.get('user_id'),
+            email=body.get('email') if body.get('user_id') is None else None,
+            note=body.get('note'),
+        ))
+
+
+class MentoringAdminInviteResendView(MentoringAdminView):
+    def post(self, request, invite_id):
+        return Response(MentoringAdminService.resend_invite(request.user, invite_id, note=_body(request).get('note')))
 
 
 class MentoringAdminInviteRevokeView(MentoringAdminView):

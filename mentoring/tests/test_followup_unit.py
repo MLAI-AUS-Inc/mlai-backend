@@ -48,7 +48,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_reviewed_migration_inventory(self):
         names = sorted(p.name for p in (Path(__file__).resolve().parents[1] / 'migrations').glob('0*.py'))
-        self.assertEqual(names, ['0001_initial.py', '0002_invites_brief_questions_followup.py', '0003_instant_bookings.py', '0004_meeting_capture.py'])
+        self.assertEqual(names, ['0001_initial.py', '0002_invites_brief_questions_followup.py', '0003_instant_bookings.py', '0004_meeting_capture.py', '0005_invite_email.py'])
 
 
 class InviteFixture(unittest.TestCase):
@@ -118,6 +118,32 @@ class InviteLifecycleTests(InviteFixture):
         self.assertEqual(self.code(MentoringService.submit_application, other, form()), 'invite_wrong_user')
         self.profile.save.assert_not_called()
         self.invite.save.assert_not_called()
+
+    def test_email_invite_binds_to_the_account_that_signs_in_with_that_address(self):
+        self.invite.user_id = None
+        self.invite.pk = 3
+        self.invite.email = 'new@example.com'
+        users = MagicMock()
+        users.objects.resolve_email.return_value = self.user
+        with patch.object(service, 'get_user_model', return_value=users):
+            out = MentoringService.check_invite(self.user, TOKEN)
+        self.assertEqual(out['state'], 'ready')
+        users.objects.resolve_email.assert_called_once_with('new@example.com')
+        self.invites.objects.select_for_update.return_value.filter.assert_called_with(pk=3, user__isnull=True)
+        self.assertEqual(self.invite.user_id, 5)
+
+    def test_email_invite_refuses_another_account_and_masks_the_address(self):
+        self.invite.user_id = None
+        self.invite.email = 'sonia@talathrive.com'
+        users = MagicMock()
+        users.objects.resolve_email.return_value = SimpleNamespace(pk=99)
+        with patch.object(service, 'get_user_model', return_value=users):
+            with self.assertRaises(MentoringError) as ctx:
+                MentoringService.check_invite(self.user, TOKEN)
+        self.assertEqual(ctx.exception.code, 'invite_wrong_user')
+        self.assertIn('s\u2022\u2022\u2022@talathrive.com', ctx.exception.message)
+        self.assertNotIn('sonia@', ctx.exception.message)
+        self.assertIsNone(self.invite.user_id)
 
     def test_expired_invite_is_refused(self):
         self.invite.expires_at = NOW - timedelta(seconds=1)

@@ -21,4 +21,11 @@ SAMPLE_CONTEXT = {
     },
     "monthly_update_7d": {"first_name": "Sam", "startups": _STARTUPS},
     "monthly_update_1d": {"first_name": "Sam", "startups": _STARTUPS},
+    "mentor_invite": {
+        "first_name": "Sam", "inviter_name": "Sam Donegan", "inviter_first_name": "Sam",
+        "note": "You helped three founders at the last demo night. We'd love more people to get that.",
+        "accept_url": "https://chat.mlai.au/mentoring/apply?mentor_invite=sample",
+        "explainer_url": "https://mlai.au/mentors", "expires_on": "30 November 2026",
+        "invited_email": "sam@example.com", "asset_base": "https://api.mlai.au/static/crm/email",
+    },
 }

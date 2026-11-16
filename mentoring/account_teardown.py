@@ -3,7 +3,7 @@ from django.db import connection
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import MentorBookingAttempt, MentorSession, MentorTimeReservation
+from .models import MentorBookingAttempt, MentorInvite, MentorSession, MentorTimeReservation
 from .service import MentoringError, _lock_users
 
 
@@ -33,4 +33,7 @@ def prepare_account_deletion(user):
     # No provider or ledger obligation remains. Historic ledgers are retained by
     # their own domain; these dependency rows no longer need to prevent cascade.
     MentorTimeReservation.objects.filter(session_id__in=ids).delete()
+    # Address-only invites to this person's email would outlive the cascade.
+    if user.email:
+        MentorInvite.objects.filter(user__isnull=True, email__iexact=user.email).delete()
     MentorBookingAttempt.objects.filter(session_id__in=ids).delete()

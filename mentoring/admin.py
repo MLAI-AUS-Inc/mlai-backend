@@ -81,11 +81,12 @@ class MentorInviteAdmin(admin.ModelAdmin):
     is_active there to approve.
     """
 
-    list_display = ('user', 'created_at', 'expires_at', 'status', 'created_by')
+    list_display = ('user', 'email', 'created_at', 'expires_at', 'status', 'emailed_at', 'created_by')
     raw_id_fields = ('user',)
-    readonly_fields = ('created_at', 'used_at', 'revoked_at', 'created_by')
-    fields = ('user', 'expires_at', 'created_at', 'used_at', 'revoked_at', 'created_by')
-    search_fields = ('user__email', 'user__first_name', 'user__last_name')
+    readonly_fields = ('created_at', 'used_at', 'revoked_at', 'created_by', 'emailed_at', 'send_count')
+    fields = ('user', 'email', 'expires_at', 'created_at', 'used_at', 'revoked_at', 'created_by',
+              'emailed_at', 'send_count')
+    search_fields = ('email', 'user__email', 'user__first_name', 'user__last_name')
     actions = ('revoke_invites',)
 
     @admin.display(description='Status')
@@ -102,11 +103,14 @@ class MentorInviteAdmin(admin.ModelAdmin):
     def save_model(self, request, obj, form, change):
         if change:
             return  # invites are never edited, only revoked
-        if MentorProfile.objects.filter(user=obj.user, is_active=True).exists():
+        if obj.user is None and not obj.email:
+            self.message_user(request, 'Choose a user or enter an email address; no invite created.', messages.ERROR)
+            return
+        if obj.user is not None and MentorProfile.objects.filter(user=obj.user, is_active=True).exists():
             self.message_user(request, 'That user is already an active mentor; no invite created.', messages.ERROR)
             return
         ttl_days = max((obj.expires_at - timezone.now()).total_seconds() / 86400, 0.01)
-        invite, token = MentorInvite.issue(obj.user, created_by=request.user, ttl_days=ttl_days)
+        invite, token = MentorInvite.issue(obj.user, created_by=request.user, ttl_days=ttl_days, email=obj.email)
         obj.pk = invite.pk
         obj.token_hash = invite.token_hash
         obj.created_by = invite.created_by
