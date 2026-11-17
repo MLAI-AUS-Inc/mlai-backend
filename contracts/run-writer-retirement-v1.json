@@ -1670,12 +1670,12 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "e578815f9c01991ddb9d32e0bde28736400b8f7d6f80f12f09d20be7d783b0b5",
+      "function_sha256": "593d0459a0f95e81ae00e30366d99ad66f5400294261d69a85af71fe0b7efe4a",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_retired_writers.py"
       ],
-      "reason": "Old Valley telemetry refuses actual event owner with409 before serializer/meta/history/clocks.",
+      "reason": "Job bookkeeping runs under the same run-row lock as execution claims so stale tracking cannot replace a successor fence. The typed-owner early return remains in place.",
       "guard": "Fresh actual Run authoritative_run check before mutation; c3aa1ede.",
       "pending_owner": null
     },
