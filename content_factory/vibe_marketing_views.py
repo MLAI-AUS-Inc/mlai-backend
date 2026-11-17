@@ -6855,6 +6855,7 @@ def _save_setup_merge_result(run, *, checks_status, merge_response=None, merged_
         setup["prNumber"] = pr_number
     merged_at = merged_at or timezone.now().isoformat()
     result["status"] = "merged"
+    result.pop("merge_blocked_reason", None)
     result["setup_status"] = "merged"
     result["setupStatus"] = "merged"
     result["merge_status"] = "merged"
@@ -7090,6 +7091,25 @@ def _schedule_setup_pr_merge(*, run, context, config, head_sha, verified_sha, pr
     return op
 
 
+def _record_setup_verification_refusal(run, head, error):
+    """Retain the final exact-head refusal without changing the reviewed setup status."""
+    from .run_provider_facts import save_provider_result
+    with transaction.atomic():
+        locked = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).first()
+        # The observation belongs to this attempt. A later approval, resume or
+        # merge owns its own status and reason.
+        if (not locked or locked.result != run.result or locked.run_request != run.run_request
+                or locked.status != run.status or locked.approval_state != run.approval_state):
+            return
+        result = locked.result or {}
+        refusal = {"code": error.code, "message": str(error), "head_sha": head}
+        if result.get("setup_merge_refusal") == refusal:
+            return
+        updated = {**result, "setup_merge_refusal": refusal, "merge_blocked_reason": str(error)}
+        save_provider_result(locked, updated, baseline=result, legacy_fields=["result", "updated_at"])
+        run.result = locked.result
+
+
 def _setup_pr_changes_outcome(*, run, context, config, pull, pr_number, checks, automatic):
     """Re-verify an approved setup PR whose head changed after its preview passed.
 
@@ -7202,8 +7222,15 @@ def _attempt_setup_publish_merge_authorized(*, run, context, automatic=False):
             pr_number=pr_number, checks=checks, automatic=automatic)
         if changes is not None:
             return changes
-        # Refused as before, unless a refreshed proof now covers this head.
-        validate_setup_merge_source(run, (pull.get("head") or {}).get("sha"))
+        # A refreshed proof can now cover this head. Persist a final refusal
+        # without switching the run out of the statuses eligible for retry.
+        head = (pull.get("head") or {}).get("sha")
+        try:
+            validate_setup_merge_source(run, head)
+        except WebsiteAuthorityError as final:
+            if final.code == "setup_verification_required":
+                _record_setup_verification_refusal(run, head, final)
+            raise
 
     from .website_setup_merge_policy import (setup_merge_policy, setup_merge_refusal,
         setup_pr_adds_verification_kit, verification_kit_checks)
@@ -7270,7 +7297,8 @@ def _merge_setup_pr_for_run(*, run, context):
     if kind == "manual_required":
         detail = f"{detail} Merge the setup PR in GitHub, then refresh merge status."
     return None, Response(
-        {"detail": detail, "checks": outcome.get("checks") or {}},
+        {"detail": detail, "checks": outcome.get("checks") or {},
+         **({"code": outcome["code"]} if outcome.get("code") else {})},
         status=status.HTTP_409_CONFLICT,
     )
 

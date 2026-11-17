@@ -269,6 +269,12 @@ def summary_for(config, *, company_id=None):
         actions = [action for action in actions if action not in {"setup", "publish", "preview"}]
         if any(item.get("code") == ACCESS_BLOCKER for item in connection.blockers) and "reconnect" not in actions:
             actions.append("reconnect")
+    # The stored deletion epoch must outlive every reset. Once a target in
+    # this generation verifies, the old deletion is no longer a user blocker.
+    blockers = connection.blockers
+    if (selected and selected.verified_at and connection.verified_sha == selected.source_sha
+            and capabilities["publishingReady"]):
+        blockers = [row for row in blockers if row.get("code") != "website_data_deleted"]
     latest = connection.operations.exclude(action__in=["goal-usage", "goal-alert", "usage-refresh"]).order_by("-created_at").first()
     summary = {
         "latestOperation": {"id": str(latest.pk), "action": latest.action, "state": latest.state, "receipt": latest.receipt} if latest else None,
@@ -277,7 +283,7 @@ def summary_for(config, *, company_id=None):
         "repositoryId": connection.repository_id, "githubRepo": connection.github_repo,
         "appRoot": connection.app_root, "branch": connection.branch, "siteUrl": connection.site_url,
         "status": connection.state, "capabilities": capabilities, "allowedActions": actions,
-        "blockers": connection.blockers, "verifiedSha": connection.verified_sha or None,
+        "blockers": blockers, "verifiedSha": connection.verified_sha or None,
         "scannedSha": getattr(config, "last_scanned_sha", "") or None, "observedSha": observed_source_sha(connection) or None,
         "configurationVersion": connection.configuration_version,
     }
@@ -1506,7 +1512,7 @@ def settled_setup_run(connection, *, source_sha):
         and str(row.github_repo or "").casefold() == str(connection.github_repo or "").casefold()), None)
 
 
-def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False):
+def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False, merged=False):
     """Read the worker's exact approved setup proof before a target exists."""
     from .website_contract import SHA_PATTERN
     saved = scoped_run_contract(run)
@@ -1520,7 +1526,13 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
     base_sha = str(saved.get("expected_source_sha") or "")
     generation = result.get("resume_generation")
     from .website_hosted_build import enabled as hosted_enabled, current_scan_source, valid_hosted_build
-    if not base_sha and not website.verified_sha:
+    if merged and not base_sha:
+        # After the merge the branch points at a new commit. Its generation's
+        # historical observation still pins the first setup's original base.
+        recorded = str(result.get("source_sha") or "")
+        if _source_observed(website, recorded):
+            base_sha = recorded
+    if not merged and not base_sha and not website.verified_sha:
         # A first-time site has no verified source for Prepare to pin, so its setup
         # is dispatched without expected_source_sha and every merge was refused as
         # "changed" (PawShare setup ccd3ea22, 23 Oct 2026). Such a setup is built
@@ -1543,15 +1555,16 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
     build_passed = gates.get("local_build") is True and gates.get("local_build_skipped") is False
     if hosted and gates.get("local_build_skipped") is True:
         build_passed = valid_hosted_build(run, preview, head_sha, website)
-    approved_setup = (run.approval_state == "approved" and result.get("status") in SETUP_PR_OPEN_STATUSES
-        and setup.get("status") in SETUP_PR_OPEN_STATUSES)
+    approved_statuses = {"merged"} if merged else SETUP_PR_OPEN_STATUSES
+    approved_setup = (run.approval_state == "approved" and result.get("status") in approved_statuses
+        and setup.get("status") in approved_statuses)
     pending_setup = (automatic_approval and run.status == "awaiting_approval" and run.approval_state == "approval_required"
         and result.get("status") == "preview_ready" and setup.get("status") == "preview_ready")
     # The preview platform could not run the app, so Content Factory parked the
     # setup for code review and the founder approved the branch diff itself (La Vie
     # setup c12e1329, 23 Oct 2026). That approval stands in for the browser proof;
     # source, local build, source-quality and exact-head checks still apply.
-    code_review_setup = bool(approved_setup and result.get("preview_runtime_unsupported") is True
+    code_review_setup = bool(not merged and approved_setup and result.get("preview_runtime_unsupported") is True
         and setup.get("preview_runtime_unsupported") is True and proof.get("status") == "code_review_ready")
     adopted_kit = (run.approval_state == "not_required" and result.get("status") == "adopted"
         and setup.get("status") == "adopted" and result.get("adopted") is True and setup.get("adopted") is True

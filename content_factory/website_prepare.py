@@ -840,6 +840,9 @@ def _dispatch_prepare_step(op, context, config, step, *, user, journey=None):
     from .website_verification import current_ci_attestation, discover_source_attestation, record_ci_attestation, verify_live_deployment
     website = config.website_connection
     target = website.targets.filter(generation=website.generation, target_key=config.default_publish_target_id).first()
+    if live_url and step in {"ci-attestation", "verify"} and op.receipt.get("merged_setup_run_id"):
+        from .website_setup_merge_proof import carry_setup_merge_proof
+        target = carry_setup_merge_proof(op, config, target)
     if target is None:
         raise WebsiteAuthorityError("verified_target_required", "Waiting for articles build and render proof.", retryable=True)
     repository = (journey or {}).get("repository") or {}

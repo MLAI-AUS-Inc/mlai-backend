@@ -5684,6 +5684,29 @@
       "reason": "The reported .update is a Python dict update on a copied run.result; persistence is save_provider_result with a deep baseline, recording only that MLAI's own superseded setup PR was closed (pr_closed, superseded_by_run_id). No lifecycle, request or control field changes.",
       "guard": "Receiver is a local dict copy; persisted through save_provider_result with deep baseline after a DB recheck of the connection generation, repository and branch.",
       "pending_owner": null
+    },
+    {
+      "identity": "content_factory/website_setup_merge_proof.py:carry_setup_merge_proof:51a5152e7e06fb160848afb6389e04820d94762714aa47a79948a84b1b11df99:1",
+      "path": "content_factory/website_setup_merge_proof.py",
+      "function": "carry_setup_merge_proof",
+      "line": 120,
+      "kind": "inferred_run_save",
+      "fields": [],
+      "statement_sha256": "51a5152e7e06fb160848afb6389e04820d94762714aa47a79948a84b1b11df99",
+      "duplicate_ordinal": 1,
+      "direct_model_chain": false,
+      "inferred_receivers": [
+        "locked"
+      ],
+      "local_guard_mentioned": false,
+      "function_sha256": "29dce05f1add073029c83a55ede9ac760f5e8f642de5fb9c47e537da95a06af5",
+      "classification": "non_cf_model",
+      "test_refs": [
+        "content_factory/tests_setup_merge_proof.py"
+      ],
+      "reason": "Writes the build proof on WebsiteConnectionTarget. The setup Run supplies read-only evidence.",
+      "guard": "The active Prepare lease, original setup scope, verified render, selected target, observed head and identical Git trees fence promotion under the connection authority lock.",
+      "pending_owner": null
     }
   ],
   "control_contexts": [
@@ -6926,6 +6949,15 @@
       "reason": "Bounded reconciliation of a lost setup approval response: exact approved child, current parent generation, original immutable repository/branch/root and existing PR required. Only active error projection is superseded; no independent database writer, repeated consent, dispatch or merge authority; prior counters and retry window are retained.",
       "test_refs": [
         "content_factory/tests_prepare_journey_unit.py"
+      ]
+    },
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "_record_setup_verification_refusal",
+      "function_sha256": "8da095f8ad6b162b378d9ab7d3ddc56c520dccb17fd1bd23cd9ea4d0fa2cb8e1",
+      "reason": "Records a final setup merge refusal with the existing provider fact writer. The row lock and attempt comparison protect concurrent proof, approval and merge updates.",
+      "test_refs": [
+        "content_factory/tests_setup_merge_proof.py"
       ]
     }
   ],

@@ -120,12 +120,16 @@ def _setup_pull_merged_as(website, pull, *, number, head_sha, source_sha):
         and head.get("sha") == head_sha and _pull_from_selected_repository(website, head, base))
 
 
-def _commit_tree_sha(website, sha, headers):
+def commit_tree_sha(website, sha, headers=None):
     """Read the tree of one exact commit in the selected repository."""
     from integrations import http_client
     from .website_contract import SHA_PATTERN
-    response = http_client.get(f"https://api.github.com/repos/{website.github_repo}/git/commits/{sha}",
-        headers=headers, timeout=(3, 15))
+    url = f"https://api.github.com/repos/{website.github_repo}/git/commits/{sha}"
+    if headers is None:
+        from integrations.services.github_connections import read_bound_repository
+        response = read_bound_repository(website, url)
+    else:
+        response = http_client.get(url, headers=headers, timeout=(3, 15))
     response.raise_for_status()
     commit = response.json()
     tree = commit.get("tree") if isinstance(commit, dict) else None
@@ -171,7 +175,7 @@ def _find_owner_merged_setup(website, rows, source_sha, identity):
                     continue
                 for sha in (source_sha, head_sha):
                     if sha not in trees:
-                        trees[sha] = _commit_tree_sha(website, sha, headers)
+                        trees[sha] = commit_tree_sha(website, sha, headers)
                 if trees[source_sha] != trees[head_sha]:
                     # Merged with other changes (a moved base or an edited merge):
                     # that source was never previewed, so it is scanned as external.

@@ -115,6 +115,19 @@ Pending setup must be merged and published before verification can grant access.
 Reset/disconnect markers, provisional/structural-only targets and bundle-only
 fallbacks block production.
 
+For a connected site using live-URL verification, an inventory-only scan after
+a setup merge can leave the selected target without build proof. With
+`ARTICLES_PROOF_CARRY_FORWARD_ENABLED`, Prepare can use the completed setup's
+approved build and exact browser render. GitHub must confirm the selected branch
+still points at the recorded merge and that its entire Git tree equals the
+verified PR head's tree. This also works for squash merges. Prepare writes the
+setup's own default target and records the preview head, merge source, tree and
+run ID. The existing live verifier checks the reviewed marker before activating
+the connection. Hosted verification and sealed CI targets retain their own proof
+requirements. Once the current target verifies, the founder's connection summary
+clears the historical data-removal notice. The stored deletion epoch continues
+to fence callbacks from before removal.
+
 Article history, a public Stories listing, `articles_scaffolded`, and a merged
 setup PR alone cannot grant permission. Old stored scans lacking this proof
 require a new verification. A changed repository invalidates old drafts;
