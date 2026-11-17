@@ -38,6 +38,8 @@ Approval-required tickets are allowed under the user's 30 October approval, incl
 
 ## Automatic member perks priced from the ticket (November 2026)
 
+The Upcoming events feed includes `mlai_managed` for each card. A true value lets the client check the signed-in member’s perk options or existing receipt before showing the Member perks button.
+
 `ROO_EVENT_PERKS_AUTO` replaces hand-made offers for Member perks:
 
 - `off` (default): only offers made with `configure_event_ticket_offer`, at the fixed 16/32 prices above.

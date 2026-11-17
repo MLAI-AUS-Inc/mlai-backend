@@ -16,6 +16,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 import requests
 from django.conf import settings
 
+from integrations.services.luma import calendar_manages_luma_event
 from roo.event_ticket_policy import EVENT_TICKET_MAX_CENTS_EXCLUSIVE, test_event_ids
 
 
@@ -192,7 +193,7 @@ class LumaEventDiscountService:
         expires = _datetime(terms.get("valid_end_at"))
         event = self.get_event(event_id)
         starts = _datetime(event.get("start_at"))
-        if event.get("access") != "manage" or event.get("platform") != "luma":
+        if not calendar_manages_luma_event(event):
             raise LumaEventDiscountError("event_not_managed", "This event does not support Roo discounts.")
         # A private event is allowed only when explicitly listed for testing.
         public = event.get("visibility") == "public" or event_id in test_event_ids()
@@ -260,7 +261,7 @@ class LumaEventDiscountService:
         """
         now = _datetime(now or datetime.now(timezone.utc))
         event = self.get_event(event_id)
-        if event.get("access") != "manage" or event.get("platform") != "luma":
+        if not calendar_manages_luma_event(event):
             raise LumaEventDiscountError("event_not_managed", "Member perks only cover events MLAI hosts on its Luma calendar.")
         starts = _datetime(event.get("start_at"))
         if starts <= now:
