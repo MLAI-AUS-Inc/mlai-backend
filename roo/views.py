@@ -1687,6 +1687,74 @@ class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
         return qs.order_by('-created_at')[:100]
 
 
+def _book_coworking_user(
+    *, user, booking_date, created_by_slack_id, slack_channel_id,
+    operation_id, operation_fingerprint,
+):
+    """Book one account and record the optional idempotent operation receipt."""
+    try:
+        with transaction.atomic():
+            booking, created = CoworkingService.book(
+                user=user,
+                booking_date=booking_date,
+                created_by_slack_id=created_by_slack_id,
+                slack_channel_id=slack_channel_id,
+            )
+            response_data = dict(CoworkingBookingSerializer(booking).data)
+            # Surface whether the monthly-update discount applied so callers
+            # (e.g. Roo) don't have to hardcode the price. The standard cost is
+            # the single source of truth in get_standard_coworking_cost().
+            standard_cost = CoworkingService.get_standard_coworking_cost()
+            response_data["standard_points_cost"] = standard_cost
+            response_data["monthly_update_discount_applied"] = (
+                CoworkingService.monthly_update_discount_applied(booking)
+            )
+            connection_type = founder_tools_connection_type(booking.user)
+            response_data["founder_tools_connection_type"] = connection_type
+            response_data["founder_tools_account_linked"] = (
+                connection_type is not None
+            )
+            response_data["founder_tools_explicitly_linked"] = (
+                connection_type == "explicit"
+            )
+            response_status = (
+                status.HTTP_201_CREATED if created else status.HTTP_200_OK
+            )
+            if not created:
+                response_data["already_booked"] = True
+                response_data["idempotent"] = True
+            if operation_id:
+                receipt, receipt_created = (
+                    CoworkingBookingOperation.objects.get_or_create(
+                        id=operation_id,
+                        defaults={
+                            'kind': 'single',
+                            'request_fingerprint': operation_fingerprint,
+                            'response_payload': _coworking_receipt_payload(
+                                response_data, kind='single'
+                            ),
+                            'http_status': response_status,
+                        },
+                    )
+                )
+                if receipt_created:
+                    receipt.subjects.set([user])
+                if not receipt_created:
+                    if (
+                        receipt.kind != 'single'
+                        or receipt.request_fingerprint != operation_fingerprint
+                    ):
+                        raise ValueError(
+                            'operation_id was already used for a different request'
+                        )
+                    return _coworking_replay_response(receipt)
+        return Response(response_data, status=response_status)
+    except ValueError as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except InsufficientBalanceError as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
 class CoworkingViewSet(viewsets.ViewSet):
     """Coworking booking management."""
     permission_classes = [HasAPIKey | HasRooApiKey]
@@ -1800,6 +1868,8 @@ class CoworkingViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'])
     def book(self, request):
         """Book a coworking day. Users can only book for today."""
+        if request.data.get('target_profile_id') not in (None, ''):
+            return self._book_for_profile(request)
         slack_user_id = request.data.get('slack_user_id')
         booking_date_str = request.data.get('date')
         slack_channel_id = request.data.get('slack_channel_id')
@@ -1880,67 +1950,89 @@ class CoworkingViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        return _book_coworking_user(
+            user=user,
+            booking_date=booking_date,
+            created_by_slack_id=slack_user_id,
+            slack_channel_id=slack_channel_id,
+            operation_id=operation_id,
+            operation_fingerprint=operation_fingerprint,
+        )
+
+    def _book_for_profile(self, request):
+        """Admin check-in for an MLAI account that has no linked Slack user.
+
+        The target is the canonical MLAI Chat profile ID from a verified bridge
+        mention. Unlike Slack-ID bookings (gated by Roo), this path checks the
+        requesting Points Admin here because no Slack identity backs the target.
+        """
+        admin_slack_user_id = clean_slack_id(request.data.get('admin_slack_user_id'))
+        raw_profile_id = request.data.get('target_profile_id')
+        booking_date_str = request.data.get('date')
+        slack_channel_id = request.data.get('slack_channel_id')
+        if not admin_slack_user_id or not booking_date_str:
+            return Response(
+                {'error': 'admin_slack_user_id, target_profile_id and date are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
-            with transaction.atomic():
-                booking, created = CoworkingService.book(
-                    user=user,
-                    booking_date=booking_date,
-                    created_by_slack_id=slack_user_id,
-                    slack_channel_id=slack_channel_id,
+            profile_id = UUID(str(raw_profile_id).strip())
+            booking_date = date.fromisoformat(booking_date_str)
+        except (ValueError, TypeError, AttributeError):
+            return Response(
+                {'error': 'Use a valid target_profile_id and a YYYY-MM-DD date'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            operation_id, operation_fingerprint, operation_receipt = (
+                _coworking_operation_receipt(
+                    raw_id=request.data.get('operation_id'),
+                    kind='single',
+                    request_fields={
+                        'admin_slack_user_id': admin_slack_user_id,
+                        'target_profile_id': str(profile_id),
+                        'date': booking_date.isoformat(),
+                    },
                 )
-                response_data = dict(CoworkingBookingSerializer(booking).data)
-                # Surface whether the monthly-update discount applied so callers
-                # (e.g. Roo) don't have to hardcode the price. The standard cost is
-                # the single source of truth in get_standard_coworking_cost().
-                standard_cost = CoworkingService.get_standard_coworking_cost()
-                response_data["standard_points_cost"] = standard_cost
-                response_data["monthly_update_discount_applied"] = (
-                    CoworkingService.monthly_update_discount_applied(booking)
-                )
-                connection_type = founder_tools_connection_type(booking.user)
-                response_data["founder_tools_connection_type"] = connection_type
-                response_data["founder_tools_account_linked"] = (
-                    connection_type is not None
-                )
-                response_data["founder_tools_explicitly_linked"] = (
-                    connection_type == "explicit"
-                )
-                response_status = (
-                    status.HTTP_201_CREATED if created else status.HTTP_200_OK
-                )
-                if not created:
-                    response_data["already_booked"] = True
-                    response_data["idempotent"] = True
-                if operation_id:
-                    receipt, receipt_created = (
-                        CoworkingBookingOperation.objects.get_or_create(
-                            id=operation_id,
-                            defaults={
-                                'kind': 'single',
-                                'request_fingerprint': operation_fingerprint,
-                                'response_payload': _coworking_receipt_payload(
-                                    response_data, kind='single'
-                                ),
-                                'http_status': response_status,
-                            },
-                        )
-                    )
-                    if receipt_created:
-                        receipt.subjects.set([user])
-                    if not receipt_created:
-                        if (
-                            receipt.kind != 'single'
-                            or receipt.request_fingerprint != operation_fingerprint
-                        ):
-                            raise ValueError(
-                                'operation_id was already used for a different request'
-                            )
-                        return _coworking_replay_response(receipt)
-            return Response(response_data, status=response_status)
-        except ValueError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except InsufficientBalanceError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            )
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        if not is_points_admin(admin_slack_user_id):
+            return Response(
+                {
+                    'code': 'points_admin_required',
+                    'error': 'Only Roo Points Admins can book coworking for other users',
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if operation_receipt:
+            return _coworking_replay_response(operation_receipt)
+
+        today = timezone.now().date()
+        if booking_date < today or booking_date > today + timedelta(days=7):
+            return Response(
+                {
+                    'code': 'booking_date_out_of_range',
+                    'error': 'Coworking can be booked from today up to 7 days ahead',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user = User.objects.filter(
+            community_chat_profile_id=profile_id, is_active=True,
+        ).first()
+        if user is None:
+            return Response(
+                {'code': 'target_profile_unknown', 'error': 'No active MLAI account matches that member'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return _book_coworking_user(
+            user=user,
+            booking_date=booking_date,
+            created_by_slack_id=admin_slack_user_id,
+            slack_channel_id=slack_channel_id,
+            operation_id=operation_id,
+            operation_fingerprint=operation_fingerprint,
+        )
 
     @action(detail=False, methods=['post'], url_path='book-many')
     def book_many(self, request):
