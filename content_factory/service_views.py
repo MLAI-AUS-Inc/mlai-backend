@@ -9630,8 +9630,9 @@ class ContentFactoryRunValleyJobView(APIView):
     authentication_classes = []
     permission_classes = [HasRooApiKey]
 
+    @transaction.atomic
     def post(self, request, run_id: str):
-        run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+        run = ContentFactoryRun.objects.select_for_update().filter(run_id=run_id).first()
         if not run:
             return Response({"error": "Run not found"}, status=status.HTTP_404_NOT_FOUND)
 

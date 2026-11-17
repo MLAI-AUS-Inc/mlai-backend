@@ -1048,6 +1048,7 @@ jobs:
           content_factory.tests_run_nightly_authority \
           content_factory.tests_run_control_transport_unit \
           content_factory.tests_run_owned_cancellation \
+          startup_updates.tests_valley_job_concurrency \
           content_factory.tests_run_reconciliation \
           content_factory.tests_run_reconciliation_unit \
           content_factory.tests_run_dispatch_settlement \
