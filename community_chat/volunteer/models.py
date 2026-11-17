@@ -372,3 +372,29 @@ class VolunteerOpeningEntry(ScopedRecord):
                 name="vol_opening_member_idx",
             )
         ]
+
+
+class ChatIntroWelcome(models.Model):
+    """Roo's once-only Slack welcome for an intro written in MLAI Chat.
+
+    Chat intros are rewarded by the Volunteer receipt pipeline, not by Roo, so
+    Roo never sees them. One row per approved intro recognition records the
+    claim and the posted Slack reply so a retry never welcomes twice.
+    """
+
+    STATUS_PENDING = "pending"
+    STATUS_SENT = "sent"
+
+    recognition = models.OneToOneField(
+        VolunteerRecognition,
+        on_delete=models.CASCADE,
+        related_name="chat_intro_welcome",
+    )
+    slack_channel_id = models.CharField(max_length=100)
+    slack_thread_ts = models.CharField(max_length=100)
+    slack_message_ts = models.CharField(max_length=100, blank=True, default="")
+    status = models.CharField(max_length=20, default=STATUS_PENDING)
+    attempts = models.PositiveIntegerField(default=0)
+    last_error = models.CharField(max_length=120, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)

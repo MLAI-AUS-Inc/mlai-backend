@@ -13,6 +13,7 @@ from .onboarding_models import (  # noqa: F401 -- Django model discovery
 )
 
 from .volunteer.models import (  # noqa: F401 -- Django model discovery
+    ChatIntroWelcome,
     VolunteerAttendance,
     VolunteerMemberState,
     VolunteerMilestone,

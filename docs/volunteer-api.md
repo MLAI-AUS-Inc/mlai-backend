@@ -217,6 +217,20 @@ Conversation pagination groups persisted eligible replies by public opportunity
 root before applying limits. Continuation URLs preserve the selected filter;
 many replies in one conversation cannot hide an older joined opportunity.
 
+### Roo's Slack welcome for Chat intros
+
+Intros typed in Slack are rewarded by Public Roo, which replies in the thread.
+Intros written in MLAI Chat reach Slack through the bridge bot, so Roo ignores
+them and this pipeline awards them silently. The scheduled
+`chat_intro_welcomes` runner (`community_chat/intro_welcome.py`) closes the gap:
+for an approved `introduce_yourself` recognition from a processed Chat
+start-here post in the last 48 hours, once the bridge has posted that message to
+Slack, it replies in the thread with Roo's usual welcome using Public Roo's bot
+token. `ChatIntroWelcome` (one row per recognition) records the claim and reply,
+so each intro is welcomed at most once; Slack failures retry up to five times.
+Linked members are mentioned, others are named. The reward never depends on the
+message. Kill switch: `COMMUNITY_CHAT_INTRO_WELCOME_ENABLED` (default true).
+
 ## Disposable validation
 
 `scripts/test_volunteer_disposable.py` requires an explicit approved migration
