@@ -503,6 +503,7 @@ jobs:
           tests.test_retired_runtime_packaging \
           roo.tests_api.TaskViewSetTests \
           roo.tests_api.CoworkingViewSetTests \
+          community_chat.tests.test_intro_welcome \
           tests.test_coworking_snapshot \
           roo.tests.CoworkingBookingAdminSafetyTests \
           roo.tests_kimi_usage \

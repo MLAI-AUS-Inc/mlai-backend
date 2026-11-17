@@ -49,6 +49,7 @@ from jobs.services.job_pipeline import enqueue_daily_jobs as run_daily_jobs_sche
 from hospital.sim_retention import run_scheduled_sim_conversation_cleanup
 from roo.coding import reconcile_coding_reservations
 from mentoring.instant_booking import process_due_bookings
+from community_chat.intro_welcome import run_chat_intro_welcome_sweep
 from mentoring.calendar_sync import sync_due_sessions
 from roo.models import ScheduledDiscoveryHeartbeat
 from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
@@ -127,6 +128,10 @@ class Command(BaseCommand):
             # draft 24 h after a startup is created, Your turn for 72 h), for
             # every org. Gated by ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED and
             # bounded by ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK.
+            # Roo's Slack welcome for intros written in MLAI Chat (paid by
+            # the Volunteer pipeline, so Roo itself never sees them). Once
+            # per intro, recent intros only; COMMUNITY_CHAT_INTRO_WELCOME_ENABLED.
+            ("chat_intro_welcomes", run_chat_intro_welcome_sweep),
             ("founder_journey_alerts", run_founder_journey_alert_sweep),
             # One "founder stuck" alert for every cohort: a stopped website
             # setup, a website step retrying too long, or a latest run stopped
