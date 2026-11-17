@@ -3002,6 +3002,82 @@ class CoworkingViewSetTests(APITestCase):
         self.assertEqual(too_far_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(CoworkingBooking.objects.filter(user=target).exists())
 
+    def _create_slackless_member(self, balance=10):
+        user = User.objects.create_user(email='no-slack@example.com')
+        PointsService.award(
+            user=user,
+            delta=balance,
+            source='MANUAL',
+            description='Coworking profile setup',
+            created_by_slack_id=self.admin_slack_id,
+            idempotency_key='coworking_profile_setup',
+        )
+        return user
+
+    def _post_profile(self, user, admin_slack_id=None, **extra):
+        return self.client.post(
+            self.url,
+            {
+                'admin_slack_user_id': admin_slack_id or self.admin_slack_id,
+                'target_profile_id': str(user.community_chat_profile_id),
+                'date': (date.today() + timedelta(days=1)).isoformat(),
+                'slack_channel_id': 'C123',
+                **extra,
+            },
+            format='json',
+        )
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_admin_books_member_without_slack_by_profile(self, mock_permission):
+        member = self._create_slackless_member()
+        operation_id = str(uuid4())
+
+        response = self._post_profile(member, operation_id=operation_id)
+        replay = self._post_profile(member, operation_id=operation_id)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['points_cost'], 8)
+        self.assertTrue(CoworkingBooking.objects.filter(user=member, status='booked').exists())
+        self.assertEqual(PointsService.get_balance(member)['balance'], 2)
+        self.assertEqual(replay.status_code, status.HTTP_200_OK)
+        self.assertTrue(replay.data['operation_replayed'])
+        self.assertEqual(CoworkingBooking.objects.filter(user=member).count(), 1)
+        self.assertEqual(PointsService.get_balance(member)['balance'], 2)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_profile_booking_requires_full_points_admin(self, mock_permission):
+        member = self._create_slackless_member()
+
+        for actor in (self.partner_slack_id, self.non_admin_slack_id):
+            response = self._post_profile(member, admin_slack_id=actor)
+            self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+            self.assertEqual(response.data['code'], 'points_admin_required')
+        self.assertFalse(CoworkingBooking.objects.filter(user=member).exists())
+        self.assertEqual(PointsService.get_balance(member)['balance'], 10)
+
+    @patch('core.permissions.HasAPIKey.has_permission', return_value=True)
+    def test_profile_booking_rejects_unknown_or_inactive_profile(self, mock_permission):
+        member = self._create_slackless_member()
+        member.is_active = False
+        member.save(update_fields=['is_active'])
+
+        inactive = self._post_profile(member)
+        malformed = self.client.post(
+            self.url,
+            {
+                'admin_slack_user_id': self.admin_slack_id,
+                'target_profile_id': 'Isaak Eriksson',
+                'date': date.today().isoformat(),
+            },
+            format='json',
+        )
+
+        self.assertEqual(inactive.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(inactive.data['code'], 'target_profile_unknown')
+        self.assertEqual(malformed.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(CoworkingBooking.objects.exists())
+
+
 
 class CoworkingReportViewSetTests(APITestCase):
     def setUp(self):

@@ -71,6 +71,24 @@ delivery check has passed, and grants nothing; Public Roo uses it to reply once
 in the thread explaining how to fix it. Every other refusal keeps its old code.
 Release Public Roo's support for this code before this backend change.
 
+## Admin check-in of members without Slack
+
+A full Points Admin can check in a Chat-only member from MLAI Chat, for example
+`@Roo book in @Isaak`, choosing both names from the mention list. The member's
+mention is an MLAI profile selection, so the verified bridge context gives Roo
+the recipient's canonical profile ID and no Slack ID. Roo then calls
+`POST roo/coworking/book/` with `admin_slack_user_id`, `target_profile_id` and
+`date` (optional `slack_channel_id` and `operation_id`) instead of
+`slack_user_id`.
+
+Unlike Slack-ID bookings, which Roo gates, this backend path checks
+`is_points_admin(admin_slack_user_id)` itself and returns
+`403 points_admin_required` otherwise. An unknown or inactive profile returns
+`400 target_profile_unknown`. Dates run from today to 7 days ahead. The booking,
+points debit and operation receipt reuse the Slack-ID path, so a repeated
+`operation_id` replays rather than double-charging. Model-extracted names are
+never accepted as targets. No schema change or migration is needed.
+
 ## Legacy chat-message handoff
 
 Older clients can still submit the signed message
