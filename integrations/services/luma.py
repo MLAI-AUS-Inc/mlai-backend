@@ -624,11 +624,16 @@ def _public_event_cover_url(value: Any) -> str:
     return ""
 
 
+def calendar_manages_luma_event(event: Dict[str, Any]) -> bool:
+    """The calendar can issue coupons only for events it manages on Luma."""
+    return event.get("access") == "manage" and event.get("platform") == "luma"
+
+
 def _public_upcoming_event(
     event: Any,
     *,
     now_utc: datetime,
-) -> Optional[Dict[str, str]]:
+) -> Optional[Dict[str, Any]]:
     """Build the only Luma event shape that may cross the chat API boundary."""
     if not isinstance(event, dict) or str(event.get("visibility") or "").strip() != "public":
         return None
@@ -666,6 +671,7 @@ def _public_upcoming_event(
 
     return {
         "id": event_id,
+        "mlai_managed": calendar_manages_luma_event(event),
         "cover_url": _public_event_cover_url(event.get("cover_url")),
         "name": name,
         "url": event_url,

@@ -221,6 +221,7 @@ class CommunityChatHomeFacadeTests(TestCase):
         service.list_upcoming_events.return_value = [
             {
                 "id": "evt-1",
+                "mlai_managed": True,
                 "cover_url": "https://images.lumacdn.com/event-covers/coffee.jpg",
                 "name": "Founder Coffee",
                 "url": "https://lu.ma/founder-coffee",
@@ -258,8 +259,10 @@ class CommunityChatHomeFacadeTests(TestCase):
         self.assertEqual(len(second.data["events"]), 2)
         self.assertEqual(
             set(second.data["events"][0]),
-            {"id", "name", "url", "start_at", "end_at", "timezone", "cover_url"},
+            {"id", "name", "url", "start_at", "end_at", "timezone", "cover_url", "mlai_managed"},
         )
+        self.assertIs(first.data["events"][0]["mlai_managed"], True)
+        self.assertIs(second.data["events"][0]["mlai_managed"], True)
         self.assertEqual(second["Cache-Control"], "private, max-age=60")
         service_class.assert_called_once_with(timeout=2)
         service.list_upcoming_events.assert_called_once_with()

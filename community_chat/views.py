@@ -141,9 +141,10 @@ DESKTOP_AUTH_ORIGINS = (
 DESKTOP_AUTHORIZATION_CODE_SALT = "community-chat.desktop-authorization.v1"
 DESKTOP_AUTHORIZATION_CODE_INVALID_DETAIL = "Desktop authorization code is invalid."
 PKCE_CHALLENGE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
-UPCOMING_EVENTS_CACHE_KEY = "community-chat:upcoming-events:v3"
+UPCOMING_EVENTS_CACHE_KEY = "community-chat:upcoming-events:v4"
 UPCOMING_EVENT_FIELDS = (
     "id",
+    "mlai_managed",
     "cover_url",
     "name",
     "url",
