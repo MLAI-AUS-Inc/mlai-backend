@@ -20,9 +20,11 @@ from .website_prepare import _dispatch_prepare_step
 HEAD, TREE = "c" * 40, "d" * 40
 
 
-@override_settings(**ALL_P1_FLAGS_ON)
-class SetupMergeProofTests(TestCase):
+class SetupMergeFixture:
+    """A new-journey site whose setup pull request merged as a squash of the reviewed head."""
+
     def setUp(self):
+        super().setUp()
         built = make_new_journey_org(domain="squash.example.test")
         self.website = _connect(built, verified_sha="")
         self.config = built.config
@@ -64,6 +66,9 @@ class SetupMergeProofTests(TestCase):
         self.assertFalse(self.website.capabilities.get("publishingReady"))
         self.fetch.assert_not_called()
 
+
+@override_settings(**ALL_P1_FLAGS_ON)
+class SetupMergeProofTests(SetupMergeFixture, TestCase):
     def test_identical_tree_then_live_marker_activates_without_a_full_rescan(self):
         self.assertEqual(self.dispatch()["status"], "completed")
         self.assertEqual([call.args[1] for call in self.trees.call_args_list], [HEAD, MERGED])
@@ -285,4 +290,155 @@ class WorkerSetupMergeProofTests(SimpleTestCase):
                 self.operation.receipt = {**receipt, field: value}
                 self.assertIs(carry.worker_publish_targets(self.config), self.config.publish_targets)
         self.config.website_connection.operations.filter.return_value.first.return_value = None
+        self.assertIs(carry.worker_publish_targets(self.config), self.config.publish_targets)
+
+
+PUSHED = "e" * 40
+SETUP_FILES = {"registry_path": "src/content/articles/registry.ts", "route_shell_path": "src/app/articles/page.tsx",
+    "managed_files": ["src/lib/articles.ts"]}
+
+
+def _worker_accepts(projected, config, website):
+    """The source-bound checks Content Factory's ``verified_registered_target`` applies.
+
+    Mirrors CF ``harness/registered_targets.py`` for the fields this backend
+    projects; ``native_contract_digest`` is computed by CF and is not repeated here.
+    """
+    import re
+    scope = contract_for(website)
+    rows = [row for row in projected or [] if row.get("target_id") == config.default_publish_target_id]
+    if len(rows) != 1:
+        return False
+    proof = rows[0].get("verification") or {}
+    identity = ("website_connection_id", "connection_generation", "repository_id", "github_repo")
+    return bool(proof.get("status") in {"passed", "verified"}
+        and proof.get("source_sha") == website.verified_sha
+        and all(proof.get(key) == scope[key] for key in identity)
+        and proof.get("target_id") == config.default_publish_target_id
+        and proof.get("adapter_id") == rows[0].get("delivery_adapter")
+        and proof.get("operation_id") and type(proof.get("operation_attempt")) is int and proof["operation_attempt"] >= 1
+        and type(proof.get("deletion_epoch")) is int and proof["deletion_epoch"] == deletion_epoch(website)
+        and re.fullmatch(r"[a-f0-9]{64}", str(proof.get("evidence_digest") or ""))
+        and proof.get("contract_digest") == rows[0].get("contract_digest"))
+
+
+@override_settings(**ALL_P1_FLAGS_ON, ARTICLES_READY_ON_MERGE_ENABLED=True, ARTICLES_PROOF_CARRY_FORWARD_ENABLED=True)
+class CarriedSetupMergeProofTests(SetupMergeFixture, TestCase):
+    """A13: the first founder push after a setup-merge Ready must not switch the worker projection off.
+
+    La Vie (18 Nov 2026) is Ready on a setup-merge proof; a push that leaves
+    MLAI's setup files alone carries that proof to the new head. The worker then
+    needs a projected proof at the new head, while sealed and custom targets keep
+    exact-commit proof.
+    """
+
+    def ready_then_push(self, *, files=("src/app/page.tsx",)):
+        from . import website_reconciliation as reconciliation
+        from . import website_source_carry
+        from .tests_website_source_carry import _compare
+        self.assertEqual(self.dispatch()["status"], "completed")
+        self.config.refresh_from_db()
+        self.website.refresh_from_db()
+        projected = carry.worker_publish_targets(self.config)
+        self.assertTrue(_worker_accepts(projected, self.config, self.website), projected)
+        self.config.article_system_setup_cache = SETUP_FILES
+        self.config.save(update_fields=["article_system_setup_cache"])
+        with patch.object(website_source_carry, "compare_sources", return_value=_compare(*files)), \
+                patch("content_factory.website_reconciliation._find_owned_merge", return_value=None), \
+                patch("content_factory.website_prepare.wake_prepare_for_source"):
+            result = reconciliation.handle_website_github_event("push", {
+                "repository": {"id": 777}, "ref": "refs/heads/main", "after": PUSHED})
+        self.website.refresh_from_db()
+        self.target.refresh_from_db()
+        return result
+
+    def recheck(self):
+        from django.utils import timezone
+        from . import website_reconciliation as reconciliation
+        op = self.website.operations.get(action="source-reverify", payload__source_sha=PUSHED)
+        state = reconciliation._process_source_reverification(op.pk, timezone.now())
+        self.website.refresh_from_db()
+        self.target.refresh_from_db()
+        self.config.refresh_from_db()
+        return state, op
+
+    def test_a_carried_push_keeps_a_worker_proof_at_the_new_head(self):
+        result = self.ready_then_push()
+        self.assertEqual(result.get("carried"), 1)
+        self.assertEqual(self.website.verified_sha, PUSHED)
+        state, _ = self.recheck()
+        self.assertEqual(state, "completed")
+        projected = carry.worker_publish_targets(self.config)
+        proof = projected[0]["verification"]
+        self.assertEqual(proof["source_sha"], PUSHED)
+        deployment = self.website.operations.get(action="deployment-verify", payload__source_sha=PUSHED)
+        self.assertEqual(proof["operation_id"], str(deployment.pk))
+        self.assertTrue(_worker_accepts(projected, self.config, self.website), proof)
+
+    def test_before_the_recheck_the_worker_still_waits(self):
+        self.ready_then_push()
+        self.assertFalse(_worker_accepts(carry.worker_publish_targets(self.config), self.config, self.website))
+
+    def test_a_push_that_changes_setup_files_keeps_exact_commit_proof(self):
+        result = self.ready_then_push(files=("src/app/articles/page.tsx",))
+        self.assertNotIn("carried", result)
+        self.assertEqual(self.website.verified_sha, MERGED)
+        self.assertFalse(_worker_accepts(carry.worker_publish_targets(self.config), self.config, self.website))
+
+    def test_a_sealed_target_is_never_projected_from_a_carried_head(self):
+        self.ready_then_push()
+        self.recheck()
+        with patch("content_factory.website_sealed_workflow.required", return_value=True):
+            self.assertIs(carry.worker_publish_targets(self.config), self.config.publish_targets)
+
+    def test_a_custom_contract_target_is_never_projected_from_a_carried_head(self):
+        self.ready_then_push()
+        self.recheck()
+        custom = {**self.run.result["publish_targets"][0], "delivery_adapter": "custom_contract_v1"}
+        self.run.result["publish_targets"] = [custom]
+        self.run.save(update_fields=["result"])
+        self.assertIs(carry.worker_publish_targets(self.config), self.config.publish_targets)
+
+    def test_a_carry_without_a_backend_recorded_link_is_refused(self):
+        self.ready_then_push()
+        self.recheck()
+        self.website.operations.filter(action="source-reverify", payload__source_sha=PUSHED).update(
+            payload={"source_sha": PUSHED, "carried_from": "", "scan_required": True})
+        self.assertIs(carry.worker_publish_targets(self.config), self.config.publish_targets)
+
+    def test_a_failed_carry_recheck_withdraws_the_projection(self):
+        self.ready_then_push()
+        self.recheck()
+        self.website.operations.filter(action="source-reverify", payload__source_sha=PUSHED).update(
+            state="needs_attention", receipt={"status": "needs_attention", "retryable": False})
+        self.assertIs(carry.worker_publish_targets(self.config), self.config.publish_targets)
+
+    def test_two_quick_carried_pushes_follow_the_recorded_chain(self):
+        from django.utils import timezone
+        from . import website_reconciliation as reconciliation
+        from . import website_source_carry
+        from .tests_website_source_carry import _compare
+        self.ready_then_push()
+        first = self.website.operations.get(action="source-reverify", payload__source_sha=PUSHED)
+        later = "f" * 40
+        with patch.object(website_source_carry, "compare_sources", return_value=_compare("README.md")), \
+                patch("content_factory.website_reconciliation._find_owned_merge", return_value=None), \
+                patch("content_factory.website_prepare.wake_prepare_for_source"):
+            reconciliation.handle_website_github_event("push", {
+                "repository": {"id": 777}, "ref": "refs/heads/main", "after": later})
+        # The first push's own re-check finds the branch moved on and is superseded.
+        self.head.side_effect = WebsiteAuthorityError("website_source_changed", "Branch moved.")
+        self.assertEqual(reconciliation._process_source_reverification(first.pk, timezone.now()), "cancelled")
+        self.head.side_effect = None
+        second = self.website.operations.get(action="source-reverify", payload__source_sha=later)
+        self.assertEqual(second.payload["carried_from"], PUSHED)
+        self.assertEqual(reconciliation._process_source_reverification(second.pk, timezone.now()), "completed")
+        self.website.refresh_from_db()
+        self.config.refresh_from_db()
+        projected = carry.worker_publish_targets(self.config)
+        self.assertEqual(projected[0]["verification"]["source_sha"], later)
+        self.assertTrue(_worker_accepts(projected, self.config, self.website), projected)
+        # A failed re-check anywhere on the chain breaks it.
+        self.website.operations.filter(pk=first.pk).update(state="needs_attention",
+            receipt={"status": "needs_attention", "retryable": False})
         self.assertIs(carry.worker_publish_targets(self.config), self.config.publish_targets)
