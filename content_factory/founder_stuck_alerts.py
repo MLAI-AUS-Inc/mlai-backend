@@ -324,8 +324,7 @@ def _stopped_runs(*, now, scope) -> list[StuckCondition]:
         rows = rows.filter(updated_at__gte=now - scope.lookback)
     if scope.organization_ids is not None:
         rows = rows.filter(organization_id__in=scope.organization_ids)
-    rows = _pages(rows.filter(~Q(run_request__has_key="request_source")
-                              | ~Q(run_request__request_source=alerts.SCHEDULER_REQUEST_SOURCE))
+    rows = _pages(rows.filter(alerts.founder_run_q())
                   .exclude(Exists(newer)).values(*RUN_FIELDS), scope, kind="runs", pk_field="pk")
     conditions = []
     for row in rows:

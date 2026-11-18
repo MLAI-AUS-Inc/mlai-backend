@@ -532,7 +532,7 @@
       "identity": "content_factory/founder_journey_alerts.py:queue_founder_journey_alerts_batch:5adbb928cf9ff656c8d707d2d99bb4b0f42e21b84fa7ad4138037ebea720ca8f:1",
       "path": "content_factory/founder_journey_alerts.py",
       "function": "queue_founder_journey_alerts_batch",
-      "line": 277,
+      "line": 310,
       "kind": "model_bulk_update",
       "fields": [],
       "statement_sha256": "5adbb928cf9ff656c8d707d2d99bb4b0f42e21b84fa7ad4138037ebea720ca8f",
@@ -540,12 +540,13 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "f2b13d3b4c1a449546dc903f63dd7826a384c1985c5c91ec3402256dd219283c",
+      "function_sha256": "040b8444851d956165c93c0ac4f1bd835c9f90543a4e052efb83b53d99ba3c63",
       "classification": "owned_backend_observation",
       "test_refs": [
-        "content_factory/tests_founder_journey_alerts.py"
+        "content_factory/tests_founder_journey_alerts.py",
+        "content_factory/tests_background_alert_audience.py"
       ],
-      "reason": "Bulk target writes only ops-alert result receipts on fresh locked Run rows, never status/approval/request/clocks.",
+      "reason": "Bulk target writes only ops-alert result receipts on fresh locked Run rows, never status/approval/request/clocks; scheduler runs are skipped and get no receipt (A2).",
       "guard": "Independent backend alert receipt namespace; bulk_update fields exactly result.",
       "pending_owner": null
     },
@@ -5723,10 +5724,11 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_decide",
-      "function_sha256": "d5d3c1523d148c5011a49247fb46c80a329e0ed666606dd4b83bf3246a26b4d6",
+      "function_sha256": "beb3a9669d5129ae9dc18ecfce5a8ebed562fa09110dd8078a203cdfbb80f9be",
       "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
       "test_refs": [
-        "content_factory/tests_run_policy_retirement.py"
+        "content_factory/tests_run_policy_retirement.py",
+        "content_factory/tests_background_alert_audience.py"
       ]
     },
     {
@@ -5798,10 +5800,11 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_candidates",
-      "function_sha256": "4520ca46ed97cfdd6660e0a601f00489a7257647308947f0cee99700d7d2601f",
+      "function_sha256": "7e38002e97358f34eabf8e90ee0466933429606cf7575f27cf203bb68dd92302",
       "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
       "test_refs": [
-        "content_factory/tests_run_policy_retirement.py"
+        "content_factory/tests_run_policy_retirement.py",
+        "content_factory/tests_background_alert_audience.py"
       ]
     },
     {

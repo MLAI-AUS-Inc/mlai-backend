@@ -1,0 +1,28 @@
+{
+  "dynamic_adapters": [
+    {
+      "path": "content_factory/self_heal_quiesce.py",
+      "function": "_apply",
+      "field": "code",
+      "expression": "recode",
+      "site_sha256": "bca94a9e94e6ecbc46a027931a99b87022491168f3a6ca62ddf76a98292714f7",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.self_heal_quiesce",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Operator quiesce records the engine's own earlier SELF_HEAL_DEADLINE_REACHED or SELF_HEAL_ATTEMPTS_EXHAUSTED recode (keys of RECODES only) beside the restored original under self_heal_v1.stop; no new code is emitted.",
+      "test": "content_factory.tests_self_heal_history_commands.QuiesceSelfHealHistoryTests.test_apply_stamps_restores_keeps_updated_at_and_is_idempotent"
+    },
+    {
+      "path": "content_factory/self_heal_quiesce.py",
+      "function": "_apply",
+      "field": "error_code",
+      "expression": "planned['restore']['to']",
+      "site_sha256": "6e9b29fffcd8cbae190ebcc029843bbe1dcc85d86e05a1076f4cd68295e52f45",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.self_heal_quiesce",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Operator quiesce restores the run's own original failure code, read back from the engine's saved self_heal_v1 receipt (code or history, SAFE_CODE-shaped, never a SELF_HEAL recode); it undoes an overwrite and never invents a code.",
+      "test": "content_factory.tests_self_heal_history_commands.QuiesceSelfHealHistoryTests.test_apply_stamps_restores_keeps_updated_at_and_is_idempotent"
+    }
+  ]
+}
