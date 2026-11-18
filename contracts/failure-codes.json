@@ -11260,6 +11260,69 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "sandbox_authority_changed",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "sandbox_authority_changed",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "Setup stopped because the approval it started with changed. MLAI has been told and will check it."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "sandbox_integrity_violation",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "sandbox_integrity_violation",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "Setup stopped at a safety check in MLAI's build workspace. MLAI has been told and will check it."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "sandbox_unavailable",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "sandbox_unavailable",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "retry_same_step",
+      "user_message": "Our build workspace is temporarily unavailable. We will try again shortly."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "saved_editorial_policy_invalid",
       "emitter_scopes": [
         "content_factory"
@@ -11319,6 +11382,48 @@
       "refund": true,
       "retry_policy": "observe_wait",
       "user_message": "Waiting for the saved article operation."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "sdk_controller_failed",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "sdk_controller_failed",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "retry_same_step",
+      "user_message": "Our setup assistant stopped unexpectedly. We will try again shortly."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "sdk_model_request_refused",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "sdk_model_request_refused",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "retry_same_step",
+      "user_message": "Our setup assistant hit one of MLAI's internal checks. We will try again shortly."
     },
     {
       "action_id": null,
