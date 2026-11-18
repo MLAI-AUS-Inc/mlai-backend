@@ -116,8 +116,15 @@ def _cleanup_retry_journey(op, context, config, journey):
     return journey
 
 
-# Content Factory refuses setup when the repository head moved since the scan.
-SOURCE_CHANGED_CODES = frozenset({"SOURCE_CHANGED", "WEBSITE_SOURCE_CHANGED"})
+# Content Factory refuses setup when the repository head moved since the scan
+# (upper case); the backend's own head check raises the lower-case code
+# (website_connections.verify_repository_head). Both restart from a fresh scan.
+SOURCE_CHANGED_CODES = frozenset({"SOURCE_CHANGED", "WEBSITE_SOURCE_CHANGED", "website_source_changed"})
+# Automatic re-pins to the current head before a moved source becomes a stop
+# with "Try again" (which restarts from a fresh scan again). A push storm that
+# outruns this many re-reads also has its own source checks queued per push.
+SOURCE_REPIN_LIMIT = 3
+SOURCE_REPIN_MINUTES = (1, 5, 15)
 
 
 SETUP_PR_RESULT_KEYS = ("pr_url", "pull_request_url", "draft_pr_url", "pr_number", "pull_request_number", "draft_pr_number")
@@ -262,7 +269,8 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
                 "child_run_id": op.receipt.get("child_run_id") if check_again else None,
                 "reason_code": "", "blocked_step": None, "deployment_attempts": 0,
                 "dispatch_outcome": "replayed" if check_again else "new_attempt"}
-            for key in ("deployment_wait_started_at", "transient_started_at", "child_resume_pending", "failure_class"):
+            for key in ("deployment_wait_started_at", "transient_started_at", "child_resume_pending", "failure_class",
+                    "source_repins"):
                 op.receipt.pop(key, None)
             op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + (0 if check_again else 1),
                 "user_clicks": op.payload.get("user_clicks", 1) + 1}
@@ -478,7 +486,9 @@ def prepare_failure(op, step, error, *, now=None):
     if observation_enabled:
         op.receipt["failure_taxonomy_observation"] = {"failure": decision["failure"], "classification": decision["failure"]["failure_class"] if decision["failure"] else None,
             "policy_classification": classification, "contract_invalid": decision["contract_invalid"]}
-    if (getattr(error, "user_action", None) and (classification == "needs_user" or not strict_policy and getattr(error, "result", None) is None)
+    if code in SOURCE_CHANGED_CODES and _repin_to_current_source(op, now=now):
+        pass
+    elif (getattr(error, "user_action", None) and (classification == "needs_user" or not strict_policy and getattr(error, "result", None) is None)
             and (code not in PERMISSION_CODES or permission_needed)):
         op.state, op.next_attempt_at = "needs_user", None
         op.receipt.update(status="needs_you", user_action=error.user_action, failure_class="needs_user", retryable=False)
@@ -580,6 +590,40 @@ def prepare_failure(op, step, error, *, now=None):
         op.receipt.update(status="needs_attention", user_action={"id": "retry", "label": "Try again"})
     from .website_operations import prepare_receipt
     op.receipt = prepare_receipt(op)
+
+
+def _repin_to_current_source(op, *, now):
+    """Re-read the moved repository head and carry on, instead of stopping (plan A11).
+
+    A setup or check refused because GitHub's branch moved can never pass on
+    the old scan, so the preparation starts again from a scan of the current
+    head, as "Try again" does: a new attempt and request identity, no replayed
+    scan or setup run, and the owner's saved consent and company kept. A
+    failed setup child that opened no pull request has its branch queued for
+    cleanup, as a retry would. Bounded by ``SOURCE_REPIN_LIMIT``; after that the
+    stop stands with "Try again". Goal-owned preparations are left to the goal
+    runner, which re-pins them itself on a source change.
+    """
+    from .website_goal_runner import owns_goal
+    if owns_goal(op):
+        return False
+    count = int(op.receipt.get("source_repins") or 0) + 1
+    if count > SOURCE_REPIN_LIMIT:
+        return False
+    child_id = op.receipt.get("child_run_id")
+    if child_id:
+        from workflow_runs.models import ContentFactoryRun
+        child = ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
+        if child is not None and child.status in {"failed", "blocked"}:
+            _queue_superseded_setup_cleanup(op, child)
+    values = _source_recheck_values(op, message="Your website changed, so we're reading the latest version.")
+    op.payload = values["payload"]
+    op.receipt = {**values["receipt"], "source_repins": count, "failure_class": "waiting", "retryable": False}
+    op.receipt.pop("failure", None)
+    op.state = "pending"
+    op.next_attempt_at = now + timedelta(minutes=SOURCE_REPIN_MINUTES[min(count, len(SOURCE_REPIN_MINUTES)) - 1])
+    logger.info("website_prepare_source_repin operation=%s connection=%s repin=%s", op.pk, op.connection_id, count)
+    return True
 
 
 def _canonical_article_route(route):

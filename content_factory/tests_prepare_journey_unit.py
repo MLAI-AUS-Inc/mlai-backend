@@ -532,3 +532,73 @@ class PrepareJourneyReplayTests(SimpleTestCase):
             with self.subTest(changed=changed), patch("workflow_runs.models.ContentFactoryRun.objects.filter") as rows:
                 rows.return_value.first.return_value = SimpleNamespace(**{**valid, **changed})
                 self.assertIsNone(prepare._selected_setup_child(self.op, self.config))
+
+
+class SourceChangedRepinTests(SimpleTestCase):
+    """A11: a moved head re-reads the current source instead of stopping (MLAI's own site, 18 Nov 2026)."""
+
+    def setUp(self):
+        self.replay = PrepareJourneyReplayTests()
+        self.replay.setUp()
+        self.op = self.replay.op
+        self.op.payload.update(attempt=1)
+        self.op.receipt = {"scan_run_id": "old-scan", "setup_run_id": "old-setup", "completed_steps": ["scan"]}
+
+    def moved(self):
+        from .website_contract import WebsiteAuthorityError
+        return Mock(side_effect=WebsiteAuthorityError("website_source_changed",
+            "The repository changed since this verification. Verify the current source again."))
+
+    def test_the_backend_lower_case_code_restarts_from_a_fresh_scan(self):
+        self.replay.advance({"setup": self.moved()})
+        self.assertEqual(self.op.state, "pending")
+        self.assertIsNotNone(self.op.next_attempt_at)
+        self.assertTrue(self.op.payload["source_reverify"])
+        self.assertEqual(self.op.payload["attempt"], 2)
+        self.assertEqual(self.op.receipt["current_step"], "scan")
+        self.assertEqual(self.op.receipt["failure_class"], "waiting")
+        self.assertEqual(self.op.receipt["source_repins"], 1)
+        for stale in ("scan_run_id", "setup_run_id", "completed_steps"):
+            self.assertNotIn(stale, self.op.receipt)
+        self.assertIsNone(self.op.receipt["user_action"])
+
+    def test_the_worker_upper_case_code_from_a_setup_child_re_pins_and_queues_its_cleanup(self):
+        self.op.receipt = {"child_run_id": "refused-setup", "current_step": "setup", "scan_run_id": "old-scan"}
+        child = SimpleNamespace(run_id="refused-setup", status="failed", workflow="article_system_setup",
+            error="The repository changed.", result={"error_code": "SOURCE_CHANGED", "retryable": False})
+        with patch.object(prepare, "_queue_superseded_setup_cleanup") as cleanup:
+            self.replay.advance({"setup": Mock()}, child)
+        cleanup.assert_called_once()
+        self.assertEqual(self.op.state, "pending")
+        self.assertEqual(self.op.receipt["current_step"], "scan")
+        self.assertNotIn("scan_run_id", self.op.receipt)
+
+    def test_re_pins_are_bounded_then_try_again_restarts_from_a_fresh_scan(self):
+        for repin in range(1, prepare.SOURCE_REPIN_LIMIT + 1):
+            self.op.receipt["scan_run_id"] = "stale-scan"
+            self.replay.advance({"setup": self.moved(), "scan": self.moved()})
+            self.assertEqual((self.op.state, self.op.receipt["source_repins"]), ("pending", repin))
+        self.op.receipt["scan_run_id"] = "stale-scan"
+        self.replay.advance({"setup": self.moved(), "scan": self.moved()})
+        self.assertEqual(self.op.state, "needs_attention")
+        self.assertEqual(self.op.receipt["reason_code"], "website_source_changed")
+        self.assertEqual(self.op.receipt["user_action"]["id"], "retry")
+        # "Try again" must not replay the stale scan id.
+        with patch.object(prepare, "authority_guard", return_value=nullcontext(self.op.connection)), \
+                patch.object(prepare.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)), \
+                patch.object(prepare.WebsiteConnectionOperation.objects, "filter",
+                    return_value=FrozenPrepareContextTests.rows(first=None)), \
+                patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=[]):
+            prepare.start_prepare(self.replay.config, expected={}, retry=True)
+        self.assertEqual(self.op.state, "pending")
+        self.assertTrue(self.op.payload["source_reverify"])
+        self.assertEqual(self.op.receipt["current_step"], "scan")
+        self.assertNotIn("scan_run_id", self.op.receipt)
+        self.assertNotIn("source_repins", self.op.receipt)
+
+    def test_a_goal_owned_preparation_is_left_to_the_goal_runner(self):
+        from .website_contract import WebsiteAuthorityError
+        self.op.receipt = {"goal": {"goal_id": "g"}, "scan_run_id": "old-scan"}
+        prepare.prepare_failure(self.op, "setup", WebsiteAuthorityError("website_source_changed", "Moved."))
+        self.assertNotEqual(self.op.receipt.get("failure_class"), "waiting")
+        self.assertNotIn("source_repins", self.op.receipt)
