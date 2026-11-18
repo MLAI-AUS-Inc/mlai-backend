@@ -1279,6 +1279,13 @@ class NeverVerifiedPushTests(WebsiteDatabaseFixture, TestCase):
         self.website.refresh_from_db()
         self.assertEqual([item['code'] for item in self.website.blockers], ['website_data_deleted'])
 
+    def test_a_scan_keeps_the_lock_on_a_site_that_was_publishing_ready(self):
+        self.website.capabilities = {**self.website.capabilities, 'publishingReady': True}
+        self.website.save(update_fields=['capabilities'])
+        record_scan_evidence(self.website, {'repository_inventory': {'source_sha': SHA, 'discovery_complete': True}})
+        self.website.refresh_from_db()
+        self.assertIn('repository_source_changed', [item['code'] for item in self.website.blockers])
+
     def test_a_verified_site_keeps_the_push_time_lock(self):
         self.website.verified_sha = SHA
         self.website.save(update_fields=['verified_sha'])

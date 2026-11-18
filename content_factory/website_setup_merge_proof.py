@@ -190,11 +190,14 @@ def worker_publish_targets(config):
     return [{**row, "verification": proof} if row is selected else row for row in targets]
 
 
-# Pushes a carried setup-merge proof may follow before it needs a fresh setup proof.
-MAX_CARRIED_PUSHES = 20
+# Pushes a carried setup-merge proof may follow before it needs a fresh setup
+# proof. Read in one bounded query, so a busy repository does not fall off its
+# projection after a handful of pushes.
+MAX_CARRIED_PUSHES = 500
 # A carry link whose own re-check never ran to the end because a newer push
-# moved the branch on (website_reconciliation marks it superseded).
-SUPERSEDED_LINK = ("cancelled", "superseded")
+# moved the branch on (``_process_source_reverification`` cancels it as
+# superseded with the ``website_source_changed`` code).
+SUPERSEDED_LINK = ("cancelled", "superseded", "website_source_changed")
 
 
 def _carried_chain(website, target, *, merge_sha, build):
@@ -208,9 +211,10 @@ def _carried_chain(website, target, *, merge_sha, build):
     - the connection holds no source-changed lock (a withdrawn carry sets it);
     - every step from the head back to the merge is a push this backend carried
       itself (a founder push, or MLAI's own article merge): the source-reverify
-      operation of this generation for that head records ``carried_from``. The current head's own re-check passed; an older
-      step either passed or was superseded by the next push. A re-check that
-      failed (``needs_attention``) breaks the chain, as the 72-hour withdrawal does.
+      operation of this generation for that head records ``carried_from``. The
+      current head's own re-check passed; an older step either passed or was
+      superseded by the next push. A re-check that failed (``needs_attention``)
+      breaks the chain, as the 72-hour withdrawal does.
 
     The caller still requires the live-URL proof and its deployment receipt at the
     current head, so the worker's proof stays bound to an operation at that source.
@@ -223,14 +227,22 @@ def _carried_chain(website, target, *, merge_sha, build):
             or build.get("source_sha") != source
             or mapping(target.capabilities).get("proofCarriedFrom") != build.get("carried_from")):
         return None
+    prefix = f"{website.pk}:source-reverify:{website.generation}:"
+    links = {}
+    for link in (WebsiteConnectionOperation.objects.filter(connection_id=website.pk, generation=website.generation,
+            action="source-reverify", idempotency_key__startswith=prefix).order_by("-created_at", "-pk")
+            .only("pk", "idempotency_key", "state", "payload", "receipt")[:MAX_CARRIED_PUSHES + 1]):
+        sha = link.idempotency_key[len(prefix):]
+        if SHA_PATTERN.fullmatch(sha):
+            links.setdefault(sha, link)
     chain, current, seen = [], source, {source}
     for _ in range(MAX_CARRIED_PUSHES):
-        link = WebsiteConnectionOperation.objects.filter(connection_id=website.pk, generation=website.generation,
-            action="source-reverify", idempotency_key=f"{website.pk}:source-reverify:{website.generation}:{current}").first()
+        link = links.get(current)
         payload, receipt = mapping(link.payload) if link else {}, mapping(link.receipt) if link else {}
         previous = str(payload.get("carried_from") or "")
         passed = link is not None and link.state == "completed" and receipt.get("status") == "verified"
-        superseded = link is not None and (link.state, receipt.get("status")) == SUPERSEDED_LINK and current != source
+        superseded = (link is not None and current != source
+            and (link.state, receipt.get("status"), receipt.get("code")) == SUPERSEDED_LINK)
         if (not (passed or superseded) or payload.get("source_sha") != current
                 or not SHA_PATTERN.fullmatch(previous) or previous in seen and previous != merge_sha):
             return None

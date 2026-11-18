@@ -1285,7 +1285,11 @@ def record_scan_evidence(connection, data):
             # generation answers it, so the prompt must not outlive it. On a
             # website never verified, a source-changed lock left by an older
             # push guards nothing either.
-            stale = {"scan_required"} if connection.verified_sha else {"scan_required", "repository_source_changed"}
+            # Same conservative test as the push handler
+            # (website_reconciliation._never_verified).
+            never_verified = (not connection.verified_sha and not caps.get("publishingReady")
+                and not connection.targets.filter(generation=connection.generation, verified_at__isnull=False).exists())
+            stale = {"scan_required", "repository_source_changed"} if never_verified else {"scan_required"}
             connection.blockers = [item for item in connection.blockers if item.get("code") not in stale]
         # Direct publishing needs an adapter's verification evidence at this SHA;
         # a detected file/legacy scaffold cache alone is not verification.

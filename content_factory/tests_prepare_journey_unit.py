@@ -573,6 +573,19 @@ class SourceChangedRepinTests(SimpleTestCase):
         self.assertEqual(self.op.receipt["current_step"], "scan")
         self.assertNotIn("scan_run_id", self.op.receipt)
 
+    def test_a_still_running_child_is_never_doubled_by_a_re_pin(self):
+        from .website_contract import WebsiteAuthorityError
+        self.op.receipt = {"child_run_id": "running-setup", "current_step": "setup", "scan_run_id": "old-scan"}
+        running = SimpleNamespace(run_id="running-setup", status="running", workflow="article_system_setup")
+        with patch("workflow_runs.models.ContentFactoryRun.objects.filter",
+                return_value=SimpleNamespace(first=lambda: running)), \
+                patch.object(prepare, "_queue_superseded_setup_cleanup") as cleanup:
+            prepare.prepare_failure(self.op, "setup", WebsiteAuthorityError("website_source_changed", "Moved."))
+        cleanup.assert_not_called()
+        self.assertNotIn("source_repins", self.op.receipt)
+        self.assertEqual(self.op.receipt["scan_run_id"], "old-scan")
+        self.assertNotEqual(self.op.state, "pending")
+
     def test_re_pins_are_bounded_then_try_again_restarts_from_a_fresh_scan(self):
         for repin in range(1, prepare.SOURCE_REPIN_LIMIT + 1):
             self.op.receipt["scan_run_id"] = "stale-scan"

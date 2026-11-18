@@ -442,3 +442,69 @@ class CarriedSetupMergeProofTests(SetupMergeFixture, TestCase):
         self.website.operations.filter(pk=first.pk).update(state="needs_attention",
             receipt={"status": "needs_attention", "retryable": False})
         self.assertIs(carry.worker_publish_targets(self.config), self.config.publish_targets)
+
+    def test_a_long_run_of_carried_pushes_keeps_the_projection(self):
+        """More pushes than any per-link query budget: the chain is read in one query."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from django.utils import timezone
+        from . import website_reconciliation as reconciliation
+        from . import website_source_carry
+        from .tests_website_source_carry import _compare
+        self.ready_then_push()
+        previous = self.website.operations.get(action="source-reverify", payload__source_sha=PUSHED)
+        heads = [f"{index:040x}" for index in range(1, 26)]
+        for head in heads:
+            with patch.object(website_source_carry, "compare_sources", return_value=_compare("README.md")), \
+                    patch("content_factory.website_reconciliation._find_owned_merge", return_value=None), \
+                    patch("content_factory.website_prepare.wake_prepare_for_source"):
+                reconciliation.handle_website_github_event("push", {
+                    "repository": {"id": 777}, "ref": "refs/heads/main", "after": head})
+            self.head.side_effect = WebsiteAuthorityError("website_source_changed", "Branch moved.")
+            self.assertEqual(reconciliation._process_source_reverification(previous.pk, timezone.now()), "cancelled")
+            self.head.side_effect = None
+            previous = self.website.operations.get(action="source-reverify", payload__source_sha=head)
+        self.assertEqual(reconciliation._process_source_reverification(previous.pk, timezone.now()), "completed")
+        self.website.refresh_from_db()
+        self.config.refresh_from_db()
+        with CaptureQueriesContext(connection) as queries:
+            projected = carry.worker_publish_targets(self.config)
+        chain_queries = [query for query in queries.captured_queries if "source-reverify" in query["sql"]]
+        self.assertEqual(len(chain_queries), 1)
+        self.assertEqual(projected[0]["verification"]["source_sha"], heads[-1])
+        self.assertTrue(_worker_accepts(projected, self.config, self.website), projected)
+
+    def test_a_link_cancelled_for_another_reason_breaks_the_chain(self):
+        from django.utils import timezone
+        from . import website_reconciliation as reconciliation
+        from . import website_source_carry
+        from .tests_website_source_carry import _compare
+        self.ready_then_push()
+        first = self.website.operations.get(action="source-reverify", payload__source_sha=PUSHED)
+        later = "f" * 40
+        with patch.object(website_source_carry, "compare_sources", return_value=_compare("README.md")), \
+                patch("content_factory.website_reconciliation._find_owned_merge", return_value=None), \
+                patch("content_factory.website_prepare.wake_prepare_for_source"):
+            reconciliation.handle_website_github_event("push", {
+                "repository": {"id": 777}, "ref": "refs/heads/main", "after": later})
+        self.website.operations.filter(pk=first.pk).update(state="cancelled",
+            receipt={"status": "superseded", "code": "verified_target_required", "retryable": False})
+        second = self.website.operations.get(action="source-reverify", payload__source_sha=later)
+        self.assertEqual(reconciliation._process_source_reverification(second.pk, timezone.now()), "completed")
+        self.config.refresh_from_db()
+        self.assertIs(carry.worker_publish_targets(self.config), self.config.publish_targets)
+
+    @override_settings(ROO_API_KEY="synthetic-test-key", INTERNAL_API_KEY="synthetic-test-key")
+    def test_the_config_endpoint_serves_the_worker_a_proof_at_the_carried_head(self):
+        """The worker reads its targets from the org-config endpoint, not the helper."""
+        from rest_framework.test import APIRequestFactory
+        from .service_views import ContentFactoryOrgConfigView
+        self.ready_then_push()
+        self.recheck()
+        request = APIRequestFactory().get("/synthetic", {"domain": self.website.organization.domain},
+            HTTP_X_API_KEY="synthetic-test-key")
+        response = ContentFactoryOrgConfigView.as_view()(request)
+        self.assertEqual(response.status_code, 200, getattr(response, "data", None))
+        projected = response.data["publish_targets"]
+        self.assertEqual(projected[0]["verification"]["source_sha"], PUSHED)
+        self.assertTrue(_worker_accepts(projected, self.config, self.website), projected)

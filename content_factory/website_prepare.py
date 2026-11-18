@@ -125,6 +125,8 @@ SOURCE_CHANGED_CODES = frozenset({"SOURCE_CHANGED", "WEBSITE_SOURCE_CHANGED", "w
 # outruns this many re-reads also has its own source checks queued per push.
 SOURCE_REPIN_LIMIT = 3
 SOURCE_REPIN_MINUTES = (1, 5, 15)
+# Child run states after which a re-pin cannot leave two setups running.
+SETTLED_CHILD_STATUSES = frozenset({"completed", "failed", "blocked", "cancelled", "denied"})
 
 
 SETUP_PR_RESULT_KEYS = ("pr_url", "pull_request_url", "draft_pr_url", "pr_number", "pull_request_number", "draft_pr_number")
@@ -599,8 +601,9 @@ def _repin_to_current_source(op, *, now):
     the old scan, so the preparation starts again from a scan of the current
     head, as "Try again" does: a new attempt and request identity, no replayed
     scan or setup run, and the owner's saved consent and company kept. A
-    failed setup child that opened no pull request has its branch queued for
-    cleanup, as a retry would. Bounded by ``SOURCE_REPIN_LIMIT``; after that the
+    failed or blocked setup child has its branch queued for cleanup, as a
+    retry would; a child still running is never doubled, so the stop stands
+    with "Try again" (which fences it). Bounded by ``SOURCE_REPIN_LIMIT``; after that the
     stop stands with "Try again". Goal-owned preparations are left to the goal
     runner, which re-pins them itself on a source change.
     """
@@ -610,10 +613,15 @@ def _repin_to_current_source(op, *, now):
     count = int(op.receipt.get("source_repins") or 0) + 1
     if count > SOURCE_REPIN_LIMIT:
         return False
-    child_id = op.receipt.get("child_run_id")
-    if child_id:
-        from workflow_runs.models import ContentFactoryRun
-        child = ContentFactoryRun.objects.filter(run_id=child_id, organization_id=op.connection.organization_id).first()
+    from workflow_runs.models import ContentFactoryRun
+    children = [ContentFactoryRun.objects.filter(run_id=identifier, organization_id=op.connection.organization_id).first()
+        for identifier in dict.fromkeys(identifier for identifier in (op.receipt.get("hosted_verification_run_id"),
+            op.receipt.get("child_run_id") or op.payload.get("run_id")) if identifier)]
+    if any(child is not None and child.status not in SETTLED_CHILD_STATUSES for child in children):
+        # A child still running owns the repository and its spend. Never start
+        # a second setup beside it; "Try again" fences it first.
+        return False
+    for child in children:
         if child is not None and child.status in {"failed", "blocked"}:
             _queue_superseded_setup_cleanup(op, child)
     values = _source_recheck_values(op, message="Your website changed, so we're reading the latest version.")
