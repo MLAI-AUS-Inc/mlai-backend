@@ -1,0 +1,17 @@
+{
+  "nonfailure_sites": [
+    {
+      "path": "content_factory/notification_channel_views.py",
+      "function": "_first_article_lock_response",
+      "field": "code",
+      "expression": "'first_article_required'",
+      "site_sha256": "59a3a0cd393f80a9c9f775447cd8a47dd638a9f7b7105facf359d18564c16e99",
+      "adapter": "nonfailure_category",
+      "owner": "backend.notification_channel_views",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "daily research enable validation; not a causal article run failure",
+      "source": "daily research enable validation (startup has not generated its first article yet); not a causal article run failure",
+      "test": "tests.test_notification_channels.NotificationChannelEndpointTests.test_automation_endpoint_locked_until_first_article"
+    }
+  ]
+}
