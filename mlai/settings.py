@@ -2737,10 +2737,11 @@ REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["community_chat_invite_resolve"] = COMM
 MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED = _env_is_true("MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED", False)
 MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED", False)
 
-# Shared startup access and email invites (#1362). Held until their security
-# sign-off; kept outside the P2 block below, whose switch list is fixed.
+# Startup shared access and email invites (held until their security sign-off).
+# Kept outside the P2 block, which lists only P2 cohort switches.
 MY_STARTUP_SHARED_ACCESS_ENABLED = _env_is_true("MY_STARTUP_SHARED_ACCESS_ENABLED", False)
 MY_STARTUP_EMAIL_INVITES_ENABLED = _env_is_true("MY_STARTUP_EMAIL_INVITES_ENABLED", False)
+
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort
 # (content_factory.p2_foundation.p2_applies) unless the P2 contract names an
