@@ -2752,6 +2752,9 @@ ARTICLES_SOURCE_FOLLOW_ENABLED = _env_is_true("ARTICLES_SOURCE_FOLLOW_ENABLED", 
 # (one GitHub compare) keeps the website Ready; the proof is re-checked in the
 # background for free and articles lock only if that re-check fails.
 ARTICLES_PROOF_CARRY_FORWARD_ENABLED = _env_is_true("ARTICLES_PROOF_CARRY_FORWARD_ENABLED", True)
+# A push to a live-URL website that left preparation finished is re-verified by
+# its own source check (setup scan + live check) instead of reopening preparation.
+ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED = _env_is_true("ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED", True)
 # Setup runs one website preparation may dispatch across all its attempts
 # (owner Try again and the replacement of a closed pull request included).
 # Past it, preparation waits for staff with a stuck-founder alert instead of
