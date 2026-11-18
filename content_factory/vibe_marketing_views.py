@@ -12108,7 +12108,7 @@ def _serialize_run(
     topic_candidates=None, precomputed_article_setup_state=None, config=None, include_workflow_progress=True,
 ):
     from .run_ownership import public_run_value
-    from .hosted_quality_state import founder_result
+    from .hosted_quality_state import current_preview_target, founder_result
     from .setup_status_projection import terminal_setup_projection
     run = terminal_setup_projection(_setup_pr_creation_failure_view(run))
     compact = mode in {"summary", "status"}
@@ -12183,6 +12183,9 @@ def _serialize_run(
         "admission": saved_request.get("editorial_admission"),
         "provenance_status": "recorded" if saved_request.get("editorial_admission") else "partial"} if saved_brief else None)
     if compact:
+        compact_result = _compact_result_for_run(run)
+        if run.workflow in ARTICLE_WORKFLOWS and isinstance(raw_quality, dict):
+            compact_result["article_preview_quality"] = raw_quality
         return {
             "runId": run.run_id,
             **p2_fields,
@@ -12239,7 +12242,11 @@ def _serialize_run(
             "workflowProgress": _workflow_progress(
                 context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
             ) if include_workflow_progress else None,
-            "result": founder_result(public_run_value(_strip_missing_setup_run_refs(_compact_result_for_run(run)))),
+            "result": founder_result(
+                public_run_value(_strip_missing_setup_run_refs(compact_result)),
+                target=current_preview_target(result),
+                safety_alert=_run_mapping(result.get("ops_alerts")).get("article_safety_review_required"),
+            ),
             **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                        current_step=run.current_step, resume_available=resume_available,
                                        approval_state=approval_state),
@@ -12322,7 +12329,10 @@ def _serialize_run(
         "workflowProgress": _workflow_progress(
             context=context, run=run, latest_runs=latest_runs, checks=checks, topic_candidates=topic_candidates, config=config
         ) if include_workflow_progress else None,
-        "result": founder_result(public_run_value(_strip_missing_setup_run_refs(response_result))),
+        "result": founder_result(
+            public_run_value(_strip_missing_setup_run_refs(response_result)),
+            safety_alert=_run_mapping(result.get("ops_alerts")).get("article_safety_review_required"),
+        ),
         **reliability_presentation(result, status=run.status, workflow=run.workflow,
                                    current_step=run.current_step, resume_available=resume_available,
                                    approval_state=approval_state),
