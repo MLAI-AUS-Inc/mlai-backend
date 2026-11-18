@@ -46,6 +46,17 @@ def deletion_epoch(connection):
     return max((int(row.get("deletion_epoch", 0)) for row in (connection.blockers or []) if isinstance(row, dict)), default=0)
 
 
+# The row that stores the deletion epoch above. It is bookkeeping every
+# operation and worker proof compares, never something blocking the website.
+DELETION_EPOCH_BLOCKER = "website_data_deleted"
+
+
+def staff_visible_blockers(blockers):
+    """A connection's blockers for staff views, without the deletion-epoch storage row."""
+    return [row for row in (blockers if isinstance(blockers, list) else [])
+        if not (isinstance(row, dict) and row.get("code") == DELETION_EPOCH_BLOCKER)]
+
+
 def _approved_publish_child_continuation(connection, operation, run):
     """Recognize an explicitly approved child without reopening its source operation."""
     from workflow_runs.models import ContentFactoryRun

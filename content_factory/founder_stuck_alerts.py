@@ -118,6 +118,7 @@ KIND_DESCRIPTIONS = {
     "operation_stopped": "The website step stopped and will not retry by itself.",
     "operation_retrying": "The website step keeps retrying without finishing.",
     "run_stopped": "The latest run stopped and the founder has nothing to press.",
+    "operation_retired_ask": "The website step waits on an ask the founder's journey does not show.",
 }
 MAX_NAME_LENGTH = 80
 
@@ -251,7 +252,7 @@ def stuck_alert_id(condition: StuckCondition) -> str:
 
 OPERATION_FIELDS = ("id", "connection__organization_id", "action", "state", "attempts", "created_at", "updated_at",
                     "receipt__reason_code", "receipt__error_code", "receipt__failure__code", "receipt__code",
-                    "receipt__last_error")
+                    "receipt__last_error", "receipt__user_action__id")
 # Prepare records its code as reason_code (sometimes error_code or failure.code);
 # other operations use code or last_error. The first safe code wins.
 OPERATION_CODE_FIELDS = ("receipt__reason_code", "receipt__error_code", "receipt__failure__code", "receipt__code",
@@ -277,10 +278,19 @@ def _operation_code(row) -> str:
 
 
 def _operation_condition(row, *, kind, stuck_since) -> StuckCondition:
+    details = {"website_operation_id": str(row["id"]), "operation_state": row["state"], "attempts": row["attempts"]}
+    action = row.get("receipt__user_action__id")
+    if kind == "retired_ask" and isinstance(action, str) and alerts.SAFE_CODE.fullmatch(action):
+        details["action"] = action
     return StuckCondition(
         organization_id=row["connection__organization_id"], slot=f"op-{row['id']}-{kind}", kind=f"operation_{kind}",
-        step=row["action"], code=_operation_code(row), stuck_since=stuck_since,
-        details={"website_operation_id": str(row["id"]), "operation_state": row["state"], "attempts": row["attempts"]})
+        step=row["action"], code=_operation_code(row), stuck_since=stuck_since, details=details)
+
+
+def _retired_actions():
+    """Owner actions the new journey retired; an operation resting on one waits unseen (plan A9)."""
+    from .founder_journey import RETIRED_ACTIONS
+    return sorted(RETIRED_ACTIONS)
 
 
 def _stuck_operations(*, now, scope) -> list[StuckCondition]:
@@ -293,10 +303,16 @@ def _stuck_operations(*, now, scope) -> list[StuckCondition]:
                 & ~(Q(receipt__has_key="status") & Q(receipt__status__in=WAITING_RECEIPT_STATUSES))
                 & ((Q(attempts__gte=OPERATION_RETRY_ATTEMPTS) & (~Q(action__in=POLLING_OPERATION_ACTIONS) | _failure_recorded()))
                    | Q(created_at__lte=now - OPERATION_PENDING_AFTER)))
-    rows = _pages(_current_operations(scope=scope).filter(stopped | retrying).values(*OPERATION_FIELDS), scope,
+    # Any cohort: an operation parked on a retired owner action is shown to no
+    # founder on the new journey, so staff hear of it at once (Lilia, 9 Nov 2026).
+    retired = Q(state="needs_user") & Q(receipt__user_action__id__in=_retired_actions())
+    if scope.lookback is not None:
+        retired &= Q(updated_at__gte=now - scope.lookback)
+    rows = _pages(_current_operations(scope=scope).filter(stopped | retrying | retired).values(*OPERATION_FIELDS), scope,
                   kind="operations", pk_field="id")
     return [_operation_condition(row, kind="retrying", stuck_since=row["created_at"])
             if row["state"] in RETRYING_OPERATION_STATES
+            else _operation_condition(row, kind="retired_ask", stuck_since=row["updated_at"]) if row["state"] == "needs_user"
             else _operation_condition(row, kind="stopped", stuck_since=row["updated_at"]) for row in rows]
 
 
@@ -450,6 +466,8 @@ def stuck_alert_text(receipt, context) -> str:
     since = alerts._timestamp(details.get("stuck_since_at"))
     if since:
         parts.append(f"Stuck for {_duration(timezone.now() - since)}.")
+    if details.get("action"):
+        parts.append(f"Waiting on the retired ask {alerts._safe(details['action'])}.")
     if details.get("attempts"):
         parts.append(f"Attempts {details['attempts']}.")
     if details.get("run_id"):

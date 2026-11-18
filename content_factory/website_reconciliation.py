@@ -347,6 +347,16 @@ def revoke_installation(installation_id, *, repository_ids=None, reason="github_
     return count
 
 
+def _never_verified(website):
+    """Whether nothing about this connection's current generation was ever verified.
+
+    Conservative: any verified commit, a publishing-ready capability or a target
+    with a verification stamp keeps the push-time lock.
+    """
+    return (not website.verified_sha and not (website.capabilities or {}).get("publishingReady")
+        and not website.targets.filter(generation=website.generation, verified_at__isnull=False).exists())
+
+
 def handle_website_github_event(event_type, payload):
     """Process verified lifecycle events using immutable IDs, fail closed on loss."""
     action = str(payload.get("action") or "")
@@ -411,25 +421,35 @@ def handle_website_github_event(event_type, payload):
                     record_source_transition(website, previous_revision=previous_revision, source_sha=source_sha)
                     carried_from = carry.get("from_sha") if apply_carry(
                         website, config.default_publish_target_id, source_sha, carry) else ""
+                    never_verified = not owned_merge and _never_verified(website)
                     if carried_from:
                         result["carried"] = result.get("carried", 0) + 1
+                    elif never_verified:
+                        # Nothing was ever verified, so a push revokes nothing:
+                        # no lock, no dropped capability, no paid source check.
+                        # The observed head (snapshot above) is what preparation
+                        # scans next (Studio Narrm, Pawshare, Examon; 18 Nov 2026).
+                        website.blockers = [item for item in website.blockers if item.get("code") != "repository_source_changed"]
+                        result["never_verified"] = result.get("never_verified", 0) + 1
                     elif not owned_merge:
                         website.capabilities = {**website.capabilities, "publishingReady": False, "previewSupported": False}
-                    WebsiteConnectionOperation.objects.get_or_create(
-                        idempotency_key=f"{website.pk}:source-reverify:{website.generation}:{source_sha}", defaults={
-                            "connection": website, "generation": website.generation, "action": "source-reverify",
-                            "payload": {"source_sha": source_sha, "target_id": config.default_publish_target_id,
-                                "previous_configuration_revision": previous_revision, "configuration_revision": website.configuration_version,
-                                "owned_merge_run_id": owned_merge["run_id"] if owned_merge else "",
-                                # A carried proof is re-checked in the background
-                                # for free: no paid scan of unchanged setup files.
-                                "scan_required": not bool(owned_merge or carried_from),
-                                "carried_from": carried_from},
-                            "receipt": {"status": "verification_queued", "repository_modified": False}})
-                    if not owned_merge and not carried_from:
+                    if not never_verified:
+                        WebsiteConnectionOperation.objects.get_or_create(
+                            idempotency_key=f"{website.pk}:source-reverify:{website.generation}:{source_sha}", defaults={
+                                "connection": website, "generation": website.generation, "action": "source-reverify",
+                                "payload": {"source_sha": source_sha, "target_id": config.default_publish_target_id,
+                                    "previous_configuration_revision": previous_revision, "configuration_revision": website.configuration_version,
+                                    "owned_merge_run_id": owned_merge["run_id"] if owned_merge else "",
+                                    # A carried proof is re-checked in the background
+                                    # for free: no paid scan of unchanged setup files.
+                                    "scan_required": not bool(owned_merge or carried_from),
+                                    "carried_from": carried_from},
+                                "receipt": {"status": "verification_queued", "repository_modified": False}})
+                    if not owned_merge and not carried_from and not never_verified:
                         website.blockers = [item for item in website.blockers if item.get("code") != "repository_source_changed"] + [{"code": "repository_source_changed", "message": "The repository changed. Scan and verify the current source before publishing.", "source_sha": source_sha}]
                     website.save(update_fields=["configuration_version", "capabilities", "blockers", "verified_sha", "updated_at"])
-                    result["invalidated"] += 1
+                    if not never_verified:
+                        result["invalidated"] += 1
                     prepare_wakes.append((website.pk, config.organization_id, owned_merge["run_id"] if owned_merge else ""))
         # Run no provider calls while the webhook transaction owns authority
         # locks. Both MLAI merges and customer pushes resume the same journey.

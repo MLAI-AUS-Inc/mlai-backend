@@ -348,7 +348,9 @@ class WebsiteReliabilityLifecycleTests(WebsiteDatabaseFixture, TestCase):
         from .website_verification import record_ci_attestation, BOOLEAN_PROOFS, validated_ci_identity
         from .website_contract import evidence_digest
         self.website.verified_sha = "a" * 40
-        self.website.save(update_fields=["verified_sha"])
+        # Tala Thrive (18 Nov 2026): a stale reset prompt outlived verification.
+        self.website.blockers = [*self.website.blockers, {"code": "scan_required", "message": "Scan.", "retryable": False}]
+        self.website.save(update_fields=["verified_sha", "blockers"])
         binding = {**self.binding, "expected_source_sha": "a" * 40, "client_request_id": "native-ci"}
         op = reserve_workflow_operation(self.website, workflow="article_system_setup", payload=binding)
         WebsiteConnectionTarget.objects.create(connection=self.website, generation=1, target_key="native-ci", adapter="react_article_system",
@@ -378,6 +380,7 @@ class WebsiteReliabilityLifecycleTests(WebsiteDatabaseFixture, TestCase):
         self.website.refresh_from_db()
         op.refresh_from_db()
         self.assertEqual(self.website.verified_sha, "b" * 40)
+        self.assertNotIn("scan_required", [row.get("code") for row in self.website.blockers])
         self.assertEqual(binding["expected_source_sha"], "a" * 40)
         self.assertEqual(op.generation, self.website.generation)
 
