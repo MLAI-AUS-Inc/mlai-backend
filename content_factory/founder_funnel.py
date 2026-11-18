@@ -27,7 +27,7 @@ from .run_state import ARTICLE_WORKFLOWS
 from .website_models import WebsiteConnection
 
 logger = logging.getLogger(__name__)
-STAGES = ('signed_up', 'joined', 'intent', 'startup_created', 'research_done',
+STAGES = ('signed_up', 'joined', 'intent', 'not_on_github', 'startup_created', 'research_done',
           'first_article_started', 'queued', 'draft_ready', 'copied', 'published', 'github_upgraded')
 RESEARCH_WORKFLOWS = ('startup_autofill', 'website_scan', 'repo_scan')
 MAX_COHORT = 20_000
@@ -236,6 +236,15 @@ def journey_funnel(*, since, until, using=DEFAULT_DB_ALIAS):
                 # Interests can change after joining. Its original selection time
                 # is available in new event logs, not historic profile rows.
                 mark(profile['user_id'], 'intent')
+    # A21: the not-on-GitHub exit, from its durable lead row (founder_tools.website_leads).
+    from crm.models import Contact
+    from founder_tools.website_leads import LEADS_KEY
+    for attributes in Contact.objects.using(using).filter(user_id__in=facts).exclude(attributes={}).values_list(
+            'attributes', flat=True):
+        for lead in mapping(mapping(attributes).get(LEADS_KEY)).values():
+            lead = mapping(lead)
+            if lead.get('version') == 1 and lead.get('userId') in facts:
+                mark(lead['userId'], 'not_on_github', lead.get('createdAt'))
     owners = defaultdict(set)
     for row in VibeRaisingCompany.objects.using(using).filter(profile__user_id__in=facts).values(
             'profile__user_id', 'organization_id', 'created_at'):

@@ -13544,6 +13544,22 @@ def _friendly_content_factory_error(*, workflow, detail="", unavailable=False):
     return "Content Factory worker is unavailable. Please try again."
 
 
+def content_factory_refusal_code(response_payload):
+    """The ``error_code`` a Content Factory refusal carries, wherever its body nests it.
+
+    FastAPI wraps an HTTPException body in ``detail``; some refusals put the
+    code inside an ``error`` object. Returns '' when no code is present.
+    """
+    if not isinstance(response_payload, dict):
+        return ""
+    for candidate in (response_payload, response_payload.get("detail"), response_payload.get("error")):
+        if isinstance(candidate, dict):
+            code = candidate.get("error_code")
+            if isinstance(code, str) and code.strip():
+                return code.strip()[:100]
+    return ""
+
+
 def _blocked_worker_payload(*, workflow, detail="", technical_error="", status_code=None, response_payload=None, retryable=True, diagnostics=None):
     friendly = _friendly_content_factory_error(workflow=workflow, detail=detail, unavailable=True)
     payload_diagnostics = {
@@ -13925,6 +13941,12 @@ def _run_result_from_remote(remote_data):
             merged.pop(key, None)
             merged["review_draft_actions_available"] = False
             merged["reviewDraftActionsAvailable"] = False
+    if not merged.get("error_code") and isinstance(merged.get("error"), dict):
+        # A refusal stored as an error object keeps its code where the
+        # registry and journey read it. Never replaces a code already present.
+        code = content_factory_refusal_code({"error": merged["error"]})
+        if code:
+            merged["error_code"] = code
     # The execution envelope is authoritative even when the worker's nested
     # result omits it. Polling must retain the same fence as service callbacks,
     # including the generation bound into an exact-preview approval receipt.
@@ -15408,6 +15430,13 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
             )
             if explicitly_rejected:
                 remote_data.update(status="failed", error_code="dispatch_rejected", backend_code=rejection.get("backend_code"), retryable=True)
+            else:
+                # The refusal's own code is the run's code, so the registry,
+                # the journey and self-heal can map it (INSUFFICIENT_ROO_POINTS
+                # becomes the buy-points ask instead of an unexplained block).
+                refusal_code = content_factory_refusal_code(response_payload)
+                if refusal_code:
+                    remote_data["error_code"] = refusal_code
             # A later generic HTTP refusal can follow an earlier accepted POST.
             # Only the keyed rejection receipt proves no run owns this identity.
             if keyed_dispatch and not explicitly_rejected:
