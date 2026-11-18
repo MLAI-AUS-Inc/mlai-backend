@@ -849,6 +849,8 @@ jobs:
           content_factory.tests_p2_runs \
           content_factory.tests_p2_staff \
           content_factory.tests_founder_stuck_alerts \
+          founder_tools.tests_shared_startup_membership \
+          founder_tools.tests_startup_email_invitations \
           founder_tools.tests_startup_team --exclude-tag=p2_performance --noinput --verbosity 2
 
     - name: Verify PostgreSQL search infrastructure
