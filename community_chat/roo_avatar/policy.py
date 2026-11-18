@@ -3,8 +3,10 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-CATALOG_VERSION = "roo-avatar-v1"
-SLOTS = ("hair", "glasses", "jacket", "shoes")
+CATALOG_VERSION = "roo-avatar-v2"
+SLOTS = ("fur", "hair", "glasses", "jacket", "shoes")
+# Clients released before the fur slot send exactly the other slots.
+OPTIONAL_UPDATE_SLOTS = frozenset({"fur"})
 
 
 @dataclass(frozen=True)
@@ -17,12 +19,21 @@ class Item:
 
 
 CATALOG = {
+    # Null fur is the default "Outback red"; every fur colour is a starter.
+    "fur": (
+        Item("golden_sand", "Golden sand", 0),
+        Item("blue_flier", "Blue flier", 0),
+        Item("ironbark", "Ironbark", 0),
+        Item("snow_gum", "Snow gum", 0),
+        Item("midnight_wallaroo", "Midnight wallaroo", 0),
+    ),
+    # Hair items are styles; colour belongs to the fur slot.
     "hair": (
-        Item("honey_tuft", "Honey tuft", 0),
-        Item("cocoa_curls", "Cocoa curls", 1),
-        Item("peach_fringe", "Peach fringe", 2),
-        Item("lilac_bob", "Lilac bob", 4),
-        Item("mint_mohawk", "Mint mohawk", 6),
+        Item("honey_tuft", "Tuft", 0),
+        Item("cocoa_curls", "Curls", 1),
+        Item("peach_fringe", "Swept fringe", 2),
+        Item("lilac_bob", "Bob", 4),
+        Item("mint_mohawk", "Mohawk", 6),
     ),
     "glasses": (
         Item("classic_black", "Classic black", 0),
@@ -69,7 +80,11 @@ def choices(slot):
 
 
 def validate_update(value):
-    """Strictly validate a full replacement and an exact optimistic version."""
+    """Strictly validate a replacement and an exact optimistic version.
+
+    Every slot is required except ``fur``: an outfit without it leaves the
+    saved fur unchanged, and the returned outfit then has no ``fur`` key.
+    """
     invalid = RooAvatarError("invalid_roo_avatar")
     if not isinstance(value, Mapping) or set(value) != {"version", "outfit"}:
         raise invalid
@@ -77,9 +92,13 @@ def validate_update(value):
     if type(version) is not int or not 0 <= version < 2_147_483_647:
         raise invalid
     outfit = value["outfit"]
-    if not isinstance(outfit, Mapping) or set(outfit) != set(SLOTS):
+    if not isinstance(outfit, Mapping) or set(outfit) | OPTIONAL_UPDATE_SLOTS != set(
+        SLOTS
+    ):
         raise invalid
     for slot in SLOTS:
+        if slot not in outfit:
+            continue
         selected = outfit[slot]
         if selected is not None and (
             not isinstance(selected, str)

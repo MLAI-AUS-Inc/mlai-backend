@@ -4,6 +4,7 @@ import unittest
 
 from community_chat.roo_avatar.policy import (
     CATALOG,
+    CATALOG_VERSION,
     SLOTS,
     RooAvatarError,
     catalog_for,
@@ -22,6 +23,44 @@ class RooAvatarPolicyTests(unittest.TestCase):
             self.assertEqual(len(items), 5)
             self.assertEqual(len({item.id for item in items}), 5)
             self.assertTrue(all(0 <= item.required_level <= 6 for item in items))
+
+    def test_fur_is_the_first_slot_and_every_colour_is_a_starter(self):
+        self.assertEqual(CATALOG_VERSION, "roo-avatar-v2")
+        self.assertEqual(SLOTS, ("fur", "hair", "glasses", "jacket", "shoes"))
+        self.assertEqual(tuple(empty_outfit()), SLOTS)
+        self.assertEqual(
+            [(item.id, item.name, item.required_level) for item in CATALOG["fur"]],
+            [
+                ("golden_sand", "Golden sand", 0),
+                ("blue_flier", "Blue flier", 0),
+                ("ironbark", "Ironbark", 0),
+                ("snow_gum", "Snow gum", 0),
+                ("midnight_wallaroo", "Midnight wallaroo", 0),
+            ],
+        )
+        for level in [None, *range(7)]:
+            projected = catalog_for(level)
+            self.assertEqual(tuple(projected), SLOTS)
+            self.assertEqual(len(projected["fur"]), 5)
+            for item in projected["fur"]:
+                self.assertTrue(item["unlocked"])
+                self.assertIsNone(item["unavailable_reason"])
+            for item in CATALOG["fur"]:
+                outfit = {**empty_outfit(), "fur": item.id}
+                require_unlocked(outfit, level)
+                self.assertEqual(effective_outfit(outfit, level), outfit)
+
+    def test_hair_keeps_stable_ids_and_levels_but_names_only_the_style(self):
+        self.assertEqual(
+            [(item.id, item.name, item.required_level) for item in CATALOG["hair"]],
+            [
+                ("honey_tuft", "Tuft", 0),
+                ("cocoa_curls", "Curls", 1),
+                ("peach_fringe", "Swept fringe", 2),
+                ("lilac_bob", "Bob", 4),
+                ("mint_mohawk", "Mohawk", 6),
+            ],
+        )
 
     def test_rank_thresholds_unlock_exactly_at_the_existing_contribution_level(self):
         for _, number, _, threshold, *_ in LEVELS:
@@ -56,12 +95,14 @@ class RooAvatarPolicyTests(unittest.TestCase):
         saved = {slot: items[-1].id for slot, items in CATALOG.items()}
         original = saved.copy()
         self.assertEqual(effective_outfit(saved, 6), saved)
-        self.assertEqual(effective_outfit(saved, 0), empty_outfit())
+        self.assertEqual(
+            effective_outfit(saved, 0), {**empty_outfit(), "fur": saved["fur"]}
+        )
         self.assertEqual(saved, original)
         with self.assertRaises(RooAvatarError) as caught:
             require_unlocked(saved, 0)
         self.assertEqual(caught.exception.status, 403)
-        self.assertEqual(caught.exception.slots, SLOTS)
+        self.assertEqual(caught.exception.slots, ("hair", "glasses", "jacket", "shoes"))
         self.assertEqual(effective_outfit(saved, 6), original)
 
     def test_valid_update_keeps_explicit_none_and_returns_an_independent_dict(self):
@@ -69,6 +110,42 @@ class RooAvatarPolicyTests(unittest.TestCase):
         version, parsed = validate_update({"version": 0, "outfit": outfit})
         self.assertEqual((version, parsed), (0, outfit))
         self.assertIsNot(parsed, outfit)
+        for fur in [None, "snow_gum"]:
+            outfit = {**empty_outfit(), "fur": fur}
+            self.assertEqual(
+                validate_update({"version": 3, "outfit": outfit}), (3, outfit)
+            )
+
+    def test_fur_is_optional_so_earlier_clients_can_still_save(self):
+        earlier = {
+            "hair": "honey_tuft",
+            "glasses": None,
+            "jacket": None,
+            "shoes": "red_sneakers",
+        }
+        version, parsed = validate_update({"version": 2, "outfit": earlier})
+        self.assertEqual((version, parsed), (2, earlier))
+        self.assertNotIn("fur", parsed)
+        for slot in ("hair", "glasses", "jacket", "shoes"):
+            outfit = empty_outfit()
+            del outfit[slot]
+            with self.subTest(missing=slot), self.assertRaises(
+                RooAvatarError
+            ) as caught:
+                validate_update({"version": 0, "outfit": outfit})
+            self.assertEqual(caught.exception.slots, ())
+        with self.assertRaises(RooAvatarError):
+            validate_update({"version": 0, "outfit": {**earlier, "hat": None}})
+
+    def test_unknown_fur_names_only_the_fur_slot(self):
+        for value in ["outback_red", "honey_tuft", "Golden sand", "", 1, True, [], {}]:
+            with self.subTest(value=value), self.assertRaises(RooAvatarError) as caught:
+                validate_update(
+                    {"version": 0, "outfit": {**empty_outfit(), "fur": value}}
+                )
+            self.assertEqual(caught.exception.code, "invalid_roo_avatar")
+            self.assertEqual(caught.exception.status, 400)
+            self.assertEqual(caught.exception.slots, ("fur",))
 
     def test_forged_ids_types_categories_and_incomplete_outfits_fail(self):
         for value in [
@@ -107,6 +184,7 @@ class RooAvatarPolicyTests(unittest.TestCase):
 
     def test_independent_categories_remain_mixable(self):
         outfit = {
+            "fur": "blue_flier",
             "hair": "lilac_bob",
             "glasses": "classic_black",
             "jacket": "berry_varsity",
@@ -116,6 +194,7 @@ class RooAvatarPolicyTests(unittest.TestCase):
         self.assertEqual(effective_outfit(outfit, 4), outfit)
         self.assertEqual(effective_outfit(outfit, 3)["hair"], None)
         self.assertEqual(effective_outfit(outfit, 3)["jacket"], "berry_varsity")
+        self.assertEqual(effective_outfit(outfit, None)["fur"], "blue_flier")
 
 
 if __name__ == "__main__":
