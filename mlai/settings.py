@@ -2742,6 +2742,14 @@ MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_
 MY_STARTUP_SHARED_ACCESS_ENABLED = _env_is_true("MY_STARTUP_SHARED_ACCESS_ENABLED", False)
 MY_STARTUP_EMAIL_INVITES_ENABLED = _env_is_true("MY_STARTUP_EMAIL_INVITES_ENABLED", False)
 
+# Kill switch, default on (plan step A8): the owner's Restart moves an article's
+# stored customer profile choice to the profile's newer approved version
+# instead of refusing it as an invalid brief. Never across a retired, draft or
+# unreceipted profile, a withdrawn no-offer permission or a changed offer.
+# Content Factory's CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK is the paired
+# switch that lets an admitted no-offer run continue past the newer version.
+CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK = _env_is_true("CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK", True)
+
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort
 # (content_factory.p2_foundation.p2_applies) unless the P2 contract names an

@@ -274,6 +274,24 @@ class NoDescriptionTests(JourneyFixture, TestCase):
 
 
 class ExtraCaseTests(JourneyFixture, TestCase):
+    def test_a_staff_fixing_quality_hold_is_not_the_founders_turn(self):
+        """Plan A20: an exhausted hold on an MLAI-generated artefact is ours to fix."""
+        quality = {"status": "blocking_findings", "self_heal_exhausted": True, "escalation": "quality_review",
+                   "hold_owner": "staff"}
+        run = make_run(self.org, status="approval_required", step="deliver", request={"delivery_mode": "review_draft"},
+                       result={"delivery_mode": "review_draft", "article_preview_quality": quality})
+        with self.settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=True):
+            body = self.journey()
+        self.assertStep(body, "review", "working", next_kind="view_progress")
+        self.assertEqual((body["runId"], body["holdingReason"]), (run.run_id, "slow"))
+        # Without staff alerts nobody would fix it: the founder keeps their review.
+        with self.settings(ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=False):
+            self.assertStep(self.journey(), "review", "your_turn", ask="review_draft")
+        # A finding about the founder's own content is still their review.
+        run.result = {**run.result, "article_preview_quality": {**quality, "hold_owner": "founder"}}
+        run.save(update_fields=["result"])
+        self.assertStep(self.journey(), "review", "your_turn", ask="review_draft")
+
     def test_an_invalid_org_with_a_description_never_asks_for_the_customer(self):
         self.org.domain = f"banksia-{uuid4().hex[:6]}.invalid"
         self.org.save(update_fields=["domain"])
