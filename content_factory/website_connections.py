@@ -1282,8 +1282,11 @@ def record_scan_evidence(connection, data):
         if inventory.get("discovery_complete") is True or any(key in data for key in ("tech_stack", "article_system")):
             caps["inventoryReady"] = True
             # Reset/reconnect asks for a scan; this scan of the current
-            # generation answers it, so the prompt must not outlive it.
-            connection.blockers = [item for item in connection.blockers if item.get("code") != "scan_required"]
+            # generation answers it, so the prompt must not outlive it. On a
+            # website never verified, a source-changed lock left by an older
+            # push guards nothing either.
+            stale = {"scan_required"} if connection.verified_sha else {"scan_required", "repository_source_changed"}
+            connection.blockers = [item for item in connection.blockers if item.get("code") not in stale]
         # Direct publishing needs an adapter's verification evidence at this SHA;
         # a detected file/legacy scaffold cache alone is not verification.
         targets = data.get("publish_targets") if isinstance(data.get("publish_targets"), list) else []

@@ -25,6 +25,9 @@ IDENTITY_FIELDS = ("website_connection_id", "connection_generation", "repository
     "github_repo", "source_sha", "target_id", "contract_digest", "evidence_digest")
 BOOLEAN_PROOFS = ("content_loading", "listing", "detail", "unknown_slug_404", "canonical", "assets", "browser", "narrow_layout", "wide_layout")
 CHECK_NAME = "MLAI articles native adapter verification"
+# Verifying the current source answers both the source-changed lock and a
+# reset's "scan the current repository" prompt (Tala Thrive, 18 Nov 2026).
+VERIFICATION_CLEARED_BLOCKERS = frozenset({"repository_source_changed", "scan_required"})
 MARKER = re.compile(r"MLAI_ARTICLES_ATTESTATION:([A-Za-z0-9+/=]+)")
 
 
@@ -211,7 +214,7 @@ def record_ci_attestation(data, *, owner_review=False, origin="authenticated_ci"
             from .website_goal_scope import record_source_transition
             record_source_transition(website, previous_revision=previous_revision, source_sha=proof["source_sha"])
         website.verified_sha, website.last_verified_at = proof["source_sha"], timezone.now()
-        website.blockers = [row for row in website.blockers if row.get("code") != "repository_source_changed"]
+        website.blockers = [row for row in website.blockers if row.get("code") not in VERIFICATION_CLEARED_BLOCKERS]
         website.capabilities = {**website.capabilities, "publishingReady": website.state == "connected" and not custom_verified,
             "generationReady": website.state == "connected" and not custom_verified, "previewSupported": True}
         website.save(update_fields=["verified_sha", "last_verified_at", "configuration_version", "blockers", "capabilities", "updated_at"])
@@ -562,7 +565,7 @@ def verify_live_url_deployment(config, target, *, setup_run_id="", renew=True):
             from .website_goal_scope import record_source_transition
             record_source_transition(current, previous_revision=previous_revision, source_sha=source_sha)
         current.verified_sha, current.last_verified_at = source_sha, now
-        current.blockers = [row for row in current.blockers if row.get("code") != "repository_source_changed"]
+        current.blockers = [row for row in current.blockers if row.get("code") not in VERIFICATION_CLEARED_BLOCKERS]
         connected = current.state == "connected"
         current.capabilities = {**(current.capabilities or {}), "publishingReady": connected,
             "generationReady": connected, "previewSupported": True}
