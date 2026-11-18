@@ -64,6 +64,9 @@ def reliability_presentation(result, *, status="", workflow="", current_step="",
         fields.update(errorCode=failure.get("code"), nextAction=failure.get("next_action"),
                       requiresUserAction=failure.get("requires_user_action"))
     effective_status = status or result.get("status")
+    if (effective_status in {"failed", "blocked", "blocked_verification", "completed", "cancelled", "denied"}
+            and isinstance(recovery, dict) and recovery.get("status") == "resume_queued"):
+        fields["recovery"] = {**recovery, "status": "finished"}
     assembly_repair = (
         effective_status in {"failed", "blocked", "blocked_verification"}
         and workflow in {"article_generation", "direct_generate", "confirmed_topic"}

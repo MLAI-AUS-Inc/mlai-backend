@@ -587,7 +587,10 @@ class ContentFactoryOrgConfigView(APIView):
             ]
 
         if config and config.website_connection_id:
+            from .website_setup_merge_proof import worker_publish_targets
+
             website = config.website_connection
+            response_data["publish_targets"] = worker_publish_targets(config)
             response_data["website_connection"] = {**contract_for(website), "state": website.state, "capabilities": website.capabilities}
             response_data.update(contract_for(website))
             latest_inventory = website.scan_snapshots.filter(generation=website.generation, evidence__has_key="repository_inventory").order_by("-created_at").first()

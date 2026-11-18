@@ -306,13 +306,10 @@ def is_owner_cancel(run) -> bool:
 
 def is_retrying(run) -> bool:
     """A failed or blocked run that Content Factory will run again (not terminal)."""
-    from .run_state import active_retry_signal
     if run.status not in FAILED_STATUSES:
         return False
-    result = _result(run)
-    if _mapping(result.get("recovery")).get("state") == "pending":
-        return True
-    return active_retry_signal(result)
+    from .run_state import reliability_presentation
+    return reliability_presentation(_result(run), status=run.status).get("nextAction") == "automatic_retry"
 
 
 def latest_article_run(organization):

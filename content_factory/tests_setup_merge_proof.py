@@ -1,8 +1,8 @@
 """A first-time articles setup with only inventory after a verified squash merge."""
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 
 from workflow_runs.models import ContentFactoryRun
 from . import website_setup_merge_proof as carry
@@ -12,7 +12,7 @@ from .tests_live_url_verification import BASE, MERGED, CONTRACT_DIGEST, DIGEST, 
 from .tests_setup_pr_changes_unit import static_setup_run
 from .vibe_marketing_views import _record_setup_verification_refusal
 from .website_connections import contract_for, summary_for
-from .website_contract import WebsiteAuthorityError
+from .website_contract import WebsiteAuthorityError, evidence_digest
 from .website_live_verification import build_proof
 from .website_operations import deletion_epoch
 from .website_prepare import _dispatch_prepare_step
@@ -74,6 +74,10 @@ class SetupMergeProofTests(TestCase):
         self.assertEqual(self.target.contract["verification"], {"status": "passed", "source_sha": MERGED,
             "attestation_origin": "setup_merge_carry", "carried_from": HEAD, "setup_run_id": "setup-1",
             "source_tree_sha": TREE})
+        proof = carry.worker_publish_targets(self.config)[0]["verification"]
+        self.assertEqual(proof["website_connection_id"], str(self.website.pk))
+        self.assertEqual(proof["operation_id"], str(self.website.operations.get(action="deployment-verify").pk))
+        self.assertEqual(proof["deletion_epoch"], 12)
         self.assertTrue(self.website.capabilities["generationReady"])
         self.assertTrue(self.website.capabilities["publishingReady"])
         self.assertTrue(durable_integration_evidence(self.config, self.website)["liveVerified"])
@@ -228,3 +232,57 @@ class SetupMergeProofTests(TestCase):
         _record_setup_verification_refusal(self.run, BASE, exc)
         self.run.refresh_from_db()
         self.assertEqual(self.run.result, merged)
+
+
+class WorkerSetupMergeProofTests(SimpleTestCase):
+    def setUp(self):
+        website = SimpleNamespace(pk="connection-1", generation=11, repository_id=777,
+            organization_id=17, organization=SimpleNamespace(domain="acme.example"),
+            github_repo="acme/website", branch="main", app_root="", state="connected",
+            verified_sha=MERGED, blockers=[{"deletion_epoch": 12}], targets=Mock(), operations=Mock())
+        marker = {"kind": "artifact_digest", "value": DIGEST}
+        self.reviewed = {"target_id": "articles", "kind": "registry_driven_seo",
+            "delivery_adapter": "registry_entry", "publish_capability": "direct", "route_path": "/articles",
+            "contract_digest": CONTRACT_DIGEST, "live_marker": marker,
+            "contract": {"live_marker": marker, "contract_digest": CONTRACT_DIGEST}}
+        self.build = {"attestation_origin": "setup_merge_carry", "status": "passed", "source_sha": MERGED,
+            "carried_from": HEAD, "setup_run_id": "reviewed-setup", "source_tree_sha": TREE}
+        self.binding = {**contract_for(website), "source_sha": MERGED, "target_id": "articles",
+            "contract_digest": CONTRACT_DIGEST, "method": carry.live.METHOD}
+        receipt = {**self.binding, "status": "passed", "attestation_origin": carry.live.ORIGIN,
+            "artifact_digest": DIGEST, "public_url": "https://acme.example/articles"}
+        self.selected = {**self.reviewed, "verification": self.build, "live_verification": {
+            **receipt, "status": "verified",
+        }}
+        self.target = SimpleNamespace(contract=self.selected, adapter="registry_entry",
+            source_sha=MERGED, verified_at=True, capabilities={"publishingReady": True})
+        self.operation = SimpleNamespace(pk="deployment-receipt", payload=self.binding, receipt=receipt)
+        website.targets.filter.return_value.first.return_value = self.target
+        website.operations.filter.return_value.first.return_value = self.operation
+        self.config = SimpleNamespace(organization_id=17, website_connection=website,
+            default_publish_target_id="articles", publish_targets=[self.selected])
+        self.enterContext(patch.object(carry, "_reviewed_target", return_value=(HEAD, MERGED, self.reviewed)))
+        self.enterContext(patch.object(carry.ContentFactoryRun.objects, "filter"))
+        self.enterContext(patch.object(carry, "observed_source_sha", return_value=MERGED))
+        self.enterContext(patch.object(carry.live, "selected", return_value=True))
+
+    def test_worker_proof_uses_the_saved_build_and_deployment_receipts(self):
+        proof = carry.worker_publish_targets(self.config)[0]["verification"]
+        self.assertEqual(proof, {
+            **self.build, **contract_for(self.config.website_connection), "target_id": "articles",
+            "adapter_id": "registry_entry", "operation_id": self.operation.pk, "operation_attempt": 1,
+            "deletion_epoch": 12, "contract_digest": CONTRACT_DIGEST,
+            "evidence_digest": evidence_digest({
+                "binding": self.binding, "build": self.build, "deployment": self.operation.receipt,
+            }),
+        })
+        self.assertNotIn("operation_id", self.selected["verification"])
+
+    def test_missing_or_different_deployment_evidence_keeps_the_incomplete_proof(self):
+        receipt = self.operation.receipt
+        for field, value in (("source_sha", BASE), ("artifact_digest", "e" * 64), ("target_id", "other")):
+            with self.subTest(field=field):
+                self.operation.receipt = {**receipt, field: value}
+                self.assertIs(carry.worker_publish_targets(self.config), self.config.publish_targets)
+        self.config.website_connection.operations.filter.return_value.first.return_value = None
+        self.assertIs(carry.worker_publish_targets(self.config), self.config.publish_targets)

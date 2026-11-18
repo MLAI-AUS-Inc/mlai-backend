@@ -41,6 +41,24 @@ PostgreSQL CI additionally covers persisted configuration changes, bounded
 unknown delivery, exact-key recovery and one-spend delivery. Approved disposable PostgreSQL tests exercise these paths with isolated provider transports.
 They perform no production provider actions or financial repairs.
 
+## Resuming an article after repository verification
+
+A scan can find the article route while publishing verification is still
+incomplete. Before requeuing a blocked connected article, Content Factory
+reloads the selected target and validates its proof against the original
+connection, target and source. Missing verification leaves the original
+article blocked with a website setup action.
+
+The worker configuration endpoint can supply a source-bound proof for an
+approved setup carried across an identical-tree merge. It requires the current
+target, the approved setup and its saved deployment-verification receipt.
+The proof is derived on read, including for existing saved setups.
+
+A completed resume receipt remains available as history. A stopped article
+shows an automatic retry only when the server records a pending attempt.
+Terminal verification failures use the existing no-delivery settlement path,
+which checks the original charge and the worker's stop evidence.
+
 ## Keyed first-article topic switches
 
 For the admitted founder journey, `POST /api/v1/my-startup/first-article/switch-topic/`

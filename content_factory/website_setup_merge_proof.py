@@ -13,7 +13,7 @@ from .website_connections import (
     _verified_setup_run_base, authority_guard, contract_for, observed_source_sha,
     require_unlocked_remote_call, scoped_run_contract,
 )
-from .website_contract import SHA_PATTERN
+from .website_contract import SHA_PATTERN, evidence_digest
 from .website_hosted_build import enabled as hosted
 from .website_models import WebsiteConnectionTarget
 from .website_operations import deletion_epoch
@@ -120,3 +120,61 @@ def carry_setup_merge_proof(op, config, target):
         locked.capabilities = {"publishingReady": True}
         locked.save()
         return locked
+
+
+def worker_publish_targets(config):
+    """Project a carried setup proof from backend-owned build and deployment evidence."""
+    targets = config.publish_targets
+    key = config.default_publish_target_id
+    matches = [row for row in targets or [] if mapping(row).get("target_id") == key]
+    if not key or len(matches) != 1:
+        return targets
+    selected = matches[0]
+    build = mapping(selected.get("verification"))
+    if build.get("attestation_origin") != "setup_merge_carry":
+        return targets
+
+    website = config.website_connection
+    if (website.state != "connected" or website.organization_id != config.organization_id
+            or not website.verified_sha or observed_source_sha(website) != website.verified_sha):
+        return targets
+    target = website.targets.filter(generation=website.generation, target_key=key).first()
+    if target is None or target.contract != selected or not live.accepted(website, target):
+        return targets
+    setup = ContentFactoryRun.objects.filter(
+        run_id=build.get("setup_run_id"), organization_id=website.organization_id,
+        workflow="article_system_setup", status="completed", approval_state="approved",
+    ).first()
+    reviewed = _reviewed_target(setup, website, key) if setup else None
+    scope = contract_for(website)
+    source = target.source_sha
+    digest = selected.get("contract_digest")
+    adapter = selected.get("delivery_adapter")
+    if (not reviewed or reviewed[:2] != (build.get("carried_from"), source)
+            or not SHA_PATTERN.fullmatch(str(build.get("source_tree_sha") or ""))
+            or adapter != target.adapter
+            or any(selected.get(field) != value for field, value in reviewed[2].items()
+                   if field not in {"verification", "live_verification"})):
+        return targets
+
+    binding = {**scope, "source_sha": source, "target_id": key, "contract_digest": digest, "method": live.METHOD}
+    operation = website.operations.filter(
+        idempotency_key=f"{website.pk}:live-url:{evidence_digest(binding)}",
+        generation=website.generation, action="deployment-verify", state="completed",
+    ).first()
+    receipt = mapping(operation.receipt) if operation else {}
+    if (not operation or operation.payload != binding or receipt.get("status") != "passed"
+            or receipt.get("attestation_origin") != live.ORIGIN
+            or any(receipt.get(field) != binding[field] for field in (
+                "source_sha", "target_id", "contract_digest", "connection_generation", "method",
+            ))
+            or receipt.get("artifact_digest") != live.artifact_digest(selected)
+            or receipt.get("public_url") != live.live_proof(target).get("public_url")):
+        return targets
+
+    # This completed synchronous observation has a single execution attempt.
+    proof = {**build, **scope, "target_id": key, "adapter_id": adapter,
+        "operation_id": str(operation.pk), "operation_attempt": 1, "deletion_epoch": deletion_epoch(website),
+        "contract_digest": digest,
+        "evidence_digest": evidence_digest({"binding": binding, "build": build, "deployment": receipt})}
+    return [{**row, "verification": proof} if row is selected else row for row in targets]
