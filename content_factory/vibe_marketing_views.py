@@ -162,6 +162,7 @@ from content_factory.vibe_marketing_workflows import (
     VIBE_MARKETING_WORKFLOWS,
 )
 from founder_tools.profile_fields import company_avatar_url
+from founder_tools import membership
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import (
     CompanyDomainChangeBlocked,
@@ -632,7 +633,7 @@ def _resolve_profile_company_or_response(request):
     company_id = _company_id_from_request(request)
     if company_id:
         try:
-            company = profile.companies.get(pk=company_id)
+            company = membership.companies_for_user(request.user).get(pk=company_id)
         except (VibeRaisingCompany.DoesNotExist, ValueError, DjangoValidationError):
             return profile, None, Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
     else:
@@ -1208,7 +1209,7 @@ def _refund_roo_points_for_content_island_topic_start(*, charged_user, actor_id:
     )
 
 
-def _reusable_content_factory_charge_for_run(run) -> Optional[int]:
+def _reusable_content_factory_charge_for_run(run) -> int | None:
     """Return the ledger id of a REAL, non-refunded Content Factory charge in this run's billing
     lineage, or None.
 
@@ -1393,7 +1394,7 @@ def _explicit_company_scope_required_response(request, context):
     startups because a request rendered for company A can otherwise land on
     company B after a concurrent switch or an omitted frontend field.
     """
-    if _company_id_from_request(request) or context.profile.companies.count() <= 1:
+    if _company_id_from_request(request) or membership.companies_for_user(request.user).count() <= 1:
         return None
     return Response(
         {
@@ -1417,7 +1418,7 @@ def _github_repo_company_conflict_response(*, context, requested_repo: str):
         organization=context.organization,
     ).values_list("organization_id", flat=True)
     conflicting_company = (
-        context.profile.companies.filter(organization_id__in=conflicting_org_ids)
+        membership.companies_for_user(context.profile.user).filter(organization_id__in=conflicting_org_ids)
         .select_related("organization")
         .order_by("created_at", "id")
         .first()
@@ -17298,7 +17299,7 @@ class VibeMarketingAutofillView(APIView):
                 confirm_domain_change = _request_flag(request, "confirm_domain_change", "confirmDomainChange")
                 if company_id:
                     try:
-                        company = profile.companies.get(pk=company_id)
+                        company = membership.companies_for_user(request.user).get(pk=company_id)
                     except VibeRaisingCompany.DoesNotExist:
                         return Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
                 elif create_new:

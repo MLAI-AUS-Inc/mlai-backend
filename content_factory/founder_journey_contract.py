@@ -127,6 +127,12 @@ def _rights(organization, company, config, user):
     from founder_tools.services import organization_owner_user_id
     if not startup_team._valid_user(user):
         return False, False, False, False
+    from founder_tools.membership import has_membership, shared_workspace
+
+    workspace = shared_workspace(organization)
+    if workspace:
+        allowed = has_membership(user, workspace)
+        return allowed, allowed, allowed, allowed
     owner = organization_owner_user_id(organization)
     strategy = _mapping(getattr(config, "pillar_strategy", None))
     roster = startup_team._roster(config)

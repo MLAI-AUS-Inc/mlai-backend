@@ -26,6 +26,14 @@ def _user_is_bound_to_organization(user_id, organization) -> bool:
     """
     if not user_id:
         return False
+    from django.contrib.auth import get_user_model
+    from founder_tools.membership import has_membership, shared_workspace
+
+    workspace = shared_workspace(organization)
+    if workspace:
+        user = get_user_model().objects.filter(pk=user_id).first()
+        if not has_membership(user, workspace):
+            return False
     return UserStartupBinding.objects.filter(
         user_id=user_id, organization=organization
     ).exists()

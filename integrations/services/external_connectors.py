@@ -760,7 +760,9 @@ def _get_active_vibe_raising_company(user):
 
     if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
         return None
-    return profile.active_company or profile.companies.first()
+    from founder_tools.services import resolve_active_company
+
+    return resolve_active_company(profile)
 
 
 CONNECT_DOMAIN_CLAIMED_MESSAGE = (
@@ -860,7 +862,9 @@ def company_for_user_from_request(user, request):
     from founder_tools.models import VibeRaisingCompany
 
     try:
-        return VibeRaisingCompany.objects.get(pk=company_id, profile__user=user), True
+        from founder_tools.membership import companies_for_user
+
+        return companies_for_user(user).get(pk=company_id), True
     except (VibeRaisingCompany.DoesNotExist, ValueError, DjangoValidationError):
         return None, False
 
@@ -1675,6 +1679,15 @@ def connect_humanitix_connection(user, api_key: str, company=None, *, account_la
     )
 
 
+def _connector_binding_authorized(user, organization):
+    from founder_tools.membership import has_membership, shared_workspace
+
+    workspace = shared_workspace(organization)
+    if workspace:
+        return has_membership(user, workspace)
+    return UserStartupBinding.objects.filter(user=user, organization=organization).exists()
+
+
 def _store_stripe_connection(user, organization: Optional[Organization], token_data: dict[str, Any]) -> ExternalServiceConnection:
     stripe_account_id = str(token_data.get("stripe_user_id") or "").strip()
     scopes = _as_scope_list(token_data.get("scope")) or _as_scope_list(getattr(settings, "STRIPE_OAUTH_SCOPES", []))
@@ -1862,10 +1875,7 @@ def _store_slack_connection(
         )
         if expected_generation != current_generation:
             stale_callback = True
-        elif organization is not None and not UserStartupBinding.objects.filter(
-            user_id=locked_user.pk,
-            organization_id=organization.pk,
-        ).exists():
+        elif organization is not None and not _connector_binding_authorized(locked_user, organization):
             # OAuth state is an integrity-protected snapshot, not durable
             # authorization. Recheck tenant membership at the same user lock
             # that guards token persistence so a removed founder cannot land a

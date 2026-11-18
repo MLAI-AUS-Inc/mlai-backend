@@ -164,6 +164,7 @@ def _owned(receipt, connection, pull=None):
 
 
 def _approver(organization, identifier, *, owner_only=False):
+    from founder_tools.membership import has_membership, shared_workspace
     from founder_tools.services import organization_owner_user_id
     from core.models import User
     if not identifier or isinstance(identifier, bool):
@@ -175,6 +176,9 @@ def _approver(organization, identifier, *, owner_only=False):
     user = User.objects.filter(pk=identifier, is_active=True).first()
     if user is None:
         return False
+    workspace = shared_workspace(organization)
+    if workspace:
+        return has_membership(user, workspace)
     if organization_owner_user_id(organization) == identifier:
         return True
     if owner_only:

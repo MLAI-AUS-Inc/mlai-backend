@@ -4,7 +4,7 @@ from django.core.exceptions import ValidationError
 
 from community_chat.account_sessions import _valid_session
 from community_chat.models import CommunityChatAccountSession
-from founder_tools.models import VibeRaisingCompany
+from founder_tools.membership import companies_for_user
 
 
 def valid_chat_oauth_context(payload, user_id):
@@ -19,9 +19,9 @@ def valid_chat_oauth_context(payload, user_id):
         session = CommunityChatAccountSession.objects.select_related("user").filter(
             pk=session_id, user_id=user_id,
         ).first()
-        company_filter = {"pk": company_id, "profile__user_id": user_id}
+        company_filter = {"pk": company_id}
         if payload.get("organization_id") is not None:
             company_filter["organization_id"] = payload["organization_id"]
-        return bool(_valid_session(session, timezone.now()) and VibeRaisingCompany.objects.filter(**company_filter).exists())
+        return bool(_valid_session(session, timezone.now()) and companies_for_user(session.user).filter(**company_filter).exists())
     except (ValueError, TypeError, ValidationError):
         return False

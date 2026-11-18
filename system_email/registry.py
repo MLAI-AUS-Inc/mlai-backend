@@ -67,6 +67,14 @@ _SPECS = (
         required_context=("accept_url", "explainer_url", "expires_on", "invited_email", "inviter_name", "asset_base"),
     ),
     MessageSpec(
+        key="startup_team_invite",
+        category=NOTIFICATION,
+        subject="{% autoescape off %}{{ inviter_name }} invited you to join {{ startup_name }} on MLAI{% endautoescape %}",
+        html_template="system_email/startup_team_invite_v1.html",
+        text_template="system_email/startup_team_invite_v1.txt",
+        required_context=("startup_name", "inviter_name", "invite_email", "expires_on", "accept_url", "asset_base"),
+    ),
+    MessageSpec(
         key="event_perk_code",
         category=NOTIFICATION,
         subject="Your {{ perk_label|lower }} code for {{ event_name }}",

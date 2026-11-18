@@ -6,6 +6,7 @@ from rest_framework.views import APIView
 
 from integrations.models import ExternalServiceConnection
 
+from . import membership
 from .models import VibeRaisingCompany, VibeRaisingProfile
 from .serializers import (
     FounderActiveCompanySerializer,
@@ -132,8 +133,8 @@ class FounderToolsProfileView(APIView):
 class FounderToolsCompanyView(APIView):
     def get(self, request):
         from .profile_fields import visible_companies
-        profile = get_or_create_founder_profile(request.user)
-        companies = visible_companies(profile.companies.select_related("organization").all())
+
+        companies = visible_companies(membership.companies_for_user(request.user))
         return Response(FounderCompanySerializer(companies, many=True).data, status=status.HTTP_200_OK)
 
     def post(self, request):
@@ -212,12 +213,6 @@ class FounderToolsCompanyView(APIView):
 
     def _save_company(self, request, data=None):
         profile = get_or_create_founder_profile(request.user)
-        profile = VibeRaisingProfile.objects.select_for_update().get(pk=profile.pk)
-        if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
-            profile.role = VibeRaisingProfile.ROLE_FOUNDER
-            profile.organization_name = None
-            profile.save(update_fields=["role", "organization_name", "updated_at"])
-
         serializer = FounderCompanyUpsertSerializer(data=request.data if data is None else data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -230,11 +225,22 @@ class FounderToolsCompanyView(APIView):
             if key in data
         }
 
+        if not company_id:
+            profile = VibeRaisingProfile.objects.select_for_update().get(pk=profile.pk)
+            if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
+                profile.role = VibeRaisingProfile.ROLE_FOUNDER
+                profile.organization_name = None
+                profile.save(update_fields=["role", "organization_name", "updated_at"])
+
         # A new company, or the first save of an unsaved research workspace.
         first_save = False
         try:
             if company_id:
-                company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
+                from .profile_fields import is_research_workspace
+
+                company = get_object_or_404(membership.companies_for_user(request.user), pk=company_id)
+                company = membership.lock_company_edit(request.user, company)
+                first_save = is_research_workspace(company)
             elif create_new:
                 from .profile_fields import is_research_workspace
                 from .services import find_company_with_domain
@@ -243,7 +249,7 @@ class FounderToolsCompanyView(APIView):
                 company = provisional if reuse else VibeRaisingCompany(profile=profile)
                 first_save = True
             else:
-                company = profile.companies.filter(name__iexact=data["name"]).first()
+                company = membership.companies_for_user(request.user).filter(profile=profile, name__iexact=data["name"]).first()
                 first_save = company is None
                 company = company or VibeRaisingCompany(profile=profile)
 
@@ -261,6 +267,7 @@ class FounderToolsCompanyView(APIView):
                 # company endpoint).
                 if (
                     plain_fields["domain"]
+                    and plain_fields["domain"] != company.domain
                     and not domain_is_available_to(request.user, plain_fields["domain"])
                 ):
                     raise CompanyDomainClaimedError(claimed_organization(plain_fields["domain"]))
@@ -315,27 +322,45 @@ class FounderToolsCompanyView(APIView):
         apply_shared_startup_details(user=request.user, company=company, data=data)
         if first_save:
             seed_new_company_founder_and_author(user=request.user, company=company)
-        if profile.active_company_id is None:
+            membership.activate_new_company(company, request.user)
+        if first_save and profile.active_company_id is None:
             set_active_company(profile, company)
         company.refresh_from_db()
 
         return Response(FounderCompanySerializer(company).data, status=status.HTTP_200_OK)
 
 
-class FounderToolsCompanyDetailView(APIView):
-    def delete(self, request, company_id):
-        """Offboard a company: revoke its integrations, purge its data, remove it.
+def _company_ids(request):
+    return {str(source.get(key)) for source in (request.query_params, request.data)
+            for key in ("companyId", "company_id") if source.get(key)}
 
-        Ownership is enforced via ``profile.companies`` (a company belonging to
-        another founder 404s). Returns the offboarding summary plus the refreshed
-        profile so the client can re-render the company list and active company.
-        """
+
+class FounderToolsCompanyDetailView(APIView):
+    @transaction.atomic
+    def delete(self, request, company_id):
+        """Offboard a legacy company or explicitly close a shared startup."""
         profile = get_or_create_founder_profile(request.user)
-        company = get_object_or_404(
-            profile.companies.select_related("organization"),
-            pk=company_id,
-        )
-        summary = offboard_company(company)
+        company = get_object_or_404(membership.companies_for_user(request.user), pk=company_id)
+        company = membership.lock_company_edit(request.user, company)
+        if company.membership_policy == VibeRaisingCompany.SHARED_ACCESS:
+            from .startup_team import TeamError
+
+            identifiers = _company_ids(request)
+            if identifiers and identifiers != {str(company.pk)}:
+                return Response({"detail": "Startup selections do not match."}, status=400)
+
+            if request.data.get("confirmCloseForEveryone") is not True:
+                return Response({
+                    "detail": "Confirm that you want to close this startup for everyone.",
+                    "reason": "confirm_close_for_everyone",
+                }, status=409)
+            try:
+                membership.close(company, request.user)
+            except TeamError as exc:
+                return Response({"detail": exc.detail, "reason": exc.reason}, status=exc.status)
+            summary = {"companyId": str(company.pk), "closed": True}
+        else:
+            summary = offboard_company(company)
         profile.refresh_from_db()
         return Response(
             {"offboarding": summary, "profile": FounderProfileSerializer(profile).data},
@@ -350,9 +375,8 @@ class FounderToolsActiveCompanyView(APIView):
         serializer = FounderActiveCompanySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         company = get_object_or_404(
-            VibeRaisingCompany,
+            membership.companies_for_user(request.user),
             pk=serializer.validated_data["companyId"],
-            profile=profile,
         )
         set_active_company(profile, company)
         return Response(FounderProfileSerializer(profile).data, status=status.HTTP_200_OK)
@@ -372,7 +396,7 @@ class FounderToolsCompanyMonthlyUpdatesView(APIView):
     def post(self, request, company_id):
         profile = get_or_create_founder_profile(request.user)
         company = get_object_or_404(
-            profile.companies.select_related("organization"),
+            membership.companies_for_user(request.user),
             pk=company_id,
         )
         if not company.organization_id:
@@ -386,6 +410,11 @@ class FounderToolsCompanyMonthlyUpdatesView(APIView):
 
         from startup_updates.models import UserStartupBinding
 
+        if company.membership_policy == VibeRaisingCompany.SHARED_ACCESS:
+            company = membership.lock_company_edit(request.user, company)
+            UserStartupBinding.objects.filter(
+                organization=company.organization, monthly_updates_enabled=True,
+            ).exclude(user=request.user).update(monthly_updates_enabled=False)
         binding, _created = UserStartupBinding.objects.get_or_create(
             user=request.user,
             organization=company.organization,

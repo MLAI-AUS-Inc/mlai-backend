@@ -431,15 +431,15 @@ class OAuthTests(SimpleTestCase):
                 oauth.valid_grant("grant")
 
     def test_wrong_owner_and_cross_startup_rejected_before_tools(self):
-        with patch.object(oauth.VibeRaisingCompany, "objects") as companies:
-            companies.select_related.return_value.filter.return_value.first.return_value = None
+        with patch.object(oauth, "companies_for_user") as companies:
+            companies.return_value.filter.return_value.first.return_value = None
             with self.assertRaises(PermissionDenied):
                 oauth.company_for(principal().user, COMPANY_ID)
-            self.assertEqual(companies.select_related.return_value.filter.call_args.kwargs["profile__user"].pk, 7)
+            self.assertEqual(companies.call_args.args[0].pk, 7)
             companies.reset_mock()
             with self.assertRaises(PermissionDenied):
                 oauth.company_for(principal().user, OTHER_COMPANY_ID, grant())
-            companies.select_related.assert_not_called()
+            companies.assert_not_called()
 
     def test_model_uuid_company_approval_and_tool_round_trip(self):
         from organizations.models import Organization
@@ -448,11 +448,12 @@ class OAuthTests(SimpleTestCase):
         intent = oauth.create_intent(self.query)
         user = Obj(pk=7, auth_version=3, is_active=True)
         session = Obj(pk="session", user_id=7)
-        with patch.object(oauth.VibeRaisingCompany, "objects") as companies, patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
-            companies.select_related.return_value.filter.return_value.first.return_value = company
+        with patch.object(oauth, "companies_for_user") as companies, patch.object(oauth, "_valid_session", return_value=True), patch.object(oauth, "_validate_device_owner"):
+            companies.return_value.filter.return_value.first.return_value = company
             callback = oauth.approve_intent(intent["requestId"], user=user, session=session,
                 company_id=COMPANY_ID.upper(), approve=True)
-            companies.select_related.return_value.filter.assert_called_with(pk=UUID(COMPANY_ID), profile__user=user)
+            companies.assert_called_with(user)
+            companies.return_value.filter.assert_called_with(pk=UUID(COMPANY_ID))
             code = parse_qs(urlsplit(callback).query)["code"][0]
             grant_id = cache.get(oauth.key("code", code))["grant_id"]
             saved_grant = cache.get(oauth.key("grant", grant_id))
@@ -478,11 +479,11 @@ class OAuthTests(SimpleTestCase):
                 self.assertEqual(parse_qs(urlsplit(status["reviewUrl"]).query)["company_id"], [COMPANY_ID])
 
     def test_invalid_company_ids_are_denied_before_ownership_query(self):
-        with patch.object(oauth.VibeRaisingCompany, "objects") as companies:
+        with patch.object(oauth, "companies_for_user") as companies:
             for company_id in (None, True, False, 9, "9", "not-a-uuid", {}, [], "04d89807-5884-4b0e-83cc-311abf13b648/other"):
                 with self.subTest(company_id=company_id), self.assertRaises(PermissionDenied):
                     oauth.company_for(principal().user, company_id)
-            companies.select_related.assert_not_called()
+            companies.assert_not_called()
 
     def test_revoked_scope_rejected(self):
         user = Obj(pk=7, auth_version=3, is_active=True)

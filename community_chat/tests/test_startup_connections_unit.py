@@ -119,9 +119,10 @@ class StartupConnectionBridgeTests(SimpleTestCase):
         with patch.object(connections, 'consume_ticket', return_value={"uid": 7, "company": COMPANY, "session": "session-1", "provider": "slack", "return_to": "mobile"}), \
              patch.object(connections.CommunityChatAccountSession.objects, 'select_related') as sessions, \
              patch.object(connections, '_valid_session', return_value=True), \
-             patch.object(connections.VibeRaisingCompany.objects, 'get', return_value=self.company), \
+             patch.object(connections, 'companies_for_user') as companies, \
              patch.object(connections, 'connector_connect', return_value=HttpResponseRedirect('https://provider.example.test/oauth')) as start:
             sessions.return_value.filter.return_value.first.return_value = session
+            companies.return_value.get.return_value = self.company
             response = connections.connect_browser(request)
         self.assertEqual(response.status_code, 302)
         self.assertEqual(request.GET['next'], 'mlaichat://connections?company_id=' + COMPANY + '&provider=slack')
@@ -135,7 +136,8 @@ class StartupConnectionBridgeTests(SimpleTestCase):
 
 class SourcePreferenceStorageTests(SimpleTestCase):
     def setUp(self):
-        self.company = Obj(pk=COMPANY, organization_id=9, profile=Obj(user_id=7))
+        self.company = Obj(pk=COMPANY, organization_id=9, profile_id=1, profile=Obj(user_id=7),
+                           membership_policy=prefs.VibeRaisingCompany.LEGACY_ACCESS)
         self.strategy = {"pillars": ["culture"], "editorial_catalog": {"version": 4},
                          prefs.PREFERENCE_KEY: {COMPANY + ":7": {"slack": True}, COMPANY + ":8": {"luma": False}, "other:7": {"stripe": False}}}
 
@@ -216,13 +218,16 @@ class NativeOAuthBoundaryTests(SimpleTestCase):
     def test_revoked_session_or_changed_company_cannot_complete_callback(self):
         payload = {"chat_session_id": "session-1", "chat_company_id": COMPANY, "organization_id": 9}
         with patch("community_chat.startups.oauth_context.CommunityChatAccountSession.objects.select_related") as sessions, \
-             patch("community_chat.startups.oauth_context.VibeRaisingCompany.objects.filter") as companies, \
+             patch("community_chat.startups.oauth_context.companies_for_user") as companies, \
              patch("community_chat.startups.oauth_context._valid_session", return_value=True):
-            sessions.return_value.filter.return_value.first.return_value = Obj()
-            companies.return_value.exists.return_value = True
+            user = Obj(pk=7)
+            sessions.return_value.filter.return_value.first.return_value = Obj(user=user)
+            scoped = companies.return_value.filter
+            scoped.return_value.exists.return_value = True
             self.assertTrue(valid_chat_oauth_context(payload, 7))
-            companies.assert_called_with(pk=COMPANY, profile__user_id=7, organization_id=9)
-            companies.return_value.exists.return_value = False
+            companies.assert_called_with(user)
+            scoped.assert_called_with(pk=COMPANY, organization_id=9)
+            scoped.return_value.exists.return_value = False
             self.assertFalse(valid_chat_oauth_context(payload, 7))
         with patch("community_chat.startups.oauth_context.CommunityChatAccountSession.objects.select_related"), \
              patch("community_chat.startups.oauth_context._valid_session", return_value=False):

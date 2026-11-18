@@ -151,6 +151,9 @@ class EntryViewTests(SimpleTestCase):
         cache.clear()
         self.factory=APIRequestFactory()
         self.user=SimpleNamespace(pk='mlai-user',is_authenticated=True,is_active=True)
+        self.company_scope = self.enterContext(
+            patch('community_chat.my_startup_views.membership.companies_for_user')
+        )
         self.company=SimpleNamespace(pk=COMPANY,name='Test company',organization_id=None)
         self.identity=dict(user_id='mlai-user',company_id=COMPANY,workspace_id=WORKSPACE,company_name='Test company')
 
@@ -165,7 +168,8 @@ class EntryViewTests(SimpleTestCase):
             response=views.EntryView.as_view()(self.request())
         self.assertEqual(response.status_code,200)
         self.assertIn('company_id='+COMPANY,response.data['start_url'])
-        self.assertEqual(owned.call_args.kwargs['profile__user'],self.user)
+        self.company_scope.assert_called_once_with(self.user)
+        owned.assert_called_once_with(self.company_scope.return_value, pk=COMPANY)
 
     def test_missing_company_is_rejected_before_authority_call(self):
         with patch.object(views,'authorize') as auth:

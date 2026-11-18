@@ -1,6 +1,6 @@
 # My startup account API
 
-`/api/v1/my-startup/` exposes the reviewed marketing, company, connector, account and points operations to MLAI Chat account sessions. Existing JWT routes and Content Factory worker contracts remain unchanged. No database schema change is introduced.
+`/api/v1/my-startup/` exposes the reviewed marketing, company, connector, account and points operations to MLAI Chat account sessions. Existing JWT routes and Content Factory worker contracts remain unchanged.
 
 The allowlist is `founder_tools/my_startup/registry.py`; its `urls.py` copies only those registered views. `community_chat/my_startup_urls.py` supplies explicit company-scoped facades before those aliases. The mixin preserves their permission and throttle behavior and adds authenticated Chat account requirements. Foreign explicit Authorization credentials cannot fall back to a Chat cookie. Cookie mutations retain the Chat session's exact-origin checks. Never add administrative or worker/service-key endpoints to the allowlist.
 
@@ -15,6 +15,14 @@ hydration and analytics scripts. This prevents client routing at the capability
 path and storage errors in the opaque-origin sandbox. The sandbox continues to
 allow scripts without granting same-origin access. Text updates and approval
 still require the separate authenticated owner operations.
+
+## Shared startup teams
+
+A shared startup keeps its company UUID and organization. Every active teammate can edit the startup, publish work, approve join requests, manage invites, remove a teammate and leave. The creator receives the first membership. Provider consent, personal purchases and billing opt-in belong to the person who gives consent.
+
+Shared companies and team responses include `accessPolicy: "shared"`. Team responses include each active teammate and an `isYou` marker. Invite redemption returns `companyId`. Obsolete per-member rights updates return HTTP 409. Deleting a shared company requires `confirmCloseForEveryone: true` and closes access for everyone while retaining the tenant and its history.
+
+Apply the reviewed migration before deploying the new code. Enable `MY_STARTUP_SHARED_ACCESS_ENABLED` to enroll new saved startups. Inspect an existing startup with `manage.py migrate_startup_membership --company <uuid>`. An authorized `--apply` cutover admits confirmed teammates, preserves company and member UUIDs, and revokes outstanding legacy invites. Pending requests still require approval. Frozen or ambiguous cases require review. After adoption, the shared policy and revocations remain effective when new enrollment is paused.
 
 ## Additional endpoints
 
@@ -147,3 +155,36 @@ observation endpoint; it cannot start or recover a preview. Reads are cached
 and bounded, and an older worker's 404 leaves the ordinary preparation status
 intact. The frontend links to the owned setup run and keeps provider links in
 staff details. A successful build observation never establishes readiness.
+
+### Email invitations
+
+`cutover_startup_email_invites --company <uuid>` inspects a saved startup. An
+authorized operator can pass `--apply` after shipping the capable clients.
+It durably retires anonymous invite links for that startup and sets
+`invitationMode: "email"` on the manager's Team response.
+`MY_STARTUP_EMAIL_INVITES_ENABLED` gates new sends and the outbox worker.
+A pause leaves the email Team controls, cancellation and existing valid
+acceptance available. Newly saved shared startups use email invitations when
+the switch is on. Legacy teams retain their existing member permissions
+until shared-access adoption.
+
+- `POST /api/v1/my-startup/team/invitations/?company_id=<uuid>` accepts a single
+  `email`. The result status is `queued`, `existing` or `already_member`.
+- `GET /api/v1/my-startup/team/?company_id=<uuid>` returns `canSendInvitations`
+  and up to 50 current invitation summaries to the startup's managers. Resend is
+  available after a five-minute cooldown. A rate-limited write includes `retryAt`.
+- `POST /api/v1/my-startup/team/invitations/<id>/resend/?company_id=<uuid>`
+  takes `actionId`, a client UUID preserved across retries. A new send renews
+  the seven-day expiry and replaces the previous accept reference.
+- `DELETE /api/v1/my-startup/team/invitations/<id>/?company_id=<uuid>` cancels
+  the invitation.
+- `GET` and `POST /api/v1/my-startup/team/invitations/<public-id>/accept/`
+  preview and accept with the verified primary email or verified alias. The
+  acceptance endpoint resolves the startup without a selected company.
+  Successful acceptance returns the startup's `companyId`.
+
+Deploy the approved migration before the runtime. The Compose
+`startup-invite-worker` drains the committed outbox. It uses the existing
+system email sender, suppression checks and Resend feedback. Verify the
+transactional sender, approved Chat origin and untracked CTA in staging with
+an authorized synthetic recipient. See [system email](system-email.md).

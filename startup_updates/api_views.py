@@ -908,7 +908,11 @@ def _get_org_and_binding_for_run(run: ContentFactoryRun):
         organization.user_startup_bindings.select_related("user", "google_connection"),
         id=binding_id,
     )
+    from founder_tools.membership import has_membership, shared_workspace
     from startup_updates.revisions import RevisionConflict
+    workspace = shared_workspace(organization)
+    if workspace and not has_membership(binding.user, workspace):
+        raise RevisionConflict("The selected account no longer has access to this startup.")
     for provider, pin in ((run.run_request or {}).get("source_connection_pins") or {}).items():
         if provider == "gmail":
             if pin and not GoogleConnection.objects.filter(pk=pin, user=binding.user).exists():
@@ -4538,6 +4542,17 @@ class MonthlyDispatchTargetsView(APIView):
             .exclude(organization__domain="")
             .order_by("organization__domain", "user_id")
         )
+        from founder_tools.membership import has_membership, shared_workspace
+
+        seen = set()
+        eligible = []
+        for binding in bindings.select_related("user"):
+            workspace = shared_workspace(binding.organization)
+            if workspace:
+                if binding.organization_id in seen or not has_membership(binding.user, workspace):
+                    continue
+                seen.add(binding.organization_id)
+            eligible.append(binding)
         targets = [
             {
                 "user_id": binding.user_id,
@@ -4545,7 +4560,7 @@ class MonthlyDispatchTargetsView(APIView):
                 "organization_id": binding.organization_id,
                 "binding_id": binding.id,
             }
-            for binding in bindings
+            for binding in eligible
         ]
         return Response({"count": len(targets), "targets": targets}, status=status.HTTP_200_OK)
 

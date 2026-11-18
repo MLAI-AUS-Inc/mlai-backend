@@ -44,7 +44,7 @@ class SourcePreferenceTests(SimpleTestCase):
         profile = Obj(progress_configuration={preferences.PREFERENCE_KEY: {"a:2": {"gmail": False, "linear": "false"}, "b": {"gmail": True}}})
         with patch.object(preferences.StartupProfile, "objects") as manager:
             manager.filter.return_value.first.return_value = profile
-            actual = preferences.source_preferences(Obj(pk="a", organization_id=7, profile=Obj(user_id=2)))
+            actual = preferences.source_preferences(Obj(pk="a", organization_id=7, profile_id=2, profile=Obj(user_id=2), membership_policy=0))
             manager.filter.assert_called_once_with(organization_id=7)
         self.assertEqual(actual, {"gmail": False})
 
@@ -52,14 +52,14 @@ class SourcePreferenceTests(SimpleTestCase):
         profile = MagicMock(progress_configuration={"version": 2, preferences.PREFERENCE_KEY: {"sibling": {"gmail": True}}})
         with patch.object(preferences.Organization, "objects"), patch.object(preferences.StartupProfile, "objects") as manager:
             manager.select_for_update.return_value.get_or_create.return_value = profile, False
-            result = preferences.set_source_preference.__wrapped__(Obj(pk="owned", organization_id=7, profile=Obj(user_id=2)), "gmail", False)
+            result = preferences.set_source_preference.__wrapped__(Obj(pk="owned", organization_id=7, profile_id=2, profile=Obj(user_id=2), membership_policy=0), "gmail", False)
         self.assertEqual(profile.progress_configuration, {"version": 2, preferences.PREFERENCE_KEY: {"sibling": {"gmail": True}, "owned:2": {"gmail": False}}})
         self.assertEqual(result["enabled"], False)
 
     def test_invalid_values_fail_before_persistence(self):
         for provider, value in (("other", True), ("gmail", "false"), ("slack", 0), ("luma", None)):
             with self.subTest(provider=provider, value=value), self.assertRaises(ValidationError):
-                preferences.set_source_preference.__wrapped__(Obj(pk="owned", organization_id=7, profile=Obj(user_id=2)), provider, value)
+                preferences.set_source_preference.__wrapped__(Obj(pk="owned", organization_id=7, profile_id=2, profile=Obj(user_id=2), membership_policy=0), provider, value)
 
     def test_post_does_not_disconnect(self):
         view = DisconnectView()

@@ -74,16 +74,17 @@ class OwnAiJourneyTests(SimpleTestCase):
         cache.clear()
         self.factory = APIRequestFactory()
         self.user, self.session = account()
-        self.company = Obj(pk=UUID(COMPANY_ID), name="Example Startup", organization=Obj(pk=8, domain="example.test"))
+        self.company = Obj(pk=UUID(COMPANY_ID), name="Example Startup", organization=Obj(pk=8, domain="example.test"), membership_policy=0)
         self.drafts = Drafts()
         self.sessions = MagicMock()
         stack = ExitStack()
         self.addCleanup(stack.close)
-        companies = stack.enter_context(patch.object(oauth.VibeRaisingCompany, "objects"))
-        companies.select_related.return_value.filter.return_value.first.return_value = self.company
-        # agent_connections imports the same model: organisation-less startups are a separate query.
-        companies.filter.side_effect = lambda **query: MagicMock(order_by=MagicMock(
-            return_value=[] if query.get("organization__isnull") else [self.company]))
+        companies = stack.enter_context(patch.object(oauth, "companies_for_user"))
+        companies.return_value.filter.return_value.first.return_value = self.company
+        selected = stack.enter_context(patch.object(agent_connections, "companies_for_user"))
+        selected.return_value.filter.return_value.order_by.return_value = [self.company]
+        raw = stack.enter_context(patch.object(agent_connections.VibeRaisingCompany, "objects"))
+        raw.filter.return_value.order_by.return_value = []
         users = stack.enter_context(patch.object(oauth, "get_user_model"))
         users.return_value.objects.filter.return_value.first.return_value = self.user
         stack.enter_context(patch("django.contrib.auth.get_user_model"))
@@ -584,9 +585,9 @@ class RealReasonTests(SimpleTestCase):
         users = stack.enter_context(patch.object(oauth, "get_user_model"))
         users.return_value.objects.filter.return_value.first.return_value = self.user
         self.membership = stack.enter_context(patch.object(oauth, "require_community_access"))
-        self.companies = stack.enter_context(patch.object(oauth.VibeRaisingCompany, "objects"))
-        self.companies.select_related.return_value.filter.return_value.first.return_value = Obj(
-            pk=UUID(COMPANY_ID), name="Example", organization=Obj(pk=8))
+        self.companies = stack.enter_context(patch.object(oauth, "companies_for_user"))
+        self.companies.return_value.filter.return_value.first.return_value = Obj(
+            pk=UUID(COMPANY_ID), name="Example", organization=Obj(pk=8), membership_policy=0)
         self.client = oauth.register_client({"redirect_uris": ["https://claude.ai/api/mcp/auth_callback"]})
         cache.set(oauth.key("grant", "grant"), grant(resource=config.mlai_url(), client_id=self.client["client_id"]))
         self.access = oauth.issue_tokens("grant")
@@ -599,7 +600,7 @@ class RealReasonTests(SimpleTestCase):
         cases = (
             ("community_membership_required", "membership is not approved", lambda: setattr(self.membership, "side_effect", PermissionDenied({"error": "onboarding_required"}))),
             ("startup_unavailable", "startup is unavailable", lambda: (setattr(self.membership, "side_effect", None),
-                setattr(self.companies.select_related.return_value.filter.return_value.first, "return_value", None))),
+                setattr(self.companies.return_value.filter.return_value.first, "return_value", None))),
         )
         for code, text, arrange in cases:
             arrange()
@@ -682,8 +683,10 @@ class ConsentEligibilityTests(SimpleTestCase):
         stack = ExitStack()
         self.addCleanup(stack.close)
         self.member = stack.enter_context(patch.object(agent_connections, "has_community_access", return_value=True))
-        self.companies = stack.enter_context(patch.object(agent_connections.VibeRaisingCompany, "objects"))
         self.owned, self.unfinished = [], []
+        scoped = stack.enter_context(patch.object(agent_connections, "companies_for_user"))
+        scoped.return_value.filter.return_value.order_by.side_effect = lambda *args: self.owned
+        self.companies = stack.enter_context(patch.object(agent_connections.VibeRaisingCompany, "objects"))
         self.companies.filter.side_effect = lambda **query: MagicMock(order_by=MagicMock(
             return_value=self.unfinished if query.get("organization__isnull") else self.owned))
 
@@ -793,7 +796,7 @@ class BriefAndSchemaTests(SimpleTestCase):
                 "narrative": {"summary": "Up"}, "metrics": {"revenue": 1}})
 
     def test_brief_text_names_the_installed_service_and_explains_existing_drafts(self):
-        company = Obj(pk=UUID(COMPANY_ID), name="Example", organization=Obj(pk=8, domain="example.test"))
+        company = Obj(pk=UUID(COMPANY_ID), name="Example", organization=Obj(pk=8, domain="example.test"), membership_policy=0)
         existing = [{"updateId": 3, "revisionId": 30, "status": "draft", "title": "October update", "updatedAt": None}]
         for resource, brand, absent in ((config.mlai_url(), "MLAI", "Valley"), (config.mcp_url(), "Valley", "MLAI from")):
             principal = oauth.Principal(user=Obj(pk=7), grant=grant(resource=resource))
@@ -888,7 +891,8 @@ class DraftTaskTests(SimpleTestCase):
         user, session = account()
         request = APIRequestFactory().post(f"/api/v1/community-chat/startups/agent-draft-task/?company_id={COMPANY_ID}", body, format="json")
         force_authenticate(request, user=user, token=session)
-        with patch.object(agent_connections, "get_object_or_404", create=True), patch("community_chat.startups.views.get_object_or_404", return_value=self.company), \
+        with patch("community_chat.startups.views.get_object_or_404", return_value=self.company), \
+                patch("community_chat.startups.views.companies_for_user"), \
                 patch("startup_updates.models.StartupProfile.objects") as profiles, patch("startup_updates.models.MonthlyUpdateDraft.objects", Drafts(list(drafts))), \
                 patch("django.utils.timezone.now", return_value=NOW):
             profiles.filter.return_value.first.return_value = Obj(reporting_timezone="Australia/Melbourne")

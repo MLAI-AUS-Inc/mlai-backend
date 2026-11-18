@@ -98,6 +98,7 @@ from startup_updates.services import (
     startup_update_run_matches_target_month,
     sync_startup_profile_from_company,
 )
+from founder_tools import membership
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from founder_tools.services import (
     CompanyDomainChangeBlocked,
@@ -421,7 +422,8 @@ def _get_founder_profile_or_response(user):
 
 
 def _get_active_company(profile):
-    company = profile.active_company or profile.companies.first()
+    companies = membership.companies_for_user(profile.user)
+    company = companies.filter(pk=profile.active_company_id).first() or companies.first()
     if company:
         ensure_company_organization(company)
     return company
@@ -1287,15 +1289,14 @@ def _get_founder_company_context_or_response(request):
     tabs can't read or write each other's data through the shared, mutable
     active_company. Without one, falls back to the active company as before.
     """
-    profile, error_response = _get_founder_profile_or_response(request.user)
-    if error_response:
-        return None, error_response
+    from founder_tools.services import get_or_create_founder_profile
 
+    profile = get_or_create_founder_profile(request.user)
     company_id = _company_id_from_request(request)
     if company_id:
         try:
             # profile.companies enforces ownership; a foreign or unknown id 404s.
-            company = profile.companies.get(pk=company_id)
+            company = membership.companies_for_user(request.user).get(pk=company_id)
         except (VibeRaisingCompany.DoesNotExist, ValueError, DjangoValidationError):
             return None, Response(
                 {"detail": "Company not found."},
@@ -1310,6 +1311,8 @@ def _get_founder_company_context_or_response(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+    if profile.role != VibeRaisingProfile.ROLE_FOUNDER and company.membership_policy != VibeRaisingCompany.SHARED_ACCESS:
+        return None, Response({"detail": "Only founders can access this endpoint."}, status=403)
     organization = ensure_company_organization(company)
     domain = organization.domain
     return {
@@ -1719,7 +1722,11 @@ def _manual_document_access_allowed(user, document: StartupManualDocument, *, ac
         return True
     if active_company is None or document.company_id != active_company.id:
         return False
-    return document.created_by_id == user.id or document.company.profile.user_id == user.id
+    if active_company.membership_policy == VibeRaisingCompany.SHARED_ACCESS:
+        return membership.has_membership(user, active_company)
+    return document.created_by_id == user.id or (
+        document.company.profile_id and document.company.profile.user_id == user.id
+    )
 
 
 def _get_accessible_manual_document_or_response(request, document_id):
@@ -2275,11 +2282,28 @@ class VibeRaisingProfileView(APIView):
         return Response(VibeRaisingProfileSerializer(profile).data, status=status.HTTP_200_OK)
 
 
+def _founder_or_shared_profile(request):
+    """Allow an admitted teammate to edit or select their shared startup."""
+    from founder_tools.services import get_or_create_founder_profile
+
+    company_id = _company_id_from_request(request)
+    if company_id:
+        try:
+            shared = membership.companies_for_user(request.user).filter(
+                pk=company_id, membership_policy=VibeRaisingCompany.SHARED_ACCESS,
+            ).exists()
+        except (TypeError, ValueError, DjangoValidationError):
+            shared = False
+        if shared:
+            return get_or_create_founder_profile(request.user), None
+    return _get_founder_profile_or_response(request.user)
+
+
 class VibeRaisingCompanyView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        profile, error_response = _get_founder_profile_or_response(request.user)
+        profile, error_response = _founder_or_shared_profile(request)
         if error_response:
             return error_response
 
@@ -2292,8 +2316,11 @@ class VibeRaisingCompanyView(APIView):
         # Without this, setting domain to a rival's value joins you to their
         # tenant (Organization is a unique, shared row keyed by domain).
         requested_domain = data.get("domain")
+        company_id = data.get("companyId")
+        target_company = membership.companies_for_user(request.user).filter(pk=company_id).first() if company_id else None
         if (
             requested_domain
+            and (target_company is None or target_company.domain != requested_domain)
             and not _is_admin_user(request.user)
             and not domain_is_available_to(request.user, requested_domain)
         ):
@@ -2306,9 +2333,12 @@ class VibeRaisingCompanyView(APIView):
         try:
             with transaction.atomic():
                 if company_id:
-                    company = get_object_or_404(VibeRaisingCompany, pk=company_id, profile=profile)
+                    company = get_object_or_404(membership.companies_for_user(request.user), pk=company_id)
+                    company = membership.lock_company_edit(request.user, company)
                 else:
-                    company = None if create_new else profile.companies.filter(name__iexact=data["name"]).first()
+                    company = None if create_new else membership.companies_for_user(request.user).filter(
+                        profile=profile, name__iexact=data["name"],
+                    ).first()
                     if company is None:
                         company = VibeRaisingCompany(profile=profile)
 
@@ -2324,6 +2354,7 @@ class VibeRaisingCompanyView(APIView):
                             company, data["domain"], confirmed=confirm_domain_change
                         )
 
+                is_new = company._state.adding
                 company.name = data["name"]
                 if "domain" in data:
                     company.domain = data["domain"]
@@ -2341,7 +2372,9 @@ class VibeRaisingCompanyView(APIView):
                 attempt_company_verification(company, abn=company.abn, acn=data.get("acn"))
 
                 ensure_company_organization(company)
-                if profile.active_company_id is None:
+                if is_new:
+                    membership.activate_new_company(company, request.user)
+                if is_new and profile.active_company_id is None:
                     set_active_company(profile, company)
         except CompanyDomainClaimedError as exc:
             # A claim that raced the check above: the company writes have
@@ -2379,7 +2412,7 @@ class VibeRaisingActiveCompanyView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        profile, error_response = _get_founder_profile_or_response(request.user)
+        profile, error_response = _founder_or_shared_profile(request)
         if error_response:
             return error_response
 
@@ -2387,9 +2420,8 @@ class VibeRaisingActiveCompanyView(APIView):
         serializer.is_valid(raise_exception=True)
 
         company = get_object_or_404(
-            VibeRaisingCompany,
+            membership.companies_for_user(request.user),
             pk=serializer.validated_data["companyId"],
-            profile=profile,
         )
 
         if profile.active_company_id != company.id:

@@ -31,6 +31,7 @@ from rest_framework.exceptions import APIException, AuthenticationFailed, Permis
 from community_chat.account_sessions import InvalidAccountSession, _valid_session, _validate_device_owner
 from community_chat.models import CommunityChatAccountSession, CommunityChatDevice
 from community_chat.onboarding import require_community_access
+from founder_tools.membership import active_memberships, companies_for_user
 from founder_tools.models import VibeRaisingCompany
 from .config import ALL_SCOPES, DOT_MESSAGES_SCOPE, DOT_SCOPES, SCOPES, availability, mcp_url, mlai_url, public_base, resource_scopes
 
@@ -248,9 +249,19 @@ def company_for(user, company_id, grant=None):
     company_id = _company_uuid(company_id)
     if grant and company_id != _company_uuid(grant["company_id"]):
         raise AccessProblem("This connection was approved for a different startup.", "startup_not_authorised")
-    company = VibeRaisingCompany.objects.select_related("organization", "profile").filter(pk=company_id, profile__user=user).first()
+    company = companies_for_user(user).filter(pk=company_id).first()
     if company is None or company.organization is None:
         raise AccessProblem("This startup is unavailable to this account.", "startup_unavailable")
+    if grant and company.membership_policy == VibeRaisingCompany.SHARED_ACCESS:
+        from django.utils.dateparse import parse_datetime
+
+        member = active_memberships(company).filter(user=user).first()
+        granted_at = parse_datetime(str(grant.get("createdAt") or ""))
+        if member is None or (
+            member.source not in {"legacy_creator", "legacy_roster"}
+            and (granted_at is None or timezone.is_naive(granted_at) or granted_at < member.joined_at)
+        ):
+            raise AccessProblem("Connect your agent again for this startup.", "startup_unavailable")
     return company
 
 

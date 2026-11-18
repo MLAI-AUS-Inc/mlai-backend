@@ -60,6 +60,7 @@ class FrozenPrepareContextTests(SimpleTestCase):
         commit = Mock(status_code=200)
         commit.json.return_value = {"sha": website.verified_sha}
         with ExitStack() as stack:
+            stack.enter_context(patch("founder_tools.membership.companies_for_user", return_value=context.profile.companies))
             # All seams below load/store records, call providers, or contact the
             # cache. The frozen context, journey loader/projector, dispatcher,
             # request builder and guarded owner view execute their real code.

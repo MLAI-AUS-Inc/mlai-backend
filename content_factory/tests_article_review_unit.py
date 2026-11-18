@@ -89,7 +89,10 @@ class ArticleReviewTests(SimpleTestCase):
         view.kwargs = {'token': token}
         request = RequestFactory().get('/preview')
         lookup.return_value = self.run
-        self.assertIsNone(view._resolve_run(request, 'article-1')[2])
+        with patch("content_factory.article_preview_lease.Organization.objects.filter") as organizations, \
+                patch("content_factory.article_preview_lease.shared_workspace", return_value=None):
+            organizations.return_value.first.return_value = None
+            self.assertIsNone(view._resolve_run(request, 'article-1')[2])
         self.assertEqual(guard.call_args.kwargs['action'], 'read')
         self.assertEqual(guard.call_args.args[0]['connection_generation'], 1)
         self.assertEqual(view._resolve_run(request, 'article-2')[2].status_code, 404)

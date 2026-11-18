@@ -167,14 +167,19 @@ def build_actor(slack_id: str) -> Actor:
         profile = VibeRaisingProfile.objects.filter(user=user).first()
         if profile:
             roles.add(profile.role)
-            for company in VibeRaisingCompany.objects.filter(profile=profile).select_related("organization"):
-                if company.organization_id:
-                    organization_ids.add(company.organization_id)
-                    organization_domains.add(company.organization.domain)
-                if company.domain:
-                    organization_domains.add(company.domain)
+        from founder_tools.membership import companies_for_user, has_membership, shared_workspace
+
+        for company in companies_for_user(user):
+            if company.organization_id:
+                organization_ids.add(company.organization_id)
+                organization_domains.add(company.organization.domain)
+            if company.domain:
+                organization_domains.add(company.domain)
 
         for binding in su_models.UserStartupBinding.objects.filter(user=user).select_related("organization"):
+            workspace = shared_workspace(binding.organization)
+            if workspace and not has_membership(user, workspace):
+                continue
             organization_ids.add(binding.organization_id)
             if binding.organization.domain:
                 organization_domains.add(binding.organization.domain)

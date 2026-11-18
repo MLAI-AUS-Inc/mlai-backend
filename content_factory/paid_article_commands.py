@@ -58,7 +58,7 @@ def _cost_confirmed(data):
 def _current_user(context, user, config, roster, *, confirmed_points=None, cost_confirmed=False):
     """Run inside the organization lock, including immediately before debit."""
     from django.contrib.auth import get_user_model
-    from founder_tools import startup_team
+    from founder_tools import membership, startup_team
     from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
     fresh = get_user_model().objects.filter(pk=getattr(user, 'pk', None), is_active=True).first()
     if (fresh is None or config is None or not isinstance(config.pillar_strategy, dict)
@@ -68,6 +68,11 @@ def _current_user(context, user, config, roster, *, confirmed_points=None, cost_
                 organization_id=context.organization.pk).exists()
             or not VibeRaisingProfile.objects.filter(pk=context.profile.pk, user_id=fresh.pk).exists()):
         raise PaidArticleCommandRefusal('permission_denied', status=403)
+    workspace = membership.shared_workspace(context.organization)
+    if workspace:
+        if context.company.pk != workspace.pk or not membership.has_membership(fresh, workspace):
+            raise PaidArticleCommandRefusal('permission_denied', status=403)
+        return fresh
     owner = startup_team._owner(context.organization)
     rights = startup_team._rights(fresh, context.organization, roster) if startup_team.enabled() else frozenset()
     if owner != fresh.pk and not {'write_articles', 'spend_startup_points'} <= rights:

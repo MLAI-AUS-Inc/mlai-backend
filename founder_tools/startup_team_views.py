@@ -4,26 +4,32 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from community_chat.my_startup_views import MyStartupAccess
-from . import startup_team as teams
+from . import membership, startup_email_invitations as invitations, startup_team as teams
 
 
 class _TeamAccess(MyStartupAccess, APIView):
     """Reuse exact Origin/authentication, account throttles and private responses."""
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
-        if not teams.enabled():
+        if self.company is not None and not (
+            membership.shared_workspace(self.company.organization) or teams.enabled()
+        ):
             raise NotFound('Not found.')
 
     def handle_exception(self, exc):
         if isinstance(exc, teams.TeamError):
-            return Response({'detail': exc.detail, 'reason': exc.reason}, status=exc.status)
+            payload = {'detail': exc.detail, 'reason': exc.reason}
+            if exc.retry_at:
+                payload['retryAt'] = exc.retry_at.isoformat()
+            return Response(payload, status=exc.status)
         return super().handle_exception(exc)
 
 
 class TeamView(_TeamAccess):
     """Read owner management fields or a member's names-only team list."""
     def get(self, request):
-        return Response(teams.team_payload(organization=self.company.organization, user=request.user))
+        return Response(teams.team_payload(organization=self.company.organization,
+                                           user=request.user, company=self.company))
 
 
 class JoinRequestView(_TeamAccess):
@@ -65,3 +71,39 @@ class InviteJoinView(_TeamAccess):
 
     def post(self, request):
         return Response(teams.join_invite(user=request.user, token=request.data.get('token')), status=202)
+
+
+class TeamInvitationView(_TeamAccess):
+    """Queue a personal invitation for the selected startup."""
+
+    def post(self, request):
+        return Response(invitations.send_invitation(self.company, request.user, email=request.data.get('email')),
+                        status=202)
+
+
+class TeamInvitationResendView(_TeamAccess):
+    """Queue a new generation of a pending invitation."""
+
+    def post(self, request, invitation_id):
+        return Response(invitations.send_invitation(self.company, request.user, invitation_id=invitation_id,
+                                                   action_id=request.data.get('actionId')), status=202)
+
+
+class TeamInvitationCancelView(_TeamAccess):
+    """Cancel a pending invitation from the selected startup."""
+
+    def delete(self, request, invitation_id):
+        return Response(invitations.cancel(self.company, request.user, invitation_id))
+
+
+class TeamInvitationAcceptView(_TeamAccess):
+    """Use only the verified account and the UUID from the email to resolve the startup."""
+
+    requires_company = False
+    account_scoped_reads = True
+
+    def get(self, request, public_id):
+        return Response(invitations.accept(request.user, public_id))
+
+    def post(self, request, public_id):
+        return Response(invitations.accept(request.user, public_id, confirm=True))

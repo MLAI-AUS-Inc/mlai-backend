@@ -98,7 +98,7 @@ class ResearchDispatchTests(SimpleTestCase):
 
     def test_research_delivery_uses_discovery_and_never_article_repository_gates(self):
         from django.contrib.auth import get_user_model
-        from founder_tools.models import VibeRaisingCompany
+        from founder_tools import membership
         from integrations import http_client
         row = self.row()
         response = Obj(status_code=202, json=lambda: {"run_id": "research-1"})
@@ -106,25 +106,25 @@ class ResearchDispatchTests(SimpleTestCase):
              patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("not_received", {})), \
              patch.object(views, "_content_factory_headers", return_value={}), \
              patch.object(get_user_model().objects, "get", return_value=self.user), \
-             patch.object(VibeRaisingCompany.objects, "filter") as companies, \
+             patch.object(membership, "companies_for_user") as companies, \
              patch.object(views, "_get_config", return_value=Obj(pillar_strategy={})), \
              patch.object(views, "_refresh_article_editorial_payload") as article_policy, \
              patch.object(billing, "require_article_activation") as article_activation, \
              patch("content_factory.website_connections.authority_guard") as repo, \
              patch.object(http_client, "post", return_value=response) as post, \
              patch.object(outbox, "_accept_delivery", return_value=("delivered", "", "research-1")):
-            companies.return_value.exists.return_value = True
+            companies.return_value.filter.return_value.exists.return_value = True
             self.assertEqual(outbox._deliver(row), ("delivered", "", "research-1"))
         self.assertEqual(post.call_args.args[0], "https://worker.example.test/api/runs/discovery")
         self.assertEqual(post.call_args.kwargs["json"]["custom_topic_title"], "Original topic")
-        self.assertEqual(companies.call_args.kwargs["pk"], "company-1")
+        self.assertEqual(companies.return_value.filter.call_args.kwargs["pk"], "company-1")
         article_policy.assert_not_called()
         article_activation.assert_not_called()
         repo.assert_not_called()
 
     def test_changed_research_owner_or_domain_cannot_dispatch(self):
         from django.contrib.auth import get_user_model
-        from founder_tools.models import VibeRaisingCompany
+        from founder_tools import membership
         from integrations import http_client
         for changed in ("owner", "domain"):
             row = self.row()
@@ -134,9 +134,9 @@ class ResearchDispatchTests(SimpleTestCase):
                  patch.object(views, "_content_factory_remote_config", return_value={"enabled": True}), \
                  patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("not_received", {})), \
                  patch.object(get_user_model().objects, "get", return_value=self.user), \
-                 patch.object(VibeRaisingCompany.objects, "filter") as companies, \
+                 patch.object(membership, "companies_for_user") as companies, \
                  patch.object(http_client, "post") as post:
-                companies.return_value.exists.return_value = False
+                companies.return_value.filter.return_value.exists.return_value = False
                 with self.assertRaises(WebsiteAuthorityError):
                     outbox._deliver(row)
             post.assert_not_called()
@@ -154,18 +154,18 @@ class ResearchDispatchTests(SimpleTestCase):
 
     def test_changed_approved_audience_cannot_dispatch(self):
         from django.contrib.auth import get_user_model
-        from founder_tools.models import VibeRaisingCompany
+        from founder_tools import membership
         from integrations import http_client
         row = self.row()
         row.payload["request"]["research_audience"] = {"id": "audience-1", "version": 1}
         with patch.object(views, "_content_factory_remote_config", return_value={"enabled": True}), \
              patch.object(views, "_lookup_content_factory_dispatch_by_key", return_value=("not_received", {})), \
              patch.object(get_user_model().objects, "get", return_value=self.user), \
-             patch.object(VibeRaisingCompany.objects, "filter") as companies, \
+             patch.object(membership, "companies_for_user") as companies, \
              patch.object(views, "_get_config", return_value=Obj(pillar_strategy={})), \
              patch("content_factory.editorial_catalog.discovery_audience_context", return_value={"id": "audience-1", "version": 2}), \
              patch.object(http_client, "post") as post:
-            companies.return_value.exists.return_value = True
+            companies.return_value.filter.return_value.exists.return_value = True
             with self.assertRaises(WebsiteAuthorityError):
                 outbox._deliver(row)
         post.assert_not_called()

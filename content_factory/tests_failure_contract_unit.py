@@ -565,6 +565,7 @@ class FailureDeliveryChainTests(SimpleTestCase):
                 patch.object(views, "get_founder_company_context", founder_services.get_founder_company_context), \
                 patch.object(views, "_get_config", real_config), \
                 patch.object(VibeRaisingProfile.objects, "get_or_create", return_value=(profile, False)), \
+                patch("founder_tools.membership.companies_for_user", return_value=companies), \
                 patch.object(OrganizationContentConfig.objects, "get_or_create", return_value=(runtime.config, False)), \
                 patch.object(ContentFactoryRun.objects, "filter", return_value=runtime.rows(first=fixture.run)):
             result = prepare.advance_prepare(runtime.prepare.pk, now=runtime.now)
