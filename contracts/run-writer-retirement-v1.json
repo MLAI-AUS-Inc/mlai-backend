@@ -3090,7 +3090,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:6a7c9391187a262de03d7c2cb786c5c72bbdf212a8f9913b0b15ea15ce44683d:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15456,
+      "line": 15564,
       "kind": "inferred_run_save",
       "fields": [
         "run_request",
@@ -3103,13 +3103,14 @@
         "portable_reservation"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
+      "function_sha256": "3b5cefca8cabe186ea0a2eae9263c4ca75db30571e3b1528cb43e2cb8f8720f1",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
-        "content_factory/tests_run_ownership.py"
+        "content_factory/tests_run_ownership.py",
+        "content_factory/tests_research_minimum_balance.py"
       ],
-      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation.",
+      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation. A CF 4xx refusal that is not an explicit dispatch_rejected now records only its own error_code on remote_data (A18); status, ownership and refund paths are unchanged.",
       "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback. Retain dispatch-key lookup and refund reconciliation. Reserve fresh research for reset companies and stop new dispatch on a changed workspace.",
       "pending_owner": null
     },
@@ -3395,7 +3396,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15489,
+      "line": 15597,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3407,13 +3408,14 @@
         "run"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
+      "function_sha256": "3b5cefca8cabe186ea0a2eae9263c4ca75db30571e3b1528cb43e2cb8f8720f1",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
-        "content_factory/tests_run_ownership.py"
+        "content_factory/tests_run_ownership.py",
+        "content_factory/tests_research_minimum_balance.py"
       ],
-      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation.",
+      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation. A CF 4xx refusal that is not an explicit dispatch_rejected now records only its own error_code on remote_data (A18); status, ownership and refund paths are unchanged.",
       "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback. Retain dispatch-key lookup and refund reconciliation. Reserve fresh research for reset companies and stop new dispatch on a changed workspace.",
       "pending_owner": null
     },
@@ -3481,7 +3483,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:f40fe594d02b001537d58480ad7cc8611166a2e9c9572bc73dbde6978a15712e:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15353,
+      "line": 15454,
       "kind": "model_update",
       "fields": [
         "status"
@@ -3493,13 +3495,14 @@
         "remote_data"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
+      "function_sha256": "3b5cefca8cabe186ea0a2eae9263c4ca75db30571e3b1528cb43e2cb8f8720f1",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
-        "content_factory/tests_run_ownership.py"
+        "content_factory/tests_run_ownership.py",
+        "content_factory/tests_research_minimum_balance.py"
       ],
-      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation.",
+      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation. A CF 4xx refusal that is not an explicit dispatch_rejected now records only its own error_code on remote_data (A18); status, ownership and refund paths are unchanged.",
       "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback. Retain dispatch-key lookup and refund reconciliation. Reserve fresh research for reset companies and stop new dispatch on a changed workspace.",
       "pending_owner": null
     },
@@ -3507,7 +3510,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:669eb9f79164a269775fb125857f46dd8931706566e619e175a0bbd750be355e:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15295,
+      "line": 15396,
       "kind": "model_update",
       "fields": [
         "run_request"
@@ -3519,13 +3522,14 @@
         "acknowledged"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
+      "function_sha256": "3b5cefca8cabe186ea0a2eae9263c4ca75db30571e3b1528cb43e2cb8f8720f1",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
-        "content_factory/tests_run_ownership.py"
+        "content_factory/tests_run_ownership.py",
+        "content_factory/tests_research_minimum_balance.py"
       ],
-      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation.",
+      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation. A CF 4xx refusal that is not an explicit dispatch_rejected now records only its own error_code on remote_data (A18); status, ownership and refund paths are unchanged.",
       "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback. Retain dispatch-key lookup and refund reconciliation. Reserve fresh research for reset companies and stop new dispatch on a changed workspace.",
       "pending_owner": null
     },
