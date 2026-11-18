@@ -6235,7 +6235,9 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertTrue(bootstrap_response.data["articleSetupState"]["generationReady"])
         self.assertTrue(bootstrap_response.data["hasCompletedArticleFlow"])
         self.assertEqual(bootstrap_response.data["startPageMode"], "topic_picker")
-        self.assertTrue(bootstrap_response.data["checks"]["dailyAutomation"]["ready"])
+        # Daily research unlocks after the first generated article, not on setup merge.
+        self.assertFalse(bootstrap_response.data["checks"]["dailyAutomation"]["ready"])
+        self.assertEqual(bootstrap_response.data["checks"]["dailyAutomation"]["lockedReason"], "first_article_required")
         workflow_steps = {step["id"]: step for step in bootstrap_response.data["workflowProgress"]["steps"]}
         self.assertEqual(workflow_steps["research"]["status"], "ready")
 
@@ -6260,6 +6262,21 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertEqual(article_response.data["runId"], "article-after-setup-merge")
         self.assertEqual(PointsAccount.objects.get(user=self.user).balance_microroo, 0)
         queue.assert_called_once()
+
+        locked_response = self.client.post(
+            f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/enable-daily-automation",
+            {"defaultTimezone": "Australia/Melbourne"},
+            format="json",
+        )
+        self.assertEqual(locked_response.status_code, 400, locked_response.data)
+
+        queued_article.status = ContentFactoryRunStatus.COMPLETED
+        queued_article.result = {"article": "First article body"}
+        queued_article.save(update_fields=["status", "result", "updated_at"])
+        with patch("content_factory.vibe_marketing_views.google_baseline_connection_status", return_value={}):
+            unlocked = self.client.get("/api/v1/vibe-marketing/bootstrap/")
+        self.assertTrue(unlocked.data["checks"]["dailyAutomation"]["firstArticleGenerated"])
+        self.assertTrue(unlocked.data["checks"]["dailyAutomation"]["ready"])
 
         enable_response = self.client.post(
             f"/api/v1/vibe-marketing/runs/{setup_run.run_id}/enable-daily-automation",

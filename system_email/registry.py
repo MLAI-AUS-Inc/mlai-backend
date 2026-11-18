@@ -86,6 +86,7 @@ _SPECS = (
     MessageSpec(key="article_review_ready", category=NOTIFICATION, prerendered=True, unsubscribe=True),
     MessageSpec(key="article_content_ready", category=NOTIFICATION, prerendered=True, unsubscribe=True),
     MessageSpec(key="article_report_ready", category=NOTIFICATION, prerendered=True, unsubscribe=True),
+    MessageSpec(key="daily_research_topics", category=NOTIFICATION, prerendered=True, unsubscribe=True),
     MessageSpec(
         key="monthly_update_7d",
         category=NOTIFICATION,

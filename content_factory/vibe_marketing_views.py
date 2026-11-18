@@ -12449,16 +12449,35 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     has_active_channel = any(
         channel.consent_state == NotificationConsentState.ACTIVE for channel in org_channels
     )
-    daily_prerequisites_ready = (
-        domain_ok
-        and context_ok
-        and keywords_ok
-        and baseline_ready
-        and scan_ready
-        and (article_ready or setup_pr_merged)
-        and (bool(config.connected_slack_user_id) or has_active_channel)
-        and (delivery_mode != "publish_code" or github_ready)
-    )
+    has_delivery_channel = bool(config.connected_slack_user_id) or has_active_channel
+    # "Generated at least one article": the latest article run produced a draft,
+    # or the org has written-article history (a reset does not forget it).
+    first_article_generated = bool(write_ready) or _article_generation_history_exists(organization, latest_runs)
+    if getattr(settings, "DAILY_RESEARCH_AFTER_FIRST_ARTICLE_ENABLED", True):
+        daily_prerequisites_ready = (
+            first_article_generated
+            and has_delivery_channel
+            and (delivery_mode != "publish_code" or github_ready)
+        )
+    else:
+        daily_prerequisites_ready = (
+            domain_ok
+            and context_ok
+            and keywords_ok
+            and baseline_ready
+            and scan_ready
+            and (article_ready or setup_pr_merged)
+            and has_delivery_channel
+            and (delivery_mode != "publish_code" or github_ready)
+        )
+    if not first_article_generated and getattr(settings, "DAILY_RESEARCH_AFTER_FIRST_ARTICLE_ENABLED", True):
+        daily_locked_reason = "first_article_required"
+    elif not has_delivery_channel:
+        daily_locked_reason = "delivery_channel_required"
+    elif not daily_prerequisites_ready:
+        daily_locked_reason = "setup_incomplete"
+    else:
+        daily_locked_reason = ""
     automation_active = bool(automation and automation.status == ResearchAutomationStatus.ACTIVE)
     daily_ready = daily_prerequisites_ready and (bool(config.daily_discovery_enabled) or automation_active)
     return {
@@ -12514,6 +12533,9 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             "passed": daily_ready,
             "ready": daily_prerequisites_ready,
             "enabled": bool(config.daily_discovery_enabled) or automation_active,
+            "firstArticleGenerated": first_article_generated,
+            "hasDeliveryChannel": has_delivery_channel,
+            "lockedReason": daily_locked_reason,
             "channels": [
                 serialize_channel(
                     channel,

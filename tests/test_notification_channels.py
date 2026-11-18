@@ -1005,6 +1005,9 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertFalse(config.daily_discovery_enabled)
 
     def test_automation_endpoint_enable_requires_channel(self):
+        from content_factory.models import WrittenArticle
+        WrittenArticle.objects.create(organization=self.org, title="First", slug="first",
+            category="AI", primary_keyword="first article")
         response = self.client.post(
             reverse("vibe-marketing-notification-automation"),
             {"enabled": True, "timezone": "Australia/Melbourne"},
@@ -1013,7 +1016,26 @@ class NotificationChannelEndpointTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["code"], "no_verified_channels")
 
+    def test_automation_endpoint_locked_until_first_article(self):
+        NotificationChannel.objects.create(
+            organization=self.org,
+            channel_type=NotificationChannelType.EMAIL,
+            route_id="founder@example.com",
+            consent_state=NotificationConsentState.ACTIVE,
+        )
+        response = self.client.post(
+            reverse("vibe-marketing-notification-automation"),
+            {"enabled": True, "timezone": "Australia/Melbourne"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["code"], "first_article_required")
+        self.assertFalse(ResearchAutomation.objects.filter(organization=self.org).exists())
+
     def test_automation_endpoint_enable_with_channel_syncs_config(self):
+        from content_factory.models import WrittenArticle
+        WrittenArticle.objects.create(organization=self.org, title="First", slug="first",
+            category="AI", primary_keyword="first article")
         NotificationChannel.objects.create(
             organization=self.org,
             channel_type=NotificationChannelType.EMAIL,
