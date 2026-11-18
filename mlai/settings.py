@@ -2752,6 +2752,10 @@ ARTICLES_SOURCE_FOLLOW_ENABLED = _env_is_true("ARTICLES_SOURCE_FOLLOW_ENABLED", 
 # (one GitHub compare) keeps the website Ready; the proof is re-checked in the
 # background for free and articles lock only if that re-check fails.
 ARTICLES_PROOF_CARRY_FORWARD_ENABLED = _env_is_true("ARTICLES_PROOF_CARRY_FORWARD_ENABLED", True)
+# Kill switch, default on: a worker callback for a bound run that omits its
+# website connection fields is checked against that run's own saved consent
+# instead of being refused as "Reconnect this website" (La Vie, 18 Nov 2026).
+ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED = _env_is_true("ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED", True)
 # Setup runs one website preparation may dispatch across all its attempts
 # (owner Try again and the replacement of a closed pull request included).
 # Past it, preparation waits for staff with a stuck-founder alert instead of
