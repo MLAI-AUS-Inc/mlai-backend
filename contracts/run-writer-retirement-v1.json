@@ -5881,8 +5881,8 @@
     {
       "path": "content_factory/founder_article_controls.py",
       "function": "article_controls",
-      "function_sha256": "97172735502f40bf2b21f2987fa60cad03276a55256ae1ff44efe6773c164fb5",
-      "reason": "Pure current active owner/rights/article scope and stop/settlement/publication checks offer only commands; conditional original-obligation copy cannot promise a refund or mutate money.",
+      "function_sha256": "f5ab496a291dbdb4c6fdb53459a35c4619e4fd481c59cda9403b80fa654fde26",
+      "reason": "Offers controls only for the original article and startup after rereading active actor and startup access. Shared access uses the exact current membership, and the existing command rights, settlement checks and publication checks still apply.",
       "test_refs": [
         "content_factory.tests_founder_article_controls"
       ]
@@ -6016,7 +6016,7 @@
       "path": "content_factory/paid_article_commands.py",
       "function": "_exact",
       "function_sha256": "84f38e4c51a32bdd8c89244b09ee9b0319cc405b44e3f1c1129234f5d3e46924",
-      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "reason": "Rechecks the fresh active actor, its profile and the exact company and organization under the debit lock. A shared workspace requires active membership of the canonical company. Legacy member use still requires both explicit cost proof and an active opted-in founder payer inside the trusted portable command. Receipt and outbox bindings are unchanged.",
       "test_refs": [
         "content_factory/tests_paid_article_http_replay.py"
       ]
@@ -6051,7 +6051,7 @@
     {
       "path": "content_factory/paid_article_commands.py",
       "function": "_current_user",
-      "function_sha256": "0336f384aa69ab33fdeb8525ee30457e70349911339f12706a53d8e8498c67c0",
+      "function_sha256": "0f69dbd2a304b69cd2c52fdaf0400725dbc3be963d9b2624e820f035a1798fa8",
       "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
       "test_refs": [
         "content_factory/tests_paid_article_http_replay.py"
@@ -6404,8 +6404,8 @@
     {
       "path": "content_factory/founder_library_commands.py",
       "function": "settings_candidate",
-      "function_sha256": "f329aebb8dbe2a4af6a878da1b95af58fb10d112a3f0fc4033e07f19dc45800e",
-      "reason": "Only author-only bodies or already-retained exact headers enter this command path. General first-domain settings keep their original validation/write behavior; a retained header cannot escape into unrelated settings.",
+      "function_sha256": "4b607b9598055fbaf6bc7719c9b1ea1505b54c260d705d8e39b038080da5f883",
+      "reason": "Only author-only bodies or already-retained exact headers enter this command path. The scoped company query permits active membership only on the canonical shared startup. General first-domain settings retain the original validation and write path.",
       "test_refs": [
         "content_factory/tests_founder_library_commands.py",
         "content_factory/tests_startup_settings_unit.py"

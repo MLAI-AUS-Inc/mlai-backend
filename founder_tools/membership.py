@@ -9,7 +9,7 @@ from .models import StartupMembership, StartupMembershipEvent, VibeRaisingCompan
 
 def shared_workspace(organization):
     """Return the canonical company, including closed workspaces."""
-    if organization is None or not organization.pk:
+    if not getattr(organization, "pk", None):
         return None
     return VibeRaisingCompany.objects.filter(
         organization=organization, membership_policy=VibeRaisingCompany.SHARED_ACCESS,

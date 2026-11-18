@@ -213,7 +213,7 @@ class GoalAuditTests(SimpleTestCase):
         context_boundaries = ExitStack()
         self.addCleanup(context_boundaries.close)
         context_boundaries.enter_context(patch.object(VibeRaisingProfile.objects, "get_or_create", return_value=(self.profile, False)))
-        context_boundaries.enter_context(patch.object(VibeRaisingProfile, "companies", companies))
+        context_boundaries.enter_context(patch("founder_tools.membership.companies_for_user", return_value=companies))
         context_boundaries.enter_context(patch.object(OrganizationContentConfig.objects, "get_or_create", return_value=(self.config, False)))
         context_boundaries.enter_context(patch.object(WebsiteConnectionOperation.objects, "filter", return_value=rows(self.op)))
         run = ContentFactoryRun(run_id="article", organization=self.organization, domain=self.organization.domain,
