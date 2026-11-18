@@ -3,7 +3,8 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-CATALOG_VERSION = "roo-avatar-v2"
+# Shipped iOS builds reject any other value, so adding the fur slot keeps it.
+CATALOG_VERSION = "roo-avatar-v1"
 SLOTS = ("fur", "hair", "glasses", "jacket", "shoes")
 # Clients released before the fur slot send exactly the other slots.
 OPTIONAL_UPDATE_SLOTS = frozenset({"fur"})

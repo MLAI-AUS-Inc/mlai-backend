@@ -25,7 +25,7 @@ class RooAvatarPolicyTests(unittest.TestCase):
             self.assertTrue(all(0 <= item.required_level <= 6 for item in items))
 
     def test_fur_is_the_first_slot_and_every_colour_is_a_starter(self):
-        self.assertEqual(CATALOG_VERSION, "roo-avatar-v2")
+        self.assertEqual(CATALOG_VERSION, "roo-avatar-v1")
         self.assertEqual(SLOTS, ("fur", "hair", "glasses", "jacket", "shoes"))
         self.assertEqual(tuple(empty_outfit()), SLOTS)
         self.assertEqual(

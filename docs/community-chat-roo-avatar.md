@@ -35,7 +35,7 @@ GET and a successful PATCH return the same shape:
   "account_id": "00000000-0000-4000-8000-000000000001",
   "community_id": "chat.example.test",
   "relay_url": "wss://chat.example.test",
-  "catalog_version": "roo-avatar-v2",
+  "catalog_version": "roo-avatar-v1",
   "version": 0,
   "current_level": null,
   "rank_name": null,
@@ -105,7 +105,7 @@ This is current-rank eligibility, not a permanent unlock entitlement.
 `fur` is Roo's whole fur colour. Null fur is the default "Outback red", which
 has no catalog object. Every fur colour has required level 0, so all of them
 are available to every member, including while history is unreconciled. Hair
-items are styles only: their stable IDs are unchanged from `roo-avatar-v1`,
+items are styles only: their stable IDs are unchanged,
 and only the display names dropped the colour.
 
 Existing level names are Curious (0), Connected (1), Contributor (2), Regular
@@ -150,3 +150,7 @@ slots. Authentication/admission errors retain the existing account API format.
 On a conflict, retain the local draft for review and reload; never silently
 retry with a fresh version. On a locked response, reload eligibility before
 saving again. All responses have `Cache-Control: private, no-store`.
+
+`catalog_version` stays `roo-avatar-v1`: released iOS builds refuse any other
+value, and the fur slot is purely additive for them (they ignore the extra
+`fur` keys and keep sending four-slot updates, which preserve the saved fur).

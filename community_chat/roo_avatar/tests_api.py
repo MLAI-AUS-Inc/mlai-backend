@@ -149,7 +149,7 @@ class RooAvatarApiTests(TestCase):
             self.state.historical_microroo = total
             self.state.save()
             result = self.client.get(self.url).data
-            self.assertEqual(result["catalog_version"], "roo-avatar-v2")
+            self.assertEqual(result["catalog_version"], "roo-avatar-v1")
             self.assertEqual(result["history_reconciled"], total is not None)
             for key in ["outfit", "effective_outfit", "catalog"]:
                 self.assertEqual(
