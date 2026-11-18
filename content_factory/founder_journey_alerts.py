@@ -48,7 +48,10 @@ from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import connection, transaction
-from django.db.models import Exists, Max, OuterRef, Q
+from django.db.models import Exists, Max, OuterRef, Q, TextField, Value
+from django.db.models.fields.json import KT
+from django.db.models.functions import Coalesce
+from django.db.models.lookups import StartsWith
 from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
@@ -532,8 +535,10 @@ def founder_run_q(prefix: str = "") -> Q:
     request, workflow = f"{prefix}run_request", f"{prefix}workflow"
     stamped = Q(**{f"{request}__has_key": "request_source"})
     founder_stamped = stamped & ~Q(**{f"{request}__request_source": SCHEDULER_REQUEST_SOURCE})
-    founder_research = (Q(**{f"{request}__has_key": "client_request_id"})
-                        & Q(**{f"{request}__client_request_id__startswith": FOUNDER_RESEARCH_REQUEST_PREFIX}))
+    # Coalesce: a JSON null id reads as "" (as in Python), never as SQL NULL,
+    # so ``exclude(founder_run_q())`` is the exact complement of the filter.
+    client_id = Coalesce(KT(f"{request}__client_request_id"), Value(""), output_field=TextField())
+    founder_research = Q(StartsWith(client_id, FOUNDER_RESEARCH_REQUEST_PREFIX))
     unstamped_founder = ~stamped & (~Q(**{f"{workflow}__in": LEGACY_UNSTAMPED_SCHEDULER_WORKFLOWS}) | founder_research)
     return founder_stamped | unstamped_founder
 

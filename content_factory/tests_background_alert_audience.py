@@ -91,12 +91,17 @@ class SchedulerAudienceTests(AudienceFixture):
             ("unstamped old nightly refresh", self.bare_run(), True),
             ("unstamped refresh with a research id", self.bare_run(request={"client_request_id": "island-research:x"}), False),
             ("unstamped article", self.bare_run(workflow="article_generation"), False),
+            ("unstamped refresh with a null id", self.bare_run(request={"client_request_id": None}), True),
+            ("stamped null source", self.make(request={"request_source": None}), False),
         )
         founder = set(ContentFactoryRun.objects.filter(alerts.founder_run_q()).values_list("pk", flat=True))
+        # The quiesce command selects scheduler rows with exclude(): it must be the exact complement.
+        scheduler_rows = set(ContentFactoryRun.objects.exclude(alerts.founder_run_q()).values_list("pk", flat=True))
         for label, run, scheduler in cases:
             with self.subTest(label):
                 self.assertIs(alerts.is_scheduler_run(run), scheduler)
                 self.assertIs(run.pk in founder, not scheduler)
+                self.assertIs(run.pk in scheduler_rows, scheduler)
 
     def test_org_175_nine_failed_nights_produce_zero_receipts(self):
         nights = [self.make(request=SCHEDULER, result={"error_code": STRATEGY_CODE}, age=timedelta(days=day, hours=2))

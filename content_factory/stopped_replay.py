@@ -84,7 +84,10 @@ def _skip_reason(op, *, stop_code, key, now) -> tuple[str, dict]:
         return "execution_owned", {}
     if terminal_first_article_goal(op):
         return "finished_first_article_goal", {}
-    return "", {"config": config, "company": company, "user": connection.authorized_by}
+    # Keep the goal the founder chose: a first-article goal re-opened as "ready"
+    # would be superseded (cancelled and refunded) instead of retried.
+    target = mapping(mapping(op.receipt).get("goal")).get("target") or "ready"
+    return "", {"config": config, "company": company, "user": connection.authorized_by, "target": target}
 
 
 def _stamp(op_pk, *, stop_code, key, previous_state, now):
@@ -136,7 +139,8 @@ def replay_stopped(*, stop_code, since: datetime | None = None, apply=False, org
             continue
         previous = op.state
         try:
-            reopened = start_prepare(founder["config"], company_id=founder["company"].pk, user=founder["user"], retry=True)
+            reopened = start_prepare(founder["config"], company_id=founder["company"].pk, user=founder["user"], retry=True,
+                                     target=founder["target"])
         except WebsiteAuthorityError as exc:
             # The owner's own Try again would be refused the same way; nothing changed.
             report["skipped"][f"refused:{exc.code}"] = report["skipped"].get(f"refused:{exc.code}", 0) + 1

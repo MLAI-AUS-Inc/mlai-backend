@@ -184,6 +184,23 @@ class ReplayStoppedTests(TestCase):
             op.refresh_from_db()
             self.assertEqual(op.state, state)
 
+    def test_replay_keeps_the_founders_goal_target(self):
+        # Re-opening a first-article goal as "ready" would supersede (cancel and
+        # refund) the founder's goal instead of retrying it.
+        op = self.stopped(state="needs_user", receipt={"goal": {"target": "first_article_live"}})
+        targets = []
+
+        def reopen(config, **kwargs):
+            targets.append(kwargs["target"])
+            WebsiteConnectionOperation.objects.filter(pk=op.pk).update(state="pending", receipt={**op.receipt, "reason_code": ""})
+            return WebsiteConnectionOperation.objects.get(pk=op.pk)
+
+        with patch("content_factory.website_prepare.start_prepare", side_effect=reopen) as start:
+            report = call("replay_stopped", "--code", self.CODE, "--apply")
+        self.assertEqual(report["replayed"], 1, report)
+        self.assertEqual(targets, ["first_article_live"])
+        self.assertIs(start.call_args.kwargs["retry"], True)
+
     def test_pull_request_cap_holds_the_replay(self):
         op = self.stopped()
         with patch("content_factory.failure_policy_engine.pull_request_cap_reached", return_value=True):
