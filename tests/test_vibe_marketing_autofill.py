@@ -4057,3 +4057,4 @@ class VibeMarketingAutofillTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data["detail"], "Daily generation prerequisites are not complete.")
+        self.assertEqual(response.data["checks"]["dailyAutomation"]["lockedReason"], "scans_required")

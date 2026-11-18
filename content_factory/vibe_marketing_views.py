@@ -12450,32 +12450,27 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
         channel.consent_state == NotificationConsentState.ACTIVE for channel in org_channels
     )
     has_delivery_channel = bool(config.connected_slack_user_id) or has_active_channel
-    # "Generated at least one article": the latest article run produced a draft,
-    # or the org has written-article history (a reset does not forget it).
-    first_article_generated = bool(write_ready) or _article_generation_history_exists(organization, latest_runs)
-    if getattr(settings, "DAILY_RESEARCH_AFTER_FIRST_ARTICLE_ENABLED", True):
-        daily_prerequisites_ready = (
-            first_article_generated
-            and has_delivery_channel
-            and (delivery_mode != "publish_code" or github_ready)
-        )
+    # Daily research unlocks once the website scans pass and the articles page
+    # is set up so the startup can generate articles, plus one delivery channel.
+    scans_ready = bool(domain_ok and context_ok and keywords_ok and baseline_ready and scan_ready)
+    articles_ready = bool(generation_ready or article_ready)
+    if getattr(settings, "DAILY_RESEARCH_GENERATION_READY_GATE_ENABLED", True):
+        setup_ready = scans_ready and articles_ready
     else:
-        daily_prerequisites_ready = (
-            domain_ok
-            and context_ok
-            and keywords_ok
-            and baseline_ready
-            and scan_ready
-            and (article_ready or setup_pr_merged)
-            and has_delivery_channel
-            and (delivery_mode != "publish_code" or github_ready)
-        )
-    if not first_article_generated and getattr(settings, "DAILY_RESEARCH_AFTER_FIRST_ARTICLE_ENABLED", True):
-        daily_locked_reason = "first_article_required"
+        setup_ready = scans_ready and (article_ready or setup_pr_merged)
+    daily_prerequisites_ready = (
+        setup_ready
+        and has_delivery_channel
+        and (delivery_mode != "publish_code" or github_ready)
+    )
+    if not scans_ready:
+        daily_locked_reason = "scans_required"
+    elif not setup_ready:
+        daily_locked_reason = "articles_setup_required"
     elif not has_delivery_channel:
         daily_locked_reason = "delivery_channel_required"
     elif not daily_prerequisites_ready:
-        daily_locked_reason = "setup_incomplete"
+        daily_locked_reason = "github_required"
     else:
         daily_locked_reason = ""
     automation_active = bool(automation and automation.status == ResearchAutomationStatus.ACTIVE)
@@ -12533,7 +12528,8 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             "passed": daily_ready,
             "ready": daily_prerequisites_ready,
             "enabled": bool(config.daily_discovery_enabled) or automation_active,
-            "firstArticleGenerated": first_article_generated,
+            "scansReady": scans_ready,
+            "articlesReady": setup_ready,
             "hasDeliveryChannel": has_delivery_channel,
             "lockedReason": daily_locked_reason,
             "channels": [

@@ -75,29 +75,6 @@ def _channel_or_none(organization, channel_id):
     return NotificationChannel.objects.filter(id=channel_id, organization=organization).first()
 
 
-def _first_article_lock_response(organization):
-    """Daily research turns on only after the startup has generated one article."""
-    from django.conf import settings
-
-    if not getattr(settings, "DAILY_RESEARCH_AFTER_FIRST_ARTICLE_ENABLED", True):
-        return None
-    from .vibe_marketing_views import _article_generation_history_exists, _latest_runs_for_org, _profile_checks
-
-    latest_runs = _latest_runs_for_org(organization)
-    if _article_generation_history_exists(organization, latest_runs):
-        return None
-    checks = _profile_checks(organization, _get_config(organization), latest_runs)
-    if checks.get("dailyAutomation", {}).get("firstArticleGenerated"):
-        return None
-    return Response(
-        {
-            "detail": "Generate your first article to turn on daily research.",
-            "code": "first_article_required",
-        },
-        status=status.HTTP_400_BAD_REQUEST,
-    )
-
-
 class VibeMarketingNotificationChannelsView(APIView):
     def get(self, request):
         context, error = _resolve_context_or_response(request)
@@ -483,9 +460,6 @@ class VibeMarketingResearchAutomationView(APIView):
                 config.save(update_fields=update_fields + ["updated_at"])
             return Response(_channels_payload(organization), status=status.HTTP_200_OK)
 
-        locked = _first_article_lock_response(organization)
-        if locked is not None:
-            return locked
         automation, channels = ensure_research_automation_for_org(
             organization=organization,
             user=request.user,
