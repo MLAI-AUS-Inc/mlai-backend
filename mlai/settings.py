@@ -744,6 +744,7 @@ MENTOR_INSTANT_BOOKING_ENABLED = _env_is_true('MENTOR_INSTANT_BOOKING_ENABLED', 
 # Mentoring admin emails mentor invites (system_email, Resend) instead of only
 # showing a one-time link. Off: the admin screens behave exactly as before.
 MENTOR_INVITE_EMAIL_ENABLED = _env_is_true('MENTOR_INVITE_EMAIL_ENABLED', False)
+MENTOR_INVITE_RATE_LIMIT_ENABLED = _env_is_true('MENTOR_INVITE_RATE_LIMIT_ENABLED', False)
 MENTOR_INVITE_EXPLAINER_URL = os.getenv('MENTOR_INVITE_EXPLAINER_URL', 'https://mlai.au/mentors').strip()
 MENTOR_REQUEST_TTL_HOURS = int(os.getenv('MENTOR_REQUEST_TTL_HOURS', '48'))
 MENTOR_AUTO_COMPLETE_HOURS = int(os.getenv('MENTOR_AUTO_COMPLETE_HOURS', '24'))

@@ -38,7 +38,7 @@ def wave_counts(wave):
 
 def record_smtp_feedback(delivery, kind, now):
     """Store known listmonk bounce types; absent SMTP diagnostics remain absent."""
-    from crm.resend_feedback import _apply_contact_feedback, next_delivery_state
+    from crm.resend_feedback import _apply_contact_feedback, apply_transport_evidence, next_delivery_state
     receipt = hashlib.sha256(f'listmonk:{delivery.wave_id}:{delivery.pk}:{kind}'.encode()).hexdigest()
     with transaction.atomic():
         Contact.objects.select_for_update().get(pk=delivery.contact_id)
@@ -53,8 +53,7 @@ def record_smtp_feedback(delivery, kind, now):
                 'bounce_type': event.bounce_type}
             delivery.status, delivery.error_code = next_delivery_state(delivery.status, delivery.error_code,
                 'email.bounced', bounce_type=event.bounce_type)
-            if delivery.error_code != 'resend_complained':
-                delivery.bounce_kind = 'hard' if delivery.status == 'bounced' else 'soft'
+            apply_transport_evidence(delivery, event)
             delivery.save(update_fields=['status', 'error_code', 'bounce_kind', 'updated_at'])
             _apply_contact_feedback(parsed, event, delivery, now)
     contact = Contact.objects.get(pk=delivery.contact_id)

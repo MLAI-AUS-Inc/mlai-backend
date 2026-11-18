@@ -37,6 +37,30 @@ def available():
     return enabled() and configured()
 
 
+def reserve_rate_limit(address, inviter, *, now):
+    """Throttle invitations independently of account-access email."""
+    if not getattr(settings, 'MENTOR_INVITE_RATE_LIMIT_ENABLED', False):
+        return
+    from django.core.cache import cache
+    from django.utils.crypto import salted_hmac
+    from .service import MentoringError
+
+    recipient = salted_hmac('mentor-invite-recipient', address.strip().lower(), algorithm='sha256').hexdigest()
+    recipient_key = f'mentoring:email-invite:recipient:{recipient}'
+    hour = int(now.timestamp()) // 3600
+    sender_key = f'mentoring:email-invite:inviter:{inviter.pk}:{hour}'
+    try:
+        cache.add(sender_key, 0, timeout=7200)
+        if cache.incr(sender_key) > 10:
+            raise MentoringError('invite_email_rate_limited', 'Wait until the next hour before sending more invitations.', 429)
+        if not cache.add(recipient_key, 1, timeout=86400):
+            raise MentoringError('invite_email_rate_limited', 'Wait 24 hours before emailing this person another invitation.', 429)
+    except MentoringError:
+        raise
+    except Exception:
+        raise MentoringError('invite_email_rate_unavailable', 'The invitation email check is unavailable. Try again shortly.', 503) from None
+
+
 def explainer_url():
     return str(getattr(settings, 'MENTOR_INVITE_EXPLAINER_URL', '') or 'https://mlai.au/mentors').strip()
 

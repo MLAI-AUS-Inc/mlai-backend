@@ -7,7 +7,7 @@ once a deployment routes it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 AUTH = "auth"
 NOTIFICATION = "notification"
@@ -105,9 +105,17 @@ class UnknownMessageError(KeyError):
     """Raised for a message key that is not registered."""
 
 
-def get_spec(message_key: str) -> MessageSpec:
+def get_spec(message_key: str, *, mentor_variant: str = "") -> MessageSpec:
     """Return the spec for ``message_key`` or raise ``UnknownMessageError``."""
     try:
-        return MESSAGES[message_key]
+        spec = MESSAGES[message_key]
     except KeyError as exc:
         raise UnknownMessageError(message_key) from exc
+
+    if mentor_variant == "compact" and spec.key == "mentor_invite":
+        return replace(spec, html_template="system_email/mentor_invite_compact.html",
+            text_template="system_email/mentor_invite_compact.txt",
+            required_context=("accept_url", "expires_on", "invited_email", "inviter_name"))
+    if mentor_variant:
+        raise ValueError("Unknown system email template variant")
+    return spec

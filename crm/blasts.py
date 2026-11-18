@@ -596,9 +596,11 @@ def queue_blast(
                     assign_stream(blast, actor=actor, mailbox=blast.mailbox)
             check_channels_available(blast.channels or [], status=403)
             check_ready(blast)
-            if preflight_template is not None:
-                preflight.require(blast, preflight_hash, now=now, template=preflight_template)
             audience, prepared = planned_audience(blast, now, cached_only=True)
+            if preflight_template is not None:
+                if prepared is not None:
+                    blast.plan = prepared.summary
+                preflight.require(blast, preflight_hash, now=now, template=preflight_template)
             resolved_hash = definition_hash(audience.definition) if audience.definition is not None else None
             if (
                 (audience.definition or {}).get("version") == 2

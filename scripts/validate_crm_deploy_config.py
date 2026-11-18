@@ -56,7 +56,7 @@ def validate_single(key: str, value: str, *, optional: bool = False) -> None:
             raise ValueError(f"{key} must be true or false")
     elif key in DELIVERY_DEFAULTS:
         try:
-            environment_settings({key: value})
+            environment_settings({key: value}, partial=True)
             if key in ("RSPAMD_URL", "CRM_LISTMONK_PUBLIC_URL"):
                 parsed = urlsplit(value)
                 parsed.port
@@ -139,6 +139,8 @@ def validate(environment: dict[str, str]) -> None:
     """Validate every CRM setting a release may carry; each may be left empty."""
     for key in KEYS:
         validate_single(key, environment.get(key, ""), optional=True)
+    if environment.get("CRM_DELIVERABILITY_RECOVERY_MODE") == "enforce":
+        environment_settings({key: environment[key] for key in DELIVERY_DEFAULTS if environment.get(key)})
 
 
 if __name__ == "__main__":

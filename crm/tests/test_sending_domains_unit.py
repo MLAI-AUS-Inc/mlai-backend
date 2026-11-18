@@ -242,3 +242,25 @@ class MailboxInputTests(SimpleTestCase):
             self.valid(wire.MailboxUpdateInput, {"email": "other@mlai.au"}, partial=True)
         self.assertEqual(caught.exception.get_codes(), {"email": ["unknown_field"]})
         self.assertEqual(dict(self.valid(wire.MailboxUpdateInput, {"reply_to": ""}, partial=True)), {"reply_to": ""})
+
+
+class RecoveryDnsTests(SimpleTestCase):
+    def test_effective_parent_subdomain_policy_and_child_override(self):
+        parent = ('_dmarc.mlai.au', 'TXT')
+        child = ('_dmarc.notify.mlai.au', 'TXT')
+        with patch.object(sending_domains, 'lookup', side_effect=zone_lookup({parent: ['v=DMARC1; p=none; sp=quarantine; aspf=s']})):
+            found = sending_domains.dmarc_policy('notify.mlai.au')
+        self.assertEqual((found['effective_policy'], found['source'], found['aspf']), ('quarantine', 'mlai.au', 's'))
+        with patch.object(sending_domains, 'lookup', side_effect=zone_lookup({
+                child: ['v=DMARC1; p=reject; adkim=s'], parent: ['v=DMARC1; p=none']})):
+            found = sending_domains.dmarc_policy('notify.mlai.au')
+        self.assertEqual((found['effective_policy'], found['source'], found['adkim']), ('reject', 'notify.mlai.au', 's'))
+
+    @override_settings(CRM_RESEND_DNS_ROUTES=('notify.mlai.au:rsend.notify.mlai.au:custom',))
+    def test_custom_resend_hosts_and_unknown_dns(self):
+        checks = {row.key: row.host for row in sending_domains.checks_for('notify.mlai.au', 'resend')}
+        self.assertEqual(checks['return_path_spf'], 'rsend.notify.mlai.au')
+        self.assertEqual(checks['return_path_mx'], 'rsend.notify.mlai.au')
+        self.assertEqual(checks['dkim'], 'custom._domainkey.notify.mlai.au')
+        with patch.object(sending_domains, 'lookup', return_value=None):
+            self.assertEqual(sending_domains.dmarc_policy('notify.mlai.au')['status'], sending_domains.ERROR)

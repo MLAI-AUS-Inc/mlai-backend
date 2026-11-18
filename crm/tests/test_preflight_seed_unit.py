@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 from crm.deliverability.preflight import seed_inbox
 
@@ -121,3 +121,39 @@ class ImapProbeTests(SimpleTestCase):
         with patch('imaplib.IMAP4_SSL') as connect:
             self.assertEqual(seed_inbox.read_mailbox(mailbox, None, now=NOW)['error'], 'credential_reference_invalid')
         connect.assert_not_called()
+
+
+class RecoveryPlacementTests(SimpleTestCase):
+    @override_settings(CRM_DELIVERABILITY_RECOVERY_MODE='enforce')
+    def test_no_placement_data_can_block_a_queued_campaign(self):
+        from crm.deliverability.preflight import service
+        blast = SimpleNamespace(purpose='marketing', stream_id=None, plan={},
+            preflight={'can_send': True, 'version': service.VERSION, 'policy_hash': service.policy_hash(),
+                'content_hash': 'draft', 'seed_test': {'status': 'timeout', 'results': []}})
+        with (patch.object(service.render, 'template_body'), patch.object(service.render, 'content_hash', return_value='draft')):
+            self.assertEqual(service.admission(blast, now=NOW), 'inbox_test_unavailable')
+
+    @override_settings(CRM_DELIVERABILITY_RECOVERY_MODE='enforce')
+    def test_promotions_counts_as_inbox_but_required_provider_spam_blocks(self):
+        from crm.deliverability.preflight import placement
+        blast = SimpleNamespace(purpose='marketing', stream_id=None, plan={})
+        rows = [{'provider': provider, 'folder': 'promotions', 'spf': 'pass', 'dkim': 'pass', 'dmarc': 'pass',
+            'arrived_at': NOW.isoformat(), 'list_unsubscribe': True, 'list_unsubscribe_post': True, 'one_click_signed': True}
+            for provider in ('gmail', 'google_workspace', 'outlook')]
+        seed = {'status': 'complete', 'sent_at': NOW.isoformat(), 'results': rows}
+        self.assertIsNone(placement.assess(blast, seed, NOW)['reason'])
+        blast.plan['providers'] = {'yahoo': 1}
+        self.assertEqual(placement.assess(blast, seed, NOW)['missing_providers'], ['yahoo'])
+        rows[0]['folder'] = 'spam'
+        self.assertEqual(placement.assess(blast, seed, NOW)['reason'], 'inbox_test_spam')
+        blast.purpose = 'event_update'
+        self.assertIsNone(placement.assess(blast, seed, NOW))
+
+    @override_settings(CRM_DELIVERABILITY_RECOVERY_MODE='shadow')
+    def test_shadow_mode_reports_a_hold_and_preserves_an_existing_authentication_block(self):
+        from crm.deliverability.preflight import placement, service
+        blast = SimpleNamespace(purpose='marketing', stream_id=None, plan={})
+        seed = {'status': 'complete', 'grade': 'block', 'results': []}
+        decision = placement.assess(blast, seed, NOW)
+        self.assertFalse(decision['enforcing'])
+        self.assertEqual(service._seed_item(seed, decision)['status'], 'block')

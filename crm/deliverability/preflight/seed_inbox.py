@@ -71,7 +71,12 @@ def header_result(raw, *, provider, folder, stream_domain, now):
         auth['dkim'] = 'unknown'
     unsubscribe = str(message.get('List-Unsubscribe') or '')
     one_click = bool(re.fullmatch(r'list-unsubscribe\s*=\s*one-click', str(message.get('List-Unsubscribe-Post') or '').strip(), re.I))
-    return {'provider': provider, 'folder': folder, **auth, 'list_unsubscribe': bool(re.search(r'<https://[^<>\s]+>', unsubscribe, re.I)),
+    envelope = re.search(r'\bsmtp\.mailfrom\s*=\s*([^;\s]+)', header, re.I)
+    return_path = envelope[1].strip('<>"').rpartition('@')[2].lower() if envelope else ''
+    passing_selectors = {selector for selector, _ in signatures if selector in passed
+        or (None in passed and len(signatures) == 1)}
+    return {'provider': provider, 'folder': folder, **auth, 'return_path_domain': return_path,
+        'dkim_selectors': sorted(passing_selectors), 'list_unsubscribe': bool(re.search(r'<https://[^<>\s]+>', unsubscribe, re.I)),
         'list_unsubscribe_post': one_click, 'dkim_signed_headers': sorted(signed),
         'one_click_signed': any({'list-unsubscribe', 'list-unsubscribe-post'} <= names for names in valid_signatures),
         'feedback_id_signed': any('feedback-id' in names for names in valid_signatures), 'arrived_at': now.isoformat()}

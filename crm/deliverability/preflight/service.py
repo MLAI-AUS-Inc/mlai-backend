@@ -19,7 +19,7 @@ from crm.models import Blast, Contact, EmailEvent, ReputationCheck, SeedTest
 
 from .. import guardian, planner, policy, volume
 from ..monitors.config_check import check_listmonk
-from . import content, links, render, seeds
+from . import content, links, placement, render, seeds
 
 VERSION = '2026-11-05.1'
 
@@ -115,7 +115,13 @@ def system_checks(blast, template, now, *, refresh=False):
     return rows
 
 
-def _seed_item(result):
+def _seed_item(result, decision=None):
+    if decision and decision['enforcing'] and not decision['reason']:
+        return content.item('seed_test', 'pass', 'Inbox check', decision['detail'], group='inbox')
+    if decision and decision['reason']:
+        return content.item('seed_test', 'block' if decision['enforcing'] or result.get('grade') == 'block' else 'warn', 'Inbox check',
+            decision['detail'], group='inbox', owner_detail={'reason': decision['reason'],
+                'missing_providers': decision['missing_providers']})
     waiting = result.get('status') in ('sending', 'waiting', 'not_requested', 'not_started')
     status = 'warn' if waiting else result.get('grade', 'warn')
     detail = 'Checking how this email arrives in the test inboxes.' if waiting else (
@@ -129,12 +135,13 @@ def _finish(result):
     result['blocking'] = [row['key'] for row in result['items'] if row['status'] == 'block']
     # Queueing and actual wave admission are separate. Staff may press Send
     # during a probe; admission waits for it without sending to the audience.
-    result['status'] = 'running' if waiting and not result['blocking'] else 'complete'
+    polling = (result.get('seed_test') or {}).get('status') in ('sending', 'waiting')
+    result['status'] = 'running' if polling or (waiting and not result['blocking']) else 'complete'
     result['can_send'] = not result['blocking']
     return result
 
 
-def run_preflight(blast, *, now=None, include_seed=True):
+def run_preflight(blast, *, now=None, include_seed=True, retry_seed=False):
     if not policy.value('CRM_PREFLIGHT_ENABLED'):
         raise BlastError('preflight_disabled', 404)
     now = now or timezone.now()
@@ -145,6 +152,8 @@ def run_preflight(blast, *, now=None, include_seed=True):
         pass
     digest = render.content_hash(blast, template)
     prepared = planner.prepare(blast, now)
+    # The draft plan on the instance may predate this audience refresh.
+    blast.plan = prepared.summary
     observations = links.inspect_links(blast.body_markdown)
     unsafe = any(row.error in ('ip_address_link', 'nonpublic_link', 'invalid_link') for row in observations)
     unsafe |= len({url for url, _ in links.link_targets(blast.body_markdown)}) > policy.value('CRM_LINKS_BLOCK')
@@ -188,7 +197,7 @@ def run_preflight(blast, *, now=None, include_seed=True):
     seed = {'status': 'not_started', 'results': []}
     if not any(row['status'] == 'block' for row in items) and include_seed:
         try:
-            probe = seeds.get_or_start(blast, digest, now=now, template=template)
+            probe = seeds.get_or_start(blast, digest, now=now, template=template, force=retry_seed)
         except listmonk.ListmonkError:
             probe = SeedTest.objects.filter(blast=blast, content_hash=digest).order_by('-created_at').first()
         if probe:
@@ -196,13 +205,14 @@ def run_preflight(blast, *, now=None, include_seed=True):
             seeds.timeout_incident(probe, now)
     elif not include_seed:
         seed['status'] = 'not_requested'
-    items.append(_seed_item(seed))
+    decision = placement.assess(blast, seed, now)
+    items.append(_seed_item(seed, decision))
     if seed.get('timed_out'):
         used, hourly = volume.usage(blast.stream, now)
         prepared.summary['estimate'] = volume.estimate(blast.stream, prepared.summary['people'], now,
             used_today=used, used_hour=hourly, critical=volume.time_critical(blast, now), canary_factor=policy.value('CRM_SEED_CANARY_FACTOR'))
     result = _finish({'content_hash': digest, 'checked_at': now.isoformat(), 'version': VERSION,
-        'policy_hash': policy_hash(), 'items': items, 'seed_test': seed})
+        'policy_hash': policy_hash(), 'items': items, 'seed_test': seed, 'placement': decision})
     with transaction.atomic():
         current = Blast.objects.select_for_update(of=('self',)).select_related('event', 'mailbox', 'stream').get(pk=blast.pk)
         if render.content_hash(current, template) != digest:
@@ -220,7 +230,9 @@ def refresh_seed_result(probe, *, now):
         if result.get('content_hash') != probe.content_hash or (result.get('seed_test') or {}).get('id') != str(probe.pk):
             return
         result['seed_test'] = seeds.probe_result(probe)
-        result['items'] = [row for row in result.get('items') or [] if row['key'] != 'seed_test'] + [_seed_item(result['seed_test'])]
+        result['placement'] = placement.assess(blast, seed_result(blast, result), now)
+        result['items'] = [row for row in result.get('items') or [] if row['key'] != 'seed_test'] + [
+            _seed_item(result['seed_test'], result['placement'])]
         blast.preflight = _finish(result)
         blast.save(update_fields=['preflight', 'updated_at'])
 
@@ -238,12 +250,12 @@ def current_result(blast):
             or result.get('policy_hash') != policy_hash()):
         return {'status': 'stale', 'content_hash': current, 'items': [], 'seed_test': {'status': 'not_started', 'results': []},
             'can_send': False, 'blocking': ['preflight_required']}
-    seed_id = (result.get('seed_test') or {}).get('id')
-    if seed_id:
-        probe = SeedTest.objects.filter(pk=seed_id, blast=blast, content_hash=current).first()
-        if probe:
-            result['seed_test'] = seeds.probe_result(probe)
-            result['items'] = [row for row in result.get('items') or [] if row['key'] != 'seed_test'] + [_seed_item(result['seed_test'])]
+    seed = seed_result(blast, result)
+    decision = placement.assess(blast, seed, now)
+    result['seed_test'] = seed
+    result['placement'] = decision
+    result['items'] = [row for row in result.get('items') or [] if row['key'] != 'seed_test'] + [
+        _seed_item(seed, decision)]
     return _finish(result)
 
 
@@ -262,6 +274,9 @@ def queue_context(blast, *, now):
 def require(blast, supplied_hash, *, now, template):
     result = blast.preflight or {}
     seed = seed_result(blast, result)
+    decision = placement.assess(blast, seed, now)
+    if decision and decision['enforcing'] and decision['reason']:
+        raise BlastError(decision['reason'], 409)
     checked = blast_email.parse_iso(result.get('checked_at'))
     digest = render.content_hash(blast, template)
     if (not supplied_hash or supplied_hash != digest or result.get('content_hash') != digest
@@ -279,21 +294,29 @@ def seed_result(blast, result):
     if seed.get('id'):
         probe = SeedTest.objects.filter(pk=seed['id'], blast=blast, content_hash=result.get('content_hash')).first()
         if probe:
+            if placement.enforces(blast):
+                evidence = probe.results or {}
+                version = seeds.enrolment_version(seeds.enrolled(blast))
+                if evidence.get('enrolment_version') != version or evidence.get('route') != render.probe_route(blast):
+                    return {'status': 'not_started', 'results': []}
             return seeds.probe_result(probe)
-    return seed
+    return {'status': 'not_started', 'results': []} if placement.enforces(blast) else seed
 
 
-def admission(blast):
+def admission(blast, *, now=None, refresh=False):
     """A queued campaign may span days; edits to its content or template still stop it."""
     result = blast.preflight or {}
     try:
-        valid = (result.get('can_send') and result.get('content_hash') == render.content_hash(blast, render.template_body())
+        valid = (result.get('can_send') and result.get('content_hash') == render.content_hash(blast, render.template_body(refresh=refresh))
             and result.get('version') == VERSION and result.get('policy_hash') == policy_hash())
     except listmonk.ListmonkError:
         valid = False
     seed = seed_result(blast, result)
     if not valid or seed.get('grade') == 'block':
         return 'preflight_required'
+    decision = placement.assess(blast, seed, now or timezone.now())
+    if decision and decision['enforcing']:
+        return decision['reason']
     return 'inbox_test_pending' if seed.get('status') not in ('complete', 'timeout', 'error') else None
 
 

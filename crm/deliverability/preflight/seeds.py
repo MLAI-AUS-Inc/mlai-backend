@@ -14,8 +14,8 @@ from django.utils import timezone
 from crm import blast_email, listmonk, sending_domains
 from crm.models import Blast, CrmEvent, DeliverabilityIncident, SeedMailbox, SeedTest, SenderMailbox, SendingStream
 
-from .. import policy
-from . import render, seed_inbox
+from .. import policy, recovery
+from . import placement, render, seed_inbox
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,21 @@ def sync_mailboxes():
     return len(validated)
 
 
+def enrolled(blast):
+    rows = SeedMailbox.objects.filter(enabled=True)
+    if placement.enforces(blast):
+        rows = rows.filter(provider__in=placement.required_providers(blast))
+    return list(rows.order_by('pk'))
+
+
+def enrolment_version(mailboxes):
+    from django.utils.crypto import salted_hmac
+
+    fields = ('pk', 'provider', 'address', 'imap_host', 'imap_port', 'auth', 'secret_env')
+    config = [[str(getattr(row, key)) for key in fields] for row in mailboxes]
+    return salted_hmac('crm-seed-mailbox-config', json.dumps(config), algorithm='sha256').hexdigest()
+
+
 def get_or_start(blast, digest, *, now, force=False, template=None):
     """Reuse the exact message and enrolled inbox set for at most 24 hours."""
     if not policy.value('CRM_PREFLIGHT_ENABLED'):
@@ -57,18 +72,25 @@ def get_or_start(blast, digest, *, now, force=False, template=None):
         if render.content_hash(current, template if template is not None else render.template_body()) != digest:
             from crm.blasts import BlastError
             raise BlastError('draft_changed', 409)
-        enabled = list(SeedMailbox.objects.filter(enabled=True).order_by('pk'))
+        current.plan = blast.plan
+        enabled = enrolled(current)
+        version = enrolment_version(enabled)
         identities = {str(row.pk): {'provider': row.provider, 'folder': 'missing'} for row in enabled}
         recent = SeedTest.objects.filter(stream=stream, blast=blast, content_hash=digest,
             created_at__gte=now - timedelta(hours=policy.value('CRM_PREFLIGHT_MAX_AGE_HOURS'))).order_by('-created_at').first()
-        if not force and recent and set((recent.results or {}).get('mailboxes') or {}) == set(identities):
+        retry_after = now - timedelta(minutes=policy.value('CRM_SEED_TIMEOUT_MINUTES'))
+        may_retry = (force and recent and recent.status in ('complete', 'timeout', 'error')
+            and recent.created_at <= retry_after)
+        route = render.probe_route(current)
+        if (recent and not may_retry and (recent.results or {}).get('route') == route
+                and (recent.results or {}).get('enrolment_version') == version):
             probe = recent
         else:
             message = {key: getattr(current, key) for key in ('subject', 'body_markdown', 'preview_text', 'sign_off_name')}
             message['event'] = render.event_context(current)
             message['identity'] = {'email': current.mailbox.email, 'reply_to': current.mailbox.reply_to, 'domain': stream.domain}
             probe = SeedTest.objects.create(stream=stream, blast=blast, content_hash=digest,
-                status='sending' if enabled else 'timeout', results={'mailboxes': identities, 'message': message})
+                status='sending' if enabled else 'timeout', results={'mailboxes': identities, 'message': message, 'route': route, 'enrolment_version': version})
     if probe.status == 'sending':
         submit(probe.pk, now=now)
         probe.refresh_from_db()
@@ -100,6 +122,7 @@ def submit(probe_id, *, now):
     if not (policy.value('CRM_PREFLIGHT_ENABLED') or policy.value('CRM_SEED_HEARTBEAT_ENABLED')):
         return
     with transaction.atomic():
+        recovery.lock_account()
         probe = SeedTest.objects.select_for_update(of=('self',)).select_related('blast__event', 'blast__mailbox', 'stream__mailbox').get(pk=probe_id)
         submission = (probe.results or {}).get('submission') or {}
         if probe.status != 'sending' or submission.get('attempted_at'):
@@ -144,6 +167,9 @@ def submit(probe_id, *, now):
         campaign_id = int(campaign['id'])
         for mailbox in mailboxes:
             _seed_subscriber(mailbox)
+        fingerprints = [recovery.send_fingerprint(source.mailbox.email, row.address, payload['subject']) for row in mailboxes]
+        if not recovery.record_test_attempt(source.mailbox, now, kind='seed', count=len(mailboxes), fingerprints=fingerprints):
+            return
         probe.results = {**probe.results, 'submission': {'list_id': list_id, 'campaign_id': campaign_id,
             'attempted_at': now.isoformat(), 'state': 'request_started'}}
         probe.status, probe.sent_at = 'waiting', now
@@ -168,6 +194,7 @@ def probe_result(probe):
     results = list(((probe.results or {}).get('mailboxes') or {}).values())
     status, reason = seed_inbox.grade(results, timed_out=probe.status in ('timeout', 'error'), marketing=not probe.stream.transactional)
     return {'id': str(probe.pk), 'status': probe.status, 'results': results,
+        'sent_at': probe.sent_at.isoformat() if probe.sent_at else None,
         'grade': status, 'reason': reason, 'timed_out': probe.status in ('timeout', 'error')}
 
 

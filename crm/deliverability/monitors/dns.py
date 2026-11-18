@@ -56,7 +56,8 @@ def advisories(domain):
     match = re.search(r'(?:^|;)\s*sp\s*=\s*([a-z]+)', dmarc, re.I)
     bits = None
     try:
-        records = sending_domains.lookup('resend._domainkey.' + domain, 'TXT') or []
+        _, selector = sending_domains.resend_dns_route(domain)
+        records = sending_domains.lookup(selector + '._domainkey.' + domain, 'TXT') or []
         for row in records:
             key = re.search(r'(?:^|;)\s*p\s*=\s*([^;\s"]+)', row.strip('"'))
             if key:
@@ -73,6 +74,7 @@ def advisories(domain):
 def check(stream, *, now):
     result = sending_domains.domain_health(stream.domain, stream.mailbox.route, refresh=True, now=now)
     passed = result.get('status') == 'verified'
+    unknown = result.get('status') == 'unknown'
     with transaction.atomic():
         locked = SendingStream.objects.select_for_update().get(pk=stream.pk)
         state = dict((locked.state_detail or {}).get('dns_checks') or {})
@@ -84,15 +86,20 @@ def check(stream, *, now):
         spaced = previous is None or now >= previous + interval
         if spaced:
             state['passes'] = (state.get('passes', 0) + 1) if passed else 0
-            state['failures'] = 0 if passed else state.get('failures', 0) + 1
+            state['failures'] = 0 if passed or unknown else state.get('failures', 0) + 1
             state['checked_at'] = now.isoformat()
             locked.state_detail = {**(locked.state_detail or {}), 'dns_checks': state}
             locked.save(update_fields=['state_detail', 'updated_at'])
-    status = 'pass' if passed and state.get('passes', 0) >= policy.value('CRM_DNS_RECOVERY_PASSES') else 'recovering' if passed else 'fail'
+    status = 'unknown' if unknown else 'pass' if passed and state.get('passes', 0) >= policy.value('CRM_DNS_RECOVERY_PASSES') else 'recovering' if passed else 'fail'
     output = {'status': status, 'verified': passed, 'passes': state.get('passes', 0), 'failures': state.get('failures', 0),
-        'records': [{key: row.get(key) for key in ('key', 'required', 'status')} for row in result.get('records') or []],
+        'records': [{key: row.get(key) for key in ('key', 'required', 'status', 'host', 'source', 'effective_policy')} for row in result.get('records') or []],
         'advisories': advisories(stream.domain)}
-    if not passed and state.get('failures', 0) >= policy.value('CRM_DNS_FAILURE_CHECKS'):
+    reply_domain = sending_domains.domain_of(stream.mailbox.reply_to or stream.mailbox.email)
+    if reply_domain:
+        mx = sending_domains.lookup(reply_domain, 'MX')
+        output['reply_routing'] = {'domain': reply_domain, 'status': 'unknown' if mx is None else
+            'published_mx' if mx and mx != ['0 '] and mx != ['0'] else 'no_mx_observed'}
+    if not passed and not unknown and state.get('failures', 0) >= policy.value('CRM_DNS_FAILURE_CHECKS'):
         from ..guardian import Signal, detect
         detect(None, Signal('dns_drift', 'amber', state['failures'], policy.value('CRM_DNS_FAILURE_CHECKS'), state['failures'],
             'hold_stream', evidence_key=scopes.evidence_key([row['key'] for row in output['records'] if row.get('required') and row.get('status') != 'pass'])), stream=stream, now=now)

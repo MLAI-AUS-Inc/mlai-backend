@@ -77,6 +77,7 @@ def send(
     user_id: Optional[int] = None,
     unsubscribe_url: str = "",
     reply_to: str = "",
+    mentor_variant: str = "",
 ) -> SendResult:
     """Send one registered message through Resend and return its id.
 
@@ -88,7 +89,7 @@ def send(
     """
     from .models import SystemEmail, SystemEmailStatus
 
-    spec = get_spec(message_key)
+    spec = get_spec(message_key, mentor_variant=mentor_variant)
     address = _normalise(to)
     if "@" not in address:
         raise SystemEmailRejected("invalid_recipient")

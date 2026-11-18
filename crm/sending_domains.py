@@ -157,20 +157,55 @@ def _judge_mx(values):
     return (True, "") if values else (False, "No MX record.")
 
 
-def _judge_dmarc(values):
-    records = [value for value in values if value.lower().startswith("v=dmarc1")]
-    if len(records) != 1:
-        return False, "No DMARC record." if not records else "More than one DMARC record."
-    tags = {
-        name.strip().lower(): setting.strip()
-        for name, _, setting in (part.partition("=") for part in records[0].split(";"))
-    }
-    notes = []
-    if tags.get("p", "").lower() == "none":
-        notes.append("Monitoring only (p=none); move to quarantine once reports look clean.")
-    if not tags.get("rua"):
-        notes.append("No rua= address, so no aggregate reports arrive.")
-    return True, " ".join(notes)
+def _dmarc_records(values):
+    return [value for value in values if re.match(r'^v=dmarc1(?:\s*;|$)', value, re.I)]
+
+
+def _dmarc_tags(record):
+    return {key.strip().lower(): value.strip().lower() for key, _, value in
+        (part.partition("=") for part in record.split(";"))}
+
+
+def dmarc_policy(domain):
+    """Describe the published policy selected by a bounded DNS tree walk."""
+    labels = domain.split(".")
+    names = [domain] + [".".join(labels[index:]) for index in range(max(1, len(labels) - 7), len(labels))]
+    for name in names:
+        values = lookup(f"_dmarc.{name}", "TXT")
+        if values is None:
+            return {"status": ERROR, "source": name, "detail": "DNS lookup failed. Try again.", "found": []}
+        records = _dmarc_records(values)
+        if not records:
+            continue
+        tags = _dmarc_tags(records[0])
+        policy = tags.get("sp", tags.get("p")) if name != domain else tags.get("p")
+        modes = {"none", "quarantine", "reject"}
+        valid = len(records) == 1 and tags.get("p") in modes and policy in modes
+        valid = valid and tags.get("adkim", "r") in ("r", "s") and tags.get("aspf", "r") in ("r", "s")
+        notes = []
+        if valid:
+            if name != domain:
+                notes.append(f"Policy inherited from {name}.")
+            if policy == "none":
+                notes.append("Monitoring only (p=none).")
+            if not tags.get("rua"):
+                notes.append("No rua= address, so no aggregate reports arrive.")
+        else:
+            notes.append("The published DMARC record needs review.")
+        return {"status": PASS if valid else FAIL, "source": name, "effective_policy": policy if valid else None,
+            "adkim": tags.get("adkim", "r"), "aspf": tags.get("aspf", "r"),
+            "detail": " ".join(notes), "found": _clip(records)}
+    return {"status": FAIL, "source": None, "detail": "No applicable DMARC policy was found.", "found": []}
+
+
+def resend_dns_route(domain):
+    """Use the operator-verified envelope hostname and DKIM selector for this sender."""
+    from crm.deliverability import policy
+    for entry in policy.value("CRM_RESEND_DNS_ROUTES"):
+        configured, return_path, selector = entry.split(":")
+        if configured == domain:
+            return return_path, selector
+    return f"send.{domain}", "resend"
 
 
 def checks_for(domain: str, route: str) -> list[Check]:
@@ -183,7 +218,7 @@ def checks_for(domain: str, route: str) -> list[Check]:
         f"_dmarc.{domain}",
         f"v=DMARC1; p=none; rua=mailto:team@{domain}",
         True,
-        _judge_dmarc,
+        _judge_spf,  # DMARC uses the policy discovery branch in run_check.
     )
     inbound = Check(
         "mx", "Inbound mail (replies)", "MX", domain, "Your mail host's MX records", False, _judge_mx
@@ -212,12 +247,13 @@ def checks_for(domain: str, route: str) -> list[Check]:
             dmarc,
             inbound,
         ]
+    return_path, selector = resend_dns_route(domain)
     return [
         Check(
             "dkim",
             "DKIM signature",
             "TXT",
-            f"resend._domainkey.{domain}",
+            f"{selector}._domainkey.{domain}",
             "p=… from Resend → Domains",
             True,
             _judge_dkim,
@@ -226,8 +262,8 @@ def checks_for(domain: str, route: str) -> list[Check]:
             "return_path_spf",
             "Return path SPF",
             "TXT",
-            f"send.{domain}",
-            "CNAME send → send.forge.rmta.net (or Resend's TXT v=spf1 record)",
+            return_path,
+            "Resend's SPF record or CNAME",
             True,
             _judge_spf,
         ),
@@ -235,8 +271,8 @@ def checks_for(domain: str, route: str) -> list[Check]:
             "return_path_mx",
             "Return path MX",
             "MX",
-            f"send.{domain}",
-            "CNAME send → send.forge.rmta.net (or Resend's feedback MX record)",
+            return_path,
+            "Resend's feedback MX record or CNAME",
             True,
             _judge_mx,
         ),
@@ -260,6 +296,10 @@ def _clip(values: list[str]) -> list[str]:
 
 
 def run_check(check: Check) -> dict:
+    discovered = dmarc_policy(check.host.removeprefix("_dmarc.")) if check.key == "dmarc" else None
+    if discovered is not None:
+        return {"key": check.key, "label": check.label, "type": check.rtype, "host": check.host,
+            "expected": check.expected, "required": check.required, **discovered}
     values = lookup(check.host, check.rtype)
     if values is None:
         passed, status, detail, found = False, ERROR, "DNS lookup failed; try again.", []
@@ -289,7 +329,8 @@ def overall_status(records: list[dict]) -> str:
 
 
 def _cache_key(domain: str, route: str) -> str:
-    return f"crm:sending-domain:v1:{route}:{domain}"
+    identity = ":".join(resend_dns_route(domain)) if route == SenderMailbox.Route.RESEND else route
+    return f"crm:sending-domain:v2:{domain}:{identity}"
 
 
 def domain_health(domain: str, route: str, *, refresh: bool = False, now: Optional[datetime] = None) -> dict:

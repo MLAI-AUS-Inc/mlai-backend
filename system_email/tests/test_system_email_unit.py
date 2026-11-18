@@ -312,3 +312,18 @@ class CallerRoutingTests(SimpleTestCase):
                                      message_key="article_review_ready")
         self.assertFalse(ok)
         self.assertEqual(payload, {"error": "resend_429", "retryable": True})
+
+
+class MentorComparisonTests(SimpleTestCase):
+    def test_compact_mentor_probe_preserves_one_direct_action(self):
+        from system_email.fixtures import SAMPLE_CONTEXT
+        from system_email.registry import get_spec
+        from system_email.render import render
+
+        context = SAMPLE_CONTEXT['mentor_invite']
+        rendered = render(get_spec('mentor_invite', mentor_variant='compact'), context)
+        for body in (rendered.html, rendered.text):
+            self.assertEqual(body.count(context['accept_url']), 1)
+            self.assertNotIn(context['explainer_url'], body)
+        with self.assertRaises(ValueError):
+            get_spec('password_reset', mentor_variant='compact')

@@ -1,0 +1,15 @@
+{% autoescape off %}Hi {{ first_name|default:"there" }},
+{% if note %}
+{{ note }}
+{% endif %}
+{{ inviter_name }} invited you to mentor founders in the MLAI community. You choose the topics, hours and sessions that suit you.
+
+Review your MLAI mentor invitation:
+{{ accept_url }}
+
+Sign in with {{ invited_email }} to accept by {{ expires_on }}.
+
+If you have a question or prefer to skip future invitations, reply to this email.
+
+MLAI · Suite 350, 585 Little Collins St, Melbourne VIC 3000
+{% endautoescape %}

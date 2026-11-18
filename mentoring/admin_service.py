@@ -31,6 +31,7 @@ from .service import (
     MentoringError,
     _display_name,
     _is_stale_pending,
+    _lock_keys,
     serialize_mentor,
 )
 
@@ -353,6 +354,9 @@ class MentoringAdminService:
         with transaction.atomic():
             user, address = cls._target(user_id=user_id, email=email)
             now = timezone.now()
+            _lock_keys(f'mentor-invite:{address}')
+            if send_email:
+                invite_email.reserve_rate_limit(address, actor, now=now)
             _open_invites_for(user, address).update(revoked_at=now, revoked_by=actor)
             invite, token = MentorInvite.issue(user, created_by=actor, email=address)
         return cls._deliver(invite, token, actor, clean, send_email=send_email)
@@ -388,6 +392,7 @@ class MentoringAdminService:
                 raise MentoringError('invite_revoked', 'That invite was revoked. Create a new one instead.', 409)
             if invite.user is not None and MentorProfile.objects.filter(user=invite.user, is_active=True).exists():
                 raise MentoringError('already_a_mentor', 'That member is already an active mentor.', 409)
+            invite_email.reserve_rate_limit(invite.email or getattr(invite.user, 'email', ''), actor, now=timezone.now())
             token = invite.rotate()
             invite.save(update_fields=['token_hash', 'expires_at'])
         return cls._deliver(invite, token, actor, clean, send_email=True)

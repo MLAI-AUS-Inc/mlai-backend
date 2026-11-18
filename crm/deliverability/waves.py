@@ -21,7 +21,7 @@ from crm import blast_email, listmonk
 from crm.models import Blast, BlastDelivery, BlastWave, Contact, CrmAuditEvent, EmailEvent, SendingStream, StreamDay
 from crm.queries import banned
 
-from . import planner, policy, volume
+from . import planner, policy, recovery, volume
 
 ACTIVE = ('loading', 'running', 'paused')
 LIVE = ('queued', 'sending')
@@ -121,14 +121,14 @@ def admission(blast, now, *, continuing=False):
             return block
     if not settings.CRM_RESEND_WEBHOOK_SECRET:
         return 'feedback_not_configured'
-    if continuing:
-        # This audience already consumed capacity. The gate applies to later waves.
-        return None
-    if policy.value('CRM_PREFLIGHT_ENABLED'):
+    from .preflight import placement
+    if policy.value('CRM_PREFLIGHT_ENABLED') and (not continuing or placement.enforces(blast)):
         from .preflight.service import admission as preflight_admission
-        block = preflight_admission(blast)
+        block = preflight_admission(blast, now=now)
         if block:
             return block
+    if continuing:
+        return None
     if not volume.window(blast.stream, now, critical=volume.time_critical(blast, now)):
         return 'outside_sending_hours'
     block = canary_block(blast, now)
@@ -179,6 +179,7 @@ def _higher_priority(blast, now):
 def reserve(blast_id, *, now):
     """The stream lock serializes capacity across competing dispatchers and blasts."""
     with transaction.atomic():
+        recovery.lock_account()
         blast = _lock(blast_id)
         active = blast.waves.filter(status__in=ACTIVE).first()
         if active:
@@ -202,6 +203,8 @@ def reserve(blast_id, *, now):
             allowance = math.ceil(allowance * policy.value('CRM_SEED_CANARY_FACTOR'))
         if blast.incidents.filter(state='open', action='slow_blast').exists():
             allowance = math.floor(allowance * policy.value('CRM_STREAM_SLOW_FACTOR'))
+        if allowance <= 0:
+            return None, 'waiting_for_capacity'
         caps = volume.provider_caps(allowance, shares, provider_states(blast))
         picked, counts = [], Counter()
         for row in rows.order_by('send_rank', 'pk').values('pk', 'provider').iterator():
@@ -210,7 +213,9 @@ def reserve(blast_id, *, now):
                 counts[row['provider']] += 1
                 if len(picked) >= allowance:
                     break
-        minimum_wave = min(policy.value('CRM_MIN_WAVE'), allowance) if reduced_canary else policy.value('CRM_MIN_WAVE')
+        minimum_wave = policy.value('CRM_MIN_WAVE')
+        if reduced_canary or recovery.constrained(blast.mailbox):
+            minimum_wave = min(minimum_wave, allowance)
         if not picked or (len(picked) < minimum_wave and len(picked) < sum(shares.values())):
             return None, 'waiting_for_capacity'
         index = (blast.waves.aggregate(n=Max('index'))['n'] or 0) + 1 if blast.waves.exists() else 0
@@ -282,9 +287,11 @@ def _recheck(wave, blast, now):
     eligible = set(planner.eligible_rows(wave.deliveries.all(), blast, now).values_list('pk', flat=True))
     from crm.queries import marketing_consent_q, registered_q
     from crm.models import EventRegistration
+    restricted = blast.purpose == 'marketing' and recovery.constrained(blast.mailbox)
     if blast.purpose == 'marketing':
+        consent = Q(marketing_consent='granted') if restricted else marketing_consent_q(now)
         permitted = set(Contact.objects.filter(pk__in=wave.deliveries.values('contact_id')).filter(
-            marketing_consent_q(now)).values_list('pk', flat=True))
+            consent).values_list('pk', flat=True))
     else:
         permitted = set(EventRegistration.objects.filter(event_id=blast.event_id,
             contact_id__in=wave.deliveries.values('contact_id')).filter(registered_q()).values_list('contact_id', flat=True))
@@ -305,6 +312,7 @@ def _recheck(wave, blast, now):
     listmonk.remove_subscribers_from_list(subscriber_ids, wave.listmonk_list_id)
     for pk, reason in invalid.items():
         wave.deliveries.filter(pk=pk).update(status=Status.CANCELLED, error_code=reason, updated_at=now)
+    return bool(invalid)
 
 
 def advance(wave_id, *, now):
@@ -312,6 +320,7 @@ def advance(wave_id, *, now):
     tick_started = monotonic()
     blast_id = BlastWave.objects.values_list('blast_id', flat=True).get(pk=wave_id)
     with transaction.atomic():
+        recovery.lock_account()
         blast = _lock(blast_id)
         wave = BlastWave.objects.select_for_update().get(pk=wave_id)
         wave.stats = {**wave.stats, 'tracked_urls': blast_email.tracked_urls(blast_email.campaign_body(blast))}
@@ -346,10 +355,31 @@ def advance(wave_id, *, now):
                 _control(wave, 'cancelled', now)
             elif blast.pause_state:
                 _control(wave, 'paused', now)
-            elif wave.status == 'paused' and blast_email.email_stats(blast).get('resume_pending'):
+            elif wave.status == 'running':
+                from .preflight import placement, service
+                if placement.enforces(blast) and (block := service.admission(blast, now=now)):
+                    wave.stats = {**wave.stats, 'placement_hold': block}
+                    _control(wave, 'paused', now)
+                    CrmAuditEvent.objects.create(action='edit', target_type='blast', target_id=str(blast.pk),
+                        detail={'operation': 'placement_hold', 'reason': block, 'wave': wave.index})
+                    return {'blocked': block}
+                if blast_email.email_stats(blast).get('resume_pending'):
+                    blast.stats = blast_email.with_email_stats(blast.stats, resume_pending=False)
+                    blast.save(update_fields=['stats', 'updated_at'])
+            elif wave.status == 'paused' and (wave.stats.get('placement_hold')
+                    or blast_email.email_stats(blast).get('resume_pending')):
                 block = admission(blast, now, continuing=True)
                 if block:
                     return {'blocked': block}
+                from .preflight import placement
+                if placement.enforces(blast):
+                    _contacts(wave)
+                    if _recheck(wave, blast, now):
+                        # The provider may have buffered recipients before it paused.
+                        # Preserve its incomplete outcomes and never resume that audience.
+                        _control(wave, 'cancelled', now)
+                        return {'blocked': 'consent_changed_after_start'}
+                wave.stats.pop('placement_hold', None)
                 _control(wave, 'running', now)
                 blast.stats = blast_email.with_email_stats(blast.stats, resume_pending=False)
                 blast.save(update_fields=['stats', 'updated_at'])
@@ -406,6 +436,13 @@ def advance(wave_id, *, now):
                 return {'wave': wave.index, 'campaign': wave.status}
             _expire(wave, effective_now)
             return {'blocked': 'reservation_expired'}
+        from .preflight import placement, service
+        if placement.enforces(blast) and (block := service.admission(blast, now=effective_now, refresh=True)):
+            return {'blocked': block}
+        available = recovery.remaining(blast.mailbox, effective_now, excluding_wave=wave.pk)
+        if available is not None and wave.size > available:
+            _expire(wave, effective_now)
+            return {'blocked': 'waiting_for_capacity'}
         listmonk.update_campaign(wave.listmonk_campaign_id, campaign_payload(wave, blast))
         listmonk.set_campaign_status(wave.listmonk_campaign_id, 'running')
         wave.status, wave.started_at = 'running', effective_now

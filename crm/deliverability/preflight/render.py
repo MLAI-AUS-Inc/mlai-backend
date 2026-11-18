@@ -9,7 +9,7 @@ from email.utils import format_datetime
 from django.core.cache import cache
 from django.conf import settings
 
-from crm import blast_email, listmonk, merge_tags
+from crm import blast_email, listmonk, merge_tags, sending_domains
 from crm.models import BlastWave
 from integrations import http_client
 
@@ -33,6 +33,14 @@ def content_hash(blast, template_body):
         reply_to=blast.mailbox.reply_to, template_id=listmonk.template_id(),
         template_hash=hashlib.sha256(template_body.encode()).hexdigest(), event=event_context(blast))
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+
+def probe_route(blast):
+    """Hash the delivery route without exposing provider URLs in check results."""
+    domain = blast.stream.domain
+    return hashlib.sha256(json.dumps([blast.mailbox.route, listmonk._setting('LISTMONK_BASE_URL'),
+        sending_domains.resend_dns_route(domain), policy.value('CRM_RECOVERY_REQUIRED_INBOXES')]).encode()).hexdigest()
 
 
 def template_body(*, refresh=False):

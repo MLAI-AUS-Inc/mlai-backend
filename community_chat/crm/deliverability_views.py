@@ -44,10 +44,20 @@ class DeliverabilityView(DeliverabilityOwnerView):
                 state="open").select_related("stream").order_by("-opened_at")[:30]],
             "guardian_enabled": policy.value("CRM_GUARDIAN_ENABLED"),
             "monitors_enabled": policy.value("CRM_MONITORS_ENABLED"),
+            "recovery_mode": policy.value("CRM_DELIVERABILITY_RECOVERY_MODE"),
             "lifecycle_enabled": policy.value("CRM_LIFECYCLE_ENABLED"),
             "transactional_monitor_enabled": policy.value("CRM_TRANSACTIONAL_MONITOR_ENABLED"),
             "seed_heartbeat_enabled": policy.value("CRM_SEED_HEARTBEAT_ENABLED"),
             "dry_run": policy.value("CRM_GUARDIAN_DRY_RUN")})
+
+
+class CampaignEvidenceView(DeliverabilityOwnerView):
+    def get(self, request, blast_id):
+        from django.utils import timezone
+        from crm.deliverability import evidence
+        from crm.models import Blast
+        blast = get_object_or_404(Blast.objects.select_related('stream', 'mailbox', 'event'), pk=blast_id)
+        return Response(evidence.campaign(blast, timezone.now()))
 
 
 class IncidentsView(DeliverabilityOwnerView):

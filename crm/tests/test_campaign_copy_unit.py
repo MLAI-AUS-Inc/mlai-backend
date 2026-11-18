@@ -38,7 +38,7 @@ class CampaignStatusCopyTests(SimpleTestCase):
         blast = self.blast(pause_state='staff')
         self.assertIn('Paused by staff', self.text(blast)['text'])
         blast.stream.state = 'stopped'; blast.status = 'sent'; blast.stats = {'email': {'delivered': 12}}
-        self.assertEqual(self.text(blast), {'tone': 'ok', 'text': 'Finished. Delivered to 12 people.'})
+        self.assertEqual(self.text(blast), {'tone': 'ok', 'text': 'Finished. Mail servers accepted 12 emails.'})
         blast.status = 'cancelled'; blast.stats = {'stopped_by': 'Sam', 'email': {'sent': 12}}; blast.recipient_count = 20
         self.assertIn("8 won't be sent", self.text(blast)['text'])
 

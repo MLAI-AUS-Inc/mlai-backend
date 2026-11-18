@@ -11,7 +11,7 @@ from django.utils.dateparse import parse_datetime
 
 from crm.models import BlastDelivery, CrmAuditEvent, EmailEvent, SendingStream, StreamDay
 
-from . import policy, volume
+from . import policy, recovery, volume
 from .wave_sync import metrics
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,8 @@ def close_day(row_id, *, now):
         before = stream.ramp_stage
         no_promotion_until = parse_datetime(str((stream.state_detail or {}).get('postmaster_no_promotion_until', '')))
         if stream.state not in ('held', 'stopped') and (not no_promotion_until or now >= no_promotion_until):
-            stream.ramp_stage = volume.promote_stage(stream.ramp_stage, row.sent, row.budget, row.healthy is True)
+            if not recovery.constrained(stream.mailbox):
+                stream.ramp_stage = volume.promote_stage(stream.ramp_stage, row.sent, row.budget, row.healthy is True)
             amber = True
             for offset in range(policy.value('CRM_RAMP_AMBER_DAYS')):
                 day = row.day - timedelta(days=offset)

@@ -999,3 +999,59 @@ stronger record from this implementation or treat a missing report as clean.
 
 Provider contracts: [Customer.io From overrides and tracking](https://docs.customer.io/integrations/api/app/tag/send-messages/sendemail/),
 [Resend domain tracking](https://github.com/resend/resend-skills/blob/main/skills/resend/references/sending/overview.md).
+
+## Email deliverability recovery
+
+The mail-server acceptance count and controlled inbox observations measure
+different outcomes. A recipient can generate an acceptance and a later
+temporary bounce. Per-campaign `GET blasts/<id>/email-evidence/` exposes
+aggregate evidence to deliverability owners. The CRM campaign details show
+these counts for owners and let staff refresh the inbox check on queued
+campaigns. `POST blasts/<id>/preflight/` accepts `{"retry_seed": true}` to
+retry a completed or failed probe after the configured probe interval. Active
+probes reuse their original reservation.
+
+Produce a read-only ledger report for a bounded Melbourne date range with
+`python manage.py crm_email_evidence --from-day YYYY-MM-DD --through-day YYYY-MM-DD`.
+The report includes per-campaign and provider counts, unmatched provider IDs
+as a count, and test-mailbox folder counts. Match older previews against Resend
+using its retained history. The new local preview-attempt ledger starts when
+this code takes effect.
+
+1. Start with `CRM_DELIVERABILITY_RECOVERY_MODE=shadow`. Inspect the new
+   decisions in the CRM on opted-in campaign drafts. Run the reconciliation
+   command and check that bounce history and approvals match the owning
+   records.
+2. Verify each envelope hostname and DKIM selector in Resend and on a received
+   original. Configure `CRM_RESEND_DNS_ROUTES` as comma-separated
+   `sender-domain:return-path-host:selector` entries. The DNS monitor reports
+   effective inherited DMARC and the Reply-To MX separately. Review any
+   discrepancies before changing DNS.
+3. Enrol approved test inboxes with the existing `crm_seed_mailboxes` command
+   and the configured credential references. Cover personal Gmail, Workspace
+   and a Microsoft provider. Add Yahoo for campaigns that target Yahoo.
+   Verify fresh placement with the actual rendered campaign. Confirm the
+   signed one-click endpoint on a disposable opted-in fixture. Check that a
+   GET leaves consent unchanged and a one-click POST suppresses future mail.
+4. Before setting `enforce`, verify the account's current quota and reserve
+   enough capacity for essential mail. Set `CRM_RECOVERY_ACCOUNT_DAILY_LIMIT`
+   to the internal rolling 24-hour allocation across the covered Resend
+   account, within the account's plan and current usage. Set a positive
+   `CRM_RECOVERY_ACCOUNT_ESSENTIAL_RESERVE` below that limit. Set waves and
+   preflight to true in the same release configuration. Extra sends outside
+   these ledgers must fit outside that internal allocation. Verify
+   `CRM_RECOVERY_SENDERS` names the recovery mailboxes.
+5. The recovery defaults are 20 attempts per rolling day and one campaign
+   recipient per rolling hour on a listed mailbox. Controlled probes count
+   toward the rolling daily sender and account limits. They can check the
+   required providers together. The rolling window, sending calendar,
+   mailbox cap, guardian and verified consent all remain applicable.
+   Marketing requires current placement evidence before real sends. Keep
+   the longer sequence in the recovery plan for increases and ongoing review.
+6. Verify a fresh check and one authorized pilot wave in production. Recheck
+   receiver evidence, feedback and counts at 24 and 72 hours. If a hold
+   interrupts a wave, recover against the same listmonk campaign. When
+   consent changes after a provider pause, incomplete outcomes stay on that
+   campaign for reconciliation while remaining unreserved recipients retain
+   their own state. Use the existing stop and review controls before reverting
+   enforcement or its configuration.

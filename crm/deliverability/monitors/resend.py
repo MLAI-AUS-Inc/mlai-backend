@@ -6,6 +6,7 @@ from urllib.parse import quote
 from django.conf import settings
 from django.db import transaction
 
+from crm import sending_domains
 from crm.models import Contact, ContactConsentEvent, CrmAuditEvent
 
 from .. import policy
@@ -42,6 +43,28 @@ def listing(path):
     raise Unavailable('pagination_incomplete')
 
 
+def provider_dns_route(domain):
+    """Extract the envelope host and selector from Resend's public DNS metadata."""
+    name = domain.get('name', '')
+    records = domain.get('records')
+    if not name or not isinstance(records, list):
+        return None
+    envelope, selectors = set(), set()
+    for row in records:
+        if not isinstance(row, dict) or not isinstance(row.get('name'), str):
+            continue
+        host = row['name'].lower().rstrip('.')
+        if not host.endswith('.' + name):
+            host += '.' + name
+        if row.get('record') == 'SPF' and row.get('type') in ('MX', 'TXT', 'CNAME') and host != name:
+            envelope.add(host)
+        if row.get('record') == 'DKIM' and '._domainkey.' in host:
+            selectors.add(host.split('._domainkey.', 1)[0])
+    if len(envelope) == len(selectors) == 1:
+        return next(iter(envelope)), next(iter(selectors))
+    return None
+
+
 def contract(domain, webhooks, *, expected_domain):
     critical, warnings = [], []
     if domain.get('name') != expected_domain or domain.get('status') != 'verified':
@@ -53,6 +76,11 @@ def contract(domain, webhooks, *, expected_domain):
         and row.get('status') == 'enabled' and EVENTS <= set(row.get('events') or [])]
     if not valid:
         critical.append('resend_webhook')
+    observed = provider_dns_route(domain)
+    if observed and observed != sending_domains.resend_dns_route(expected_domain):
+        warnings.append('resend_dns_route_mismatch')
+    elif not observed:
+        warnings.append('resend_dns_route_unknown')
     return {'status': 'fail' if critical else 'pass', 'critical': critical, 'warnings': warnings}
 
 

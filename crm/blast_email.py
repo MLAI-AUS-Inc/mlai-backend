@@ -225,6 +225,9 @@ def email_block(blast) -> Optional[str]:
         return "not_configured"
     if blast.mailbox_id is None or not blast.mailbox.enabled:
         return "mailbox_disabled"
+    from .deliverability.preflight import placement
+    if placement.enforces(blast) and not blast.stream_id:
+        return "stream_not_configured"
     from .deliverability.streams import legacy_mailbox_path, protected_domain
     if protected_domain(blast.mailbox.email.rsplit("@", 1)[-1]) and not legacy_mailbox_path(blast):
         return "protected_domain"
@@ -738,5 +741,10 @@ def send_test_email(blast_id, user) -> str:
         except ListmonkError as exc:
             if not exc.conflict:
                 raise
+    from .deliverability import recovery
+    fingerprints = ([recovery.send_fingerprint(blast.mailbox.email, email, payload['subject'])]
+        if blast.mailbox_id else [])
+    if not recovery.record_test_attempt(blast.mailbox, timezone.now(), kind='preview', count=1, fingerprints=fingerprints):
+        raise ListmonkError('waiting_for_capacity')
     listmonk.test_campaign(campaign_id, payload, [email])
     return email

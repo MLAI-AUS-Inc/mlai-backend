@@ -328,3 +328,50 @@ class AlertRaceTests(SimpleTestCase):
             manager.select_for_update.return_value.get.return_value = SimpleNamespace(state="acknowledged")
             alerts.alert_open_incidents(now=datetime(2026, 11, 5, tzinfo=timezone.utc))
             send.assert_not_called()
+
+
+class RecoveryFeedbackEvidenceTests(SimpleTestCase):
+    def test_acceptance_followed_by_transient_bounce_remains_visible(self):
+        from datetime import timedelta
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from django.utils import timezone
+        from crm.resend_feedback import apply_transport_evidence
+
+        first = timezone.now()
+        later = first + timedelta(seconds=1)
+        delivery = SimpleNamespace(delivered_at=None, status='delivered', error_code='', bounce_kind='')
+        event = SimpleNamespace(event_type='email.delivered', occurred_at=first)
+        with patch('crm.resend_feedback.EmailEvent.objects.filter') as history:
+            history.return_value.filter.return_value.order_by.return_value.values_list.return_value.first.side_effect = [first, later]
+            apply_transport_evidence(delivery, event)
+        self.assertEqual(delivery.delivered_at, first)
+        self.assertEqual(delivery.status, 'undelivered')
+        self.assertEqual(delivery.error_code, 'soft_bounce_after_acceptance')
+        self.assertEqual(delivery.bounce_kind, 'soft')
+
+
+@override_settings(CRM_DELIVERABILITY_RECOVERY_MODE='enforce', CRM_RECOVERY_ACCOUNT_DAILY_LIMIT='100',
+    CRM_RECOVERY_ACCOUNT_ESSENTIAL_RESERVE='25')
+class RecoveryCapacityTests(SimpleTestCase):
+    def test_recovery_sender_and_shared_capacity_take_the_stricter_limit(self):
+        from types import SimpleNamespace
+        from django.utils import timezone
+        from crm.deliverability import recovery
+
+        now = timezone.now()
+        mailbox = SimpleNamespace(pk=1, route='resend', email='hello@news.mlai.org.au', daily_limit=100)
+        with (patch.object(recovery, '_attempts', side_effect=[70, 4, 0]) as attempts,
+              patch('system_email.models.SystemEmail.objects.filter') as system):
+            system.return_value.aggregate.return_value = {'total': 10}
+            self.assertEqual(recovery.remaining(mailbox, now), 1)
+            self.assertFalse(attempts.call_args.kwargs['include_probes'])
+        with (patch.object(recovery, '_attempts', side_effect=[65, 4, 0]),
+              patch('system_email.models.SystemEmail.objects.filter') as system):
+            system.return_value.aggregate.return_value = {'total': 40}
+            self.assertEqual(recovery.remaining(mailbox, now), 0)
+        with (patch.object(recovery, '_attempts', side_effect=[73, 4]) as attempts,
+              patch('system_email.models.SystemEmail.objects.filter') as system):
+            system.return_value.aggregate.return_value = {'total': 10}
+            self.assertEqual(recovery.remaining(mailbox, now, kind='seed'), 2)
+            self.assertEqual(attempts.call_count, 2)

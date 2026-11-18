@@ -133,7 +133,7 @@ def next_delivery_state(status, error, event_type, *, bounce_type=""):
                 return status, error
             return S.UNDELIVERED, "soft_bounce"
         return S.BOUNCED, "resend_bounced"
-    if status in (S.BOUNCED, S.UNSUBSCRIBED, S.FAILED) or (status == S.UNDELIVERED and error != "soft_bounce"):
+    if status in (S.BOUNCED, S.UNSUBSCRIBED, S.FAILED) or (status == S.UNDELIVERED and error not in ("soft_bounce", "soft_bounce_after_acceptance")):
         return status, error
     if event_type in ("email.failed", "email.suppressed"):
         return S.FAILED, event_type.replace("email.", "resend_")
@@ -158,10 +158,18 @@ def _match_delivery(event, now):
     rows = BlastDelivery.objects.select_for_update(of=("self",)).select_related("blast__mailbox")
     delivery = rows.filter(channel=Channel.EMAIL, provider_id=event["email_id"]).first()
     if delivery is None:
+        from .deliverability.recovery import send_fingerprint
+        fingerprint = send_fingerprint(event["sender"], event["recipient"], event["subject"])
+        cutoff = now - timedelta(days=policy.value("CRM_FEEDBACK_MATCH_DAYS"))
+        tests = CrmAuditEvent.objects.filter(action="send", target_type="crm_email_attempt",
+            created_at__gte=cutoff).values_list("detail", flat=True)
+        if any(fingerprint in detail.get("fingerprints", []) for detail in tests):
+            return None
+        occurred = event.get("occurred_at") or now
         candidates = list(rows.filter(channel=Channel.EMAIL, address=event["recipient"],
             blast__mailbox__email=event["sender"], blast__subject=event["subject"], provider_id="",
-        ).filter(Q(wave__started_at__gte=now - timedelta(days=policy.value("CRM_FEEDBACK_MATCH_DAYS")))
-            | Q(wave__isnull=True, created_at__gte=now - timedelta(days=policy.value("CRM_FEEDBACK_MATCH_DAYS"))))
+        ).filter(Q(wave__started_at__gte=cutoff, wave__reserved_at__lte=occurred)
+            | Q(wave__isnull=True, created_at__gte=cutoff, created_at__lte=occurred))
             .exclude(status=BlastDelivery.Status.QUEUED).order_by("-pk")[:2])
         delivery = candidates[0] if len(candidates) == 1 else None
     if delivery and (delivery.address != event["recipient"] or not delivery.blast.mailbox_id
@@ -205,6 +213,30 @@ def _apply_contact_feedback(event, stored, delivery, now):
                              detail={"email_id": event["email_id"], "event": event["type"]})
 
 
+def apply_transport_evidence(delivery, event):
+    """Keep receiver acceptance and later transient failures independently."""
+    if event.event_type not in ("email.delivered", "email.bounced"):
+        return
+    if event.event_type == "email.delivered":
+        delivery.delivered_at = min(filter(None, (delivery.delivered_at, event.occurred_at)))
+    if delivery.status == "bounced":
+        delivery.bounce_kind = "hard"
+        return
+    if delivery.status in ("unsubscribed", "failed", "cancelled"):
+        return
+    history = EmailEvent.objects.filter(delivery=delivery)
+    accepted = history.filter(event_type="email.delivered").order_by("-occurred_at").values_list("occurred_at", flat=True).first()
+    soft = history.filter(event_type="email.bounced", bounce_type="Transient").order_by("-occurred_at").values_list("occurred_at", flat=True).first()
+    if soft and (not accepted or soft >= accepted):
+        delivery.status = "undelivered"
+        delivery.error_code = "soft_bounce_after_acceptance" if delivery.delivered_at else "soft_bounce"
+        delivery.bounce_kind = "soft"
+    elif accepted:
+        if delivery.status != "read":
+            delivery.status = "delivered"
+        delivery.error_code, delivery.bounce_kind = "", ""
+
+
 def record_event(event, message_id, *, now=None):
     """Atomically deduplicate the receipt and apply feedback without sender row locks."""
     if not monitored_sender(event["sender"]):
@@ -237,16 +269,7 @@ def record_event(event, message_id, *, now=None):
                     delivery.provider_id = event["email_id"]
                     delivery.status, delivery.error_code = next_delivery_state(delivery.status, delivery.error_code,
                         event["type"], bounce_type=event.get("bounce_type", ""))
-                    if event["type"] == "email.bounced" and delivery.error_code != "resend_complained":
-                        if delivery.status == "bounced":
-                            delivery.bounce_kind = "hard"
-                        elif delivery.status == "undelivered":
-                            delivery.bounce_kind = "soft"
-                    if event["type"] == "email.delivered" and delivery.status in ("delivered", "read"):
-                        delivery.bounce_kind = ""
-                    if (event["type"] == "email.delivered" and delivery.delivered_at is None
-                            and (delivery.status in ("delivered", "read") or delivery.error_code == "resend_complained")):
-                        delivery.delivered_at = stored.occurred_at
+                    apply_transport_evidence(delivery, stored)
                     delivery.save(update_fields=["provider_id", "status", "error_code", "bounce_kind", "delivered_at", "updated_at"])
                 _apply_contact_feedback(event, stored, delivery, now)
     # Retrying suppression after a provider outage must work for duplicate receipts too.

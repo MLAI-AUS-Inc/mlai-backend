@@ -12,7 +12,7 @@ from django.db.models.functions import Coalesce
 from crm.engagement import engagement_rating
 from crm.models import BlastDelivery, Contact, EventRegistration, InboundMessage
 
-from . import hygiene, policy, volume
+from . import hygiene, policy, recovery, volume
 
 
 @dataclass
@@ -87,6 +87,7 @@ def prepare(blast, now, *, audience=None, cached_only=False):
     audience = audience or resolve_audience(blast, now=now)
     from . import reconfirmation
     reconfirm = reconfirmation.is_reconfirmation(blast)
+    restricted = blast.purpose == 'marketing' and recovery.constrained(blast.mailbox)
     query = _activity_queryset(audience.querysets['email'], now=now)
     if reconfirm:
         query = reconfirmation.with_bounce_history(query)
@@ -105,6 +106,8 @@ def prepare(blast, now, *, audience=None, cached_only=False):
                 reason = 'not_dormant' if tier != 'D' else reconfirmation.exclusion(contact, now)
             elif tier == 'D':
                 reason = 'dormant'
+        if restricted and not reason and (contact.marketing_consent != 'granted' or tier != 'A'):
+            reason = 'recovery_explicit_recent_opt_in'
         if reason:
             excluded[reason] += 1
             continue

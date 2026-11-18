@@ -26,9 +26,14 @@ def found(blast_id):
     return blast
 
 
+class PreflightInput(StrictSerializer):
+    retry_seed = serializers.BooleanField(required=False, default=False)
+
+
 class PreflightView(CrmView):
     def post(self, request, blast_id):
-        result = service.run_preflight(found(blast_id))
+        data = validated(PreflightInput, request)
+        result = service.run_preflight(found(blast_id), retry_seed=data['retry_seed'])
         return Response(result_dto(result, owner=is_owner(request.user)))
 
     def get(self, request, blast_id):

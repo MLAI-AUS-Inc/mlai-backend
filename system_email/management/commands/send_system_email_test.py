@@ -17,6 +17,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--message", required=True, choices=sorted(MESSAGES))
         parser.add_argument("--to", required=True)
+        parser.add_argument("--mentor-variant", choices=("compact",))
 
     def handle(self, *args, **options):
         allowed = {value.strip().lower() for value in getattr(settings, "SYSTEM_EMAIL_TEST_RECIPIENTS", ()) if value}
@@ -25,6 +26,9 @@ class Command(BaseCommand):
             raise CommandError("--to must be listed in SYSTEM_EMAIL_TEST_RECIPIENTS.")
         key = options["message"]
         spec = MESSAGES[key]
+        variant = options.get("mentor_variant") or ""
+        if variant and key != "mentor_invite":
+            raise CommandError("--mentor-variant requires --message mentor_invite.")
         prerendered = None
         if spec.prerendered:
             prerendered = RenderedEmail(subject=f"[Test] {key}", html=f"<p>Test of {key}.</p>", text=f"Test of {key}.\n")
@@ -35,6 +39,7 @@ class Command(BaseCommand):
                 idempotency_key=f"test/{key}/{uuid.uuid4()}",
                 context=SAMPLE_CONTEXT.get(key, {}),
                 prerendered=prerendered,
+                mentor_variant=variant,
                 unsubscribe_url="https://mlai.au/unsubscribe-test" if spec.unsubscribe else "",
             )
         except api.SystemEmailRejected as exc:

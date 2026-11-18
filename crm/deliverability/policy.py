@@ -1,6 +1,7 @@
 """Central defaults; every numeric delivery rule is configurable through settings."""
 
 import math
+import re
 
 DEFAULTS = {
     "CRM_STREAMS": "news:news.mlai.au:hello@news.mlai.au:marketing|event_update;notify:notify.mlai.au:notifications@notify.mlai.au:transactional",
@@ -109,6 +110,14 @@ DEFAULTS = {
     "CRM_RAMP_AMBER_DAYS": 2,
     "CRM_RAMP_AMBER_DEMOTION": 1,
     "CRM_PREFLIGHT_ENABLED": False,
+    "CRM_DELIVERABILITY_RECOVERY_MODE": "shadow",
+    "CRM_RECOVERY_SENDERS": ("hello@news.mlai.org.au",),
+    "CRM_RECOVERY_ROLLING_DAY": 20,
+    "CRM_RECOVERY_ROLLING_HOUR": 1,
+    "CRM_RECOVERY_REQUIRED_INBOXES": ("gmail", "google_workspace", "outlook"),
+    "CRM_RECOVERY_ACCOUNT_DAILY_LIMIT": "",
+    "CRM_RECOVERY_ACCOUNT_ESSENTIAL_RESERVE": "",
+    "CRM_RESEND_DNS_ROUTES": (),
     "CRM_PREFLIGHT_MAX_AGE_HOURS": 24,
     "CRM_SUBJECT_MIN_LENGTH": 10,
     "CRM_SUBJECT_MAX_LENGTH": 70,
@@ -211,7 +220,7 @@ def value(name, stream=None):
     return result
 
 
-def environment_settings(environ):
+def environment_settings(environ, *, partial=False):
     """Parse the policy's environment inventory without logging configured values."""
     result = {}
     for name, default in DEFAULTS.items():
@@ -257,4 +266,43 @@ def environment_settings(environ):
                 raise ValueError(f"{name} must be a positive finite policy value")
         else:
             result[name] = raw.strip()
+    mode = result["CRM_DELIVERABILITY_RECOVERY_MODE"]
+    if mode not in ("off", "shadow", "enforce"):
+        raise ValueError("CRM_DELIVERABILITY_RECOVERY_MODE must be off, shadow or enforce")
+    validate_dns_routes(result["CRM_RESEND_DNS_ROUTES"])
+    for name in ("CRM_RECOVERY_ACCOUNT_DAILY_LIMIT", "CRM_RECOVERY_ACCOUNT_ESSENTIAL_RESERVE"):
+        if result[name] and not re.fullmatch(r"[1-9][0-9]*", result[name]):
+            raise ValueError(f"{name} must be a positive integer")
+    scopes = result["CRM_RECOVERY_REQUIRED_INBOXES"]
+    if (not {"gmail", "google_workspace"}.issubset(scopes) or not {"outlook", "microsoft365"}.intersection(scopes)
+            or set(scopes) - {"gmail", "google_workspace", "outlook", "microsoft365", "yahoo", "icloud"}):
+        raise ValueError("Recovery requires personal Gmail, Workspace, and a Microsoft mailbox")
+    if not result["CRM_RECOVERY_SENDERS"] or not all(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", sender)
+            for sender in result["CRM_RECOVERY_SENDERS"]):
+        raise ValueError("CRM_RECOVERY_SENDERS requires valid sender addresses")
+    if mode == "enforce" and not partial:
+        try:
+            quota = int(result["CRM_RECOVERY_ACCOUNT_DAILY_LIMIT"])
+            reserve = int(result["CRM_RECOVERY_ACCOUNT_ESSENTIAL_RESERVE"])
+        except ValueError:
+            raise ValueError("Enforcement requires a verified account allowance and essential-mail reserve") from None
+        if not 0 < reserve < quota:
+            raise ValueError("The essential-mail reserve must be positive and below the account allowance")
+        if not (result["CRM_WAVES_ENABLED"] and result["CRM_PREFLIGHT_ENABLED"]):
+            raise ValueError("Recovery enforcement needs CRM waves and preflight")
     return result
+
+def validate_dns_routes(routes):
+    """Validate DNS names while keeping provider configuration out of errors."""
+    seen = set()
+    dns = re.compile(r'[a-z0-9-]+(?:\.[a-z0-9-]+)+')
+    for entry in routes:
+        parts = entry.split(':')
+        if len(parts) != 3:
+            raise ValueError("CRM_RESEND_DNS_ROUTES needs domain:return-path:selector entries")
+        domain, return_path, selector = parts
+        if (not dns.fullmatch(domain) or not dns.fullmatch(return_path)
+                or not return_path.endswith('.' + domain) or not re.fullmatch(r'[a-z0-9-]+', selector)
+                or domain in seen):
+            raise ValueError("CRM_RESEND_DNS_ROUTES contains an invalid or duplicate entry")
+        seen.add(domain)

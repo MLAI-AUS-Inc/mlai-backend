@@ -10,7 +10,7 @@ from django.db.models import Q, Sum
 
 from crm.models import BlastWave, CrmAuditEvent
 
-from . import policy
+from . import policy, recovery
 
 MELBOURNE = ZoneInfo('Australia/Melbourne')
 WEEKDAYS = ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun')
@@ -69,6 +69,8 @@ def budget(stream, day=None):
         amount = ladder[stage]
         if stream.state == 'active':
             amount = max(amount, math.floor(policy.value('CRM_STREAM_ACTIVE_PEAK_FACTOR') * stream.peak_healthy_daily_volume))
+    if recovery.constrained(getattr(stream, 'mailbox', None)):
+        maximum = min(maximum, stream.mailbox.daily_limit, policy.value('CRM_RECOVERY_ROLLING_DAY'))
     amount = min(maximum, max(0, amount))
     return math.floor(amount * (policy.value('CRM_STREAM_SLOW_FACTOR') if stream.state == 'slowed' else 1))
 
@@ -116,6 +118,9 @@ def allowance_for(blast, now):
     from . import reconfirmation
     if reconfirmation.is_reconfirmation(blast):
         allowance = reconfirmation.allowance(blast, now, allowance)
+    remaining = recovery.remaining(blast.mailbox, now)
+    if remaining is not None:
+        allowance = min(allowance, remaining)
     return allowance, cap
 
 
@@ -189,7 +194,9 @@ def estimate(stream, people, now, *, used_today=0, used_hour=0, canary_started_a
     if not 0 < canary_factor <= 1:
         raise ValueError('Invalid initial batch factor')
     remaining = people
+    constrained = recovery.constrained(getattr(simulated, 'mailbox', None))
     schedule, hours = [], []
+    scheduled = []
     clock = now.replace(second=0, microsecond=0)
     first = canary_started_at is None
     gate = canary_started_at
@@ -206,7 +213,8 @@ def estimate(stream, people, now, *, used_today=0, used_hour=0, canary_started_a
         if current_day != day:
             if day_count:
                 schedule.append({'day': day.isoformat(), 'count': day_count})
-                simulated.ramp_stage = promote_stage(simulated.ramp_stage, spent, budget(simulated), True)
+                if not constrained:
+                    simulated.ramp_stage = promote_stage(simulated.ramp_stage, spent, budget(simulated), True)
             day, spent, day_count = current_day, 0, 0
         bounds = window(simulated, clock, critical=critical)
         hour = bounds['slot'] if bounds else clock.astimezone(MELBOURNE).replace(minute=0)
@@ -218,9 +226,21 @@ def estimate(stream, people, now, *, used_today=0, used_hour=0, canary_started_a
             allowance, cap = slot_allowance(budget(simulated), spent, hourly_used, bounds['slots'], bounds['left'], canary=first)
             if first:
                 allowance = math.ceil(allowance * canary_factor)
-            n = min(remaining, allowance) if gate_clear else 0
-            if n and (first or n >= policy.value('CRM_MIN_WAVE') or n == remaining):
+            if constrained:
+                scheduled = [(stamp, count) for stamp, count in scheduled if stamp > clock - timedelta(days=1)]
+                daily = budget(simulated) - sum(count for _, count in scheduled)
+                hourly = policy.value('CRM_RECOVERY_ROLLING_HOUR') - sum(
+                    count for stamp, count in scheduled if stamp > clock - timedelta(hours=1))
+                # Treat known sends from the current slot as recent even when their
+                # exact timestamps aren't part of the estimate's inputs.
+                if clock < now + timedelta(hours=1):
+                    hourly = min(hourly, policy.value('CRM_RECOVERY_ROLLING_HOUR') - used_hour)
+                allowance = min(allowance, daily, hourly)
+            n = min(remaining, max(0, allowance)) if gate_clear else 0
+            if n and (constrained or first or n >= policy.value('CRM_MIN_WAVE') or n == remaining):
                 hours.append({'at': clock.isoformat(), 'count': n, 'hour_cap': cap, 'day_budget': budget(simulated)})
+                if constrained:
+                    scheduled.append((clock, n))
                 remaining -= n
                 spent += n
                 hourly_used += n

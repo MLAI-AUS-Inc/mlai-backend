@@ -4,7 +4,7 @@ from django.urls import path
 
 from . import views
 from .deliverability_views import (DeliverabilityView, IncidentAcknowledgeView, IncidentsView,
-    StreamPolicyView, SelfCheckView, SeedHeartbeatView, ReconfirmationDraftView, ContactTypoCorrectionView)
+    CampaignEvidenceView, StreamPolicyView, SelfCheckView, SeedHeartbeatView, ReconfirmationDraftView, ContactTypoCorrectionView)
 from .profile_views import AudienceProfileMappingApplyView, AudienceProfileMappingPreviewView, AudienceProfileView
 from .preflight_views import PreflightFixView, PreflightView
 
@@ -111,6 +111,7 @@ urlpatterns = [
     path("blasts/<uuid:blast_id>/plan/", views.BlastPlanView.as_view(), name="community_chat_crm_blast_plan"),
     path("blasts/<uuid:blast_id>/pause/", views.BlastPauseView.as_view(), name="community_chat_crm_blast_pause"),
     path("blasts/<uuid:blast_id>/resume/", views.BlastResumeView.as_view(), name="community_chat_crm_blast_resume"),
+    path("blasts/<uuid:blast_id>/email-evidence/", CampaignEvidenceView.as_view(), name="community_chat_crm_blast_email_evidence"),
     path("blasts/<uuid:blast_id>/preflight/", PreflightView.as_view(), name="community_chat_crm_blast_preflight"),
     path("blasts/<uuid:blast_id>/preflight/fix/", PreflightFixView.as_view(), name="community_chat_crm_blast_preflight_fix"),
     path(

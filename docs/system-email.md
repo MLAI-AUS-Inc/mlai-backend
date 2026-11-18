@@ -87,3 +87,19 @@ run **Send held reminders (Resend)**.
   mail gets a complaint. It never pauses sending.
 
 Build plan: project file `plans/customerio-to-resend-transactional.md`.
+
+### Mentor invitation recovery checks
+
+To compare the existing invitation against the compact variant, run the
+allowlisted `send_system_email_test` command once for each template to the
+same controlled mailbox. Add `--mentor-variant compact` for the candidate.
+Both use the same registered message key and an inert acceptance link.
+Check each mailbox's folder, direct branded URL, authentication and reply
+path. Verify click tracking is off on the actual Resend sender before any
+invitation test with a real token.
+
+`MENTOR_INVITE_RATE_LIMIT_ENABLED=true` enables a shared-cache limit of one
+emailed invitation per address per rolling 24 hours and ten attempts per
+inviter per UTC hour. Verify Redis is shared by the web workers when enabling
+it. The check runs before the invite is rotated or issued. Sign-in, magic
+links and password reset still use their existing mail paths.

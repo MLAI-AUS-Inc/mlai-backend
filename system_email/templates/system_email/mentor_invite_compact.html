@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ subject }}</title>
+</head>
+<body>
+  <p>Hi {{ first_name|default:"there" }},</p>
+  {% if note %}<p>{{ note|linebreaksbr }}</p>{% endif %}
+  <p>{{ inviter_name }} invited you to mentor founders in the MLAI community. You choose the topics, hours and sessions that suit you.</p>
+  <p><a href="{{ accept_url }}">Review your MLAI mentor invitation</a></p>
+  <p>Sign in with {{ invited_email }} to accept by {{ expires_on }}.</p>
+  <p>If you have a question or prefer to skip future invitations, reply to this email.</p>
+  <p>MLAI · Suite 350, 585 Little Collins St, Melbourne VIC 3000</p>
+</body>
+</html>

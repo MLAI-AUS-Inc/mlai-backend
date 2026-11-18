@@ -26,7 +26,7 @@ def status_message(blast, *, now=None, providers=None, deferred=None):
     stats = getattr(blast, 'stats', None) or {}
     email = stats.get('email') or {}
     if status in ('sent', 'partially_sent'):
-        return {'tone': 'ok', 'text': f"Finished. Delivered to {email.get('delivered', 0):,} people."}
+        return {'tone': 'ok', 'text': f"Finished. Mail servers accepted {email.get('delivered', 0):,} emails."}
     if status == 'cancelled':
         sent = email.get('sent', 0)
         remaining = max(0, (getattr(blast, 'recipient_count', 0) or 0) - sent)
