@@ -1349,6 +1349,16 @@ CRM_WHATSAPP_COST_PER_MESSAGE_AUD = (
 CRM_SMS_DAILY_LIMIT = max(0, int(os.getenv('CRM_SMS_DAILY_LIMIT', '500')))
 CRM_WHATSAPP_DAILY_LIMIT = max(0, int(os.getenv('CRM_WHATSAPP_DAILY_LIMIT', '500')))
 CRM_TWILIO_SENDS_PER_TICK = max(1, int(os.getenv('CRM_TWILIO_SENDS_PER_TICK', '200')))
+# Founder daily research (content_factory ResearchAutomation). All default on;
+# each is a kill switch for one part of the founder self-serve flow.
+# GENERATION_READY_GATE: the toggle unlocks once the scans pass and the
+# articles page is ready to generate (off: the older "setup PR merged" also
+# counts). EMAIL_TOPICS: email channels receive the daily topic shortlist,
+# not only draft-ready notices. BILL_WITHOUT_SLACK: a founder with no linked
+# Slack id is charged through their MLAI account actor id (mlai_user:<id>).
+DAILY_RESEARCH_GENERATION_READY_GATE_ENABLED = _env_is_true('DAILY_RESEARCH_GENERATION_READY_GATE_ENABLED', True)
+DAILY_RESEARCH_EMAIL_TOPICS_ENABLED = _env_is_true('DAILY_RESEARCH_EMAIL_TOPICS_ENABLED', True)
+DAILY_RESEARCH_BILL_WITHOUT_SLACK_ENABLED = _env_is_true('DAILY_RESEARCH_BILL_WITHOUT_SLACK_ENABLED', True)
 NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS = int(
     os.getenv('NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS', str(3 * 24 * 60 * 60))
 )

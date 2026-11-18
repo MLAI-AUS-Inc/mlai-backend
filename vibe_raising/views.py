@@ -1292,12 +1292,16 @@ def _get_founder_company_context_or_response(request):
     from founder_tools.services import get_or_create_founder_profile
 
     profile = get_or_create_founder_profile(request.user)
+    is_founder = profile.role == VibeRaisingProfile.ROLE_FOUNDER
+    founders_only = Response({"detail": "Only founders can access this endpoint."}, status=status.HTTP_403_FORBIDDEN)
     company_id = _company_id_from_request(request)
     if company_id:
         try:
-            # profile.companies enforces ownership; a foreign or unknown id 404s.
+            # companies_for_user enforces access; a foreign or unknown id 404s.
             company = membership.companies_for_user(request.user).get(pk=company_id)
         except (VibeRaisingCompany.DoesNotExist, ValueError, DjangoValidationError):
+            if not is_founder:
+                return None, founders_only
             return None, Response(
                 {"detail": "Company not found."},
                 status=status.HTTP_404_NOT_FOUND,
@@ -1306,13 +1310,16 @@ def _get_founder_company_context_or_response(request):
     else:
         company = _get_active_company(profile)
         if company is None:
+            if not is_founder:
+                return None, founders_only
             return None, Response(
                 {"detail": "No active company found for this founder."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-    if profile.role != VibeRaisingProfile.ROLE_FOUNDER and company.membership_policy != VibeRaisingCompany.SHARED_ACCESS:
-        return None, Response({"detail": "Only founders can access this endpoint."}, status=403)
+    # Non-founders reach only shared startups they belong to.
+    if not is_founder and company.membership_policy != VibeRaisingCompany.SHARED_ACCESS:
+        return None, founders_only
     organization = ensure_company_organization(company)
     domain = organization.domain
     return {
