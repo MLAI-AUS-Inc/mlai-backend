@@ -194,6 +194,35 @@ class NotificationTests(TransactionTestCase):
         self.assertEqual(len({notice["item"] for notice in reminders}), len(fresh))
         self.assertEqual(len(reminders), 2 * len(fresh))
 
+    def test_a_new_ask_on_the_same_item_gets_its_own_reminder(self):
+        run = self.ready()
+        self.observe_at(run, self.now)
+        self.assertEqual(self.observe_at(run, self.now + timedelta(hours=24)), 2)
+        later = self.now + timedelta(hours=30)
+        self.observe_at(run, later, ask="approve_on_github")
+        self.assertEqual(self.observe_at(run, later + timedelta(hours=24), ask="approve_on_github"), 2)
+        reminders = [(notice["event"], notice["ask"]) for notice in self.queued_items()
+                     if notice["event"].startswith("your_turn_reminder")]
+        self.assertIn(("your_turn_reminder_24h", "approve_on_github"), reminders)
+
+    def test_first_notices_of_old_live_articles_spend_the_cap(self):
+        from workflow_runs.models import ContentFactoryRun
+        runs = []
+        for _ in range(transitions.FIRST_RUN_SEND_CAP + 2):
+            run = self.make_run({"deploy_v1": {"url": "https://synthetic.example/post"}}, status="completed")
+            ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=self.now - timedelta(days=30))
+            run.refresh_from_db()
+            runs.append(run)
+        budget = transitions.first_run_budget()
+        for run in runs:
+            with transaction.atomic():
+                config = OrganizationContentConfig.objects.select_for_update().get(pk=self.fixture.config.pk)
+                config.organization = self.org
+                transitions.observe(config, "article:" + run.run_id, {"state": "done", "ask": None,
+                    "run_id": run.run_id, "run": run}, now=self.now, budget=budget)
+        self.assertEqual(budget["deferred"], 2)
+        self.assertLessEqual(len({notice["item"] for notice in self.queued_items()}), transitions.FIRST_RUN_SEND_CAP)
+
     def test_lost_provider_ack_retries_exact_frozen_payload_and_key(self):
         run = self.ready()
         self.reserve(run)

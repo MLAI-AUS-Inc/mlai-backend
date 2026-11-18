@@ -177,13 +177,15 @@ class ResearchFloorScopeTests(TransactionTestCase):
         self.assertFalse(Ledger.objects.filter(user=self.owner, kind="SPEND").exists())
 
     def test_a_replay_of_a_charged_request_needs_only_the_floor(self):
-        PointsService.credit_purchased_topup(user=self.owner, delta=10, description="Synthetic funding",
+        PointsService.credit_purchased_topup(user=self.owner, delta=4, description="Synthetic funding",
             idempotency_key=f"floor-scope-more:{self.owner.pk}")
         request = {"client_request_id": "floor-replay", "requested_topic_count": 3}
         _user, first, _cost = self.charge(request)
-        # 15 - 3 leaves 12: a replay needs only the 6-point floor, not another 3.
+        # 9 - 3 leaves exactly the 6-point floor: a replay needs only the floor,
+        # not the price again (cost + floor would be 9 and refuse it).
         _user, again, _cost = self.charge(dict(request))
         self.assertEqual(first.pk, again.pk)
+        self.assertEqual(Ledger.objects.filter(user=self.owner, kind="SPEND").count(), 1)
 
 
 class RefusalCodeTests(TransactionTestCase):

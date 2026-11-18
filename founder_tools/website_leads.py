@@ -108,7 +108,11 @@ def record_lead(user, lead: dict, *, now=None):
     with transaction.atomic():
         contact = _contact_for(user, now=now)
         if contact is None:
-            created, stored = True, False
+            # Nothing durable to dedupe against: a short-lived marker keeps the
+            # funnel event to one per account, reason and domain.
+            from django.core.cache import cache
+            created = bool(cache.add(f"founder-website-lead:{user.pk}:{key}", 1, timeout=30 * 86400))
+            stored = False
             entry.update(createdAt=now.isoformat(), updatedAt=now.isoformat(), notifyWhenChanged=lead["notify"],
                          remindAt=(now + REMIND_AFTER).isoformat() if lead["notify"] else None)
         else:

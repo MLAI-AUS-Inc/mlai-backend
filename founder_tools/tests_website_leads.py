@@ -18,6 +18,8 @@ GATE = {"ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE": True, "MY_STARTUP_F
 
 class WebsiteLeadTests(TestCase):
     def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
         self.user = User.objects.create_user(email="founder@lead.example.test", email_verified_at=timezone.now())
         self.client = APIClient()
         self.client.force_authenticate(self.user)
@@ -106,6 +108,20 @@ class WebsiteLeadTests(TestCase):
         response, _events = self.post({"reason": "not_in_git"})
         self.assertFalse(response.data["recorded"])
         self.assertFalse(Contact.objects.filter(email=unverified.email).exists())
+
+    @override_settings(**GATE)
+    def test_an_unstored_exit_still_emits_one_funnel_event(self):
+        unverified = User.objects.create_user(email="unverified-repeat@lead.example.test")
+        self.user = unverified
+        self.client.force_authenticate(unverified)
+        first, events = self.post({"reason": "not_on_github"})
+        self.assertEqual((first.status_code, first.data["recorded"], len(events)), (201, False, 1))
+        again, events = self.post({"reason": "not_on_github", "notifyWhenChanged": True})
+        self.assertEqual((again.status_code, len(events)), (200, 0))
+
+    def test_lead_rows_are_system_owned_crm_attributes(self):
+        from crm.engagement import RESERVED_ATTRIBUTE_KEYS
+        self.assertIn(LEADS_KEY, RESERVED_ATTRIBUTE_KEYS)
 
     def test_domain_is_normalised_text_only(self):
         self.assertEqual(normalise_lead_domain("HTTPS://www.Example.co/about"), "example.co")

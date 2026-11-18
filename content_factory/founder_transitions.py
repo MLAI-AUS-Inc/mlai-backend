@@ -280,17 +280,20 @@ def _ask_started(state):
     return None
 
 
-def _reminder_queued(config, item, event):
+def _reminder_queued(config, item, event, ask):
+    """Whether this rung was already queued for this item's current ask (a new ask on the item gets its own)."""
     outbox = mapping(mapping(mapping(config.pillar_strategy).get("founder_notices")).get("outbox"))
-    return any(mapping(notice).get("item") == item and mapping(notice).get("event") == event for notice in outbox.values())
+    return any(mapping(notice).get("item") == item and mapping(notice).get("event") == event
+               and mapping(notice).get("ask") == ask for notice in outbox.values())
 
 
 def observe(config, item, state, *, now, budget=None):
     """CAS-like observation under the organization row lock queues a transition once.
 
     ``budget`` (from ``first_run_budget``) caps backlog sends for one sweep:
-    the first notice of an ask that was already older than a day when it was
-    first seen, and a reminder rung that was due long before it could be sent
+    the first notice of an item that is not provably fresh (an ask already
+    older than a day when first seen, or an item with no start evidence), and
+    a reminder rung that was due long before it could be sent
     (reminders switched on for old asks). Over the cap the item is left as it
     was, so a later sweep queues it. One observation queues at most one
     reminder, the latest rung due; a backlog ask gets one follow-up only.
@@ -307,8 +310,13 @@ def observe(config, item, state, *, now, budget=None):
     event = None
     if not same:
         started = _ask_started(state)
-        backlog = bool(not previous and event_kind == "your_turn" and started and now - started >= STALE_ASK)
-        if backlog and not _spend_first_run(budget):
+        stale = started is not None and now - started >= STALE_ASK
+        backlog = bool(not previous and event_kind == "your_turn" and stale)
+        # Any first notice of an item that is not provably fresh (old, or no
+        # start evidence at all, e.g. an article that went live weeks ago when
+        # notifications are first switched on) spends the sweep's allowance.
+        capped = bool(not previous and event_kind and (started is None or stale))
+        if capped and not _spend_first_run(budget):
             return 0
         last[item] = {"state": state["state"], "ask": state.get("ask"), "event": event_kind, "at": now.isoformat(),
             **({"backlog": True} if backlog else {})}
@@ -337,7 +345,7 @@ def _remind(config, item, state, previous, *, now, budget):
         return 0
     hours = due[-1]
     event = f"your_turn_reminder_{hours}h"
-    if _reminder_queued(config, item, event):
+    if _reminder_queued(config, item, event, state.get("ask")):
         return 0
     late = now - since >= timedelta(hours=hours) + CATCH_UP_GRACE
     if late and not _spend_first_run(budget):
