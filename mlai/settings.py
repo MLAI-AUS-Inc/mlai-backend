@@ -2737,6 +2737,10 @@ REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["community_chat_invite_resolve"] = COMM
 MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED = _env_is_true("MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED", False)
 MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED", False)
 
+# Shared startup access and email invites (#1362). Held until their security
+# sign-off; kept outside the P2 block below, whose switch list is fixed.
+MY_STARTUP_SHARED_ACCESS_ENABLED = _env_is_true("MY_STARTUP_SHARED_ACCESS_ENABLED", False)
+MY_STARTUP_EMAIL_INVITES_ENABLED = _env_is_true("MY_STARTUP_EMAIL_INVITES_ENABLED", False)
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort
 # (content_factory.p2_foundation.p2_applies) unless the P2 contract names an
@@ -2804,8 +2808,6 @@ MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITIO
 MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)
 ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED = _env_is_true("ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED", False)
 # Startup team (held until its security sign-off; declared here so the block is complete).
-MY_STARTUP_SHARED_ACCESS_ENABLED = _env_is_true("MY_STARTUP_SHARED_ACCESS_ENABLED", False)
-MY_STARTUP_EMAIL_INVITES_ENABLED = _env_is_true("MY_STARTUP_EMAIL_INVITES_ENABLED", False)
 MY_STARTUP_TEAM_ENABLED = _env_is_true("MY_STARTUP_TEAM_ENABLED", False)
 MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED = _env_is_true("MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED", False)
 # Extra denied registrable domains for team domain auto-join, comma-separated.
