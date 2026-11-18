@@ -128,6 +128,35 @@ def article_brief_for_catalog(strategy, request_payload):
     return brief.model_dump(mode="json")
 
 
+def upgrade_superseded_brief(strategy, request_payload):
+    """Move a stored brief to the newer approved version of the same customer profile.
+
+    Used only by the owner-authenticated Restart, and only after the stored
+    brief failed ``article_brief_for_catalog``. It reads nothing but the live
+    catalog: the same audience id must exist once with a higher version, a
+    valid approval receipt and, for a no-offer brief, its no-offer permission.
+    An offer brief keeps its offer id and version, so a retired, re-versioned
+    or unlinked offer still refuses. Returns the upgraded brief, or None when
+    no newer approved version applies; raises ValueError when the newer version
+    cannot be used. Retired, draft and unreceipted entries are never crossed.
+    """
+    current = catalog_payload(strategy)
+    if not isinstance(request_payload, dict):
+        raise ValueError("Article request must be a JSON object")
+    keys = [key for key in ("editorial_brief", "editorialBrief") if key in request_payload]
+    if not keys or (len(keys) == 2 and request_payload[keys[0]] != request_payload[keys[1]]):
+        return None
+    brief = ArticleEditorialBrief.model_validate(request_payload[keys[0]])
+    audiences = [AudienceOption.model_validate(item) for item in current["audience_options"]]
+    matched = [item for item in audiences if item.id == brief.audience_id]
+    if len(matched) != 1 or matched[0].version <= brief.audience_version:
+        return None
+    upgraded = ArticleEditorialBrief.model_validate({**brief.model_dump(mode="json"),
+                                                     "audience_version": matched[0].version})
+    resolve_editorial_brief(upgraded, audiences, normalize_cta_options(current["cta_options"]))
+    return upgraded.model_dump(mode="json")
+
+
 def merge_strategy(existing, incoming):
     """Generated scans cannot erase or replace policy or approval history."""
     result = deepcopy(incoming or {})

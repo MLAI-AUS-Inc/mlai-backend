@@ -100,7 +100,7 @@ from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.baseline_metrics import baseline_display_metrics
 from content_factory.baseline_ai_evidence import ai_answer_metadata, compact_ai_providers
 from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed, reserve_portable_dispatch_intent, bind_portable_dispatch_snapshot
-from content_factory.editorial_catalog import article_brief_for_catalog
+from content_factory.editorial_catalog import article_brief_for_catalog, upgrade_superseded_brief
 from content_factory.article_voice import (
     ArticleVoiceError,
     article_voice_for_dispatch,
@@ -8255,11 +8255,33 @@ def _supersede_stale_scan_runs(*, context, request_user):
     return superseded
 
 
+def _restart_editorial_brief(strategy, run_request):
+    """The stored brief, or its upgrade to the profile's newer approved version.
+
+    An owner Save re-versions a customer profile; that is not a revocation, so
+    the owner's Restart carries the article to the current approved version
+    (CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK). A retired, draft or unreceipted
+    profile, a withdrawn no-offer permission or a changed offer still refuses.
+    """
+    try:
+        return article_brief_for_catalog(strategy, run_request)
+    except ValueError:
+        if not getattr(settings, "CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK", True):
+            raise
+        try:
+            upgraded = upgrade_superseded_brief(strategy, run_request)
+        except ValueError:
+            upgraded = None
+        if upgraded is None:
+            raise
+        return upgraded
+
+
 def _restart_article_payload_from_run(*, run, context, config, actor_id):
     run_request = _run_mapping(run.run_request)
     # The stored reader decision is authoritative. Do not invent one from a
     # generated result/package or silently drop it during a replacement start.
-    editorial_brief = article_brief_for_catalog(config.pillar_strategy, run_request)
+    editorial_brief = _restart_editorial_brief(config.pillar_strategy, run_request)
     result = _run_mapping(run.result)
     package = _content_package_from_run(run) or {}
     title, keyword = _article_draft_title_keyword(run)

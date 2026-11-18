@@ -576,6 +576,12 @@ def _decide(stage, state, case, *, action=None, next_kind=None, run_id=None, hol
 # The projection
 
 
+def _staff_fixing_quality(run) -> bool:
+    """True while the run's exhausted hosted quality hold is staff-owned (staff_fixing)."""
+    from .hosted_quality_state import staff_fixing
+    return staff_fixing(_mapping(getattr(run, "result", None)).get("article_preview_quality"))
+
+
 def _audience_known(organization, config, facts) -> bool:
     from .content_first_article import audience_for
     return audience_for(organization, config, facts) is not None
@@ -722,6 +728,11 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
             # A copied or posted draft is done (rule 9), after setup and publishing.
             if not copied_or_posted(config, run.run_id):
                 decision = _decide("review", "your_turn", "review", action="review_draft", run_id=run.run_id)
+        elif not approved and _staff_fixing_quality(run):
+            # Plan A20: a quality hold on something MLAI generated, with repair
+            # exhausted, is ours to fix (staff are alerted); the founder has no turn.
+            decision = _decide("review", "working", "still_working", next_kind="view_progress",
+                               run_id=run.run_id, holding="slow")
         elif not approved:
             decision = _decide("review", "your_turn", "review", action="review_draft", run_id=run.run_id)
 
