@@ -1021,6 +1021,10 @@ def get_founder_company_context(user, company_id=None, *, persist_active=False) 
         except VibeRaisingCompany.DoesNotExist:
             if member is not None:
                 return member
+            if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
+                # Non-founders reach only shared startups they belong to;
+                # anything else stays a role refusal, not a lookup miss.
+                raise PermissionError("Only founders can access this product.")
             raise
         # By default a per-request company_id only SCOPES this request; it does
         # NOT mutate the profile's shared active_company. Only the explicit
@@ -1033,6 +1037,8 @@ def get_founder_company_context(user, company_id=None, *, persist_active=False) 
     else:
         company = resolve_active_company(profile)
         if company is None:
+            if profile.role != VibeRaisingProfile.ROLE_FOUNDER:
+                raise PermissionError("Only founders can access this product.")
             raise VibeRaisingCompany.DoesNotExist("No founder company exists.")
 
     if profile.role != VibeRaisingProfile.ROLE_FOUNDER and company.membership_policy != VibeRaisingCompany.SHARED_ACCESS:

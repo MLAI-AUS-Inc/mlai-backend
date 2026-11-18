@@ -596,6 +596,51 @@ def run_action_authority(run, action):
     return "setup"
 
 
+RUN_CONTRACT_FILL_FIELDS = (*CONNECTION_FIELDS, "operation_id", "operation_attempt", "deletion_epoch")
+
+
+def fill_callback_contract_from_run(payload, run_id):
+    """Bind a worker callback that omitted its consent tuple to its own run's saved consent.
+
+    La Vie run 73887ea8 (18 Nov 2026): a review-time callback for a bound run
+    carried no connection fields, so authority_guard answered
+    website_connection_required ("Reconnect this website") although the run's
+    saved request named the live connection exactly, and the worker then
+    blocked a run that was ready for review. Only the run's own saved request
+    is read (never today's selected connection), only missing keys are added,
+    and every authority check still runs on the result.
+    """
+    from django.conf import settings
+    if not getattr(settings, "ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED", True):
+        return payload
+    try:
+        if connection_contract(_payload_with_context(payload)):
+            return payload
+    except WebsiteAuthorityError:
+        return payload
+    if not run_id:
+        return payload
+    from workflow_runs.models import ContentFactoryRun
+    run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    if run is None:
+        return payload
+    saved = scoped_run_contract(run)
+    try:
+        if not connection_contract(saved):
+            return payload
+    except WebsiteAuthorityError:
+        return payload
+    for key, expected in (("domain", run.domain), ("github_repo", run.github_repo)):
+        claimed = str(payload.get(key) or "").strip()
+        if claimed and expected and claimed.casefold() != str(expected).strip().casefold():
+            return payload
+    filled = dict(payload)
+    for key in RUN_CONTRACT_FILL_FIELDS:
+        if key not in filled and saved.get(key) not in (None, ""):
+            filled[key] = saved[key]
+    return filled
+
+
 def guarded_service_write(action, *, only_repository=False, remote_actions=(), portable=False, cancellation_receipts=False, observation_fallback=False):
     """Fence legacy service handlers without weakening their existing permissions."""
     def decorate(method):
@@ -639,6 +684,9 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         return method(self, request, *args, **kwargs)
             if only_repository and not needs_repository_authority(payload):
                 return method(self, request, *args, **kwargs)
+            if action == "config_write" and request.method != "GET":
+                payload = fill_callback_contract_from_run(
+                    payload, str(kwargs.get("run_id") or payload.get("run_id") or payload.get("job_id") or ""))
             cancellation_receipt_attempt = (cancellation_receipts and payload.get("status") == "cancelled"
                 and not payload.get("event_type") and not payload.get("event"))
             try:

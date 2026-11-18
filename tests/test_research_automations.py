@@ -462,6 +462,31 @@ class ResearchAutomationCallbackTests(TestCase):
     def tearDown(self):
         self.override.disable()
 
+    @override_settings(DAILY_RESEARCH_EMAIL_TOPICS_ENABLED=True)
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_topic_selection_callback_emails_daily_topics_when_founder_chose_email(self, mock_post):
+        mock_post.return_value = _Response(200, {"id": "email-1"})
+        response = self.client.post(
+            reverse("content_factory_callback"),
+            {
+                "event_type": "topic_selection",
+                "job_id": "discovery-run-1",
+                "domain": "callback.example.com",
+                "notification_context": notification_context_for_run(self.run),
+                "selection": {
+                    "selected_keyword": "automation ideas",
+                    "options": [{"keyword": "automation ideas", "suggested_title": "Automation Ideas"}],
+                },
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        delivery = NotificationDelivery.objects.get(automation_run=self.run, event_type="topic_selection")
+        self.assertEqual(delivery.status, NotificationDeliveryStatus.SENT)
+        mock_post.assert_called_once()
+        self.assertIn("Automation Ideas", str(mock_post.call_args))
+
+    @override_settings(DAILY_RESEARCH_EMAIL_TOPICS_ENABLED=False)
     @patch("integrations.services.notification_adapters.http_client.post")
     def test_topic_selection_callback_saves_options_without_email(self, mock_post):
         mock_post.return_value = _Response(200, {"id": "email-1"})
@@ -893,17 +918,18 @@ class FanOutDeliveryTests(TestCase):
 
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
     @patch("integrations.services.notification_adapters.http_client.post")
-    def test_topic_selection_fans_out_to_opted_in_whatsapp_and_slack(self, mock_post, mock_dm):
+    def test_topic_selection_fans_out_to_opted_in_email_whatsapp_and_slack(self, mock_post, mock_dm):
         mock_post.return_value = _Response(200, {"id": "email-1", "sid": "SM-1"})
 
         deliveries = send_topic_selection(self.callback_data)
 
-        self.assertEqual(len(deliveries), 2)
+        self.assertEqual(len(deliveries), 3)
         keys = {delivery.idempotency_key for delivery in deliveries}
         self.assertEqual(
             keys,
             {
                 f"{self.run.id}:{self.slack.id}:topic_selection",
+                f"{self.run.id}:{self.email.id}:topic_selection",
                 f"{self.run.id}:{self.whatsapp.id}:topic_selection",
             },
         )
@@ -911,7 +937,7 @@ class FanOutDeliveryTests(TestCase):
         mock_dm.assert_called_once()
 
         urls = [call.args[0] for call in mock_post.call_args_list]
-        self.assertFalse(any("resend.com" in url for url in urls))
+        self.assertEqual(sum("resend.com" in url for url in urls), 1)
         whatsapp_calls = [
             call for call in mock_post.call_args_list if "api.twilio.com" in call.args[0]
         ]
@@ -929,9 +955,18 @@ class FanOutDeliveryTests(TestCase):
 
         # Re-delivering the same callback sends nothing new.
         repeat = send_topic_selection(self.callback_data)
-        self.assertEqual(len(repeat), 2)
+        self.assertEqual(len(repeat), 3)
         self.assertEqual(mock_dm.call_count, 1)
-        self.assertEqual(len(mock_post.call_args_list), 1)
+        self.assertEqual(len(mock_post.call_args_list), 2)
+
+    @override_settings(DAILY_RESEARCH_EMAIL_TOPICS_ENABLED=False)
+    @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "1.0"))
+    @patch("integrations.services.notification_adapters.http_client.post")
+    def test_email_topics_kill_switch_keeps_whatsapp_and_slack_only(self, mock_post, mock_dm):
+        mock_post.return_value = _Response(200, {"id": "email-1", "sid": "SM-1"})
+        deliveries = send_topic_selection(self.callback_data)
+        self.assertEqual({d.channel_id for d in deliveries}, {self.slack.id, self.whatsapp.id})
+        self.assertFalse(any("resend.com" in call.args[0] for call in mock_post.call_args_list))
 
     @patch("integrations.services.notification_adapters.SlackService.send_dm", return_value=(True, "2.0"))
     @patch("integrations.services.notification_adapters.http_client.post")
@@ -1104,8 +1139,8 @@ class FanOutDeliveryTests(TestCase):
 
         deliveries = send_topic_selection(self.callback_data)
 
-        self.assertFalse(any(d.channel_id == self.email.id for d in deliveries))
-        client.send_email.assert_not_called()
+        self.assertTrue(any(d.channel_id == self.email.id for d in deliveries))
+        client.send_email.assert_called_once()
         self.assertFalse(any("resend.com" in call.args[0] for call in mock_post.call_args_list))
 
     @override_settings(CUSTOMERIO_API_KEY="cio-key", CUSTOMERIO_TOPIC_TEMPLATE_ID="tmpl-77")
@@ -1135,8 +1170,8 @@ class FanOutDeliveryTests(TestCase):
 
         deliveries = send_topic_selection(self.callback_data)
 
-        self.assertFalse(any(d.channel_id == self.email.id for d in deliveries))
-        client.send_email.assert_not_called()
+        self.assertTrue(any(d.channel_id == self.email.id for d in deliveries))
+        client.send_email.assert_called_once()
         message_data = _topic_email_message_data(self.run, self.callback_data, self.email)
         self.assertEqual(message_data["domain"], "fanout.example.com")
         topics = message_data["topics"]
@@ -1245,7 +1280,8 @@ class FanOutDeliveryTests(TestCase):
 
         deliveries = send_topic_selection(self.callback_data)
 
-        self.assertEqual(len(deliveries), 1)
+        # Slack and email still receive topics; the opted-out WhatsApp does not.
+        self.assertEqual({d.channel_id for d in deliveries}, {self.slack.id, self.email.id})
         self.assertFalse(
             NotificationDelivery.objects.filter(channel=self.whatsapp).exists()
         )

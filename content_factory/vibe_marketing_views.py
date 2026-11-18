@@ -12449,16 +12449,30 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
     has_active_channel = any(
         channel.consent_state == NotificationConsentState.ACTIVE for channel in org_channels
     )
+    has_delivery_channel = bool(config.connected_slack_user_id) or has_active_channel
+    # Daily research unlocks once the website scans pass and the articles page
+    # is set up so the startup can generate articles, plus one delivery channel.
+    scans_ready = bool(domain_ok and context_ok and keywords_ok and baseline_ready and scan_ready)
+    articles_ready = bool(generation_ready or article_ready)
+    if getattr(settings, "DAILY_RESEARCH_GENERATION_READY_GATE_ENABLED", True):
+        setup_ready = scans_ready and articles_ready
+    else:
+        setup_ready = scans_ready and (article_ready or setup_pr_merged)
     daily_prerequisites_ready = (
-        domain_ok
-        and context_ok
-        and keywords_ok
-        and baseline_ready
-        and scan_ready
-        and (article_ready or setup_pr_merged)
-        and (bool(config.connected_slack_user_id) or has_active_channel)
+        setup_ready
+        and has_delivery_channel
         and (delivery_mode != "publish_code" or github_ready)
     )
+    if not scans_ready:
+        daily_locked_reason = "scans_required"
+    elif not setup_ready:
+        daily_locked_reason = "articles_setup_required"
+    elif not has_delivery_channel:
+        daily_locked_reason = "delivery_channel_required"
+    elif not daily_prerequisites_ready:
+        daily_locked_reason = "github_required"
+    else:
+        daily_locked_reason = ""
     automation_active = bool(automation and automation.status == ResearchAutomationStatus.ACTIVE)
     daily_ready = daily_prerequisites_ready and (bool(config.daily_discovery_enabled) or automation_active)
     return {
@@ -12514,6 +12528,10 @@ def _profile_checks(organization, config, latest_runs=None, baseline_snapshot=No
             "passed": daily_ready,
             "ready": daily_prerequisites_ready,
             "enabled": bool(config.daily_discovery_enabled) or automation_active,
+            "scansReady": scans_ready,
+            "articlesReady": setup_ready,
+            "hasDeliveryChannel": has_delivery_channel,
+            "lockedReason": daily_locked_reason,
             "channels": [
                 serialize_channel(
                     channel,

@@ -6236,6 +6236,10 @@ class VibeMarketingComponentCommentTests(_PublishRetryApprovalFixture, TestCase)
         self.assertTrue(bootstrap_response.data["hasCompletedArticleFlow"])
         self.assertEqual(bootstrap_response.data["startPageMode"], "topic_picker")
         self.assertTrue(bootstrap_response.data["checks"]["dailyAutomation"]["ready"])
+        # Unlocked by scans + articles page ready; no generated article needed.
+        self.assertTrue(bootstrap_response.data["checks"]["dailyAutomation"]["scansReady"])
+        self.assertTrue(bootstrap_response.data["checks"]["dailyAutomation"]["articlesReady"])
+        self.assertEqual(bootstrap_response.data["checks"]["dailyAutomation"]["lockedReason"], "")
         workflow_steps = {step["id"]: step for step in bootstrap_response.data["workflowProgress"]["steps"]}
         self.assertEqual(workflow_steps["research"]["status"], "ready")
 
