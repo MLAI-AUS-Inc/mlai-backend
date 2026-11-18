@@ -16,6 +16,11 @@ NO_DELIVERY_REFUND_CODES = frozenset({
     "WEBSITE_SOURCE_CHANGED", "VERIFIED_TARGET_REQUIRED", "ARTICLE_DIRECTORY_AGENT_PROVIDER_ERROR",
     # Content Factory's own code when this backend refuses without naming one.
     "CONNECTION_AUTHORIZATION_FAILED",
+    # Maintained SDK and sandbox faults (A5). Before they had codes these
+    # arrived as UNCLASSIFIED or INTERNAL_ERROR, both refund triggers; a code
+    # must not take the refund away.
+    "SDK_CONTROLLER_FAILED", "SDK_MODEL_REQUEST_REFUSED", "SANDBOX_UNAVAILABLE",
+    "SANDBOX_AUTHORITY_CHANGED", "SANDBOX_INTEGRITY_VIOLATION",
 })
 
 
