@@ -23,13 +23,21 @@ def _enabled(organization):
 
 
 def switch_to_copy_ready(*, run, reason, now=None):
-    """Switch the same run's delivery without replacing its consent or billing."""
+    """Switch the same run's delivery without replacing its consent or billing.
+
+    Only article, setup and scan runs have a delivery channel; any other
+    workflow (island research, discovery) is refused before CF is called (A2).
+    """
+    from .failure_policy_engine import STRATEGY_WORKFLOWS
+    if getattr(run, 'workflow', None) not in STRATEGY_WORKFLOWS:
+        return {'status': 'refused', 'detail': 'This run has no delivery channel to switch.'}
     if not _enabled(run.organization):
         return {'status': 'refused', 'detail': 'Not available yet.'}
     now = now or timezone.now()
     with transaction.atomic():
         current = ContentFactoryRun.objects.select_for_update(of=('self',)).select_related('organization').get(pk=run.pk)
-        if not _enabled(current.organization) or current.status in {'cancelled', 'denied'}:
+        if (not _enabled(current.organization) or current.status in {'cancelled', 'denied'}
+                or current.workflow not in STRATEGY_WORKFLOWS):
             return {'status': 'refused', 'detail': 'This article cannot change delivery.'}
         old = mapping(mapping(current.result).get('channel_v1'))
         if old.get('version') == 1 and old.get('dispatch_state') == 'accepted':

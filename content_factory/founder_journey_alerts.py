@@ -117,8 +117,15 @@ TERMINAL_STATUSES = frozenset({"failed", "cancelled", "denied", "stopped"})
 YOUR_TURN_STATUSES = frozenset({"awaiting_approval", "approval_required", "awaiting_confirmation", "awaiting_delivery_mode"})
 # IF-20 owner actions. Every other cancellation_reason, 'unspecified' included, alerts.
 OWNER_CANCELLATION_REASONS = ("owner_cancelled", "draft_deleted", "article_discarded")
-SCHEDULER_WORKFLOWS = ("island_refresh",)
 SCHEDULER_REQUEST_SOURCE = "mlai_backend_scheduler"
+# Background work is decided by who asked for it, never by the workflow name:
+# founder-paid island research runs as ``island_refresh`` too (A2). The only
+# workflow-name rule left is for scheduler rows saved before the scheduler
+# stamped ``request_source``: an ``island_refresh`` row without any
+# ``request_source`` is the old nightly refresh, because every founder request
+# path stamps its own source (island research uses ``island-research:`` ids).
+LEGACY_UNSTAMPED_SCHEDULER_WORKFLOWS = ("island_refresh",)
+FOUNDER_RESEARCH_REQUEST_PREFIX = "island-research:"
 # Daily research automations stamp this request-id prefix. Their topic batches
 # wait on the founder by design, and the automation pauses itself after three
 # unanswered days, so an unpicked batch is not a stuck founder (your_turn_72h).
@@ -173,6 +180,9 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
     so each claimant gets their own alert. P2 owners may pass a stable
     ``slot`` (for example ``day-2026-11-02`` in Melbourne time) for recurring
     org-level alerts; leave it absent to retain the original lifetime dedupe.
+
+    A scheduler run (``is_scheduler_run``) is background work, not a founder's:
+    its alert id is returned but no receipt is written, whichever caller asked.
     """
     if alert_reason not in ALERT_REASONS:
         raise ValueError(f"Unknown founder-journey alert_reason: {alert_reason!r}")
@@ -184,6 +194,10 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
         run_id=getattr(run, "run_id", None), company_id=company_id,
         claimant_user_id=safe_details.get("claimant_user_id"), slot=slot,
     )
+    if run is not None and is_scheduler_run(run):
+        logger.info("founder_journey_alert_background_suppressed alert_reason=%s org_id=%s run_pk=%s",
+                    alert_reason, organization.pk, getattr(run, "pk", None))
+        return alert_id
     queued_at = timezone.now()
     receipt = {
         "alert_id": alert_id, "alert_reason": alert_reason, "state": "pending", "attempts": 0, "sent_at": None,
@@ -224,6 +238,9 @@ def queue_founder_journey_alerts_batch(items, *, now=None) -> dict:
             raise ValueError("An incident batch needs saved organizations and registered alert reasons.")
         if run is not None and run.organization_id != organization.pk:
             raise ValueError("An incident run must belong to its organization.")
+        if run is not None and is_scheduler_run(run):
+            # Background work never reserves a founder-journey receipt (A2).
+            continue
         details = _safe_details(item.get("details"))
         company = item.get("company_id")
         identifier = founder_journey_alert_id(organization_id=organization.pk, alert_reason=reason,
@@ -491,9 +508,34 @@ def is_superseded(run) -> bool:
 
 
 def is_scheduler_run(run) -> bool:
-    """Island refresh or ``mlai_backend_scheduler`` runs, which are never alerted (IF-15)."""
-    request = run.run_request if isinstance(run.run_request, dict) else {}
-    return run.workflow in SCHEDULER_WORKFLOWS or request.get("request_source") == SCHEDULER_REQUEST_SOURCE
+    """A run the backend scheduler started, which never alerts or self-heals (IF-15, A2).
+
+    Decided by the saved request source only. A founder-started run of the same
+    workflow (paid island research is ``island_refresh`` too) is founder work and
+    alerts like any other. An old unstamped nightly refresh still counts as
+    scheduler work (see ``LEGACY_UNSTAMPED_SCHEDULER_WORKFLOWS``).
+    """
+    request = getattr(run, "run_request", None)
+    request = request if isinstance(request, dict) else {}
+    if "request_source" in request:
+        return request.get("request_source") == SCHEDULER_REQUEST_SOURCE
+    return (getattr(run, "workflow", None) in LEGACY_UNSTAMPED_SCHEDULER_WORKFLOWS
+            and not str(request.get("client_request_id") or "").startswith(FOUNDER_RESEARCH_REQUEST_PREFIX))
+
+
+def founder_run_q(prefix: str = "") -> Q:
+    """SQL twin of ``not is_scheduler_run``; ``prefix`` is a relation path such as ``run__``.
+
+    Written with positive ``has_key`` tests so a missing key is never NULL on
+    Postgres (a negated nested key lookup would drop the row instead).
+    """
+    request, workflow = f"{prefix}run_request", f"{prefix}workflow"
+    stamped = Q(**{f"{request}__has_key": "request_source"})
+    founder_stamped = stamped & ~Q(**{f"{request}__request_source": SCHEDULER_REQUEST_SOURCE})
+    founder_research = (Q(**{f"{request}__has_key": "client_request_id"})
+                        & Q(**{f"{request}__client_request_id__startswith": FOUNDER_RESEARCH_REQUEST_PREFIX}))
+    unstamped_founder = ~stamped & (~Q(**{f"{workflow}__in": LEGACY_UNSTAMPED_SCHEDULER_WORKFLOWS}) | founder_research)
+    return founder_stamped | unstamped_founder
 
 
 def is_owner_cancel(run) -> bool:
@@ -552,9 +594,7 @@ def _detect(*, now, since, limit) -> dict:
         counts[reason] += 1
         budget[0] -= 1
 
-    base = (ContentFactoryRun.objects.filter(created_at__gte=since, organization__isnull=False)
-            .exclude(workflow__in=SCHEDULER_WORKFLOWS)
-            .filter(~Q(run_request__has_key="request_source") | ~Q(run_request__request_source=SCHEDULER_REQUEST_SOURCE)))
+    base = ContentFactoryRun.objects.filter(founder_run_q(), created_at__gte=since, organization__isnull=False)
     steps = ContentFactoryRunStep.objects.filter(run=OuterRef("pk"))
     legacy_owner_cancel = (Q(status="cancelled", error="") & ~Q(result__has_key="cancellation_reason") & (
         Q(Exists(steps.filter(message=LEGACY_OWNER_CANCEL_MESSAGE)))
@@ -884,7 +924,7 @@ def _alert_context(row, receipt) -> dict:
     context = {
         "org_id": org_id, "domain": _safe(domain), "company_id": _safe(receipt.get("company_id")),
         "run_id": _safe(receipt.get("run_id")), "workflow": "", "run_status": "", "stop_code": "",
-        "step_attempts": None, "staff_link": "",
+        "lead_code": "", "step_attempts": None, "staff_link": "",
     }
     run = None
     if receipt.get("run_pk") is not None:
@@ -893,7 +933,7 @@ def _alert_context(row, receipt) -> dict:
         run = ContentFactoryRun.objects.filter(run_id=receipt["run_id"]).first()
     if run is not None:
         context.update(run_id=_safe(run.run_id), workflow=_safe(run.workflow), run_status=_safe(run.status),
-                       stop_code=run_stop_code(run.result),
+                       stop_code=run_stop_code(run.result), lead_code=run_blocking_code(run),
                        step_attempts=run.steps.aggregate(value=Max("attempts"))["value"],
                        staff_link=_admin_link("admin:workflow_runs_contentfactoryrun_change", run.pk))
     elif context["company_id"]:
@@ -914,13 +954,65 @@ def run_stop_code(result) -> str:
     return ""
 
 
+BLOCKING_STATUSES = frozenset({"blocked", "failed", "denied"})
+# Precedence when one run carries several codes (A3): connection or authority,
+# website setup, delivery, quality or safety hold, then anything else.
+_BLOCKING_TIERS = (
+    ("website_connection", "authority", "authoriz", "consent", "reconnect", "github_access", "installation",
+     "permission", "repository_access", "repo_access"),
+    ("setup", "article_surface", "article_system", "articles_page", "prepare"),
+    ("delivery", "publish", "merge", "pull_request", "deploy"),
+    ("quality", "safety", "review", "finding"),
+)
+
+
+def _blocking_tier(code, *, source) -> int:
+    if source == "authority_denied":
+        return 0
+    lowered = code.lower()
+    for tier, markers in enumerate(_BLOCKING_TIERS):
+        if any(marker in lowered for marker in markers):
+            return tier
+    return len(_BLOCKING_TIERS)
+
+
+def run_blocking_code(run) -> str:
+    """The code that blocks this run, for the front of its alert (A3); "" when nothing blocks it.
+
+    A run blocks when its status is blocked, failed or denied, or when its failure
+    asks the founder to act (``requires_user_action``), which is how a run held at
+    ``approval_required`` still carries a connection error. Of several codes the
+    highest-precedence one wins (``_BLOCKING_TIERS``); a tie keeps the order
+    ``run_stop_code`` reads them in.
+    """
+    result = run.result if isinstance(getattr(run, "result", None), dict) else {}
+    failure = result.get("failure") if isinstance(result.get("failure"), dict) else {}
+    denied = result.get("authority_denied") if isinstance(result.get("authority_denied"), dict) else {}
+    asks_user = failure.get("requires_user_action") is True or result.get("requires_user_action") is True
+    if str(getattr(run, "status", "") or "") not in BLOCKING_STATUSES and not asks_user and not denied:
+        return ""
+    candidates = []
+    for source, value in (("error_code", result.get("error_code")), ("failure_code", result.get("failure_code")),
+                          ("failure", failure.get("code")), ("authority_denied", denied.get("code"))):
+        if isinstance(value, str) and SAFE_CODE.fullmatch(value.strip()):
+            candidates.append((_blocking_tier(value.strip(), source=source), len(candidates), value.strip()))
+    return min(candidates)[2] if candidates else ""
+
+
 def alert_text(receipt, context) -> str:
-    """The Slack message. The error code lives only inside this string (IF-23)."""
+    """The Slack message. The error code lives only inside this string (IF-23).
+
+    When the run is blocked by a code, the message leads with that code and the
+    alert reason follows, so a connection error is never hidden behind, say, a
+    quality hold on the same run (A3).
+    """
     reason = receipt.get("alert_reason") or ""
     if reason == "founder_stuck":
         from .founder_stuck_alerts import stuck_alert_text
         return stuck_alert_text(receipt, context)
-    parts = [f"Founder journey alert: {REASON_LABELS.get(reason, reason)} ({reason})."]
+    blocking = context.get("lead_code") or ""
+    parts = [f"{blocking} blocks this run."] if blocking else []
+    parts.append(f"Founder journey alert: {REASON_LABELS.get(reason, reason)} ({reason}).")
     parts.append(f"Org {context['org_id']}" + (f" ({context['domain']})." if context["domain"] else "."))
     if context["company_id"]:
         parts.append(f"Company {context['company_id']}.")

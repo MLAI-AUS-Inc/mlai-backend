@@ -27,6 +27,23 @@ from .website_goal import mapping, stamp
 logger = logging.getLogger(__name__)
 ACTIONS = frozenset({'retry', 'resume', 're_pin', 'rescan', 'advance_rung', 'switch_channel'})
 WORKFLOWS = ('article_generation', 'article_revision', 'confirmed_topic', 'direct_generate', 'article_system_setup', 'repo_scan', 'auto_discovery', 'island_refresh')
+# Changing website strategy or delivery channel only means something for work
+# that writes to a website: articles, setup and scans (A2). Research and
+# discovery runs never spend the org's strategy budget or switch channel.
+STRATEGY_ACTIONS = frozenset({'advance_rung', 'switch_channel'})
+STRATEGY_WORKFLOWS = frozenset({'article_generation', 'article_revision', 'confirmed_topic', 'content_factory_article',
+                                'direct_generate', 'article_system_setup', 'repo_scan'})
+
+
+def strategy_allowed(subject) -> bool:
+    """Whether ``advance_rung`` and ``switch_channel`` may apply to this run or website operation.
+
+    A website prepare operation (the setup and scan path) always may; a run only
+    when its workflow is in ``STRATEGY_WORKFLOWS``.
+    """
+    if isinstance(subject, ContentFactoryRun) or hasattr(subject, 'workflow'):
+        return getattr(subject, 'workflow', None) in STRATEGY_WORKFLOWS
+    return mapping(subject).get('_operation') is not None
 
 
 @dataclass(frozen=True)
@@ -143,6 +160,7 @@ def _decide(subject, *, now=None, prospective=False):
     limits = registry_policy.limits()
     first = min(stamp(receipt.get('first_failed_at')) or stamp(result.get('first_failed_at')) or now, now)
     started = min(stamp(receipt.get('last_action_at')) or first, now)
+    strategy_ok = strategy_allowed(subject)
     if _delivered(subject, result):
         return Decision('none', None, 'delivered', attempt, None, mode)
     if getattr(subject, 'status', None) in {'cancelled', 'denied'}:
@@ -160,17 +178,18 @@ def _decide(subject, *, now=None, prospective=False):
     # An uncertain effect retains financial proof, but never extends the
     # recovery executor beyond the item wall indefinitely.
     if now - first >= timedelta(hours=limits['wall_hours']):
-        action = 'switch_channel' if _draft(result) else 'stop'
+        action = 'switch_channel' if _draft(result) and strategy_ok else 'stop'
         if mode == 'policy' and not _executor(action, organization):
             return Decision('observe', None, 'executor_off', attempt, 'wall', mode)
         return Decision(action, None, 'wall' if mode == 'policy' or prospective else 'legacy_observe', attempt, 'wall', mode)
     if entry and entry.get('retry_policy') == 'retry_same_step' and now - first >= timedelta(hours=limits['max_elapsed_hours']):
-        action = 'switch_channel' if _draft(result) else 'stop'
+        action = 'switch_channel' if _draft(result) and strategy_ok else 'stop'
         if mode == 'policy' and not _executor(action, organization):
             return Decision('observe', None, 'executor_off', attempt, 'transient_elapsed', mode)
         return Decision(action, None, 'cap' if mode == 'policy' or prospective else 'legacy_observe', attempt, 'transient_elapsed', mode)
     pending = mapping(receipt.get('pending_action'))
-    if pending.get('state') in {'reserved', 'uncertain'} and pending.get('action') in ACTIONS:
+    if (pending.get('state') in {'reserved', 'uncertain'} and pending.get('action') in ACTIONS
+            and (strategy_ok or pending.get('action') not in STRATEGY_ACTIONS)):
         action = pending['action']
         if mode == 'policy' and not _executor(action, organization):
             return Decision('observe', None, 'executor_off', _count(pending.get('attempt')), None, mode)
@@ -180,9 +199,9 @@ def _decide(subject, *, now=None, prospective=False):
         policy = entry['retry_policy']
         classification = entry['failure_class']
         if policy == 'retry_same_step' and now - first >= timedelta(hours=limits['max_elapsed_hours']):
-            action, reason, cap = ('switch_channel' if _draft(result) else 'stop'), 'cap', 'transient_elapsed'
+            action, reason, cap = ('switch_channel' if _draft(result) and strategy_ok else 'stop'), 'cap', 'transient_elapsed'
         elif policy == 'repair_owned_candidate' and attempts >= limits['repairable_max_attempts']:
-            action, reason, cap = ('switch_channel' if _draft(result) else 'stop'), 'cap', 'repairable_max_attempts'
+            action, reason, cap = ('switch_channel' if _draft(result) and strategy_ok else 'stop'), 'cap', 'repairable_max_attempts'
         elif policy == 're_pin' and _count(mapping(result.get('re_pin_v1')).get('count')) >= limits['source_repins_per_run']:
             action, reason, cap = 'switch_channel', 'cap', 'repairable_max_attempts'
         elif policy in {'retry_same_step', 'repair_owned_candidate', 're_pin'}:
@@ -211,6 +230,10 @@ def _decide(subject, *, now=None, prospective=False):
             action, reason = 'await_owner', 'owner'
         elif classification == 'waiting':
             action, reason = 'observe', 'waiting'
+    if action in STRATEGY_ACTIONS and not strategy_ok:
+        # A research or discovery run has no website strategy or channel to change.
+        action, at = 'stop', None
+        reason = 'cap' if cap else 'terminal'
     if mode == 'observe' and not prospective:
         return Decision(action, at, 'legacy_observe', attempt, cap, mode)
     if not _executor(action, organization):
@@ -302,6 +325,17 @@ def claim_pull_request_slot(organization, *, key, now=None):
     if not allowed:
         _alert(organization, 'pull_request_cap', slot=f"day-{day['day']}")
     return allowed
+
+
+def pull_request_cap_reached(organization, *, now=None) -> bool:
+    """Read-only twin of ``claim_pull_request_slot``: no automatic PR slot is left today."""
+    if organization is None or policy_mode(organization) != 'policy':
+        return False
+    day = _daily(_config(organization), now or timezone.now())
+    slots = list(day.get('pull_request_slots') or [])
+    completed = set(day.get('pull_request_slot_completions') or [])
+    return (_count(day.get('pull_requests')) + sum(slot not in completed for slot in slots)
+            >= registry_policy.limits()['pull_requests_per_org_per_day'])
 
 
 def record_pull_request(organization, *, pr_url, run=None, now=None):
@@ -686,7 +720,9 @@ def _candidates(now, limit, organization_id=None):
             new &= ~Q(organization__domain__in=list(disabled))
         preferred |= new
     from .run_reconciliation import legacy_event_rows
-    query = ContentFactoryRun.objects.filter(legacy_event_rows(), workflow__in=WORKFLOWS, organization__isnull=False,
+    from .founder_journey_alerts import founder_run_q
+    # Scheduler runs are background work: never self-healed, alerted or charged (A2).
+    query = ContentFactoryRun.objects.filter(legacy_event_rows(), founder_run_q(), workflow__in=WORKFLOWS, organization__isnull=False,
         status__in=['failed', 'blocked', 'precondition_failed', 'preview_failed']).select_related('organization__content_config')
     if organization_id is not None:
         query = query.filter(organization_id=organization_id)

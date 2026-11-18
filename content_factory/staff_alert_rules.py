@@ -162,9 +162,9 @@ def run_alert_rule_sweep(now=None, limit=None):
     # Rows are now streamed with only the columns the rules read, scheduler
     # workflows are left to SQL, and history before the alert start date is
     # never replayed. Only a run that raises an incident stays in memory.
-    from .founder_journey_alerts import SCHEDULER_WORKFLOWS, alerts_since
-    runs = (ContentFactoryRun.objects.filter(organization_id__in=by_org, created_at__gte=alerts_since())
-        .exclude(workflow__in=SCHEDULER_WORKFLOWS).filter(
+    from .founder_journey_alerts import alerts_since, founder_run_q
+    runs = (ContentFactoryRun.objects.filter(founder_run_q(), organization_id__in=by_org, created_at__gte=alerts_since())
+        .filter(
         Q(status__in=TERMINAL | {"queued", "pending", "starting"}) | Q(created_at__gte=day_start)
         | Q(result__article_preview_quality__self_heal_exhausted=True))
         .only("run_id", "organization_id", "status", "workflow", "created_at", "result", "run_request")
