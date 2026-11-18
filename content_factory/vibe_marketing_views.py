@@ -13571,6 +13571,12 @@ def content_factory_refusal_code(response_payload):
 
     FastAPI wraps an HTTPException body in ``detail``; some refusals put the
     code inside an ``error`` object. Returns '' when no code is present.
+
+    Never returns ``dispatch_rejected``: only Content Factory's explicit keyed
+    rejection (``code`` in the refusal body) proves no run owns the identity,
+    and the dispatch outbox refunds on that code. A body that merely names it
+    as an ``error_code`` must not release a refund while the dispatch is
+    unresolved.
     """
     if not isinstance(response_payload, dict):
         return ""
@@ -13578,7 +13584,8 @@ def content_factory_refusal_code(response_payload):
         if isinstance(candidate, dict):
             code = candidate.get("error_code")
             if isinstance(code, str) and code.strip():
-                return code.strip()[:100]
+                code = code.strip()[:100]
+                return "" if code == "dispatch_rejected" else code
     return ""
 
 

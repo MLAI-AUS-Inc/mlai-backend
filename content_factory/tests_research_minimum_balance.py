@@ -197,6 +197,13 @@ class RefusalCodeTests(TransactionTestCase):
         for body in (None, "text", {"detail": "plain"}, {"detail": {"error_code": ""}}):
             self.assertEqual(views.content_factory_refusal_code(body), "")
 
+    def test_a_named_dispatch_rejected_code_never_stands_in_for_the_explicit_rejection(self):
+        # Only the explicit keyed rejection (``code``) may mark the outbox for a refund.
+        for body in ({"error_code": "dispatch_rejected"}, {"detail": {"error_code": "dispatch_rejected"}},
+                     {"error": {"error_code": " dispatch_rejected "}}):
+            with self.subTest(body=body):
+                self.assertEqual(views.content_factory_refusal_code(body), "")
+
     def test_stored_error_object_lifts_its_code_without_replacing_one(self):
         lifted = views._run_result_from_remote({"status": "blocked", "error": {"error_code": "INSUFFICIENT_ROO_POINTS"}})
         self.assertEqual(lifted["error_code"], "INSUFFICIENT_ROO_POINTS")
