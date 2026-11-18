@@ -9,10 +9,10 @@ from .website_journey import project_journey
 SHA = "a" * 40
 
 
-def journey(capabilities, status="connected", repository_id=123):
+def journey(capabilities, status="connected", repository_id=123, owner_view=True):
     return project_journey(company_id=9, domain="fixture.test", website={"status": status, "repositoryId": repository_id,
         "connectionGeneration": 3, "writePolicy": {"allowed": True}, "verifiedSha": SHA},
-        capabilities=capabilities, discovery={"complete": True, "sourceSha": SHA})
+        capabilities=capabilities, discovery={"complete": True, "sourceSha": SHA}, owner_view=owner_view)
 
 
 def capabilities(access):
@@ -49,3 +49,8 @@ class SavedAccessTests(SimpleTestCase):
             with self.subTest(status=status, repository_id=repository_id):
                 facts = journey(capabilities(UNOBSERVED), status=status, repository_id=repository_id)["prerequisites"]
                 self.assertEqual(facts["repository"]["status"], "needs_action")
+
+    def test_preparation_still_checks_access_itself(self):
+        projected = journey(capabilities(UNOBSERVED), owner_view=False)
+        self.assertEqual(projected["prerequisites"]["account"]["status"], "needs_action")
+        self.assertEqual(projected["nextAction"]["id"], "verify-access")
