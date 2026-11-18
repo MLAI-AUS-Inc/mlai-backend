@@ -313,3 +313,29 @@ class StaffConsoleStuckStateTests(FounderStuckFixture):
             self.make_run(result={"error_code": "LEGACY_ONLY_FOUNDER_STOP"})
             self.assertEqual(console.startup_detail(self.org.pk, now=self.now)["state"], "your_turn")
             self.assertEqual(self.sweep()[0]["candidates"], 0)
+
+
+class RetiredAskAlertTests(FounderStuckFixture):
+    """A9: any operation resting in needs_user on a retired owner action alerts staff, once."""
+
+    def test_every_retired_action_alerts_staff_once(self):
+        from .founder_journey import RETIRED_ACTIONS
+        for action in sorted(RETIRED_ACTIONS):
+            with self.subTest(action=action):
+                cache.clear()
+                org, site = self.startup(f"Retired {action}", f"{action.replace('_', '-')}.example.test", "Sophia", "Lee")
+                op = self.operation(website=site, state="needs_user", age=timedelta(minutes=5),
+                    receipt={"status": "needs_you", "reason_code": "articles_page_choice_required",
+                             "user_action": {"id": action, "candidates": ["/blog", "/news"]}})
+                conditions = [c for c in stuck.find_stuck_conditions(now=self.now) if c.organization_id == org.pk]
+                self.assertEqual([(c.kind, c.details.get("action")) for c in conditions], [("operation_retired_ask", action)])
+                self.assertEqual(conditions[0].details["website_operation_id"], str(op.pk))
+        outcome, texts = self.sweep()
+        self.assertEqual(outcome["queued"], len(RETIRED_ACTIONS))
+        self.assertTrue(any("Waiting on the retired ask choose_articles_page." in text for text in texts))
+        self.assertEqual(self.sweep()[0]["queued"], 0)
+
+    def test_a_rendered_owner_ask_is_your_turn_not_an_alert(self):
+        for action in ("merge_pr", "review_setup", "authorize_github"):
+            self.operation(state="needs_user", receipt={"status": "needs_you", "user_action": {"id": action}})
+        self.assertEqual(self.sweep()[0]["candidates"], 0)

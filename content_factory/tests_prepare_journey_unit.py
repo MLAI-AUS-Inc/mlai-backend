@@ -602,3 +602,80 @@ class SourceChangedRepinTests(SimpleTestCase):
         prepare.prepare_failure(self.op, "setup", WebsiteAuthorityError("website_source_changed", "Moved."))
         self.assertNotEqual(self.op.receipt.get("failure_class"), "waiting")
         self.assertNotIn("source_repins", self.op.receipt)
+
+
+class AmbiguousPageChoiceTests(SimpleTestCase):
+    """A9 / D3: an ambiguous scan never parks a founder on an ask their journey does not show."""
+
+    def setUp(self):
+        self.replay = PrepareJourneyReplayTests()
+        self.replay.setUp()
+        self.op = self.replay.op
+        self.replay.facts["resolution"] = {"existence_state": "ambiguous", "ranked_candidates": {"listing_surface_candidates": [
+            {"route": "/stories"}, {"metadata": {"route_path": "/news"}}]}}
+
+    def advance(self, *, new_journey):
+        captured = []
+        with patch("content_factory.founder_journey_cohort.is_new_journey", return_value=new_journey):
+            self.replay.advance({"setup": self.replay.setup_handler(captured)})
+        return captured
+
+    def assert_dispatched_with_choice(self, captured):
+        self.assertNotEqual(self.op.state, "needs_user")
+        self.assertEqual((captured[0]["article_surface_mode"], captured[0]["article_surface_url"]), ("existing", "/stories"))
+        self.assertEqual(self.op.receipt["setup_run_id"], "setup-child")
+        self.assertEqual(self.op.receipt["article_page_choice"], {"version": 1, "chosen_by": "mlai", "mode": "existing",
+            "route": "/stories", "alternatives": ["/news"], "reason": "first_candidate", "changeable": True})
+
+    def test_new_journey_org_gets_a_setup_dispatch_not_a_silent_ask(self):
+        """Lilia Daily Planner (org 209): waiting on a page choice the new journey never showed, since 9 Nov."""
+        self.assert_dispatched_with_choice(self.advance(new_journey=True))
+
+    def test_legacy_org_with_auto_page_on_gets_a_setup_dispatch(self):
+        from django.test import override_settings
+        with override_settings(ARTICLES_AUTO_PAGE_ENABLED=True):
+            self.assert_dispatched_with_choice(self.advance(new_journey=False))
+
+    def test_legacy_org_with_auto_page_off_keeps_the_ask_its_cards_render(self):
+        self.advance(new_journey=False)
+        self.assertEqual(self.op.state, "needs_user")
+        self.assertEqual(self.op.receipt["user_action"], {"id": "choose_articles_page", "candidates": ["/stories", "/news"]})
+
+    def test_recorded_consent_to_pick_is_never_overridden(self):
+        from django.test import override_settings
+        journey = self.replay.journey()
+        organization = SimpleNamespace(pk=7)
+        for auto_page in (False, True):
+            for new_journey in (False, True):
+                with self.subTest(auto_page=auto_page, new_journey=new_journey), \
+                        override_settings(ARTICLES_AUTO_PAGE_ENABLED=auto_page), \
+                        patch("content_factory.founder_journey_cohort.is_new_journey", return_value=new_journey), \
+                        self.assertRaises(prepare.WebsiteAuthorityError) as raised:
+                    prepare._setup_surface(self.replay.config, journey, organization=organization,
+                        goal={"consent": {"answers": {"page_policy": "pick"}}})
+                self.assertEqual(raised.exception.code, "articles_page_choice_required")
+                self.assertEqual(raised.exception.user_action["id"], "choose_articles_page")
+                self.assertEqual(sorted(raised.exception.user_action["candidates"]), ["/news", "/stories"])
+
+    def test_a_listing_the_scan_prefers_is_the_one_picked(self):
+        self.replay.facts["resolution"]["listing_surface"] = {"route": "/news"}
+        choice = {}
+        with patch("content_factory.founder_journey_cohort.is_new_journey", return_value=True):
+            picked = prepare._setup_surface(self.replay.config, self.replay.journey(),
+                organization=SimpleNamespace(pk=7), choice=choice)
+        self.assertEqual(picked, ("existing", "/news"))
+        self.assertEqual((choice["alternatives"], choice["reason"]), (["/stories"], "preferred_listing"))
+
+    def test_the_new_journey_ask_for_a_page_stays_retired_only_where_a_pick_was_recorded(self):
+        """Invariant over RETIRED_ACTIONS: the page-choice emitter only raises it under recorded consent."""
+        from .founder_journey import RETIRED_ACTIONS
+        self.assertIn("choose_articles_page", RETIRED_ACTIONS)
+        organization = SimpleNamespace(pk=7)
+        resolutions = ({"existence_state": "ambiguous", "listing_surface_candidates": [{"route": f"/r{index}"} for index in range(count)]}
+            for count in range(0, 5))
+        for resolution in resolutions:
+            self.replay.facts["resolution"] = resolution
+            with self.subTest(resolution=resolution), \
+                    patch("content_factory.founder_journey_cohort.is_new_journey", return_value=True):
+                mode, route = prepare._setup_surface(self.replay.config, self.replay.journey(), organization=organization)
+                self.assertIn(mode, {"existing", "none"})

@@ -88,8 +88,17 @@ summaries include up to twenty operation IDs, actions and outcomes.
 
 Preparation uses the scan's listing route (`existing` mode), or creates `/articles`
 in `none` mode only when inventory confirms no listing. A saved owner route takes
-precedence. Several ambiguous routes return `needs_user` with
-`user_action.id=choose_articles_page`; unchanged facts after a successful step stop
+precedence. Several ambiguous routes never park a founder on an ask their journey
+does not show (decision D3): MLAI picks the scan's preferred listing, else the first
+ranked candidate, and records `receipt.article_page_choice` (`{version:1,
+chosen_by:"mlai", mode, route, alternatives, reason, changeable:true}`). The
+founder chooses instead (`needs_user` with `user_action={id:choose_articles_page,
+candidates}`, projected by website status v1 with `candidates`, `repository` and
+`operationId`) only when their recorded setup consent says `page_policy=pick`, or
+for a legacy-cohort site while `ARTICLES_AUTO_PAGE_ENABLED` is off. Any website
+operation resting in `needs_user` on an action the new journey retired
+(`founder_journey.RETIRED_ACTIONS`) raises one `founder_stuck` staff alert of kind
+`operation_retired_ask`. Unchanged facts after a successful step stop
 with `prepare_no_progress`. Deterministic child failures link to the failed run,
 while explicitly retryable worker failures retain bounded retries. Owners may cancel
 an active or waiting prepare operation and explicitly reopen it with another Prepare
@@ -340,7 +349,19 @@ merge (`merge_sha`, `merged_at`, `merge_response.source=github_owner_merge`),
 unless the run changed or already records a merge commit. Setup settlement and
 CI lineage accept that merge as they accept MLAI's Publish; without a
 `publish_merge_intent` it is never a goal `backend_merge`. Other pushes report
-`repository_source_changed` and additionally queue a fresh inventory scan. The
+`repository_source_changed` and additionally queue a fresh inventory scan, except
+on a connection whose current generation was never verified (no verified commit,
+no publishing-ready capability, no verified target): that push records the
+observed head and wakes preparation, and sets no blocker, drops no capability and
+queues no source check. Either verification path (CI attestation or live URL)
+clears `scan_required` with `repository_source_changed`. Preparation that sees the
+head move (`website_source_changed`, `SOURCE_CHANGED`) restarts from a scan of the
+current head by itself, at most three times, and "Try again" always restarts from
+a fresh scan. After a setup-merge Ready, a carried push keeps the worker's
+projected proof (`website_setup_merge_proof.worker_publish_targets`) only for a
+carriable target, along source-reverify carries this backend recorded back to the
+reviewed merge, with the live proof and its deployment receipt at the current
+head; sealed and custom targets keep exact-commit proof. The
 reconciler authenticates current-source provider CI and observes listing/detail/
 unknown-slug deployment routes before enabling the new source. A failed or
 missing proof remains pending with its typed reason; inventory timestamps cannot

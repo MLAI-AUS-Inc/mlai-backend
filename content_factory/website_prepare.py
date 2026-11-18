@@ -632,29 +632,61 @@ def _canonical_article_route(route):
     return re.sub(r"/+", "/", route).rstrip("/") or "/"
 
 
-def _setup_surface(config, journey, *, goal=None):
-    """Respect a saved owner choice, then use the current scan's listing route."""
+def _page_ask_hidden(organization, config=None):
+    """Whether this organisation's journey shows no "choose articles page" ask.
+
+    The new journey (and the P2 cohort built on it) retired that ask
+    (``founder_journey.RETIRED_ACTIONS``); an operation resting on it there is
+    a silent stall (Lilia Daily Planner, waiting since 9 Nov 2026).
+    """
+    if organization is None or getattr(organization, "pk", None) is None:
+        return False
+    from .p2_foundation import legacy_opt_in_ids
+    from .founder_journey_cohort import is_new_journey
+    return organization.pk in legacy_opt_in_ids() or is_new_journey(organization, config)
+
+
+def _page_choice_record(route, candidates, *, reason):
+    """What MLAI picked and what else the scan offered; changeable in website settings."""
+    alternatives = [item for item in dict.fromkeys(candidates) if item != route][:8]
+    return {"version": 1, "chosen_by": "mlai", "mode": "existing", "route": route,
+        "alternatives": alternatives, "reason": reason, "changeable": True}
+
+
+def _page_choice_required(candidates):
+    error = WebsiteAuthorityError("articles_page_choice_required", "Choose the articles page to prepare.", retryable=False)
+    error.user_action = {"id": "choose_articles_page", "candidates": candidates}
+    return error
+
+
+def _setup_surface(config, journey, *, goal=None, organization=None, choice=None):
+    """Respect a saved owner choice, then use the current scan's listing route.
+
+    An ambiguous scan never parks an organisation on an ask its journey does
+    not show (plan A9, decision D3): MLAI picks the page (the clear listing,
+    else the preferred or first candidate) and records the alternatives in
+    ``choice``, unless the founder's recorded consent says they choose
+    (``page_policy == "pick"``), which is never overridden. The ask is also
+    kept for a legacy-cohort site, whose cards render it, while
+    ``ARTICLES_AUTO_PAGE_ENABLED`` is off.
+    """
     from django.conf import settings
     from .website_goal import mapping
     answers = mapping(mapping(mapping(goal).get("consent")).get("answers"))
-    if getattr(settings, "ARTICLES_AUTO_PAGE_ENABLED", False) and goal is not None and answers.get("page_policy") == "explicit":
+    founder_picks = answers.get("page_policy") == "pick"
+    auto_page = getattr(settings, "ARTICLES_AUTO_PAGE_ENABLED", False)
+    if auto_page and goal is not None and answers.get("page_policy") == "explicit":
         return "existing" if answers.get("page_mode") == "existing" else "none", _canonical_article_route(answers["page_route"])
     pending = (config.article_system or {}).get("pending_article_system_setup") or {}
     if pending.get("mode") in {"existing", "none"} and pending.get("route_path"):
         return pending["mode"], _canonical_article_route(pending["route_path"])
-    from django.conf import settings
-    if getattr(settings, "ARTICLES_AUTO_PAGE_ENABLED", False) and goal is not None:
+    if auto_page and goal is not None:
         from .website_article_page import choose_page
-        from .website_goal import mapping
-        consent = mapping(mapping(goal).get("consent"))
-        answers = mapping(consent.get("answers"))
-        if answers.get("page_policy") == "explicit":
-            return "existing" if answers.get("page_mode") == "existing" else "none", _canonical_article_route(answers["page_route"])
-        selection = choose_page(mapping(journey).get("discovery"), pick_when_ambiguous=answers.get("page_policy") == "pick")
+        selection = choose_page(mapping(journey).get("discovery"), pick_when_ambiguous=founder_picks)
         if selection["requiresChoice"]:
-            error = WebsiteAuthorityError("articles_page_choice_required", "Choose the articles page to prepare.", retryable=False)
-            error.user_action = {"id": "choose_articles_page", "candidates": selection["candidates"]}
-            raise error
+            raise _page_choice_required(selection["candidates"])
+        if choice is not None and selection["mode"] == "existing" and len(selection["candidates"]) > 1:
+            choice.update(_page_choice_record(selection["route"], selection["candidates"], reason=selection["reason"]))
         return selection["mode"], selection["route"]
     discovery = (journey or {}).get("discovery") or {}
     resolution = discovery.get("resolution") or {}
@@ -680,9 +712,13 @@ def _setup_surface(config, journey, *, goal=None):
         if len(candidates) == 1:
             return "existing", candidates[0]
         if candidates:
-            error = WebsiteAuthorityError("articles_page_choice_required", "Choose the articles page to prepare.", retryable=False)
-            error.user_action = {"id": "choose_articles_page", "candidates": candidates}
-            raise error
+            if founder_picks or not (auto_page or _page_ask_hidden(organization, config)):
+                raise _page_choice_required(candidates)
+            chosen = candidates[0]
+            if choice is not None:
+                choice.update(_page_choice_record(chosen, candidates,
+                    reason="preferred_listing" if listing else "first_candidate"))
+            return "existing", chosen
         # An "ambiguous" scan with no listing page at all has nothing to choose
         # between. Tiger Tutor (6 Nov 2026) stopped here 41 times with a
         # non-retryable "scan the repository" that no scan could change. Create
@@ -772,8 +808,13 @@ def _owner_request(op, context, config, step, *, user, journey=None):
             # setup writes no workflow file into the founder's repository.
             data["verification_mode"] = "hosted"
     if step == "setup":
+        choice = {}
         mode, surface = _merged_setup_surface(op, config) or _superseded_setup_surface(op, config) or _setup_surface(
-            config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"))
+            config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"),
+            organization=getattr(context, "organization", None), choice=choice)
+        if choice:
+            # Shown in website settings and the setup preview; the founder can change it.
+            op.receipt["article_page_choice"] = choice
         pending = (config.article_system or {}).get("pending_article_system_setup") or {}
         if op.payload.get("manual_setup_example_cleanup_retry") or op.payload.get("source_reverify"):
             pending = {**pending, "source_scan_run_id": op.receipt.get("scan_run_id") or ""}
