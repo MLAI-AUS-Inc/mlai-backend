@@ -78,18 +78,27 @@ class StartupFacadeTests(SimpleTestCase):
         self.assertIn('companyId', response.data)
 
     def test_foreign_company_is_hidden(self):
-        with patch.object(views, 'get_object_or_404', side_effect=Http404) as lookup:
+        scoped = object()
+        with patch.object(views, 'companies_for_user', return_value=scoped) as visible, \
+             patch.object(views, 'get_object_or_404', side_effect=Http404) as lookup:
             response = self.request(views.GenerateView, {'companyId': 'foreign'})
         self.assertEqual(response.status_code, 404)
-        self.assertEqual(lookup.call_args.kwargs, {'pk': 'foreign', 'profile__user': self.user})
+        visible.assert_called_once_with(self.user)
+        self.assertIs(lookup.call_args.args[0], scoped)
+        self.assertEqual(lookup.call_args.kwargs, {'pk': 'foreign'})
 
     def test_run_must_belong_to_chosen_startup(self):
-        company = Obj(organization=Obj(domain='owned.example'))
-        with patch.object(views, 'get_object_or_404', side_effect=[company, Http404]) as lookup:
+        company = Obj(organization_id=11, organization=Obj(domain='owned.example'))
+        with patch.object(views, 'companies_for_user', return_value=object()), \
+             patch.object(views.ContentFactoryRun, 'objects') as runs, \
+             patch.object(views, 'get_object_or_404', side_effect=[company, Http404]) as lookup:
             response = self.request(views.CancelView, {'companyId': 'owned'}, run_id='foreign-run')
         self.assertEqual(response.status_code, 404)
-        self.assertEqual(lookup.call_args.kwargs['domain'], 'owned.example')
-        self.assertEqual(lookup.call_args.kwargs['run_id'], 'foreign-run')
+        runs.filter.assert_called_once_with(workflow=views.founder.STARTUP_UPDATE_WORKFLOW)
+        scope = runs.filter.return_value.filter.call_args.args[0]
+        self.assertIn(('organization_id', 11), scope.children)
+        self.assertIs(lookup.call_args.args[0], runs.filter.return_value.filter.return_value)
+        self.assertEqual(lookup.call_args.kwargs, {'run_id': 'foreign-run'})
 
     def test_save_cannot_implicitly_approve(self):
         with patch.object(views, 'get_object_or_404', return_value=Obj()):
@@ -302,10 +311,12 @@ class ConnectionHandoffTests(SimpleTestCase):
         request = APIRequestFactory().get('/', {'ticket': ticket, 'company_id': 'attacker', 'next': 'https://evil.invalid'})
         user = Obj(pk=7, is_active=True, auth_version=2)
         session = Obj(pk='session', revoked_at=None, expires_at=timezone.now() + timedelta(days=1), user=user, auth_version=2)
-        with patch('community_chat.startups.connections.CommunityChatAccountSession.objects') as sessions, patch('community_chat.startups.connections.VibeRaisingCompany.objects') as companies, patch('community_chat.startups.connections.connector_connect', return_value=HttpResponse()) as connect:
+        with patch('community_chat.startups.connections.CommunityChatAccountSession.objects') as sessions, patch('community_chat.startups.connections.companies_for_user') as companies, patch('community_chat.startups.connections.connector_connect', return_value=HttpResponse()) as connect:
             sessions.select_related.return_value.filter.return_value.first.return_value = session
-            companies.get.return_value = Obj(pk='owned')
+            companies.return_value.get.return_value = Obj(pk='owned')
             response = connect_browser(request)
+        companies.assert_called_once_with(user)
+        companies.return_value.get.assert_called_once_with(pk=self.payload['company'])
         self.assertEqual(response.status_code, 200)
         self.assertEqual(request.GET['company_id'], 'owned')
         self.assertTrue(request.GET['next'].startswith('https://chat.example/my-startup/connections?company_id=owned'))

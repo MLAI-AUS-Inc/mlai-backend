@@ -201,8 +201,10 @@ def automation_billing_actor_slack_id(automation) -> str:
 
     Roo-points wallets are keyed by Slack id. The channel owner (the founder who
     verified the number/email) is the payer; fall back to the automation owner.
-    Returns "" when neither has a linked Slack id — harmless for free-listed
-    domains, and surfaced as a clear failure for paying ones at dispatch.
+    Without a Slack id the founder's canonical ``mlai_user:<id>`` actor is used
+    (DAILY_RESEARCH_BILL_WITHOUT_SLACK_ENABLED). Returns "" only when there is
+    no user at all — harmless for free-listed domains, and surfaced as a clear
+    failure for paying ones at dispatch.
     """
     candidates = (
         getattr(automation.notification_channel, "user", None),
@@ -212,6 +214,15 @@ def automation_billing_actor_slack_id(automation) -> str:
         slack_id = str(getattr(user, "slack_id", "") or "").strip()
         if slack_id:
             return slack_id
+    if getattr(settings, "DAILY_RESEARCH_BILL_WITHOUT_SLACK_ENABLED", True):
+        # Founders who chose email or WhatsApp often never linked Slack. Their
+        # wallet is still their MLAI account, addressed by its canonical actor
+        # id, which the Roo points charge accepts for that same user.
+        from core.actor_ids import preferred_actor_id_for_user
+
+        for user in candidates:
+            if user is not None and getattr(user, "pk", None):
+                return preferred_actor_id_for_user(user)
     return ""
 
 
@@ -978,6 +989,7 @@ def _send_email_via_system_email(
 SYSTEM_EMAIL_KEY_FOR_EVENT = {
     "review_ready": "article_review_ready",
     "content_ready": "article_content_ready",
+    "topic_selection": "daily_research_topics",
 }
 
 

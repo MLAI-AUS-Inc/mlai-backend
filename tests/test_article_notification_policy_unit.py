@@ -24,9 +24,10 @@ def adapter_function(name, **bindings):
 
 
 class ArticleNotificationPolicyTests(unittest.TestCase):
-    def test_only_completed_drafts_email_and_research_whatsapp_remains_enabled(self):
-        for event in ('topic_selection', 'delivery_mode_required', 'error', 'article_progress', 'recovering'):
+    def test_email_gets_drafts_and_daily_topics_and_research_whatsapp_remains_enabled(self):
+        for event in ('delivery_mode_required', 'error', 'article_progress', 'recovering'):
             self.assertFalse(should_deliver_automation_event(event, 'email'))
+        self.assertTrue(should_deliver_automation_event('topic_selection', 'email'))
         for event in ('content_ready', 'review_ready'):
             self.assertTrue(should_deliver_automation_event(event, 'email'))
         self.assertTrue(should_deliver_automation_event('topic_selection', 'whatsapp'))
@@ -43,8 +44,20 @@ class ArticleNotificationPolicyTests(unittest.TestCase):
             NotificationDeliveryStatus=SimpleNamespace(SENT='sent'))
         self.assertEqual(fan_out(run=object(), event_type='error', request_payload={}, build_kwargs=lambda c: {}), [])
         create.assert_not_called(); send.assert_not_called()
-        self.assertEqual(len(fan_out(run=object(), event_type='topic_selection', request_payload={}, build_kwargs=lambda c: {})), 2)
+        self.assertEqual(len(fan_out(run=object(), event_type='topic_selection', request_payload={}, build_kwargs=lambda c: {})), 3)
+        self.assertEqual([call.kwargs['channel'].channel_type for call in send.call_args_list], ['email', 'whatsapp', 'slack'])
+        send.reset_mock()
+        self.assertEqual(len(fan_out(run=object(), event_type='delivery_mode_required', request_payload={}, build_kwargs=lambda c: {})), 2)
         self.assertEqual([call.kwargs['channel'].channel_type for call in send.call_args_list], ['whatsapp', 'slack'])
+
+    def test_email_topics_kill_switch(self):
+        original = _policy._email_topics_enabled
+        _policy._email_topics_enabled = lambda: False
+        try:
+            self.assertFalse(should_deliver_automation_event('topic_selection', 'email'))
+            self.assertTrue(should_deliver_automation_event('review_ready', 'email'))
+        finally:
+            _policy._email_topics_enabled = original
 
     def test_review_email_uses_existing_idempotency(self):
         delivery = SimpleNamespace(status='sent')
