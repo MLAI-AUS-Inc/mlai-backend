@@ -87,6 +87,7 @@ FOUNDER_VIEWS = frozenset(
         "FounderToolsCompanyView",
         "FounderToolsCompanyDetailView",
         "FounderToolsActiveCompanyView",
+        "FounderWebsiteLeadView",
     }
 )
 POINTS_VIEWS = frozenset(

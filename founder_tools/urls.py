@@ -9,6 +9,7 @@ from .views import (
     FounderToolsCompanyView,
     FounderToolsProfileView,
 )
+from .website_leads import FounderWebsiteLeadView
 
 
 urlpatterns = [
@@ -27,4 +28,5 @@ urlpatterns = [
         name="founder-tools-company-monthly-updates",
     ),
     path("active-company/", FounderToolsActiveCompanyView.as_view(), name="founder-tools-active-company"),
+    path("website-lead/", FounderWebsiteLeadView.as_view(), name="founder-tools-website-lead"),
 ]

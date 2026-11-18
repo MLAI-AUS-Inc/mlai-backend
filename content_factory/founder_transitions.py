@@ -23,6 +23,14 @@ EVENT_TYPE = "founder_transition"
 LEASE = timedelta(minutes=10)
 RETRY_WINDOW = timedelta(hours=23)
 OWNER_ASKS = {"approve_setup", "authorize_github", "approve_join_request", "agree_terms", "describe_customer"}
+REMINDER_HOURS = (24, 72)
+# First-run cap (D14). An ask that was already waiting before this module
+# first saw it, or a reminder rung that was due long before reminders were
+# switched on, is backlog: per sweep at most this many such items are queued,
+# and the rest wait for a later sweep. Backlog asks get one follow-up only.
+FIRST_RUN_SEND_CAP = 10
+STALE_ASK = timedelta(hours=24)
+CATCH_UP_GRACE = timedelta(hours=12)
 mapping = projection.mapping
 
 
@@ -229,14 +237,15 @@ def website_item_state(config, *, now, setup_run=None):
     connection = getattr(config, "website_connection", None)
     if connection and connection.organization_id == organization.pk:
         if connection.state == "revoked":
-            return {"state": "your_turn", "ask": "authorize_github", "run_id": None}
+            return {"state": "your_turn", "ask": "authorize_github", "run_id": None,
+                "since": getattr(connection, "updated_at", None)}
         operation = WebsiteConnectionOperation.objects.filter(connection=connection, generation=connection.generation,
             action="prepare").order_by("-created_at", "-pk").first()
         notice = notice_for(operation, now=now) if operation else None
         if notice and notice["state"] == "needs_you":
             ask = registry_policy.canonical_action_id(notice.get("action"))
             if ask in OWNER_ASKS | {"approve_on_github", "review_draft"}:
-                return {"state": "your_turn", "ask": ask, "run_id": None}
+                return {"state": "your_turn", "ask": ask, "run_id": None, "since": getattr(operation, "updated_at", None)}
         if (notice and notice["state"] == "done") or cohorts.has_connected_website(organization):
             return {"state": "done", "ask": None, "verified_live": True, "run_id": None}
     if setup_run is None:
@@ -248,8 +257,44 @@ def website_item_state(config, *, now, setup_run=None):
     return item_state(organization, setup_run, config=config, now=now) if setup_run else None
 
 
-def observe(config, item, state, *, now):
-    """CAS-like observation under the organization row lock queues a transition once."""
+def first_run_budget(cap=FIRST_RUN_SEND_CAP):
+    """One sweep's allowance of backlog sends (first notices and catch-up reminders)."""
+    return {"left": max(0, int(cap)), "deferred": 0}
+
+
+def _spend_first_run(budget):
+    if budget is None:
+        return True
+    if budget["left"] <= 0:
+        budget["deferred"] += 1
+        return False
+    budget["left"] -= 1
+    return True
+
+
+def _ask_started(state):
+    """Best stored evidence of when the ask began, or None when nothing says."""
+    for value in (state.get("since"), getattr(state.get("run"), "updated_at", None)):
+        if value is not None and not timezone.is_naive(value):
+            return value
+    return None
+
+
+def _reminder_queued(config, item, event):
+    outbox = mapping(mapping(mapping(config.pillar_strategy).get("founder_notices")).get("outbox"))
+    return any(mapping(notice).get("item") == item and mapping(notice).get("event") == event for notice in outbox.values())
+
+
+def observe(config, item, state, *, now, budget=None):
+    """CAS-like observation under the organization row lock queues a transition once.
+
+    ``budget`` (from ``first_run_budget``) caps backlog sends for one sweep:
+    the first notice of an ask that was already older than a day when it was
+    first seen, and a reminder rung that was due long before it could be sent
+    (reminders switched on for old asks). Over the cap the item is left as it
+    was, so a later sweep queues it. One observation queues at most one
+    reminder, the latest rung due; a backlog ask gets one follow-up only.
+    """
     notices = deepcopy(mapping(mapping(config.pillar_strategy).get("founder_notices")))
     last = notices.setdefault("last", {})
     previous = mapping(last.get(item))
@@ -258,22 +303,51 @@ def observe(config, item, state, *, now):
         event_kind = "article_live" if item.startswith("article:") else "blog_live"
     if state.get("verified_live") and item.startswith("website:"):event_kind = "blog_live"
     same = (previous.get("state"), previous.get("ask"), previous.get("event")) == (state["state"], state.get("ask"), event_kind)
+    reminders = bool(getattr(settings, "MY_STARTUP_TURN_REMINDERS_ENABLED", False))
     event = None
     if not same:
-        last[item] = {"state": state["state"], "ask": state.get("ask"), "event": event_kind, "at": now.isoformat()}
+        started = _ask_started(state)
+        backlog = bool(not previous and event_kind == "your_turn" and started and now - started >= STALE_ASK)
+        if backlog and not _spend_first_run(budget):
+            return 0
+        last[item] = {"state": state["state"], "ask": state.get("ask"), "event": event_kind, "at": now.isoformat(),
+            **({"backlog": True} if backlog else {})}
         event = event_kind
-    if same and not (state["state"] == "your_turn" and getattr(settings, "MY_STARTUP_TURN_REMINDERS_ENABLED", False)):
+    if same and not (state["state"] == "your_turn" and reminders):
         return 0
     strategy = {**mapping(config.pillar_strategy), "founder_notices": {**notices, "version": 1}}
     OrganizationContentConfig.objects.filter(pk=config.pk).update(pillar_strategy=strategy)
     config.pillar_strategy = strategy
     created = _reserve(config, item, event, state, now=now) if event else 0
-    if same and state["state"] == "your_turn" and state.get("ask") and getattr(settings, "MY_STARTUP_TURN_REMINDERS_ENABLED", False):
-        since = _moment(previous.get("at"))
-        if since:
-            for hours in (24, 72):
-                if now - since >= timedelta(hours=hours):
-                    created += _reserve(config, item, f"your_turn_reminder_{hours}h", state, now=now)
+    if same and state["state"] == "your_turn" and state.get("ask") and reminders:
+        created += _remind(config, item, state, previous, now=now, budget=budget)
+    return created
+
+
+def _remind(config, item, state, previous, *, now, budget):
+    """Queue the latest due reminder rung once; earlier rungs it overtook are skipped."""
+    since = _moment(previous.get("at"))
+    if not since:
+        return 0
+    due = [hours for hours in REMINDER_HOURS if now - since >= timedelta(hours=hours)]
+    if not due:
+        return 0
+    followups = previous.get("followups") if type(previous.get("followups")) is int else 0
+    if previous.get("backlog") and followups >= 1:
+        return 0
+    hours = due[-1]
+    event = f"your_turn_reminder_{hours}h"
+    if _reminder_queued(config, item, event):
+        return 0
+    late = now - since >= timedelta(hours=hours) + CATCH_UP_GRACE
+    if late and not _spend_first_run(budget):
+        return 0
+    created = _reserve(config, item, event, state, now=now)
+    strategy = deepcopy(mapping(config.pillar_strategy))
+    record = mapping(mapping(strategy.setdefault("founder_notices", {}).setdefault("last", {})).get(item))
+    strategy["founder_notices"]["last"][item] = {**record, "followups": followups + 1}
+    OrganizationContentConfig.objects.filter(pk=config.pk).update(pillar_strategy=strategy)
+    config.pillar_strategy = strategy
     return created
 
 
@@ -435,6 +509,7 @@ def run_transition_sweep(now=None, limit=None):
     if not configs and cursor:configs = list(query[:ceiling])
     if configs:cache.set("founder-transitions:cursor", configs[-1].organization_id, 3600)
     created = checked = 0
+    budget = first_run_budget()
     for candidate in configs:
         if not registry_policy.cohort_for_report(candidate.organization, candidate):continue
         with transaction.atomic():
@@ -454,15 +529,15 @@ def run_transition_sweep(now=None, limit=None):
                     break
                 with registry_policy.organization_read_scope(config.organization, config):
                     state = item_state(config.organization, run, config=config, now=now)
-                created += observe(config, "article:" + run.run_id, state, now=now)
+                created += observe(config, "article:" + run.run_id, state, now=now, budget=budget)
             website = website_item_state(config, now=now, setup_run=setup_run)
             if website is not None:
-                created += observe(config, "website:" + str(config.organization_id), website, now=now)
+                created += observe(config, "website:" + str(config.organization_id), website, now=now, budget=budget)
             requests = mapping(mapping(config.pillar_strategy).get("startup_team")).get("requests")
             pending = projection.optional("founder_tools.startup_team", "pending_request_ids", config.organization, default=[]) if requests and getattr(settings, "MY_STARTUP_TEAM_ENABLED", False) else []
             for identifier in pending:
-                created += observe(config, "team:" + str(identifier), {"state": "your_turn", "ask": "approve_join_request"}, now=now)
-    return {"checked": checked, "queued": created, **drain(now)}
+                created += observe(config, "team:" + str(identifier), {"state": "your_turn", "ask": "approve_join_request"}, now=now, budget=budget)
+    return {"checked": checked, "queued": created, "first_run_deferred": budget["deferred"], **drain(now)}
 
 
 def _notify(organization, item, event, *, only_user=None, first_name=None):

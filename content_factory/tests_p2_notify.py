@@ -132,6 +132,68 @@ class NotificationTests(TransactionTestCase):
         transitions.drain(self.now + timedelta(hours=73))
         self.assertEqual(len(self.sent), 1)
 
+    def observe_at(self, run, at, *, budget=None, ask="review_draft"):
+        with transaction.atomic():
+            config = OrganizationContentConfig.objects.select_for_update().get(pk=self.fixture.config.pk)
+            config.organization = self.org
+            state = {"state": "your_turn", "ask": ask, "run_id": run.run_id, "run": run}
+            return transitions.observe(config, "article:" + run.run_id, state, now=at, budget=budget)
+
+    def old_ready(self, days=10):
+        from workflow_runs.models import ContentFactoryRun
+        run = self.ready()
+        ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=self.now - timedelta(days=days))
+        run.refresh_from_db()
+        return run
+
+    def queued_items(self):
+        outbox = transitions.mapping(transitions.mapping(OrganizationContentConfig.objects.get(
+            pk=self.fixture.config.pk).pillar_strategy.get("founder_notices")).get("outbox"))
+        return outbox.values()
+
+    def test_turning_reminders_on_for_a_cohort_of_old_asks_sends_at_most_the_cap(self):
+        runs = [self.old_ready() for _ in range(transitions.FIRST_RUN_SEND_CAP + 3)]
+        budget = transitions.first_run_budget()
+        for run in runs:
+            self.observe_at(run, self.now, budget=budget)
+        items = {notice["item"] for notice in self.queued_items()}
+        self.assertEqual(len(items), transitions.FIRST_RUN_SEND_CAP)
+        self.assertEqual(budget["deferred"], 3)
+        # The next sweep's allowance picks up the rest; nothing is sent twice.
+        later = transitions.first_run_budget()
+        for run in runs:
+            self.observe_at(run, self.now + timedelta(minutes=5), budget=later)
+        self.assertEqual(len({notice["item"] for notice in self.queued_items()}), len(runs))
+        self.assertEqual(len(self.queued_items()), 2 * len(runs))
+
+    def test_a_backlog_ask_gets_one_follow_up_only(self):
+        run = self.old_ready()
+        self.assertEqual(self.observe_at(run, self.now, budget=transitions.first_run_budget()), 2)
+        self.assertEqual(self.observe_at(run, self.now + timedelta(hours=24)), 2)
+        self.assertEqual(self.observe_at(run, self.now + timedelta(hours=72)), 0)
+        self.assertEqual(sorted(notice["event"] for notice in self.queued_items()),
+            ["your_turn", "your_turn", "your_turn_reminder_24h", "your_turn_reminder_24h"])
+
+    def test_reminders_switched_on_late_send_one_catch_up_within_the_cap(self):
+        fresh = [self.ready() for _ in range(transitions.FIRST_RUN_SEND_CAP + 2)]
+        with self.settings(MY_STARTUP_TURN_REMINDERS_ENABLED=False):
+            for run in fresh:
+                self.observe_at(run, self.now)
+        budget = transitions.first_run_budget()
+        late = self.now + timedelta(hours=100)
+        for run in fresh:
+            self.observe_at(run, late, budget=budget)
+        reminders = [notice for notice in self.queued_items() if notice["event"].startswith("your_turn_reminder")]
+        # The 24 h rung was overtaken: only the 72 h rung, once per ask, within the cap.
+        self.assertEqual({notice["event"] for notice in reminders}, {"your_turn_reminder_72h"})
+        self.assertEqual(len({notice["item"] for notice in reminders}), transitions.FIRST_RUN_SEND_CAP)
+        self.assertEqual(budget["deferred"], 2)
+        for run in fresh:
+            self.observe_at(run, late + timedelta(hours=200), budget=transitions.first_run_budget())
+        reminders = [notice for notice in self.queued_items() if notice["event"].startswith("your_turn_reminder")]
+        self.assertEqual(len({notice["item"] for notice in reminders}), len(fresh))
+        self.assertEqual(len(reminders), 2 * len(fresh))
+
     def test_lost_provider_ack_retries_exact_frozen_payload_and_key(self):
         run = self.ready()
         self.reserve(run)

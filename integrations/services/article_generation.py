@@ -23,11 +23,13 @@ from content_factory.billing import (
     CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS,
     FREE_CONTENT_FACTORY_DOMAINS,
     build_roo_points_authorization_payload,
+    build_research_minimum_balance_payload,
     build_roo_points_payload,
     get_content_factory_ai_agent_required_points,
     get_content_factory_article_cost_points,
     get_content_factory_content_island_topic_cost_points,
     get_content_factory_research_cost_points,
+    research_needs_minimum_balance,
     is_free_content_factory_domain,
 )
 from content_factory.progress import upsert_live_progress_card
@@ -1076,6 +1078,17 @@ def charge_content_factory_topic_generation_for_user(
         raise ArticleGenerationError(
             "This Content Factory topic generation request was already refunded after a failed start. Please generate topics again."
         )
+    if research_needs_minimum_balance(article_request):
+        # Content Factory refuses this research unless the balance left after
+        # this charge still meets its floor. Refuse here, before the charge and
+        # before any run row exists, instead of dispatching a blocked run.
+        already_charged = Ledger.objects.filter(
+            idempotency_key=f"content_factory:topic_generation:charge:{client_request_id}", kind="SPEND").exists()
+        current_balance = _content_factory_balance_for_user(user)
+        payload = build_research_minimum_balance_payload(domain=resolved_domain, current_balance=current_balance,
+            cost_points=cost_points, already_charged=already_charged)
+        if current_balance < payload["required_points"]:
+            raise InsufficientRooPointsError(payload)
 
     try:
         ledger, _ = PointsService.spend(

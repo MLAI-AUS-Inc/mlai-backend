@@ -62,6 +62,16 @@ Only the established organization owner can set canonical branding. Own-company 
 
 `POST vibe-marketing/github/connect/` preserves founder-account reuse. When new authorization is needed, both `auth_url` and `authorizationUrl` point to the existing one-use Chat handoff at the backend origin under `/api/v1/community-chat/startups/connect/browser/`. The handoff validates the Chat session/company at callback and signs the return destination. `returnTo: "mobile" | "desktop-dev"` selects native return; browser uses the configured Chat frontend. Arbitrary return URLs are not used. Repository selection is a separate request.
 
+## Not-on-GitHub exit (A21)
+
+`POST founder-tools/website-lead/` (Chat alias `/api/v1/my-startup/founder-tools/website-lead/`, `my_startup_write` budget) records that the founder's website code is not on GitHub. It needs no startup. It rides the GitHub-first gate `ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE`: with the gate off it returns 404 `{reason: "not_enabled"}` and records nothing, so a client treats 404 as "nothing to record".
+
+Body: `{reason?, domain?, hostClass?, notifyWhenChanged?}`. `reason` is one of `not_on_github` (default), `other_git_host`, `not_in_git`, `someone_else_holds_code`, `no_github_account`; anything else is 400 `{reason: "invalid_lead"}`. `domain` is optional text, normalised to a bare hostname or dropped; it is never fetched. `hostClass` is a short lowercase id, otherwise `unknown`. `notifyWhenChanged` must be a boolean; send `true` from "Tell me when this changes". Once set it stays set.
+
+Response: 201 for the first record of that reason and domain, 200 afterwards, with `{lead: {reason, domain, hostClass, notifyWhenChanged, remindAt, createdAt}, recorded, message}`. `message` is the one honest sentence to show ("MLAI can only set up articles for websites whose code is on GitHub today.", plus "Thanks. We'll email you when that changes." once notify is on). `recorded: false` means the lead could not be stored for this account (unverified email, or the email's CRM contact belongs to another account); the funnel event is still emitted.
+
+Storage: the lead row is an entry under `attributes.founder_website_leads` on the account's CRM `Contact` (no migration). Writing it never changes consent, status or owner. The first record emits one `not_on_github` founder journey event, and `journey_funnel` counts the stage from the stored rows. Nothing sends reminders yet (E3b).
+
 ## Verification and limits
 
 Focused `unittest`/`SimpleTestCase` suites run through `scripts/test_without_database.py`, which removes environment credentials and rejects network/database access. Tests cover sparse/empty profile fields, optional-field round-trip, provisional promotion/retry, research non-persistence, explicit scope/authentication, repository validation/invalidation, canonical removal, alpha/limits, storage failure, and existing activation/editorial/Chat connection behavior.
