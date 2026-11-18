@@ -577,8 +577,14 @@ def _decide(stage, state, case, *, action=None, next_kind=None, run_id=None, hol
 
 
 def _staff_fixing_quality(run) -> bool:
-    """True while the run's exhausted hosted quality hold is staff-owned (staff_fixing)."""
+    """True while the run's exhausted hosted quality hold is staff-owned (staff_fixing).
+
+    Only while staff alerts are on: without them nobody is told to fix it, and
+    the founder keeps their review with the unalerted copy.
+    """
     from .hosted_quality_state import staff_fixing
+    if not getattr(settings, "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED", False):
+        return False
     return staff_fixing(_mapping(getattr(run, "result", None)).get("article_preview_quality"))
 
 
