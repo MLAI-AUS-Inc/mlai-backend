@@ -171,11 +171,15 @@ def _deliver(row):
         # selected approved audience when one was requested. It never inherits
         # repository permissions or grants editorial/publication approval.
         from founder_tools.membership import companies_for_user
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
         from .editorial_catalog import discovery_audience_context
         from .vibe_marketing_views import _get_config
         requester = get_user_model().objects.get(pk=request["roo_points_requested_by_user_id"], is_active=True)
-        if request.get("domain") != row.organization.domain or not companies_for_user(requester).filter(
-                pk=request.get("mcp_company_id"), organization=row.organization).exists():
+        current_startup = companies_for_user(requester).filter(
+            Q(membership_policy=VibeRaisingCompany.SHARED_ACCESS) | Q(profile__role=VibeRaisingProfile.ROLE_FOUNDER),
+            pk=request.get("mcp_company_id"), organization=row.organization,
+        )
+        if request.get("domain") != row.organization.domain or not current_startup.exists():
             raise WebsiteAuthorityError("research_owner_changed", "The original research startup is no longer available.")
         try:
             audience = discovery_audience_context(_get_config(row.organization).pillar_strategy, request)

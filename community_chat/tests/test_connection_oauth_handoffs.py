@@ -103,10 +103,10 @@ class OAuthHandoffTests(SimpleTestCase):
         with patch.object(connections, "enabled", return_value=True), patch.object(connections, "consume_ticket", return_value=payload), \
                 patch.object(connections.CommunityChatAccountSession, "objects") as sessions, \
                 patch.object(connections, "_valid_session", return_value=True), \
-                patch.object(connections.VibeRaisingCompany, "objects") as companies, \
+                patch.object(connections, "companies_for_user") as companies, \
                 patch.object(connections, "connector_connect", return_value=Response(status=302)) as connect:
             sessions.select_related.return_value.filter.return_value.first.return_value = session
-            companies.get.return_value = self.company
+            companies.return_value.get.return_value = self.company
             response = connections.connect_browser(request)
         self.assertEqual(response.status_code, 302)
         connect.assert_called_once_with(request, "google")
@@ -275,14 +275,16 @@ class OAuthHandoffTests(SimpleTestCase):
         request = self.request({"state": state.raw, "code": "synthetic", "installation_id": "123"}, authenticated=False)
         config = Obj(connected_slack_user_id="", github_repo="", website_connection_id=None, save=MagicMock())
         with patch("community_chat.startups.oauth_context.valid_chat_oauth_context", return_value=True), \
-                patch("founder_tools.models.VibeRaisingCompany.objects") as companies, \
+                patch("founder_tools.membership.companies_for_user") as companies, \
+                patch("django.contrib.auth.get_user_model") as chat_accounts, \
                 patch("content_factory.models.OrganizationContentConfig.objects") as configs, \
                 patch.object(views.UserIntegration, "objects"), \
                 patch("integrations.services.github_installations.resolve_user_for_actor_id", return_value=self.user), \
                 patch("integrations.services.github_installations.upsert_github_installation") as registry, \
                 patch("integrations.services.slack.SlackService.send_dm") as dm, \
                 patch.object(views.requests, "post") as post, patch.object(views.requests, "get") as get:
-            companies.select_related.return_value.filter.return_value.first.return_value = self.company
+            chat_accounts.return_value.objects.filter.return_value.first.return_value = self.user
+            companies.return_value.filter.return_value.first.return_value = self.company
             configs.get_or_create.return_value = (config, False)
             post.return_value.json.return_value = {"access_token": "synthetic-token", "refresh_token": "synthetic-refresh"}
             identity = MagicMock()
@@ -372,10 +374,10 @@ class ChatConnectionReturnTests(SimpleTestCase):
         with patch.object(connections, "enabled", return_value=True), patch.object(connections, "consume_ticket", return_value=payload), \
                 patch.object(connections.CommunityChatAccountSession, "objects") as sessions, \
                 patch.object(connections, "_valid_session", return_value=True), \
-                patch.object(connections.VibeRaisingCompany, "objects") as companies, \
+                patch.object(connections, "companies_for_user") as companies, \
                 patch.object(connections, "connector_connect", return_value=Response(status=302)):
             sessions.select_related.return_value.filter.return_value.first.return_value = Obj(pk="session", user=self.user)
-            companies.get.return_value = self.company
+            companies.return_value.get.return_value = self.company
             connections.connect_browser(browser)
         self.assertEqual(browser.GET["next"], WEB)
         for bad in ({"from": "articles", "updateId": 4}, {"from": "updates", "updateId": "4; x"}, {"from": "updates", "updateId": True}):
