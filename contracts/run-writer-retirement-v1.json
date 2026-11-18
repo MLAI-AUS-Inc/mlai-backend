@@ -3614,7 +3614,7 @@
       "identity": "content_factory/website_connections.py:guarded_service_write.decorate.wrapped:8bb0750b0de2ad47b399c13f699efd876458b4d44dc8dde729a69d9d61990bcb:1",
       "path": "content_factory/website_connections.py",
       "function": "guarded_service_write.decorate.wrapped",
-      "line": 664,
+      "line": 740,
       "kind": "inferred_run_save",
       "fields": [
         "run_request",
@@ -3627,12 +3627,13 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ba2a3a920e010161d305e87266b1162df960b2281b2d29051944c40e6757392e",
+      "function_sha256": "3a40d575f418ac7f3eab991f7e00d5b3b358f3a3d8b54a30a3272b3e8b98eb41",
       "classification": "legacy_fenced",
       "test_refs": [
-        "content_factory/tests_run_retired_writers.py"
+        "content_factory/tests_run_retired_writers.py",
+        "content_factory/tests_callback_contract_from_run.py"
       ],
-      "reason": "Old worker-owned writes refuse event-owned Run before handler/original-request enrichment. Read/observation/control seams have separately scoped authority.",
+      "reason": "Old worker-owned writes refuse event-owned Run before handler/original-request enrichment. Read/observation/control seams have separately scoped authority. Callback consent fill (18 Nov 2026): before authority_guard, a config_write payload with no connection tuple takes only missing keys from its own run's saved request (fill_callback_contract_from_run); no Run write.",
       "guard": "Actual canonical current/admitted lookup, authoritative_run refusal; not inferred from worker JSON.",
       "pending_owner": null
     },
