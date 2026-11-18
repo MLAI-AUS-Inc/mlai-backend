@@ -77,7 +77,7 @@ from content_factory.progress import (
     upsert_live_progress_card,
 )
 from content_factory.run_state import (
-    execution_version, stale_execution_event, merge_reliability_fields, RELIABILITY_FIELDS,
+    execution_version, stale_execution_event, merge_reliability_fields, clear_review_callback_refusal, RELIABILITY_FIELDS,
     ACTIVE_RUN_STATUSES as DURABLE_ACTIVE_RUN_STATUSES,
     ARTICLE_WORKFLOWS,
     active_retry_signal,
@@ -9276,6 +9276,8 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
                 # work again, so it shows (run_cancellation.DRAFT_DELETED_AT_KEY).
                 data["result"].pop("draft_deleted_at", None)
         data["result"] = merge_reliability_fields(data.get("result"), data)
+        data["result"] = clear_review_callback_refusal(
+            data.get("result"), status=data.get("status") or (existing_run.status if existing_run else ""))
         if drift:
             data["result"] = record_drift(data.get("result"), drift, run_id=run_id)
         if getattr(settings, "ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False):

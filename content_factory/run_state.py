@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from .run_status_contract import ACTIVE, EXTERNAL_LABELS
+from .run_status_contract import ACTIVE, AWAITING, EXTERNAL_LABELS
 
 
 RELIABILITY_FIELDS = ("generation", "state_version", "failure", "recovery", "recovery_intents", "budget")
@@ -52,6 +52,40 @@ def merge_reliability_fields(result, payload):
             if key in failure:
                 merged[key] = failure[key]
     return merged
+
+
+CALLBACK_REFUSAL_FAILURE_KEYS = ("next_action", "requires_user_action", "retryable")
+
+
+def clear_review_callback_refusal(result, *, status):
+    """Keep a callback the backend refused from failing a run in review.
+
+    Content Factory records an MLAI callback refusal (for example a 409
+    "website_connection_required") as the run's failure and syncs it back with
+    an awaiting status. The run is then both ready for review and failed, and
+    staff alerts take the refusal's code. A refused callback changed nothing
+    here, and approval rechecks website authority, so for a run awaiting the
+    founder the refusal stays out of failure and error_code. A bounded receipt
+    is kept for diagnosis.
+    """
+    if not isinstance(result, dict) or str(status or "").strip().lower() not in AWAITING:
+        return result
+    rejection = result.get("callback_rejection")
+    if not isinstance(rejection, dict) or not rejection.get("code"):
+        return result
+    code = str(rejection["code"])
+    failure = result.get("failure") if isinstance(result.get("failure"), dict) else {}
+    cleaned = dict(result)
+    cleaned.pop("callback_rejection", None)
+    if str(failure.get("code") or "") == code:
+        cleaned.pop("failure", None)
+        for key in CALLBACK_REFUSAL_FAILURE_KEYS:
+            if key in cleaned and key in failure and cleaned[key] == failure[key]:
+                cleaned.pop(key, None)
+    if str(cleaned.get("error_code") or "") == code:
+        cleaned.pop("error_code", None)
+    cleaned["cleared_callback_refusal"] = {"code": code[:128], "stage": str(failure.get("stage") or "")[:80]}
+    return cleaned
 
 
 def reliability_presentation(result, *, status="", workflow="", current_step="", resume_available=False, approval_state=""):

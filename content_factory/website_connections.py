@@ -585,6 +585,53 @@ def scoped_run_contract(run):
     return payload
 
 
+SAVED_CONTRACT_FALLBACK_FIELDS = (*CONNECTION_FIELDS, "operation_id", "operation_attempt", "deletion_epoch")
+
+
+def with_saved_run_contract(payload, *, run_id=None):
+    """Let a worker write for a saved run carry that run's own consent tuple.
+
+    Some Content Factory callbacks for a dispatched run omit the connection
+    identity. The run's saved consent is the authority for its own writes, so
+    use it instead of refusing with "reconnect this website" while the
+    connection is still current. This never borrows today's selected
+    connection. authority_guard still checks the connection's live state and
+    generation, and the run check after it compares the run's saved contract.
+    A partial tuple in the payload is not filled in, so it still fails closed.
+    """
+    try:
+        if connection_contract(payload):
+            return payload
+    except WebsiteAuthorityError:
+        return payload
+    if any(payload.get(key) not in (None, "") for key in CONNECTION_FIELDS):
+        return payload
+    identifier = str(run_id or payload.get("run_id") or payload.get("job_id") or "")
+    if not identifier:
+        return payload
+    from workflow_runs.models import ContentFactoryRun
+    from .run_reconciliation import authoritative_run
+    run = ContentFactoryRun.objects.filter(run_id=identifier).first()
+    if run is None or authoritative_run(run):
+        return payload
+    saved = scoped_run_contract(run)
+    try:
+        if not connection_contract(saved):
+            return payload
+    except WebsiteAuthorityError:
+        return payload
+    filled = dict(payload)
+    for key in SAVED_CONTRACT_FALLBACK_FIELDS:
+        if key in saved and saved[key] not in (None, ""):
+            filled.setdefault(key, saved[key])
+    for key in ("domain", "github_repo"):
+        if not filled.get(key) and saved.get(key):
+            filled[key] = saved[key]
+    logger.info("website_saved_run_contract_used run_id=%s event=%s", identifier[:80],
+                str(payload.get("event_type") or payload.get("event") or "-")[:80])
+    return filled
+
+
 def run_action_authority(run, action):
     """Derive setup versus article publication from the persisted workflow."""
     if action == "merge-publish-pr":
@@ -653,6 +700,8 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                     from workflow_runs.models import ContentFactoryRun
                     original = ContentFactoryRun.objects.filter(run_id=kwargs["run_id"]).first()
                     effective_action = run_action_authority(original, kwargs["action"])
+                if action == "config_write":
+                    payload = with_saved_run_contract(payload, run_id=kwargs.get("run_id"))
                 with authority_guard(payload, action=effective_action) as connection:
                     from workflow_runs.models import ContentFactoryRun
                     run_id = str(kwargs.get("run_id") or payload.get("run_id") or payload.get("job_id") or "")
