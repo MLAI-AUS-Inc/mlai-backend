@@ -210,7 +210,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         self.ns["ContentCommand"] = ContentCommand
         names = {"start_article_generation", "_run_mapping", "_request_value", "_bool_from_request", "_normalize_portable_article_payload", "_refresh_article_editorial_payload", "_friendly_content_factory_error", "_blocked_worker_payload",
                  "_restart_article_payload_from_run", "_restart_editorial_brief", "_reserve_article_restart", "_restart_article_run", "_charge_roo_points_for_article", "_queue_content_factory_run", "_queue_content_factory_run_authorized",
-                 "_run_result_from_remote", "_resolve_dispatch_token_run", "_fail_unconfirmed_dispatch_run"}
+                 "_run_result_from_remote", "content_factory_refusal_code", "_resolve_dispatch_token_run", "_fail_unconfirmed_dispatch_run"}
         tree = ast.parse(Path(__file__).with_name("vibe_marketing_views.py").read_text())
         nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
         self.assertEqual({node.name for node in nodes}, names)
