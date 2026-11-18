@@ -485,7 +485,13 @@ Hosted quality repair is owned by Content Factory. While its bounded repair runs
 `article_preview_quality.status=self_healing` locks publishing, clears an older
 approval blocker during status merge, and explains that the preview is being fixed
 automatically. A terminal block uses the worker's specific `founder_message`.
-Exhausted safety checks show a staff-review message without raw safety findings.
+The current hosted preview may expose a bounded `safety_check` with checked
+sentences and official source passages, or with the sentences that still need
+verification. It also exposes `preview_inputs_invalid` when the technical
+preview check could not get its inputs. A safety check covers the displayed
+sentences. It supplies no approval, and technical and editorial gates still apply.
+`safety_review_status` reflects a delivered or acknowledged staff alert for the
+current hold. Raw alerts and staff audit fields stay internal.
 After a successful current-owner status observation, an after-commit hook reloads
 the Run and verifies its hosted review identity, generation and inputs, honoring
 any current owner stop intent before queuing `article_safety_review_required` or
