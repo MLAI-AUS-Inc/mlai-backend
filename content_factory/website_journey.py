@@ -61,6 +61,13 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     verified = bool(capabilities.get("canGenerateArticle") and authoring_supported)
     access = bool(capabilities.get("repositoryAccessVerified"))
     account_access = bool(capabilities.get("accountAccessVerified", access))
+    # A read that made no GitHub check (bootstrap never probes; a verified
+    # check is cached for 15 minutes) leaves saved access unknown. The owner
+    # sees the saved connection as connected rather than as a step to redo;
+    # every write still probes GitHub before it runs.
+    # article_capabilities reports that unknown as "github_verification_required".
+    saved_access = bool(not access and capabilities.get("reasonCode") == "github_verification_required"
+        and website.get("status") == "connected" and website.get("repositoryId"))
     write_access = bool(capabilities.get("repositoryWriteVerified", access))
     connected = website.get("status") == "connected"
     policy = mapping(website.get("writePolicy"))
@@ -117,8 +124,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "Approve Workflows: write to install or update .github/workflows/mlai-articles-verification.yml." if workflow_missing
         else f"Approve {' and '.join(missing_ci)} to read the current in-repository CI result.")
     prerequisites = {
-        "account": fact(account_access, code="github_access_required", reason="Check saved GitHub access."),
-        "repository": fact(access and bool(website.get("repositoryId")), code="repository_required", reason="Select and verify your website repository."),
+        "account": fact(account_access or saved_access, code="github_access_required", reason="Check saved GitHub access."),
+        "repository": fact((access or saved_access) and bool(website.get("repositoryId")), code="repository_required", reason="Select and verify your website repository."),
         "inventory": fact(bool(discovery.get("complete")) and not inventory_stale,
             code="scan_stale" if inventory_stale else "scan_required", reason="Scan the current repository.", status="stale" if inventory_stale else None),
         "permissions": fact(permissions_ready, code=permission_code, reason=permission_reason),
