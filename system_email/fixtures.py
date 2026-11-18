@@ -26,6 +26,12 @@ SAMPLE_CONTEXT = {
         "coupon_code": "ROO-ABCDEFGHJKLMNPQR", "checkout_url": "https://luma.com/example?coupon=ROO-ABCDEFGHJKLMNPQR",
         "points_cost": 20, "expires_display": "Thu 19 Nov 2026, 5:30 PM AEDT", "requires_approval": False,
     },
+    "startup_team_invite": {
+        "startup_name": "Acme Trees", "startup_logo": "", "inviter_name": "Alex",
+        "invite_email": "jo@example.com", "expires_on": "25 November 2026, 5:30 PM AEDT",
+        "accept_url": "https://chat.mlai.au/my-startup/join?invitation=00000000-0000-4000-8000-000000000000",
+        "asset_base": "https://api.mlai.au/static/crm/email", "shared_access": True,
+    },
     "mentor_invite": {
         "first_name": "Sam", "inviter_name": "Sam Donegan", "inviter_first_name": "Sam",
         "note": "You helped three founders at the last demo night. We'd love more people to get that.",

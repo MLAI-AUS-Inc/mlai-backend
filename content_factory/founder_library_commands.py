@@ -41,7 +41,9 @@ def settings_candidate(request):
             company_id = UUID(str(company_id))
         except ValueError:
             return False
-    organization_id = VibeRaisingCompany.objects.filter(pk=company_id, profile__user=request.user).values_list("organization_id", flat=True).first()
+    from founder_tools.membership import companies_for_user
+
+    organization_id = companies_for_user(request.user).filter(pk=company_id).values_list("organization_id", flat=True).first()
     strategy = OrganizationContentConfig.objects.filter(organization_id=organization_id).values_list("pillar_strategy", flat=True).first() or {}
     saved = strategy.get(KEY, {})
     return not isinstance(saved, dict) or digest in saved

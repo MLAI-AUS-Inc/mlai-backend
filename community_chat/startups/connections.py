@@ -18,6 +18,7 @@ from community_chat.models import CommunityChatAccountSession
 from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from founder_tools.membership import companies_for_user
 from founder_tools.models import VibeRaisingCompany
 from integrations.api_views_connectors import HumanitixConnectView, LumaConnectView
 from integrations.models import ExternalServiceConnection, GoogleConnection
@@ -166,8 +167,7 @@ def _peek_github_ticket(ticket):
         session = CommunityChatAccountSession.objects.filter(pk=payload["session"], user_id=payload["uid"]).first()
         if not _valid_session(session, timezone.now()):
             return None, None
-        company = VibeRaisingCompany.objects.select_related("organization").get(
-            pk=payload["company"], profile__user_id=payload["uid"])
+        company = companies_for_user(session.user).get(pk=payload["company"])
     except (signing.BadSignature, KeyError, ValueError, TypeError, AttributeError, VibeRaisingCompany.DoesNotExist):
         return None, None
     return payload, company
@@ -325,7 +325,7 @@ def connect_browser(request):
         if not _valid_session(session, timezone.now()):
             raise ValueError("Chat session is no longer valid")
         user = session.user
-        company = VibeRaisingCompany.objects.get(pk=payload["company"], profile__user=user)
+        company = companies_for_user(user).get(pk=payload["company"])
         provider = payload["provider"]
         if provider not in PROVIDERS:
             raise ValueError("Unknown provider")

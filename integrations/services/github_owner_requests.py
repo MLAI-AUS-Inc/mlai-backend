@@ -214,13 +214,12 @@ def pick_up(event_type, payload) -> int:
 
 def _connect(config, request, repo, *, installation_id, account) -> int:
     from django.contrib.auth import get_user_model
-    from founder_tools.models import VibeRaisingCompany
+    from founder_tools.membership import companies_for_user
     from integrations.services import github_callback_reasons as reasons
     from integrations.services.github_installations import upsert_github_installation
     organization = config.organization
     user = get_user_model().objects.filter(pk=request.get("user_id")).first()
-    company = VibeRaisingCompany.objects.filter(pk=request.get("company_id"), profile__user=user,
-                                                organization=organization).first() if user else None
+    company = companies_for_user(user).filter(pk=request.get("company_id"), organization=organization).first()
     if company is None:
         logger.info("github_owner_request_unmatched org=%s reason=founder_changed", organization.pk)
         return 0

@@ -87,3 +87,18 @@ run **Send held reminders (Resend)**.
   mail gets a complaint. It never pauses sending.
 
 Build plan: project file `plans/customerio-to-resend-transactional.md`.
+
+### Startup team invitations
+
+`startup_team_invite` uses the mentor invitation's layout with the inviter,
+the selected startup and its uploaded branding. MLAI's Roo mark and wordmark
+appear with or without a company logo. The HTML and plain-text templates are
+versioned as `startup_team_invite_v1` to keep queued retries consistent.
+The acceptance reference in the URL requires the recipient's verified MLAI
+account.
+
+For a preview without sending, call `system_email.render.render` with
+`get_spec("startup_team_invite")` and the matching entry in
+`system_email.fixtures.SAMPLE_CONTEXT`. Check a version with a synthetic logo
+and one with the logo omitted. The existing `send_system_email_test` command
+can send the registered sample to a configured test recipient when authorized.

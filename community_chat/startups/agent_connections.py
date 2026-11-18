@@ -5,6 +5,7 @@ from rest_framework.views import APIView
 
 from community_chat.authentication import CommunityChatOnboardingAuthentication
 from community_chat.onboarding import has_community_access
+from founder_tools.membership import companies_for_user
 from founder_tools.models import VibeRaisingCompany
 from startup_updates.mcp import draft_task, oauth
 from startup_updates.mcp.config import DOT_SCOPES, availability, capability_catalog, client_catalog, mcp_url, mlai_url, public_base
@@ -89,7 +90,7 @@ class AgentAuthorizationView(ChatStartupAccess, APIView):
             raise NotFound(reason)
         intent = oauth.intent_for(request_id)
         companies = [{"id": str(company.pk), "name": company.name} for company in
-            VibeRaisingCompany.objects.filter(profile__user=request.user, organization__isnull=False).order_by("name")]
+            companies_for_user(request.user).filter(organization__isnull=False).order_by("name")]
         unavailable = unavailable_companies(request.user, {company["id"] for company in companies})
         member = has_community_access(request.user)
         channels = []

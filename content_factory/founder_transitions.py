@@ -49,6 +49,13 @@ def _owner(organization):
 
 def resolve_recipients(organization, *, item, ask=None):
     """Fresh, active recipients; owner-only asks never inherit a broad team list."""
+    from founder_tools.membership import active_memberships, shared_workspace
+
+    workspace = shared_workspace(organization)
+    if workspace:
+        return list(get_user_model().objects.filter(
+            pk__in=active_memberships(workspace).values("user_id"),
+        ).order_by("pk"))
     owner_id = _owner(organization)
     candidates = projection.optional("founder_tools.startup_team", "notification_recipients",
         organization, item=item, ask=ask)
@@ -154,10 +161,15 @@ def _reserve(config, item, event, state, *, now, only_user=None):
         return 0
     ask = state.get("ask")
     recipients = resolve_recipients(organization, item=item, ask=ask)
-    if event in {"ladder_exhausted", "member_joined"}:
+    from founder_tools.membership import has_membership, shared_workspace
+
+    workspace = shared_workspace(organization)
+    if not workspace and event in {"ladder_exhausted", "member_joined"}:
         recipients = [user for user in recipients if user.pk == _owner(organization)]
     if only_user is not None:
-        if event == "join_approved" and projection.optional("founder_tools.startup_team", "viewer_role", only_user, organization) == "member":
+        if event == "join_approved" and workspace and has_membership(only_user, workspace):
+            recipients = [only_user]
+        elif event == "join_approved" and projection.optional("founder_tools.startup_team", "viewer_role", only_user, organization) == "member":
             recipients = [only_user] if only_user.is_active else []
         else:
             recipients = [user for user in recipients if user.pk == only_user.pk]

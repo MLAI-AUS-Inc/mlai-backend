@@ -26,8 +26,8 @@ def _not_found():
 
 
 def _is_owner(user, organization) -> bool:
-    from founder_tools.services import organization_owner_user_id
-    return organization is not None and organization_owner_user_id(organization) == getattr(user, "pk", None)
+    from founder_tools.services import user_may_use_organization
+    return organization is not None and user_may_use_organization(user, organization)
 
 
 class FounderJourneyView(MyStartupAccess, APIView):
@@ -70,9 +70,9 @@ class FounderJourneyOptInView(MyStartupAccess, APIView):
 
 class _FirstArticleAccess(MyStartupAccess, APIView):
     def _context(self):
-        from founder_tools.services import FounderCompanyContext
+        from founder_tools.services import FounderCompanyContext, get_or_create_founder_profile as founder_profile
         company = self.company
-        return FounderCompanyContext(profile=company.profile, company=company, organization=company.organization)
+        return FounderCompanyContext(profile=founder_profile(self.request.user), company=company, organization=company.organization)
 
     def _applies(self):
         return first_articles.applies(self.company.organization)

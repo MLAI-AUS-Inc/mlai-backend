@@ -1,6 +1,7 @@
 """Narrow Chat-session facade; shared founder views own domain mutations."""
 from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from rest_framework.exceptions import NotFound, ValidationError
@@ -10,6 +11,7 @@ from rest_framework.views import APIView
 
 from community_chat.authentication import CommunityChatAccountAuthentication
 from community_chat.throttles import StartupThrottleMixin
+from founder_tools.membership import companies_for_user
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.serializers import FounderProfileSerializer
 from founder_tools.services import get_or_create_founder_profile
@@ -48,16 +50,21 @@ class ChatStartupAccess(StartupThrottleMixin):
                 raise ValidationError({"companyId": "Choose a startup."})
             try:
                 self.company = get_object_or_404(
-                    VibeRaisingCompany.objects.select_related("organization"),
-                    pk=raw, profile__user=request.user,
+                    companies_for_user(request.user), pk=raw,
                 )
             except (ValueError, TypeError, DjangoValidationError):
                 raise NotFound("Startup not found.")
             run_id = kwargs.get("run_id")
             if run_id:
-                get_object_or_404(ContentFactoryRun, run_id=run_id,
-                    workflow=founder.STARTUP_UPDATE_WORKFLOW,
-                    domain=self.company.organization.domain if self.company.organization else "")
+                runs = ContentFactoryRun.objects.filter(workflow=founder.STARTUP_UPDATE_WORKFLOW)
+                if self.company.organization_id:
+                    runs = runs.filter(
+                        Q(organization_id=self.company.organization_id)
+                        | Q(organization_id__isnull=True, domain=self.company.organization.domain)
+                    )
+                else:
+                    runs = runs.none()
+                get_object_or_404(runs, run_id=run_id)
 
     def finalize_response(self, request, response, *args, **kwargs):
         response = super().finalize_response(request, response, *args, **kwargs)
@@ -75,7 +82,7 @@ class BootstrapView(ChatStartupAccess, APIView):
                         "delete": True, "draftReadyPush": False}
         if getattr(settings, 'MY_STARTUP_TEAM_ENABLED', False):
             from founder_tools.startup_team import member_companies
-            capabilities['hasStartupWorkspace'] = bool(profile.companies.exists() or member_companies(request.user))
+            capabilities['hasStartupWorkspace'] = bool(companies_for_user(request.user).exists() or member_companies(request.user))
         return Response({
             "enabled": True, "accountId": str(request.user.community_chat_profile_id),
             "relayUrl": settings.COMMUNITY_CHAT_RELAY_URL,

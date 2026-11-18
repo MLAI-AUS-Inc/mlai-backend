@@ -13,6 +13,10 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from founder_tools.membership import active_memberships, shared_workspace
+from founder_tools.models import VibeRaisingCompany
+from organizations.models import Organization
+
 from . import vibe_marketing_views as views
 from .website_connections import authority_guard
 from .website_contract import WebsiteAuthorityError, connection_contract
@@ -78,7 +82,12 @@ class ArticlePreviewLeaseView(APIView):
             return Response({"detail": "Run not found."}, status=404)
         portable = original_portable_run(run)
         team_grant = {}
-        if getattr(context, 'role', 'owner') == 'member':
+        if getattr(context.company, "membership_policy", None) == VibeRaisingCompany.SHARED_ACCESS:
+            member = active_memberships(context.company).filter(user=request.user).first()
+            if member is None:
+                return Response({"detail": "Preview not found."}, status=404)
+            team_grant = {"membership_id": str(member.pk), "membership_joined": member.joined_at.isoformat()}
+        elif getattr(context, 'role', 'owner') == 'member':
             team_grant = {'member_user_id': request.user.pk, 'member_company_id': str(context.company.pk)}
         token = signing.dumps({"run": run.run_id, "organization": context.organization.id,
                                "domain": context.organization.domain, "portable": portable,
@@ -107,7 +116,14 @@ class ArticlePreviewLeaseProxyView(views.VibeMarketingRunLivePreviewProxyView):
         context = SimpleNamespace(organization=SimpleNamespace(id=grant["organization"], domain=grant["domain"]))
         if not views._run_belongs_to_context(run, context):
             return None, None, Response({"detail": "Preview not found."}, status=404)
-        if grant.get('member_user_id') is not None:
+        organization = Organization.objects.filter(pk=grant["organization"]).first()
+        workspace = shared_workspace(organization)
+        if workspace:
+            member_id = grant.get("membership_id")
+            member = active_memberships(workspace).filter(pk=member_id).first() if member_id else None
+            if member is None or member.joined_at.isoformat() != grant.get("membership_joined"):
+                return None, None, Response({"detail": "Preview access expired. Reload the preview."}, status=404)
+        elif grant.get('member_user_id') is not None:
             from core.models import User
             from founder_tools.startup_team import member_context, member_may_use_run
             user = User.objects.filter(pk=grant['member_user_id'], is_active=True).first()

@@ -613,14 +613,18 @@ def github_callback(request):
     slack_user_id = oauth_state.slack_user_id
     job_id = oauth_state.job_id
     normalized_domain = oauth_state.domain
+    from django.contrib.auth import get_user_model
+    from founder_tools.membership import companies_for_user
+
     chat_company = None
+    chat_user = None
+    if oauth_state.chat_context:
+        chat_user = get_user_model().objects.filter(pk=oauth_state.chat_context["user_id"], is_active=True).first()
     if flow is not None:
         chat_company = flow.company
     elif oauth_state.chat_context:
-        from founder_tools.models import VibeRaisingCompany
-        chat_company = VibeRaisingCompany.objects.select_related("organization").filter(
+        chat_company = companies_for_user(chat_user).filter(
             pk=oauth_state.chat_context["chat_company_id"],
-            profile__user_id=oauth_state.chat_context["user_id"],
             organization__domain=normalized_domain,
         ).first()
         if chat_company is None:
@@ -918,7 +922,7 @@ def github_callback(request):
         # otherwise (and for an organisation that already has a repository,
         # templates or components) the return below, as before.
         bound = github_callback_reasons.bind_legacy_domain_repository(
-            config=config, user=chat_company.profile.user, company=chat_company,
+            config=config, user=chat_user, company=chat_company,
             repositories=repos, installation_id=installation_id)
         if bound:
             selected_repo = bound
@@ -927,7 +931,7 @@ def github_callback(request):
         reason = github_callback_reasons.NO_WEBSITE
         if is_org_oauth and chat_company is not None:
             reason = github_callback_reasons.bind_new_journey_repository(
-                config=config, user=chat_company.profile.user, company=chat_company,
+                config=config, user=chat_user, company=chat_company,
                 repositories=repos, installation_id=installation_id)
         return flow.redirect(reason)
 

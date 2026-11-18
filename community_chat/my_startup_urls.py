@@ -68,4 +68,8 @@ urlpatterns += [path(route, lazy_view("founder_tools.startup_team_views", view))
     ("team/members/<uuid:member_id>/", "TeamMemberView"),
     ("team/invite-link/", "InviteLinkView"),
     ("team/join/", "InviteJoinView"),
+    ("team/invitations/", "TeamInvitationView"),
+    ("team/invitations/<uuid:invitation_id>/", "TeamInvitationCancelView"),
+    ("team/invitations/<uuid:invitation_id>/resend/", "TeamInvitationResendView"),
+    ("team/invitations/<uuid:public_id>/accept/", "TeamInvitationAcceptView"),
 )]

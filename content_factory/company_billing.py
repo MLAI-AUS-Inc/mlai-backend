@@ -12,7 +12,12 @@ def billing_user_for_organization(organization, requester):
     payer = getattr(organization, "billing_user", None)
     if payer is None:
         return requester
-    if not payer.is_active or not organization.founder_companies.filter(profile__user_id=payer.pk).exists():
+    from founder_tools.membership import has_membership, shared_workspace
+
+    workspace = shared_workspace(organization)
+    payer_has_access = (has_membership(payer, workspace) if workspace else
+                        organization.founder_companies.filter(profile__user_id=payer.pk).exists())
+    if not payer.is_active or not payer_has_access:
         raise WebsiteAuthorityError("company_billing_founder_unavailable",
             "The company billing founder is unavailable. Ask a founder to update company billing.", status=409)
     return payer
@@ -48,7 +53,9 @@ def billing_summary(organization, requester):
     from roo.services import PointsService
     from .billing import get_content_factory_article_cost_points
     from founder_tools.services import user_may_use_organization
-    owner = user_may_use_organization(requester, organization)
+    from founder_tools.membership import shared_workspace
+
+    owner = not shared_workspace(organization) and user_may_use_organization(requester, organization)
     payer = resolve_content_billing_user(requester, organization.domain)
     balance = PointsService.get_balance(payer)
     points = int(balance.get("digital_service_balance_microroo") or 0) // 1_000_000

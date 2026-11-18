@@ -45,7 +45,8 @@ class PrivatePreviewDocumentTests(SimpleTestCase):
     def test_authorized_grant_explicitly_enables_the_comment_inspector(self):
         run = SimpleNamespace(run_id='draft-1', organization_id=7, domain='company.test',
             run_request={'delivery_mode': 'content_only', 'delivery_mode_confirmed': True})
-        context = SimpleNamespace(organization=SimpleNamespace(id=7, domain=run.domain))
+        context = SimpleNamespace(organization=SimpleNamespace(id=7, domain=run.domain),
+            company=SimpleNamespace(membership_policy=0))
         request = SimpleNamespace(data={}, build_absolute_uri=lambda path: 'https://api.example' + path)
         with patch('content_factory.website_views._context', return_value=(context, object(), None)), \
                 patch('workflow_runs.models.ContentFactoryRun.objects.filter') as runs, \

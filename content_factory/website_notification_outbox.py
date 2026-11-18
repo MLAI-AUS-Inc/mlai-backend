@@ -80,8 +80,9 @@ def current_goal(outbox,*,now):
     if not isinstance(owner,str) or not owner.isdigit() or not 0<len(owner)<=20:raise NotificationFenced()
     user=get_user_model().objects.filter(pk=owner,is_active=True).first()
     if not user:raise NotificationFenced()
-    from founder_tools.models import VibeRaisingCompany,VibeRaisingProfile
-    if not VibeRaisingCompany.objects.filter(pk=scope["company_id"],organization_id=scope["organization_id"],profile__user=user,profile__role=VibeRaisingProfile.ROLE_FOUNDER).exists():raise NotificationFenced()
+    from founder_tools.membership import companies_for_user
+    if not companies_for_user(user).filter(pk=scope["company_id"], organization_id=scope["organization_id"]).exists():
+        raise NotificationFenced()
     return op,user
 
 

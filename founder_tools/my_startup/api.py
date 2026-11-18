@@ -28,10 +28,10 @@ def _pending_member_is_new_journey(user):
     refused exactly as today.
     """
     from content_factory.founder_journey_cohort import NEW_JOURNEY, is_new_journey, new_startup_cohort
-    from founder_tools.models import VibeRaisingCompany
+    from founder_tools.membership import companies_for_user
 
     companies = list(
-        VibeRaisingCompany.objects.filter(profile__user_id=user.pk, organization__isnull=False)
+        companies_for_user(user).filter(organization__isnull=False)
         .select_related("organization")
     )
     if not companies:
