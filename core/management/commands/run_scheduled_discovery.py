@@ -51,6 +51,7 @@ from roo.coding import reconcile_coding_reservations
 from mentoring.instant_booking import process_due_bookings
 from community_chat.intro_welcome import run_chat_intro_welcome_sweep
 from mentoring.calendar_sync import sync_due_sessions
+from mentoring.feedback import run_scheduler as run_mentor_feedback_scheduler
 from roo.models import ScheduledDiscoveryHeartbeat
 from startup_updates.monthly_update_reminders import run_monthly_update_reminder_scheduler
 
@@ -163,6 +164,11 @@ class Command(BaseCommand):
             # Paid booking recovery continues even when new instant admission is off.
             ("mentor_booking_operations", lambda: {"status": "completed", **process_due_bookings()}),
             ("mentor_calendar_sync", lambda: {"status": "completed", **sync_due_sessions()}),
+            # Asks the founder how a session went a few minutes after its booked
+            # end (email + Roo Slack DM, three faces). Off unless
+            # MENTOR_FEEDBACK_ENABLED and MENTOR_FEEDBACK_NOT_BEFORE are set;
+            # one row per session makes every later tick a cheap check.
+            ("mentor_session_feedback", run_mentor_feedback_scheduler),
             # Refreshes the durable Stripe payout ledger once per local day.
             # This never posts to Xero; posting always requires admin approval.
             ("stripe_payout_reconciliation", run_daily_payout_reconciliation),

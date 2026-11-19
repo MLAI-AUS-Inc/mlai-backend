@@ -39,4 +39,16 @@ SAMPLE_CONTEXT = {
         "explainer_url": "https://mlai.au/mentors", "expires_on": "30 November 2026",
         "invited_email": "sam@example.com", "asset_base": "https://api.mlai.au/static/crm/email",
     },
+    "mentor_session_feedback": {
+        "founder_first": "Alex", "mentor_name": "Priya Raman", "mentor_first": "Priya",
+        "date_long": "Thursday 19 November", "date_short": "Thu 19 Nov", "time_range": "2:00 to 2:30 pm",
+        "time_range_detail": "2:00 to 2:30 pm, Melbourne time", "place": "Google Meet", "is_video": True,
+        "brief_line": "Pricing your first paid plan",
+        "url_sad": "https://api.mlai.au/api/v1/mentoring/feedback/sample/?r=sad&src=email",
+        "url_neutral": "https://api.mlai.au/api/v1/mentoring/feedback/sample/?r=neutral&src=email",
+        "url_happy": "https://api.mlai.au/api/v1/mentoring/feedback/sample/?r=happy&src=email",
+        "url_no_show": "https://api.mlai.au/api/v1/mentoring/feedback/sample/?r=no_show&src=email",
+        "unsubscribe_url": "https://api.mlai.au/api/v1/mentoring/feedback/sample/unsubscribe/",
+        "asset_base": "https://api.mlai.au/static/crm/email",
+    },
 }

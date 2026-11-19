@@ -67,6 +67,18 @@ _SPECS = (
         required_context=("accept_url", "explainer_url", "expires_on", "invited_email", "inviter_name", "asset_base"),
     ),
     MessageSpec(
+        key="mentor_session_feedback",
+        category=NOTIFICATION,
+        subject="{% autoescape off %}How was your session with {{ mentor_first }}?{% endautoescape %}",
+        html_template="system_email/mentor_session_feedback.html",
+        text_template="system_email/mentor_session_feedback.txt",
+        required_context=(
+            "mentor_name", "mentor_first", "date_long", "time_range", "place",
+            "url_sad", "url_neutral", "url_happy", "url_no_show", "unsubscribe_url", "asset_base",
+        ),
+        unsubscribe=True,
+    ),
+    MessageSpec(
         key="startup_team_invite",
         category=NOTIFICATION,
         subject="{% autoescape off %}{{ inviter_name }} invited you to join {{ startup_name }} on MLAI{% endautoescape %}",

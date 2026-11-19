@@ -2025,7 +2025,7 @@ class CoworkingViewSet(viewsets.ViewSet):
                 {'code': 'target_profile_unknown', 'error': 'No active MLAI account matches that member'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        return _book_coworking_user(
+        response = _book_coworking_user(
             user=user,
             booking_date=booking_date,
             created_by_slack_id=admin_slack_user_id,
@@ -2033,6 +2033,11 @@ class CoworkingViewSet(viewsets.ViewSet):
             operation_id=operation_id,
             operation_fingerprint=operation_fingerprint,
         )
+        # Roo can't look this member's balance up by Slack ID, so return it
+        # with a fresh booking. Replays omit it rather than show a stale value.
+        if response.status_code in (200, 201) and not response.data.get('operation_replayed'):
+            response.data['points_balance'] = PointsService.get_balance(user)['balance']
+        return response
 
     @action(detail=False, methods=['post'], url_path='book-many')
     def book_many(self, request):

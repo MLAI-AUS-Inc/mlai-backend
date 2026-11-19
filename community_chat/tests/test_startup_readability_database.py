@@ -106,7 +106,9 @@ class OwnAiReadabilityJourneyTests(TestCase):
         saved = self.tool('save_narrative_draft', args)
         owner = self.detail(saved['updateId'])
         update = owner['update']
-        self.assertEqual(update['startupOverview'], FIXTURE['narrative']['startupOverview'])
+        # The founder's own description from signup is kept; the AI does not rewrite it.
+        founder_overview = FIXTURE['startup']['short_description']
+        self.assertEqual(update['startupOverview'], founder_overview)
         self.assertEqual(update['validation']['groundedness_status'], 'needs_review')
         self.assertEqual(update['agentProvenance']['kind'], 'agent_supplied')
         self.assertEqual(self.client.get(BASE + 'community/').data['updates'], [])
@@ -116,7 +118,7 @@ class OwnAiReadabilityJourneyTests(TestCase):
         self.assertEqual(review['update']['validation']['groundedness_status'], 'needs_review')
         self.assertEqual(self.approve(update).status_code, 200)
         publication = self.client.get(BASE + 'community/').data['updates'][0]
-        self.assertEqual(publication['startupOverview'], FIXTURE['narrative']['startupOverview'])
+        self.assertEqual(publication['startupOverview'], founder_overview)
         self.assertEqual(publication['revisionHash'], update['revisionHash'])
         for private in ('evidenceSnapshot', 'agentSources', 'agentProvenance', 'manualSummary'):
             self.assertNotIn(private, publication)
@@ -126,7 +128,7 @@ class OwnAiReadabilityJourneyTests(TestCase):
         self.assertEqual(anonymous.status_code, 200)
         html = anonymous.content.decode()
         self.assertLess(html.index('What we do'), html.index('Summary'))
-        self.assertIn(escape(FIXTURE['narrative']['startupOverview']), html)
+        self.assertIn(escape(founder_overview), html)
         self.assertNotIn('SYNTHETIC PRIVATE COVERAGE', html)
         # Source profile changes and private agent edits do not rewrite approval.
         StartupProfile.objects.filter(organization=self.organization).update(short_description='Changed live profile')
@@ -135,7 +137,7 @@ class OwnAiReadabilityJourneyTests(TestCase):
         self.assertNotEqual(amended['revisionHash'], update['revisionHash'])
         self.assertEqual(self.approve(update).status_code, 409)
         self.assertEqual(self.client.get(BASE + 'community/').data['updates'][0], publication)
-        self.assertEqual(self.detail(update['id'], version='published')['update']['startupOverview'], FIXTURE['narrative']['startupOverview'])
+        self.assertEqual(self.detail(update['id'], version='published')['update']['startupOverview'], founder_overview)
         draft = MonthlyUpdateDraft.objects.get(pk=update['id'])
         self.assertEqual(draft.published_revision.content_hash, update['revisionHash'])
         self.assertEqual(MonthlyUpdateApproval.objects.get(revision=draft.published_revision).content_hash, update['revisionHash'])
@@ -153,10 +155,12 @@ class OwnAiReadabilityJourneyTests(TestCase):
         self.assertEqual(draft.revisions.count(), 1)
         omitted = self.tool('save_narrative_draft', self.arguments(updateId=draft.pk,
             expectedRevision=saved['revisionId'], narrative={'summary': FIXTURE['narrative']['summary']}))
-        self.assertEqual(self.detail(draft.pk)['update']['startupOverview'], FIXTURE['narrative']['startupOverview'])
+        founder_overview = FIXTURE['startup']['short_description']
+        self.assertEqual(self.detail(draft.pk)['update']['startupOverview'], founder_overview)
+        # An AI can neither rewrite nor clear the founder's introduction.
         cleared = self.tool('save_narrative_draft', self.arguments(updateId=draft.pk,
             expectedRevision=omitted['revisionId'], narrative={'summary': FIXTURE['narrative']['summary'], 'startupOverview': ''}))
-        self.assertEqual(self.detail(draft.pk)['update']['startupOverview'], '')
+        self.assertEqual(self.detail(draft.pk)['update']['startupOverview'], founder_overview)
         self.assertNotEqual(cleared['revisionHash'], omitted['revisionHash'])
         invalid = self.tool('save_narrative_draft', self.arguments(updateId=draft.pk,
             expectedRevision=cleared['revisionId'], narrative={'summary': 'Claimed revenue', 'metrics': {'revenue': 100}}), error=True)
@@ -190,7 +194,8 @@ class OwnAiReadabilityJourneyTests(TestCase):
                 updateId=draft.pk, expectedRevision=expected_revision,
                 narrative={'summary': 'We tested another route.', 'startupOverview': overview}))
             current = self.detail(draft.pk)['update']
-            self.assertEqual(current['startupOverview'], overview)
+            # The saved introduction stays; own-AI edits only change the monthly story.
+            self.assertEqual(current['startupOverview'], 'We help shops plan deliveries.')
             self.assertEqual(current['validation']['groundedness_status'], 'needs_review')
             self.assertEqual(current['financialHistory'], published['financialHistory'])
             draft.refresh_from_db()

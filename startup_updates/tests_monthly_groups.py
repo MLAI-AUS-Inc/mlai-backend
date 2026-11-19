@@ -194,3 +194,23 @@ class MonthlyOwnerReadTests(SimpleTestCase):
                 self.assertIn(("published_revision__approval__audience_visibility", [audience]), clause)
             self.assertIs(filters["published_at__isnull"], False)
             self.assertEqual(filters["published_revision__approval__content_hash"].name, "published_revision__content_hash")
+
+    def test_community_orders_by_reporting_month_not_last_edit(self):
+        with patch.object(views.MonthlyUpdateDraft, "objects") as drafts:
+            ordered = drafts.filter.return_value.select_related.return_value.order_by
+            ordered.return_value.__getitem__.return_value = []
+            views.CommunityView().get(Obj(query_params={}))
+        month, update_date, first_shared, pk = ordered.call_args.args
+        self.assertEqual((month.expression.name, month.descending), ("month", True))
+        self.assertEqual((update_date.expression.name, update_date.nulls_last), ("update_date", True))
+        self.assertEqual([source.name for source in first_shared.expression.get_source_expressions()],
+            ["first_published_at", "published_at"])
+        self.assertTrue(first_shared.descending)
+        self.assertEqual(pk, "-id")
+        # Republishing an edit refreshes published_at; it must never lead the order.
+        self.assertNotIn("-published_at", ordered.call_args.args)
+
+    def test_community_payload_carries_original_dates(self):
+        from community_chat.startups.presentation import PUBLIC_FIELDS
+        for field in ("updateDate", "datePrecision", "firstPublishedAt"):
+            self.assertIn(field, PUBLIC_FIELDS)

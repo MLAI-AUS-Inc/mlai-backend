@@ -86,7 +86,9 @@ Unlike Slack-ID bookings, which Roo gates, this backend path checks
 `403 points_admin_required` otherwise. An unknown or inactive profile returns
 `400 target_profile_unknown`. Dates run from today to 7 days ahead. The booking,
 points debit and operation receipt reuse the Slack-ID path, so a repeated
-`operation_id` replays rather than double-charging. Model-extracted names are
+`operation_id` replays rather than double-charging. A fresh booking's response
+includes `points_balance`, the member's balance after the debit, so Roo can show
+it without a Slack ID; a replay omits it rather than report a stale value. Model-extracted names are
 never accepted as targets. No schema change or migration is needed.
 
 ## Legacy chat-message handoff

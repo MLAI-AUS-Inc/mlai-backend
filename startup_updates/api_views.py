@@ -4371,6 +4371,9 @@ class StartupUpdateDraftResultsView(APIView):
                     memo = generated_cover_image(item["structured_memo"], run.run_request)
                     from startup_updates.financial_history import generated_history_selection
                     memo = generated_history_selection(memo, run.run_request)
+                    from startup_updates.overview import founder_overview
+                    memo = founder_overview(memo, run.run_request,
+                        draft.current_revision.structured_memo if draft.current_revision_id else draft.structured_memo)
                     from startup_updates.evidence_contract import content_hash, validate_generated_metric_claims
                     try:
                         validate_generated_metric_claims(memo, snapshot.payload.get("metrics"))

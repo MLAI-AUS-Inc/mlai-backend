@@ -113,6 +113,8 @@ def update_avatar(*, authenticated_session, values):
         )
         if version != (row.version if row else 0):
             raise RooAvatarError("roo_avatar_version_conflict", 409)
+        # An outfit from a client without the fur slot keeps the saved fur.
+        outfit.setdefault("fur", row.fur if row else None)
         rank = _rank(user)
         require_unlocked(outfit, rank["level"] if rank else None)
         if row is None:
