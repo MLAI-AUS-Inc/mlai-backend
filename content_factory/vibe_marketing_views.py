@@ -17856,19 +17856,23 @@ class VibeMarketingGitHubConnectView(APIView):
 
 
 
-def _repository_suggestion(context, user, repos):
-    """Rank the founder's repositories for the picker (plan E8); never raises, never binds."""
+def _repository_suggestion(context, user, repos, *, probe=True):
+    """Rank the founder's repositories for the picker (plan E8); never raises, never binds.
+
+    ``probe`` reads the top candidates' host config files. Once a repository
+    is chosen there is nothing to suggest, so no founder code is read.
+    """
     from integrations.services.github_app import github_app_credentials_configured
     from integrations.services.github_installations import user_github_installations
     from .website_repository_selection import host_config_hints, installation_access_url, rank_repositories, suggestion
     domain = str(getattr(context.organization, "domain", "") or "")
     brand = str(getattr(getattr(context, "company", None), "name", "") or getattr(context.organization, "name", "") or "")
-    installs = user_github_installations(user)
-    access_url = (installation_access_url(installs[0].installation_id, account_login=installs[0].account_login,
-                                          account_type=installs[0].account_type) if len(installs) == 1 else None)
     try:
+        installs = user_github_installations(user)
+        access_url = (installation_access_url(installs[0].installation_id, account_login=installs[0].account_login,
+                                              account_type=installs[0].account_type) if len(installs) == 1 else None)
         hints = {}
-        if github_app_credentials_configured() and domain:
+        if probe and github_app_credentials_configured() and domain:
             hints = host_config_hints(repos, rank_repositories(repos, domain=domain, brand=brand), domain=domain)
         return suggestion(repos, domain=domain, brand=brand, hints=hints, access_url=access_url)
     except Exception:  # noqa: BLE001 - a suggestion is advice
@@ -17903,7 +17907,8 @@ class VibeMarketingGitHubReposView(APIView):
                 union_repos = list_user_repos(request.user)
                 if union_repos:
                     selected_repo = str(config.github_repo or "").strip()
-                    suggested = _repository_suggestion(context, request.user, union_repos)
+                    suggested = _repository_suggestion(context, request.user, union_repos,
+                                                       probe=not selected_repo and len(union_repos) > 1)
                     if not selected_repo and len(union_repos) == 1:
                         selected_repo = str(union_repos[0].get("fullName") or "").strip()
                     elif not selected_repo and suggested.get("repo"):

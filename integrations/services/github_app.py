@@ -233,7 +233,13 @@ def _require_installation_profile_permissions(installation_id, *, profile):
         # A returned identity is never ignored; older provider fixtures omitted it.
         if kind == "installation" and _failure_taxonomy_active() and isinstance(payload, dict) and (type(payload.get("id")) is not int or payload["id"] != int(identifier)):
             raise GitHubPermissionIdentityMismatch("GitHub installation identity does not match.")
-        permissions = _profile_grant_permissions(payload, profile=profile)
+        try:
+            permissions = _profile_grant_permissions(payload, profile=profile)
+        except GitHubInstallationAccessRequired as exc:
+            # Plan E8: which grant fell short. The App's own grant is ours to
+            # fix; only the installation's grant is the founder's.
+            exc.grant = kind
+            raise
         if kind == "installation":
             installation_permissions = permissions
     return installation_permissions

@@ -181,6 +181,22 @@ class MergeAbilityTests(SimpleTestCase):
         outage = self.ability(rules=(502, None), protection="protection_open", permission="permission_admin")
         self.assertIsNone(outage["founderCanMerge"])
 
+    def test_a_missing_collaborator_read_leaves_the_founders_permission_unknown(self):
+        # A renamed login or a token that cannot see collaborators answers 404:
+        # that is unknown, never "the founder has no access".
+        recorded = fixture("branch-policy.json")
+
+        def get(path):
+            if path.startswith("/rules/branches/"):
+                return 200, recorded["rules_none"]
+            if path.endswith("/protection"):
+                return 200, recorded["protection_open"]
+            return 404, None
+        result = selection.merge_ability(repo="fixture-agency/site", branch="main", owner_login="fixture-agency",
+                                         founder_login="fixture-founder", get=get)
+        self.assertEqual((result["founderPermission"], result["founderCanMerge"], result["reviewer"]),
+                         (None, None, None))
+
     def test_the_merge_policy_still_refuses_to_merge_past_a_required_review(self):
         recorded = fixture("branch-policy.json")
         responses = iter([response(200, recorded["rules_required_review"])])
@@ -216,6 +232,21 @@ class PermissionCheckTests(TestCase):
     def test_a_provider_outage_is_not_the_founders_problem(self):
         with patch.object(github_app, "_github_app_jwt", return_value="jwt"), \
                 patch.object(github_app.http_requests, "get", return_value=response(503)):
+            self.assertEqual(selection.permission_check("1000001"), {"checked": False})
+
+    def test_a_network_failure_is_not_the_founders_problem(self):
+        from integrations import http_client
+        with patch.object(github_app, "_github_app_jwt", return_value="jwt"), \
+                patch.object(github_app.http_requests, "get", side_effect=http_client.RequestException("reset")):
+            self.assertEqual(selection.permission_check("1000001"), {"checked": False})
+
+    def test_an_app_grant_without_contents_is_ours_not_the_founders(self):
+        recorded = fixture("grants.json")
+        app = {**recorded["app"], "permissions": {"pull_requests": "write", "metadata": "read"}}
+        replies = {"https://api.github.com/app": app,
+                   "https://api.github.com/app/installations/1000001": recorded["installation_full"]}
+        with patch.object(github_app, "_github_app_jwt", return_value="jwt"), \
+                patch.object(github_app.http_requests, "get", side_effect=lambda url, **kw: response(200, replies[url])):
             self.assertEqual(selection.permission_check("1000001"), {"checked": False})
 
 
@@ -312,6 +343,18 @@ class ReviewerAskJourneyTests(JourneyFixture, TestCase):
         self.assertTrue(selection.reviewer_needed(None, run))
         self.assertFalse(selection.reviewer_needed(None, make_run(self.org, status="blocked")))
 
+    def test_the_p2_protected_copy_is_a_reviewer_ask_even_from_a_published_child(self):
+        # The article merge worker's code can sit on the published child run,
+        # not on the run the journey names; P2's protected copy still says so.
+        from .founder_journey import _reviewer_decision
+        decision = {"stage": "setup", "state": "your_turn", "copyId": "ask_approve_on_github_protected",
+                    "action": {"id": "approve_on_github", "label": "Approve on GitHub", "url": self.URL},
+                    "runId": None}
+        updated = _reviewer_decision(decision, connection=None, run=None)
+        self.assertEqual((updated["action"]["id"], updated["action"]["url"]), ("send_pr_to_reviewer", self.URL))
+        plain = {**decision, "copyId": "ask_approve_on_github"}
+        self.assertEqual(_reviewer_decision(plain, connection=None, run=None)["action"]["id"], "approve_on_github")
+
     def test_reminders_aim_at_the_reviewer_step(self):
         connection = self.connection()
         selection.store_merge_ability(connection, selection._ability(can_merge=False))
@@ -340,3 +383,12 @@ class PickerSuggestionTests(TestCase):
         self.assertFalse(WebsiteConnection.objects.filter(organization=built.organization).exists())
         built.config.refresh_from_db()
         self.assertFalse(built.config.github_repo)
+
+    def test_a_chosen_repository_reads_no_founder_code(self):
+        from .vibe_marketing_views import _repository_suggestion
+        built = make_new_journey_org("tigertutor.example")
+        context = SimpleNamespace(organization=built.organization, company=SimpleNamespace(name="Tiger Tutor"))
+        with override_settings(GITHUB_APP_ID="1", GITHUB_APP_PRIVATE_KEY="fixture"), \
+                patch.object(selection, "host_config_hints") as probe:
+            _repository_suggestion(context, built.owner, normalized("installation-repositories.json"), probe=False)
+        probe.assert_not_called()

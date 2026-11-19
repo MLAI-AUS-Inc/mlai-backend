@@ -359,10 +359,16 @@ def permission_check(installation_id) -> dict:
     """
     from integrations.services.github_app import (GitHubInstallationAccessRequired, GitHubAppTokenError,
                                                   require_installation_repository_permissions)
+    from integrations import http_client
     from .website_contract import WebsiteAuthorityError
     try:
         permissions = require_installation_repository_permissions(str(installation_id or ""))
     except GitHubInstallationAccessRequired as exc:
+        if getattr(exc, "grant", "installation") == "app":
+            # The App's own grant lacks a permission: a platform fault the
+            # founder cannot fix in their installation settings.
+            logger.warning("website_selection_app_grant_incomplete installation=%s", installation_id)
+            return {"checked": False}
         missing = tuple(getattr(exc, "missing_permissions", ()) or ())
         if "contents" in missing:
             reason, detail, permission = "contents_permission_missing", CONTENTS_PERMISSION_DETAIL, "contents"
@@ -372,7 +378,7 @@ def permission_check(installation_id) -> dict:
             reason, detail, permission = "installation_suspended", SUSPENDED_DETAIL, None
         raise WebsiteAuthorityError("github_access_required", detail, field_errors=[
             {"field": "githubRepo", "reason": reason, "permission": permission}]) from exc
-    except GitHubAppTokenError:
+    except (GitHubAppTokenError, http_client.RequestException):
         return {"checked": False}
     return {"checked": True, "contents": permissions.get("contents"), "pullRequests": permissions.get("pull_requests"),
             "writable": permissions.get("contents") == "write" and permissions.get("pull_requests") == "write"}
@@ -425,8 +431,8 @@ def merge_ability(*, repo, branch, owner_login="", founder_login="", get=None) -
         if status == 200 and isinstance(payload, dict):
             value = str(payload.get("permission") or "").lower()
             permission = value if value in {"admin", "maintain", "write", "triage", "read", "none"} else None
-        elif status == 404:
-            permission = "none"
+        # Anything else (including a 404 for a renamed login or a token that
+        # cannot see collaborators) leaves the founder's permission unknown.
     can_write = permission in {"admin", "maintain", "write"} if permission else None
     if review or code_owners or can_write is False:
         can_merge = False

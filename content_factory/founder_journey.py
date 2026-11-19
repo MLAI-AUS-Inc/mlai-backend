@@ -822,8 +822,10 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
                                            first_article=first_article)
 
     if _mapping(decision.get("action")).get("id") == "approve_on_github":
-        decision = _reviewer_decision(decision, connection=connection,
-                                      run=run if decision.get("runId") == getattr(run, "run_id", None) else setup_run)
+        decided_id = decision.get("runId")
+        decided_run = next((item for item in (run, setup_run)
+                            if item is not None and decided_id and item.run_id == decided_id), setup_run)
+        decision = _reviewer_decision(decision, connection=connection, run=decided_run)
 
     if policy_v2_applies(organization) and not decision.get("copyId"):
         ask = _mapping(decision.get("action")).get("id")
@@ -1018,7 +1020,11 @@ def _reviewer_decision(decision, *, connection, run):
     merges the exact validated head; GitHub still enforces protection.
     """
     from .website_repository_selection import reviewer_ask, reviewer_needed
-    if not reviewer_needed(connection, run):
+    # P2 already worded this as GitHub's required approval (the article merge
+    # worker's BRANCH_PROTECTION_APPROVAL_REQUIRED, possibly on a published
+    # child run that is not ``run``).
+    protected = decision.get("copyId") == "ask_approve_on_github_protected"
+    if not (protected or reviewer_needed(connection, run)):
         return decision
     url = _mapping(decision.get("action")).get("url")
     ask = reviewer_ask(connection, url=url)
