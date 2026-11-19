@@ -320,6 +320,8 @@ class NameRuleTests(SimpleTestCase):
             ({"title": "Vite + React + TS"}, ""),
             ({"title": "Just a moment..."}, ""),
             ({"title": "spring-surf-fc2e.sofia-vi-lee.workers.dev"}, ""),
+            ({"title": "Sign in | Acme"}, ""),
+            ({"title": "Dashboard"}, ""),
         ):
             with self.subTest(meta):
                 self.assertEqual(website_hosts.suggested_company_name("spring-surf-fc2e.sofia-vi-lee.workers.dev",
@@ -428,6 +430,13 @@ class PreflightEndpointTests(_ApiBase, TestCase):
         created = self.create({"domain": "spring-surf-fc2e.sofia-vi-lee.workers.dev"}, key="k-lilia")
         self.assertEqual(created.status_code, 201, created.data)
         self.assertEqual(created.data["name"], "Lilia Daily Planner")
+
+    def test_the_check_creates_no_profile(self):
+        from founder_tools.models import VibeRaisingProfile
+        response = self.preflight("lifestitch.com.au")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["existing"], {"state": "none"})
+        self.assertFalse(VibeRaisingProfile.objects.filter(user=self.user).exists())
 
     def test_existing_is_only_ever_your_own(self):
         mine = self.create({"domain": "banksia.studio"}, key="k-mine")

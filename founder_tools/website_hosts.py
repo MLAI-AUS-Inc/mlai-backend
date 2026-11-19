@@ -258,6 +258,8 @@ GENERIC_TITLES = frozenset({
     "my website", "coming soon", "under construction", "site", "website", "app", "lovable app", "lovable",
     "bolt", "replit", "emergent", "403 forbidden", "404 not found", "not found", "access denied",
     "just a moment...", "attention required!", "error",
+    # An app host's sign-in page names the page, not the startup.
+    "login", "log in", "sign in", "sign up", "signin", "signup", "dashboard", "page not found",
 })
 
 

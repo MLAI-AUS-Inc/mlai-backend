@@ -357,10 +357,11 @@ def already_added_body(company, match) -> dict:
 
 
 def existing_for(user, host, name) -> dict:
-    from .services import get_or_create_founder_profile
+    """``existing`` for the preflight answer. A read: no profile is created here."""
+    from .models import VibeRaisingProfile
 
     try:
-        profile = get_or_create_founder_profile(user)
+        profile = VibeRaisingProfile.objects.filter(user=user).first()
         company, match = own_duplicate(profile, name=name, domain=host)
     except Exception:  # noqa: BLE001 - the create repeats this check
         logger.warning("founder_website_preflight_existing_failed", exc_info=True)
