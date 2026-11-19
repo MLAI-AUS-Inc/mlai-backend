@@ -4233,6 +4233,27 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "RUN_BUDGET_NOT_CONFIGURED",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "RUN_BUDGET_NOT_CONFIGURED",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "retry_same_step",
+      "user_message": "Our setup assistant is waiting on a configuration fix on our side. We are on it; nothing is needed from you."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "RUN_IDENTITY_MISMATCH",
       "emitter_scopes": [
         "content_factory"

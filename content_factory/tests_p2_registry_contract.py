@@ -23,7 +23,8 @@ from .self_heal_testing import ALL_FLAGS_ON, make_named_legacy_org, make_p2_org
 ROOT = Path(__file__).resolve().parents[1]
 # cf-registry's bytes, checked with cmp when vendored. Merge provenance is checked remotely.
 # Registry/envelope bytes: adds the SDK and sandbox fault codes (A5) and puts the
-# editorial currency codes on existing policies (B9) ahead of the CF pin bump.
+# editorial currency codes on existing policies (B9), adds
+# the B10 codes and RUN_BUDGET_NOT_CONFIGURED (B14) ahead of the CF pin bump.
 VENDORED_SHA256 = {
     "contracts/failure-codes.json": "8120e1faa1e0d1b4a7dbed6204df9721fff4be8cbc39f0c15ab78b4bee353c73",
     "contracts/failure-envelope-v1.schema.json": "0139fa71440257c0f073bae8c721fdb7bd4ee0cb1ebe2f47b33242905ef76e0d",

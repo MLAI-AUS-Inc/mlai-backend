@@ -101,12 +101,16 @@ def _contact_for(user, *, now):
     return contact
 
 
-def record_lead(user, lead: dict, *, now=None):
-    """Upsert one lead for ``user``. Returns (public lead, created, stored)."""
+def record_lead(user, lead: dict, *, now=None, source="my_startup.website_step"):
+    """Upsert one lead for ``user``. Returns (public lead, created, stored).
+
+    Only a not-on-GitHub reason (``REASONS``) emits the funnel's
+    ``not_on_github`` event; other lead kinds share the row, not the event.
+    """
     now = now or timezone.now()
     key = f"{lead['reason']}:{lead['domain']}"
     entry = {"version": 1, "userId": user.pk, "reason": lead["reason"], "domain": lead["domain"] or None,
-             "hostClass": lead["hostClass"], "source": "my_startup.website_step"}
+             "hostClass": lead["hostClass"], "source": source}
     with transaction.atomic():
         contact = _contact_for(user, now=now)
         if contact is None:
@@ -139,7 +143,7 @@ def record_lead(user, lead: dict, *, now=None):
                 contact.user_id = user.pk
                 fields.append("user")
             contact.save(update_fields=fields)
-        if created:
+        if created and lead["reason"] in REASONS:
             from content_factory.founder_funnel import emit_event
             at, signed_up = now, getattr(user, "date_joined", None)
             transaction.on_commit(lambda: _emit(emit_event, user.pk, at, signed_up))
@@ -147,6 +151,24 @@ def record_lead(user, lead: dict, *, now=None):
         logger.info("founder_website_lead_not_stored user=%s reason=%s", user.pk, lead["reason"])
     public = {key: entry[key] for key in ("reason", "domain", "hostClass", "notifyWhenChanged", "remindAt", "createdAt")}
     return public, created, stored
+
+
+def record_staff_lead(organization, *, reason, cause, domain="", now=None):
+    """Record a lead row when staff could not set up a founder's website (plan B25).
+
+    The row goes on the startup owner's contact, beside the not-on-GitHub
+    leads, so the same follow-up finds it when the cause is fixed. ``reason``
+    is the lead kind; ``cause`` the closed-list "can't be done yet" reason.
+    Returns (public lead, created, stored), or None without a billing user.
+    """
+    from django.contrib.auth import get_user_model
+    user = get_user_model().objects.filter(pk=getattr(organization, "billing_user_id", None)).first()
+    if user is None:
+        logger.info("founder_website_staff_lead_without_owner org=%s reason=%s", getattr(organization, "pk", None), reason)
+        return None
+    host_class = cause if HOST_CLASS.fullmatch(str(cause or "")) else "unknown"
+    return record_lead(user, {"reason": reason, "domain": normalise_lead_domain(domain), "hostClass": host_class,
+                              "notify": True}, now=now, source="staff_fixing.cant_be_done_yet")
 
 
 def _emit(emit_event, user_id, at, signed_up):

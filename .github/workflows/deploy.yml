@@ -251,7 +251,7 @@ jobs:
       run: python scripts/test_without_database.py content_factory.tests_setup_example_action_unit
 
     - name: Check Articles failure taxonomy without database access
-      run: python scripts/test_without_database.py content_factory.tests_failure_contract_unit content_factory.tests_run_command_conflicts_unit content_factory.tests_run_terminal_transport_unit content_factory.tests_run_writer_retirement_unit
+      run: python scripts/test_without_database.py content_factory.tests_failure_contract_unit content_factory.tests_website_staff_fixing_unit content_factory.tests_run_command_conflicts_unit content_factory.tests_run_terminal_transport_unit content_factory.tests_run_writer_retirement_unit
 
     - name: Check generated run-status module without database access
       run: |
@@ -1674,6 +1674,8 @@ jobs:
         ARTICLES_RUN_FACT_AUTHORITY_ENABLED: ${{ vars.ARTICLES_RUN_FACT_AUTHORITY_ENABLED || '' }}
         ARTICLES_RUN_EVENT_AUTHORITY_ENABLED: ${{ vars.ARTICLES_RUN_EVENT_AUTHORITY_ENABLED || '' }}
         ARTICLES_RUN_SDK_CONTROL_ENABLED: ${{ vars.ARTICLES_RUN_SDK_CONTROL_ENABLED || '' }}
+        ARTICLES_RUN_CONTROL_MODEL_USD: ${{ vars.ARTICLES_RUN_CONTROL_MODEL_USD || '' }}
+        ARTICLES_RUN_CONTROL_MODEL_TOKENS: ${{ vars.ARTICLES_RUN_CONTROL_MODEL_TOKENS || '' }}
         ARTICLES_ARTICLE_RECOVERY_ENABLED: ${{ vars.ARTICLES_ARTICLE_RECOVERY_ENABLED || '' }}
         ARTICLES_HOSTED_VERIFICATION_ENABLED: ${{ vars.ARTICLES_HOSTED_VERIFICATION_ENABLED || '' }}
         ARTICLES_HOSTED_ENVIRONMENT_RECOVERY_ENABLED: ${{ vars.ARTICLES_HOSTED_ENVIRONMENT_RECOVERY_ENABLED || '' }}
