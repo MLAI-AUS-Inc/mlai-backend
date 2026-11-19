@@ -18,6 +18,7 @@ class CommunityRooAvatar(models.Model):
         related_name="roo_avatars",
     )
     community = models.CharField(max_length=255)
+    fur = models.CharField(max_length=32, choices=choices("fur"), null=True, blank=True)
     hair = models.CharField(
         max_length=32, choices=choices("hair"), null=True, blank=True
     )

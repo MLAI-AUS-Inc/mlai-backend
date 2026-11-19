@@ -186,7 +186,7 @@ case "$key" in
     ;;
   SYSTEM_EMAIL_RESEND_MESSAGES)
     # Empty keeps every message on its legacy provider; otherwise "all" or registered keys.
-    system_email_keys=" all chat_sign_in_code magic_link password_reset notification_channel_verify article_review_ready article_content_ready article_report_ready monthly_update_7d monthly_update_1d "
+    system_email_keys=" all chat_sign_in_code magic_link password_reset notification_channel_verify article_review_ready article_content_ready article_report_ready monthly_update_7d monthly_update_1d daily_research_topics "
     IFS=',' read -r -a system_email_values <<< "$value"
     for system_email_value in "${system_email_values[@]}"; do
       [[ "$system_email_keys" == *" ${system_email_value} "* ]] || {
