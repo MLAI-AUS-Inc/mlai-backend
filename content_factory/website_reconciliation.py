@@ -450,12 +450,14 @@ def handle_website_github_event(event_type, payload):
                     website.save(update_fields=["configuration_version", "capabilities", "blockers", "verified_sha", "updated_at"])
                     if not never_verified:
                         result["invalidated"] += 1
-                    prepare_wakes.append((website.pk, config.organization_id, owned_merge["run_id"] if owned_merge else ""))
+                    prepare_wakes.append((website.pk, config.organization_id, owned_merge["run_id"] if owned_merge else "",
+                        bool(carried_from)))
         # Run no provider calls while the webhook transaction owns authority
         # locks. Both MLAI merges and customer pushes resume the same journey.
-        for identifier, organization_id, owned_merge_run_id in prepare_wakes:
+        for identifier, organization_id, owned_merge_run_id, carried in prepare_wakes:
             from .website_prepare import wake_prepare_for_source
-            wake_prepare_for_source(identifier, organization_id=organization_id, owned_merge_run_id=owned_merge_run_id)
+            wake_prepare_for_source(identifier, organization_id=organization_id, owned_merge_run_id=owned_merge_run_id,
+                source_sha=source_sha, carried=carried)
     else:
         result["ignored"] = True
     return result
@@ -1557,6 +1559,7 @@ def _process_source_reverification(identifier, now):
         _require_roo_points_for_ai_agent, _mark_roo_points_gate_authorized, founder_actor_id_for_user)
     from .contract import CONTENT_FACTORY_REQUEST_SOURCE
     from .website_operations import reserve_workflow_operation, bind_operation_run
+    from .website_prepare_sticky_stop import ScanHeld
     from integrations import http_client
     with transaction.atomic():
         op = WebsiteConnectionOperation.objects.select_for_update().select_related("connection__organization").filter(pk=identifier, state="pending").first()
@@ -1602,6 +1605,10 @@ def _process_source_reverification(identifier, now):
                     record_owner_setup_merge(current, owned_merge)
         if scan_required and not receipt.get("scan_run_id"):
             require_unlocked_remote_call()
+            # A stopped preparation this push cannot help, or a spent daily
+            # scan budget, settles the check without a paid scan (plan B3).
+            from .website_prepare_sticky_stop import check_source_scan
+            check_source_scan(website, op, now=now)
             remote = _content_factory_remote_config()
             if not remote["enabled"]:
                 raise WebsiteAuthorityError("source_reverification_unavailable", "Repository scanning is unavailable.", retryable=True)
@@ -1712,6 +1719,9 @@ def _process_source_reverification(identifier, now):
             state, receipt = "completed", {**receipt, "status": "verified", "source_sha": op.payload["source_sha"],
                 "target_id": target.target_key, "ci_operation_id": str(ci.pk) if ci else "", "ci_reused": ci is None,
                 "deployment_operation_id": deployment_id, "repository_modified": False}
+    except ScanHeld as held:
+        state = held.state
+        receipt.update(held.receipt)
     except WebsiteAuthorityError as exc:
         receipt.update(status="verification_pending", code=exc.code, retryable=exc.retryable)
         if exc.code in {"website_disconnected", "website_connection_changed", "website_operation_cancelled"}:

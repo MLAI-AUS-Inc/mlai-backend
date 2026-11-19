@@ -118,6 +118,25 @@ class WebsiteLeadTests(TestCase):
         self.assertEqual((first.status_code, first.data["recorded"], len(events)), (201, False, 1))
         again, events = self.post({"reason": "not_on_github", "notifyWhenChanged": True})
         self.assertEqual((again.status_code, len(events)), (200, 0))
+        # Nothing keeps the request, so the answer never promises an email.
+        self.assertFalse(again.data["recorded"])
+        self.assertFalse(again.data["lead"]["notifyWhenChanged"])
+        self.assertIsNone(again.data["lead"]["remindAt"])
+        self.assertNotIn("We'll email you", again.data["message"])
+        self.assertIn("can't email you", again.data["message"])
+
+    @override_settings(**GATE)
+    def test_a_later_explicit_false_never_clears_an_earlier_opt_in(self):
+        self.post({"reason": "not_on_github", "domain": "framer-site.example.com", "notifyWhenChanged": True})
+        remind_at = next(iter(self.leads().values()))["remindAt"]
+        response, _events = self.post({"reason": "not_on_github", "domain": "framer-site.example.com",
+                                       "notifyWhenChanged": False})
+        self.assertTrue(response.data["recorded"])
+        self.assertTrue(response.data["lead"]["notifyWhenChanged"])
+        self.assertEqual(response.data["lead"]["remindAt"], remind_at)
+        self.assertIn("email you when that changes", response.data["message"])
+        lead = next(iter(self.leads().values()))
+        self.assertEqual((lead["notifyWhenChanged"], lead["remindAt"]), (True, remind_at))
 
     def test_lead_rows_are_system_owned_crm_attributes(self):
         from crm.engagement import RESERVED_ATTRIBUTE_KEYS

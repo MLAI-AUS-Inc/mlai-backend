@@ -272,7 +272,8 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
                 "reason_code": "", "blocked_step": None, "deployment_attempts": 0,
                 "dispatch_outcome": "replayed" if check_again else "new_attempt"}
             for key in ("deployment_wait_started_at", "transient_started_at", "child_resume_pending", "failure_class",
-                    "source_repins"):
+                    "source_repins", "child_dispatch_budget"):
+                # A scan-budget hold is judged again at the next scan (plan B3).
                 op.receipt.pop(key, None)
             op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + (0 if check_again else 1),
                 "user_clicks": op.payload.get("user_clicks", 1) + 1}
@@ -414,6 +415,14 @@ def _finish_prepare(op, *, now):
     from .website_goal_runner import owns_goal, finish_goal
     if owns_goal(op):
         finish_goal(op, now=now)
+    from . import website_prepare_counters as counters
+    from . import website_prepare_sticky_stop as sticky
+    counters.observe(op)
+    sticky.record_stop(op, now=now)
+    if op.state == "completed":
+        # The operation's scan budget bounds a loop that never finishes; a
+        # website that reached Ready starts it again (plan B3).
+        sticky.reset_scan_budget(op)
     if op.state not in {"pending", "running"} and op.receipt.get("staff_alerted"):
         # Ready, or stopped, cancelled or superseded: this preparation's own
         # deadline alert is no longer a founder waiting on it.
@@ -422,7 +431,16 @@ def _finish_prepare(op, *, now):
     logger.info("website_prepare operation=%s company=%s connection=%s generation=%s step=%s state=%s reason=%s attempt=%s next_attempt=%s dispatch_outcome=%s",
         op.pk, op.payload.get("company_id"), op.connection_id, op.generation, op.receipt.get("current_step"),
         op.state, op.receipt.get("reason_code", ""), op.attempts, op.next_attempt_at, op.receipt.get("dispatch_outcome", ""))
-    return _persist_prepare(op, now=now)
+    saved = _persist_prepare(op, now=now)
+    if saved is not None and saved.state == "needs_attention" and counters.at_cap(saved.receipt):
+        # The same failure stopped OWNER_RETRY_CAP times: Try again is no
+        # longer offered, so staff hear of it now (the sweep's own slot).
+        try:
+            from .founder_stuck_alerts import queue_operation_stopped_alert
+            queue_operation_stopped_alert(saved, code=str(saved.receipt.get("reason_code") or ""), now=now)
+        except Exception:  # noqa: BLE001 - the stuck sweep queues the same alert later
+            logger.exception("website_prepare retry_cap_alert_failed operation=%s", saved.pk)
+    return saved
 
 
 def _permission_action(connection, *, grants=None):
@@ -452,6 +470,8 @@ def prepare_failure(op, step, error, *, now=None):
         decision = {**decision, "code": original["code"], "failure_class": legacy_failure_class(original["code"],
             retryable=original["retryable"], status=getattr(error, "status", None))}
     code, classification = decision["code"], decision["failure_class"]
+    from . import website_prepare_counters as counters
+    counters.count_failure(op)
     strict_policy = bool(policy_enabled or decision["contract_invalid"])
     permission_needed = step in PERMISSION_STEPS.get(code, ())
     if not (strict_policy and classification == "waiting"):
@@ -488,9 +508,15 @@ def prepare_failure(op, step, error, *, now=None):
     if observation_enabled:
         op.receipt["failure_taxonomy_observation"] = {"failure": decision["failure"], "classification": decision["failure"]["failure_class"] if decision["failure"] else None,
             "policy_classification": classification, "contract_invalid": decision["contract_invalid"]}
+    # The page choice is an ask whatever the registry's policy view says: the
+    # error is raised only when the founder's consent says they choose (or a
+    # legacy card renders it), so it never becomes a "Try again" stop (plan A9).
+    page_choice = (code == "articles_page_choice_required"
+        and (getattr(error, "user_action", None) or {}).get("id") == "choose_articles_page")
     if code in SOURCE_CHANGED_CODES and _repin_to_current_source(op, now=now):
         pass
-    elif (getattr(error, "user_action", None) and (classification == "needs_user" or not strict_policy and getattr(error, "result", None) is None)
+    elif (getattr(error, "user_action", None) and (classification == "needs_user" or page_choice
+            or not strict_policy and getattr(error, "result", None) is None)
             and (code not in PERMISSION_CODES or permission_needed)):
         op.state, op.next_attempt_at = "needs_user", None
         op.receipt.update(status="needs_you", user_action=error.user_action, failure_class="needs_user", retryable=False)
@@ -591,6 +617,7 @@ def prepare_failure(op, step, error, *, now=None):
         op.state, op.next_attempt_at = "needs_attention", None
         op.receipt.update(status="needs_attention", user_action={"id": "retry", "label": "Try again"})
     from .website_operations import prepare_receipt
+    counters.observe(op)
     op.receipt = prepare_receipt(op)
 
 
@@ -1255,6 +1282,17 @@ def _advance_claimed_prepare(op, *, now, handlers):
             if op.receipt.get("last_completed") == {"step": step, "facts_digest": digest}:
                 raise WebsiteAuthorityError("prepare_no_progress", blocked.get("reason") or next_action.get("label") or "Website preparation needs attention.", retryable=False)
             from . import website_prepare_setup_cap as setup_cap
+            from . import website_prepare_sticky_stop as sticky
+            budget = sticky.scan_budget_reached(op, now=now) if step == "scan" else None
+            if budget is not None:
+                # Scans count toward the child-dispatch budget too (plan B3):
+                # each push used to buy one more scan of an unchanged failure.
+                sticky.hold_for_budget(op, budget, now=now)
+                saved = _finish_prepare(op, now=now)
+                if saved is not None:
+                    sticky.queue_budget_alert(saved.connection, saved, scope=budget[0], count=budget[1],
+                        limit=budget[2], now=now)
+                return saved
             if step == "setup" and setup_cap.reached(op):
                 # Facts that change on every pass never repeat a digest; this
                 # operation's own setup count bounds that loop instead.
@@ -1274,6 +1312,10 @@ def _advance_claimed_prepare(op, *, now, handlers):
                     from .website_hosted_setup_lineage import discard_for_new_setup
                     discard_for_new_setup(op)
                     setup_cap.record(op, run_id)
+                elif step == "scan":
+                    sticky.record_scan(op, run_id)
+                from . import website_prepare_counters as counters
+                counters.count_child(op, run_id)
                 op.receipt.update(child_run_id=run_id, **{f"{step}_run_id": run_id})
                 op.payload = {**op.payload, "run_id": run_id}
                 break
@@ -1334,13 +1376,19 @@ def wake_prepare_after_commit(connection_id):
     transaction.on_commit(lambda: advance_prepares_for_connection(connection_id), robust=True)
 
 
-def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_id=""):
+def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_id="", source_sha="", carried=False):
     """Source changes reopen the current operation without granting new consent.
 
     Stopping preparation keeps its setup pull request publishable, so an owned
     merge of a current-generation setup (MLAI's Publish, or the owner merging
     that verified pull request on GitHub) also reopens a cancelled preparation
     to verify that setup. Any other push leaves stopped work stopped.
+
+    With sticky stops (plan B3, ``website_prepare_sticky_stop``) a push that is
+    not an owned merge re-opens a ``needs_attention`` or ``stopped`` preparation
+    only when the change can alter its outcome, and leaves a finished one whose
+    proof the push carried (``carried``) to the free carried re-check.
+    ``source_sha`` is the pushed head.
     """
     from .website_models import WebsiteConnection
     from .models import OrganizationContentConfig
@@ -1368,6 +1416,10 @@ def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_i
             return latest
     if enrolled(connection.organization_id) and latest and owns_goal(latest):
         return wake_goal_for_source(config, company_id=company.pk, user=connection.authorized_by, now=timezone.now())
+    if not owned_merge_run_id and latest is not None:
+        from . import website_prepare_sticky_stop as sticky
+        if sticky.hold_push(connection, latest, source_sha=source_sha, carried=carried):
+            return None
     if not owned_merge_run_id and _source_check_owns_push(connection, config, latest):
         # The push's own source check rescans for build proof at the new commit
         # and checks the live page; reopening a finished preparation here only
@@ -1424,7 +1476,9 @@ def _source_check_owns_push(connection, config, latest):
 # Cancellation bookkeeping stays with the cancel follow-up that owns the cleanup.
 SOURCE_RECHECK_DROPPED_RECEIPT_KEYS = frozenset({"scan_run_id", "setup_run_id", "completed_steps", "deployment_wait_started_at",
     "transient_started_at", "child_resume_pending", "remote_effects", "remote_outcome_unknown", "remote_cleanup_pending",
-    "cancellation_undoes_remote_writes"})
+    "cancellation_undoes_remote_writes",
+    # A scan-budget hold is judged again at the next scan (plan B3).
+    "child_dispatch_budget"})
 
 
 def _source_recheck_values(op, *, message, merged_setup_run_id=""):

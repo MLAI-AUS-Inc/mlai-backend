@@ -39,6 +39,8 @@ HOST_CLASS = re.compile(r"[a-z][a-z0-9_]{0,39}")
 HOSTNAME = re.compile(r"(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
 MESSAGE = "MLAI can only set up articles for websites whose code is on GitHub today."
 NOTIFY_MESSAGE = "Thanks. We'll email you when that changes."
+# Nothing durable holds the request, so nothing would send that email.
+NOT_STORED_MESSAGE = "We couldn't save a reminder for this account, so we can't email you about it yet."
 NOT_ENABLED = {"detail": "Not available.", "reason": "not_enabled"}
 
 
@@ -113,15 +115,16 @@ def record_lead(user, lead: dict, *, now=None):
             from django.core.cache import cache
             created = bool(cache.add(f"founder-website-lead:{user.pk}:{key}", 1, timeout=30 * 86400))
             stored = False
-            entry.update(createdAt=now.isoformat(), updatedAt=now.isoformat(), notifyWhenChanged=lead["notify"],
-                         remindAt=(now + REMIND_AFTER).isoformat() if lead["notify"] else None)
+            # No reminder can reach an unstored lead, so none is promised.
+            entry.update(createdAt=now.isoformat(), updatedAt=now.isoformat(), notifyWhenChanged=False, remindAt=None)
         else:
             attributes = dict(contact.attributes) if isinstance(contact.attributes, dict) else {}
             leads = dict(attributes.get(LEADS_KEY)) if isinstance(attributes.get(LEADS_KEY), dict) else {}
             previous = leads.get(key) if isinstance(leads.get(key), dict) else None
             created, stored = previous is None, True
-            # Asking to be told is sticky: a later plain visit never withdraws it.
-            notify = bool(lead["notify"] or (previous or {}).get("notifyWhenChanged"))
+            # Asking to be told is sticky: a later plain visit, or a later
+            # notifyWhenChanged false, never withdraws it.
+            notify = bool(lead["notify"] or (previous or {}).get("notifyWhenChanged") is True)
             entry.update(createdAt=(previous or {}).get("createdAt") or now.isoformat(), updatedAt=now.isoformat(),
                          notifyWhenChanged=notify,
                          remindAt=((previous or {}).get("remindAt") or (now + REMIND_AFTER).isoformat()) if notify else None)
@@ -164,6 +167,12 @@ class FounderWebsiteLeadView(APIView):
         except ValueError as exc:
             return Response({"detail": str(exc), "reason": "invalid_lead"}, status=status.HTTP_400_BAD_REQUEST)
         public, created, stored = record_lead(request.user, lead)
-        message = MESSAGE + (" " + NOTIFY_MESSAGE if public["notifyWhenChanged"] else "")
+        # "We'll email you" only for a request this server actually keeps.
+        if stored and public["notifyWhenChanged"]:
+            message = f"{MESSAGE} {NOTIFY_MESSAGE}"
+        elif not stored and lead["notify"]:
+            message = f"{MESSAGE} {NOT_STORED_MESSAGE}"
+        else:
+            message = MESSAGE
         return Response({"lead": public, "recorded": stored, "message": message},
                         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)

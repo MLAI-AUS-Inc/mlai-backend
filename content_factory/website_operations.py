@@ -335,11 +335,14 @@ def prepare_receipt(op):
     The returned copy also corrects historical terminal receipts on read;
     it never mutates the persisted receipt or writes the operation.
     """
+    from .website_prepare_counters import at_cap, owner_can_retry, same_failure_stops
     receipt = dict(op.receipt or {})
     message = str(receipt.get("message") or "")
     scheduled = op.state == "pending" and getattr(op, "next_attempt_at", None) is not None
     if scheduled:
         return receipt
+    # Beside ``retryable`` (the system retries by itself), never instead of it.
+    receipt["owner_can_retry"] = owner_can_retry(op.state, receipt)
     retry_promise = r"will\s+(?:automatically\s+)?(?:retry|be retried)|retry\s+automatically|automatically\s+retry"
     promise = re.search(retry_promise, message, flags=re.IGNORECASE)
     stopped = op.state in {"needs_attention", "stopped"}
@@ -357,9 +360,13 @@ def prepare_receipt(op):
     if stopped and not reason.startswith("We stopped"):
         failures = receipt.get("step_failures")
         failures = failures if isinstance(failures, dict) else {}
-        counts = [*failures.values(), receipt.get("deployment_attempts")]
+        # Step failures reset on every new attempt; the stop streak does not
+        # (plan B4), so the third identical stop says 3.
+        counts = [*failures.values(), receipt.get("deployment_attempts"), same_failure_stops(receipt)]
         attempts = max([value for value in counts if type(value) is int and value > 0] + [1])
-        reason = f"We stopped after {attempts} {'attempt' if attempts == 1 else 'attempts'}: {reason.rstrip('.')}. Use Try again when you're ready."
+        follow = ("We've told the MLAI team, who will pick it up from here." if at_cap(receipt)
+                  else "Use Try again when you're ready." if receipt["owner_can_retry"] else "")
+        reason = f"We stopped after {attempts} {'attempt' if attempts == 1 else 'attempts'}: {reason.rstrip('.')}. {follow}".rstrip()
     if stopped:
         receipt["status"] = "needs_attention" if op.state == "needs_attention" else "stopped"
     receipt["message"] = reason

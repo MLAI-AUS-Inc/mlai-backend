@@ -335,6 +335,20 @@ class RetiredAskAlertTests(FounderStuckFixture):
         self.assertTrue(any("Waiting on the retired ask choose_articles_page." in text for text in texts))
         self.assertEqual(self.sweep()[0]["queued"], 0)
 
+    def test_a_page_ask_under_pick_consent_is_rendered_not_an_alert(self):
+        # Plan A9 follow-up: Home shows choose_articles_page when consent says "pick".
+        receipt = {"status": "needs_you", "reason_code": "articles_page_choice_required",
+                   "user_action": {"id": "choose_articles_page", "candidates": ["/blog", "/news"]},
+                   "goal": {"consent": {"answers": {"page_policy": "pick"}}}}
+        self.operation(state="needs_user", age=timedelta(minutes=5), receipt=receipt)
+        self.assertEqual(self.sweep()[0]["candidates"], 0)
+        cache.clear()
+        org, site = self.startup("Auto page", "auto-page.example.test", "Sam", "Lee")
+        self.operation(website=site, state="needs_user", age=timedelta(minutes=5),
+                       receipt={**receipt, "goal": {"consent": {"answers": {"page_policy": "auto"}}}})
+        kinds = [c.kind for c in stuck.find_stuck_conditions(now=self.now) if c.organization_id == org.pk]
+        self.assertEqual(kinds, ["operation_retired_ask"])
+
     def test_a_rendered_owner_ask_is_your_turn_not_an_alert(self):
         for action in ("merge_pr", "review_setup", "authorize_github"):
             self.operation(state="needs_user", receipt={"status": "needs_you", "user_action": {"id": action}})

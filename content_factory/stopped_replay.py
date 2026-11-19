@@ -78,6 +78,10 @@ def _skip_reason(op, *, stop_code, key, now) -> tuple[str, dict]:
         return "already_replayed", {}
     if setup_cap.reached(op) or setup_cap.HELD_KEY in mapping(op.receipt):
         return "setup_cap", {}
+    from .website_prepare_sticky_stop import budget_hold_active
+    if budget_hold_active(op.receipt, now=now):
+        # Staff hold a scan-budget stop; a replay would only buy the next scan.
+        return "scan_budget", {}
     if pull_request_cap_reached(connection.organization, now=now):
         return "pull_request_cap", {}
     if owned_goal_child(op, include_completed=False) is not None:

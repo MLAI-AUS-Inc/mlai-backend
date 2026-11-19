@@ -137,6 +137,13 @@ def add_p2_fields(result, op, *, organization):
     if state == "done":
         return result
     receipt = goals.mapping(op.receipt)
+    if (state == "needs_you" and goals.mapping(result.get("action")).get("id") == "choose_articles_page"
+            and goals.mapping(receipt.get("user_action")).get("id") == "choose_articles_page"):
+        # The page ask is parked only when the founder's consent says they
+        # choose (or a legacy card renders it). The registry's P2 view files
+        # it as strategy with no action, which would hide it as Working on it
+        # (plan A9): it stays the one needs-you action, with no copy id.
+        return result
     code = receipt.get("reason_code")
     registered = registry_policy.is_registered(code)
     action = result.get("action")
