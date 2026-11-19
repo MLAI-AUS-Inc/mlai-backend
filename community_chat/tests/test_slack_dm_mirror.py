@@ -885,6 +885,131 @@ class SlackDmMirrorOwnerTests(APITestCase):
                     grant, slack_user_ids=users, authenticated_public_key="1" * 64
                 )
 
+    def _roo_group_grant_and_client(self, web_client, provision, *, open_channel=None):
+        grant = SlackDmMirrorGrant.objects.create(
+            user=self.first,
+            connection=self.first_connection,
+            slack_workspace_id="TMLAI",
+            slack_user_id="UONE",
+            consented_at=timezone.now(),
+        )
+        client = web_client.return_value
+        client.users_info.side_effect = lambda *, user: {
+            "user": {
+                "id": user,
+                "team_id": "TMLAI",
+                "name": user.lower(),
+                "is_bot": user in {"UROO", "UOTHERBOT"},
+            }
+        }
+        client.conversations_open.return_value = {
+            "channel": open_channel
+            or {"id": "GROO", "members": ["UONE", "UTWO", "UROO"]}
+        }
+        provision.side_effect = lambda pubkeys, **_: {
+            "channel_id": str(uuid.uuid4()),
+            "participant_pubkeys": pubkeys,
+        }
+        return grant, client
+
+    @override_settings(
+        COMMUNITY_CHAT_RELAY_URL="wss://chat.mlai.au",
+        COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TMLAI",
+        COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
+        COMMUNITY_CHAT_AI_PROVIDERS=PROVIDERS,
+        COMMUNITY_CHAT_AI_DISCLOSURE_VERSION="test-v1",
+    )
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
+    )
+    @patch("integrations.services.slack_dm_mirror.WebClient")
+    def test_group_dm_can_include_public_roo_with_people(self, web_client, provision):
+        grant, client = self._roo_group_grant_and_client(web_client, provision)
+        # Roo in a group still needs the owner's AI sharing consent.
+        with self.assertRaises(slack_dm_mirror.SlackDmMirrorAuthorizationError):
+            open_slack_dm(
+                grant, slack_user_ids=["UTWO", "UROO"], authenticated_public_key="1" * 64
+            )
+        client.conversations_open.assert_not_called()
+        grant_test_ai_consent(self.first)
+        opened = open_slack_dm(
+            grant, slack_user_ids=["UTWO", "UROO"], authenticated_public_key="1" * 64
+        )
+        self.assertTrue(opened["mlai_channel_id"])
+        self.assertEqual(
+            set(grant.conversations.get().participant_slack_ids), {"UONE", "UTWO", "UROO"}
+        )
+        client.conversations_open.assert_called_with(users="UTWO,UROO", return_im=True)
+        client.chat_postMessage.assert_not_called()
+        # Other bots are still refused, alone or alongside Roo.
+        with self.assertRaises(slack_dm_mirror.SlackDmMirrorError):
+            open_slack_dm(
+                grant,
+                slack_user_ids=["UTWO", "UROO", "UOTHERBOT"],
+                authenticated_public_key="1" * 64,
+            )
+
+    @override_settings(
+        COMMUNITY_CHAT_RELAY_URL="wss://chat.mlai.au",
+        COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TMLAI",
+        COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
+        COMMUNITY_CHAT_AI_PROVIDERS=PROVIDERS,
+        COMMUNITY_CHAT_AI_DISCLOSURE_VERSION="test-v1",
+        COMMUNITY_CHAT_ROO_GROUP_DMS_ENABLED=False,
+    )
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
+    )
+    @patch("integrations.services.slack_dm_mirror.WebClient")
+    def test_roo_group_dms_switch_off_refuses_roo_in_groups(self, web_client, provision):
+        grant_test_ai_consent(self.first)
+        grant, client = self._roo_group_grant_and_client(web_client, provision)
+        with self.assertRaises(slack_dm_mirror.SlackDmMirrorError):
+            open_slack_dm(
+                grant, slack_user_ids=["UTWO", "UROO"], authenticated_public_key="1" * 64
+            )
+        client.conversations_open.assert_not_called()
+
+    @override_settings(
+        COMMUNITY_CHAT_RELAY_URL="wss://chat.mlai.au",
+        COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TMLAI",
+        COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
+        COMMUNITY_CHAT_AI_PROVIDERS=PROVIDERS,
+        COMMUNITY_CHAT_AI_DISCLOSURE_VERSION="test-v1",
+    )
+    @patch(
+        "integrations.services.slack_dm_mirror.BuzzBridgeClient.provision_private_conversation"
+    )
+    @patch("integrations.services.slack_dm_mirror.WebClient")
+    def test_slack_refusing_roo_in_a_group_explains_itself(self, web_client, provision):
+        grant_test_ai_consent(self.first)
+        grant, client = self._roo_group_grant_and_client(web_client, provision)
+        client.conversations_open.side_effect = _slack_api_error("cannot_dm_bot")
+        with self.assertRaises(slack_dm_mirror.SlackDmMirrorError) as raised:
+            open_slack_dm(
+                grant, slack_user_ids=["UTWO", "UROO"], authenticated_public_key="1" * 64
+            )
+        self.assertEqual(raised.exception.code, "roo_group_dm_refused")
+        self.assertIn("Roo", str(raised.exception))
+
+    @override_settings(
+        COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TMLAI",
+        COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
+    )
+    def test_roo_history_replies_are_kept_in_group_dms_with_roo(self):
+        _, conversation = self._live_conversation(
+            participant_slack_ids=["UONE", "UTWO", "UROO"],
+            participant_identity_map={"UONE": "1" * 64, "UTWO": "2" * 64, "UROO": "3" * 64},
+        )
+        conversation.slack_conversation_id = "GROO"
+        conversation.save(update_fields=("slack_conversation_id",))
+        reply = {"user": "UROO", "bot_id": "BROO", "subtype": "bot_message", "ts": "1.0"}
+        self.assertTrue(slack_dm_mirror._history_message_author_allowed(conversation, reply))
+        with override_settings(COMMUNITY_CHAT_ROO_GROUP_DMS_ENABLED=False):
+            self.assertFalse(slack_dm_mirror._history_message_author_allowed(conversation, reply))
+        stranger = {**reply, "user": "UOTHERBOT", "bot_id": "BOTHER"}
+        self.assertFalse(slack_dm_mirror._history_message_author_allowed(conversation, stranger))
+
     @override_settings(
         COMMUNITY_CHAT_RELAY_URL="wss://chat.mlai.au",
         COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TMLAI",

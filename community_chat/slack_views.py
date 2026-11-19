@@ -697,6 +697,8 @@ class SlackDmStartView(SlackDmMirrorApiView):
                 {
                     "slack": str(exc),
                     "code": getattr(exc, "code", "slack_dm_mirror_error"),
+                    # Chat shows `detail` as-is; without it members saw the code.
+                    "detail": str(exc),
                 }
             ) from exc
         except (SlackClientError, DatabaseError, BudgetDeferred) as exc:

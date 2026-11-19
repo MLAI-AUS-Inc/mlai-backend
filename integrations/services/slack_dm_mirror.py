@@ -860,6 +860,35 @@ def _store_conversation_profiles(
         return conversation
 
 
+# A member waiting on "New message" should not see "Slack is busy" because
+# another owner's sync used the same sub-second method slot. Wait out short
+# budget deferrals here (outside every lock); longer ones still surface as 429.
+INTERACTIVE_BUDGET_WAIT_SECONDS = 4.0
+
+
+def _call_slack_interactive(authority, method, *, required_scopes, **kwargs):
+    """Interactive wrapper: absorb brief budget waits, never sleep under a lock."""
+    from integrations.services.message_sync.scheduler import BudgetDeferred
+
+    waited = 0.0
+    while True:
+        try:
+            return _call_slack_with_grant_authority(
+                authority, method, required_scopes=required_scopes, **kwargs
+            )
+        except BudgetDeferred as exc:
+            delay = float(getattr(exc, "retry_after", 0) or 0)
+            if delay <= 0 or waited + delay > INTERACTIVE_BUDGET_WAIT_SECONDS:
+                raise
+            time.sleep(delay)
+            waited += delay
+
+
+def roo_group_dms_enabled() -> bool:
+    """Owner kill switch for adding Public Roo to Slack group DMs (default on)."""
+    return bool(getattr(settings, "COMMUNITY_CHAT_ROO_GROUP_DMS_ENABLED", True))
+
+
 def open_slack_dm(
     grant: SlackDmMirrorGrant,
     *,
@@ -918,8 +947,9 @@ def open_slack_dm(
         raise SlackDmMirrorError("Re-authorize Slack before starting this DM.")
     authority = _capture_slack_grant_api_authority(grant)
     profile_cache: dict[str, dict[str, str]] = {}
+    roo_in_group = False
     for slack_user_id in requested_ids:
-        response = _call_slack_with_grant_authority(
+        response = _call_slack_interactive(
             authority,
             "users_info",
             required_scopes=required_scopes,
@@ -931,11 +961,15 @@ def open_slack_dm(
         from integrations.services.slack_agent_bots import is_agent_bot_user
         from integrations.services.slack_roo import is_public_roo_user
 
+        exact_user = slack_user_id == raw_user.get("id")
+        is_public_roo = exact_user and is_public_roo_user(
+            raw_user, workspace_id=grant.slack_workspace_id
+        )
         is_roo_dm = (
             len(requested_ids) == 1
-            and slack_user_id == raw_user.get("id")
+            and exact_user
             and (
-                is_public_roo_user(raw_user, workspace_id=grant.slack_workspace_id)
+                is_public_roo
                 # An owner's own configured agent bot (for example an OpenAI dot).
                 or is_agent_bot_user(
                     raw_user,
@@ -944,9 +978,15 @@ def open_slack_dm(
                 )
             )
         )
-        if is_roo_dm:
+        # Public Roo (never another bot) may join a group DM with people. Each
+        # sender's own AI consent is still checked before every write.
+        is_roo_group_member = (
+            len(requested_ids) > 1 and is_public_roo and roo_group_dms_enabled()
+        )
+        if is_roo_dm or is_roo_group_member:
             _require_roo_ai_consent(grant.user_id)
-        if not is_roo_dm and not _is_eligible_slack_user(
+        roo_in_group = roo_in_group or is_roo_group_member
+        if not (is_roo_dm or is_roo_group_member) and not _is_eligible_slack_user(
             raw_user,
             workspace_id=grant.slack_workspace_id,
             owner_slack_user_id=grant.slack_user_id,
@@ -956,13 +996,27 @@ def open_slack_dm(
                 "or your own connected agent."
             )
         profile_cache[slack_user_id] = _profile_from_slack_user(raw_user)
-    open_response = _call_slack_with_grant_authority(
-        authority,
-        "conversations_open",
-        required_scopes=required_scopes,
-        users=",".join(requested_ids),
-        return_im=True,
-    )
+    try:
+        open_response = _call_slack_interactive(
+            authority,
+            "conversations_open",
+            required_scopes=required_scopes,
+            users=",".join(requested_ids),
+            return_im=True,
+        )
+    except SlackApiError as exc:
+        if roo_in_group and not _is_slack_auth_error(exc) and not _slack_retry_after_seconds(exc):
+            error = SlackDmMirrorError(
+                "Slack would not add Roo to this group DM. Message Roo in your "
+                "1:1 Roo DM or a channel instead."
+            )
+            error.code = "roo_group_dm_refused"
+            logger.warning(
+                "slack_dm_open_roo_group_refused slack_error=%s",
+                str(getattr(exc, "response", {}).get("error") or "unknown")[:64],
+            )
+            raise error from exc
+        raise
     raw_channel = (
         open_response.get("channel")
         if isinstance(open_response.get("channel"), dict)
@@ -3965,7 +4019,11 @@ def ingest_slack_dm_event(payload: dict[str, Any]) -> dict[str, Any] | None:
         )
     )
     normalized = _normalize_private_slack_event(
-        payload, event, allow_roo_channels=bool(private_channel)
+        payload,
+        event,
+        # Private channels and (when enabled) group DMs can contain Public Roo.
+        allow_roo_channels=bool(private_channel)
+        or (roo_group_dms_enabled() and (known_group_dm or is_group_dm_event)),
     )
     if normalized is None:
         return {"status": "ignored"}
@@ -6565,19 +6623,24 @@ def _history_message_author_allowed(conversation, message):
         return True
     if not message.get("bot_id") and message.get("subtype") != "bot_message":
         return True
-    private_channel = (
-        not conversation.slack_conversation_id.startswith("D")
-        and conversation_kind(conversation) == "private_channel"
+    kind = (
+        "im"
+        if conversation.slack_conversation_id.startswith("D")
+        else conversation_kind(conversation)
     )
+    private_channel = kind == "private_channel"
+    roo_group = kind == "mpim" and roo_group_dms_enabled()
     required = {conversation.grant.slack_user_id, str(message.get("user") or "")}
     participants = set(conversation.participant_slack_ids or [])
     return is_public_roo_reply(
         message,
         workspace_id=conversation.slack_workspace_id,
         conversation_id=conversation.slack_conversation_id,
-        allow_channels=private_channel,
+        allow_channels=private_channel or roo_group,
     ) and (
-        required.issubset(participants) if private_channel else participants == required
+        required.issubset(participants)
+        if private_channel or roo_group
+        else participants == required
     )
 
 

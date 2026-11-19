@@ -675,6 +675,11 @@ Community Chat exposes these owner-authenticated endpoints:
   private MLAI conversation, and returns its participant public keys and
   sanitized profiles. The owner key always comes from the authenticated active
   verified Community Chat device; body-supplied owner keys are ignored.
+  Public Roo may be one of the recipients of a group DM (never another bot)
+  while `COMMUNITY_CHAT_ROO_GROUP_DMS_ENABLED` is on; the owner must have AI
+  sharing consent, and Roo's replies in that group DM are mirrored. If Slack
+  refuses to add Roo, the 400 carries `code: "roo_group_dm_refused"`. Brief
+  shared-budget waits (up to 4 seconds in total) are absorbed before answering.
 - When MLAI's own Slack request budget defers a call (or Slack itself returns
   429), both `slack/users/` and `slack/dms/` answer `429` with
   `{"error": "slack_rate_limited", "retry_after_seconds": N, "detail": "..."}`

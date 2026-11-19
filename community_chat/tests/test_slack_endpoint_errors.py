@@ -181,5 +181,40 @@ class SlackEndpointErrorMappingTests(SimpleTestCase):
             {
                 "slack": "Slack is not linked.",
                 "code": "slack_dm_mirror_error",
+                "detail": "Slack is not linked.",
             },
         )
+
+
+class InteractiveSlackBudgetWaitTests(SimpleTestCase):
+    """A member opening a DM waits out a brief shared-budget slot, not longer."""
+
+    def _call(self, side_effect):
+        from integrations.services import slack_dm_mirror
+
+        with patch.object(
+            slack_dm_mirror, "_call_slack_with_grant_authority", side_effect=side_effect
+        ) as call, patch.object(slack_dm_mirror.time, "sleep") as sleep:
+            try:
+                result = slack_dm_mirror._call_slack_interactive(
+                    MagicMock(), "users_info", required_scopes=set(), user="U1"
+                )
+            except BudgetDeferred as exc:
+                result = exc
+        return result, call, sleep
+
+    def test_brief_deferral_is_waited_out(self):
+        result, call, sleep = self._call([BudgetDeferred(1), {"ok": True}])
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(call.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
+    def test_long_deferral_still_surfaces(self):
+        result, call, sleep = self._call([BudgetDeferred(30)])
+        self.assertIsInstance(result, BudgetDeferred)
+        sleep.assert_not_called()
+
+    def test_waits_are_capped_in_total(self):
+        result, call, sleep = self._call([BudgetDeferred(2)] * 5)
+        self.assertIsInstance(result, BudgetDeferred)
+        self.assertEqual(sleep.call_count, 2)
