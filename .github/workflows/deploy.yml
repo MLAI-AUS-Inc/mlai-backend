@@ -1127,7 +1127,7 @@ jobs:
           content_factory.tests_r3_legacy_publication_roundtrip \
           content_factory.tests_website_connections.WebsiteReviewRegressionTests.test_reconnect_requires_reviewed_binding \
           content_factory.tests_website_connections.WebsiteReviewRegressionTests.test_reconnecting_a_connected_website_keeps_its_setup_and_running_work \
-          content_factory.tests_website_connections.WebsiteReviewRegressionTests.test_reconnecting_a_paused_website_still_starts_a_new_generation \
+          content_factory.tests_website_connections.WebsiteReviewRegressionTests.test_reconnecting_a_paused_website_without_a_known_owner_starts_a_new_generation \
           --noinput --verbosity 2
 
     # Exercise the article chain before the expensive graph-rewind regressions,
