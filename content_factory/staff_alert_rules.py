@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 LOCAL = ZoneInfo("Australia/Melbourne")
 TERMINAL = {"failed", "blocked", "denied", "stopped", "cancelled"}
 GLOBAL_RULES = {"provider_error_rate": 600, "throttle_spike": 3600,
-                "refresh_failure_spike": 3600, "github_callback_failures": 3600}
+                "refresh_failure_spike": 3600, "github_callback_failures": 3600,
+                # One receipt per Melbourne night (background_job_digest, B6).
+                "background_job_failure_spike": 86400}
 GLOBAL_TTL = 7 * 86400
 
 
@@ -202,7 +204,8 @@ def run_alert_rule_sweep(now=None, limit=None):
         queue_founder_journey_alerts_batch(incidents, now=now)
     # Rate rules are global, independent of the rotating organization batch.
     provider_filter = Q(result__error_code__icontains="PROVIDER") | Q(result__error_code__icontains="TEMPORARILY_UNAVAILABLE") | Q(result__error_code__icontains="RATE_LIMIT") | Q(result__error_code__icontains="GATEWAY")
-    counts = ContentFactoryRun.objects.filter(updated_at__gte=now-timedelta(minutes=10)).exclude(workflow="island_refresh").aggregate(
+    # Background runs are judged by the nightly digest only (B1, B6).
+    counts = ContentFactoryRun.objects.filter(founder_run_q(), updated_at__gte=now-timedelta(minutes=10)).aggregate(
         total=Count("pk"), errors=Count("pk", filter=provider_filter))
     hour = timedelta(hours=1)
     refresh = staff_signals.total(staff_signals.REFRESH_FAILED, window=hour, now=now)

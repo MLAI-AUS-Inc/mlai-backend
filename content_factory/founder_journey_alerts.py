@@ -51,7 +51,7 @@ from django.db import connection, transaction
 from django.db.models import Exists, Max, OuterRef, Q, TextField, Value
 from django.db.models.fields.json import KT
 from django.db.models.functions import Coalesce
-from django.db.models.lookups import StartsWith
+from django.db.models.lookups import Exact, StartsWith
 from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
@@ -107,6 +107,9 @@ P2_REASON_LABELS = {
     "merge_rejected_twice": "GitHub rejected an MLAI merge twice",
     "join_request_unanswered": "A team join request has waited 72 hours",
     "founder_stuck": "A founder is stuck",
+    # B6: the only alerts on nightly scheduler runs (content_factory.background_job_digest).
+    "background_job_failing": "A startup's nightly job failed three nights running",
+    "background_job_failure_spike": "Nightly job failures passed 5% of startups in one night",
 }
 P2_ALERT_REASONS = frozenset(P2_REASON_LABELS)
 ALERT_REASONS = ALERT_REASONS | P2_ALERT_REASONS
@@ -129,6 +132,15 @@ SCHEDULER_REQUEST_SOURCE = "mlai_backend_scheduler"
 # path stamps its own source (island research uses ``island-research:`` ids).
 LEGACY_UNSTAMPED_SCHEDULER_WORKFLOWS = ("island_refresh",)
 FOUNDER_RESEARCH_REQUEST_PREFIX = "island-research:"
+# The admission receipt's principal (``run_ownership.scheduler_principal``) also
+# marks a run the scheduler started, whatever its request says (B1).
+SCHEDULER_PRINCIPAL_KIND = "scheduler"
+OWNER_PRINCIPAL_KIND_PATH = ("run_owner_v1", "identity", "principal", "kind")
+# B5: one alert per (org, workflow, original code) for these reasons, so nine
+# failed runs with one cause are one alert, not nine.
+INCIDENT_SLOT_REASONS = frozenset({"run_terminal", "self_heal_capped"})
+# Self-heal's own stop codes (B2); an older engine wrote them over error_code.
+SELF_HEAL_STOP_CODES = frozenset({"SELF_HEAL_DEADLINE_REACHED", "SELF_HEAL_ATTEMPTS_EXHAUSTED"})
 # Daily research automations stamp this request-id prefix. Their topic batches
 # wait on the founder by design, and the automation pauses itself after three
 # unanswered days, so an unpicked batch is not a stuck founder (your_turn_72h).
@@ -158,8 +170,9 @@ class FounderJourneyAlertConfigError(ValueError):
 def founder_journey_alert_id(*, organization_id, alert_reason, run_id=None, company_id=None, claimant_user_id=None, slot=None) -> str:
     """Return the stable alert id for one (org, slot, reason); it is also the Slack client_msg_id."""
     if slot is not None:
-        if alert_reason not in P2_ALERT_REASONS or not isinstance(slot, str) or not SAFE_TOKEN.fullmatch(slot):
-            raise ValueError("An alert slot must be a safe token for a P2 reason.")
+        if (alert_reason not in P2_ALERT_REASONS | INCIDENT_SLOT_REASONS or not isinstance(slot, str)
+                or not SAFE_TOKEN.fullmatch(slot)):
+            raise ValueError("An alert slot must be a safe token for a P2 or incident reason.")
         slot = f"p2-slot-{slot}"
     elif run_id:
         slot = str(run_id)
@@ -186,11 +199,15 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
 
     A scheduler run (``is_scheduler_run``) is background work, not a founder's:
     its alert id is returned but no receipt is written, whichever caller asked.
+    ``run_terminal`` and ``self_heal_capped`` with a run default to the run's
+    incident slot (``run_incident_slot``), so every caller shares one id (B5).
     """
     if alert_reason not in ALERT_REASONS:
         raise ValueError(f"Unknown founder-journey alert_reason: {alert_reason!r}")
     if organization is None or getattr(organization, "pk", None) is None:
         raise ValueError("A founder-journey alert needs a saved organization.")
+    if slot is None and run is not None and alert_reason in INCIDENT_SLOT_REASONS:
+        slot = run_incident_slot(run)
     safe_details = _safe_details(details)
     alert_id = founder_journey_alert_id(
         organization_id=organization.pk, alert_reason=alert_reason,
@@ -246,9 +263,12 @@ def queue_founder_journey_alerts_batch(items, *, now=None) -> dict:
             continue
         details = _safe_details(item.get("details"))
         company = item.get("company_id")
+        slot = item.get("slot")
+        if slot is None and run is not None and reason in INCIDENT_SLOT_REASONS:
+            slot = run_incident_slot(run)
         identifier = founder_journey_alert_id(organization_id=organization.pk, alert_reason=reason,
             run_id=getattr(run, "run_id", None), company_id=company,
-            claimant_user_id=details.get("claimant_user_id"), slot=item.get("slot"))
+            claimant_user_id=details.get("claimant_user_id"), slot=slot)
         receipt = {"alert_id": identifier, "alert_reason": reason, "state": "pending", "attempts": 0,
             "sent_at": None, "queued_at": queued_at.isoformat(), "company_id": str(company) if company else None,
             "run_id": str(run.run_id) if run is not None else None, "run_pk": run.pk if run is not None else None,
@@ -510,14 +530,26 @@ def is_superseded(run) -> bool:
                                             created_at__gt=run.created_at).exists()
 
 
-def is_scheduler_run(run) -> bool:
-    """A run the backend scheduler started, which never alerts or self-heals (IF-15, A2).
+def _principal_kind(run) -> str:
+    value = getattr(run, "result", None)
+    for key in OWNER_PRINCIPAL_KIND_PATH:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value if isinstance(value, str) else ""
 
-    Decided by the saved request source only. A founder-started run of the same
+
+def is_scheduler_run(run) -> bool:
+    """A run the backend scheduler started, which never alerts or self-heals (IF-15, A2, B1).
+
+    This is the one audience test: the self-heal engine, the queue functions and
+    every alert sweep use it or its SQL twin ``founder_run_q``. It is decided by
+    who asked, never by the workflow name: the saved request source, or the
+    admission receipt's scheduler principal. A founder-started run of the same
     workflow (paid island research is ``island_refresh`` too) is founder work and
     alerts like any other. An old unstamped nightly refresh still counts as
     scheduler work (see ``LEGACY_UNSTAMPED_SCHEDULER_WORKFLOWS``).
     """
+    if _principal_kind(run) == SCHEDULER_PRINCIPAL_KIND:
+        return True
     request = getattr(run, "run_request", None)
     request = request if isinstance(request, dict) else {}
     if "request_source" in request:
@@ -540,7 +572,39 @@ def founder_run_q(prefix: str = "") -> Q:
     client_id = Coalesce(KT(f"{request}__client_request_id"), Value(""), output_field=TextField())
     founder_research = Q(StartsWith(client_id, FOUNDER_RESEARCH_REQUEST_PREFIX))
     unstamped_founder = ~stamped & (~Q(**{f"{workflow}__in": LEGACY_UNSTAMPED_SCHEDULER_WORKFLOWS}) | founder_research)
-    return founder_stamped | unstamped_founder
+    principal = Coalesce(KT(f"{prefix}result__" + "__".join(OWNER_PRINCIPAL_KIND_PATH)), Value(""),
+                         output_field=TextField())
+    not_scheduler_principal = ~Q(Exact(principal, SCHEDULER_PRINCIPAL_KIND))
+    return (founder_stamped | unstamped_founder) & not_scheduler_principal
+
+
+def original_failure_code(result) -> str:
+    """The run's own failure code, seen through an older self-heal recode (B2, B5)."""
+    result = result if isinstance(result, dict) else {}
+    code = run_stop_code(result)
+    if code in SELF_HEAL_STOP_CODES:
+        heal = result.get("self_heal_v1") if isinstance(result.get("self_heal_v1"), dict) else {}
+        for value in [heal.get("code")] + [row.get("code") for row in reversed(heal.get("history") or [])
+                                           if isinstance(row, dict)]:
+            if isinstance(value, str) and SAFE_CODE.fullmatch(value) and value not in SELF_HEAL_STOP_CODES:
+                return value
+    return code
+
+
+def run_incident_slot(run):
+    """The (workflow, original code) slot shared by one run's duplicates (B5), or None without a code."""
+    code = original_failure_code(getattr(run, "result", None))
+    if not code:
+        return None
+    workflow = re.sub(r"[^A-Za-z0-9_.\-]", "_", str(getattr(run, "workflow", "") or "-"))[:40]
+    return f"wf-{workflow}:code-{code[:48]}"
+
+
+def run_alert_id(run, reason) -> str:
+    """The alert id ``queue_founder_journey_alert`` gives this run and reason."""
+    slot = run_incident_slot(run) if reason in INCIDENT_SLOT_REASONS else None
+    return founder_journey_alert_id(organization_id=run.organization_id, alert_reason=reason,
+                                    run_id=None if slot else run.run_id, slot=slot)
 
 
 def is_owner_cancel(run) -> bool:
@@ -588,7 +652,8 @@ def _detect(*, now, since, limit) -> dict:
     budget = [limit]
     counts = dict.fromkeys(DETECTED_REASONS, 0)
     # Every org's alert ids, read once per tick; kept current as this tick queues.
-    known = {org_id: set(receipts) for org_id, receipts in _receipt_index()}
+    index = dict(_receipt_index())
+    known = {org_id: set(receipts) for org_id, receipts in index.items()}
 
     def seen(organization_id, alert_id):
         return alert_id in known.get(organization_id, ())
@@ -596,6 +661,10 @@ def _detect(*, now, since, limit) -> dict:
     def queue(reason, **kwargs):
         alert_id = queue_founder_journey_alert(alert_reason=reason, **kwargs)
         known.setdefault(kwargs["organization"].pk, set()).add(alert_id)
+        stored = _receipts_in(getattr(kwargs.get("run"), "result", None)).get(reason)
+        if isinstance(stored, dict):
+            # Later duplicates in this tick adopt the same receipt (B5).
+            index.setdefault(kwargs["organization"].pk, {})[alert_id] = stored
         counts[reason] += 1
         budget[0] -= 1
 
@@ -630,6 +699,14 @@ def _detect(*, now, since, limit) -> dict:
                 continue
             run = ContentFactoryRun.objects.select_related("organization").filter(pk=pk).first()
             if run and reason in run_alert_reasons(run, now=now) and reason not in _receipts_in(run.result):
+                shared = run_alert_id(run, reason) if reason in INCIDENT_SLOT_REASONS else None
+                if shared and seen(organization_id, shared):
+                    # Another run with the same workflow and cause already holds the
+                    # alert (B5): record it on this run too, without a second alert.
+                    existing = index.get(organization_id, {}).get(shared)
+                    if isinstance(existing, dict):
+                        _mirror_run_receipt(run, reason, existing)
+                    continue
                 queue(reason, organization=run.organization, run=run)
     if budget[0] > 0:
         _detect_companies_without_draft(now=now, since=since, budget=budget, queue=queue, seen=seen)

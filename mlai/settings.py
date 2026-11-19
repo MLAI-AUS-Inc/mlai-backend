@@ -2763,6 +2763,15 @@ ARTICLES_SELF_HEAL_LEGACY_ORGANIZATIONS = os.getenv("ARTICLES_SELF_HEAL_LEGACY_O
 ARTICLES_SELF_HEAL_POLICY_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_POLICY_ENABLED", False)
 ARTICLES_SELF_HEAL_REPORT_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_REPORT_ENABLED", False)
 ARTICLES_SELF_HEAL_SWEEP_LIMIT = int(os.getenv("ARTICLES_SELF_HEAL_SWEEP_LIMIT", "50"))
+# Kill switch, default on (plan step B1): self-heal reads the failure class
+# before the 48-hour wall. A founder ask (needs_user) waits for the founder with
+# no wall; unsupported and unregistered codes stop at once; only items the
+# engine is retrying or repairing hit the wall. A refunded or released run is
+# terminal ("start again"), never resumed (owner decision D16).
+ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED", True)
+# Kill switch, default on (plan step B2): a capped self-heal stop keeps the
+# run's original error_code and records its own stop under self_heal_v1.stop.
+ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED", True)
 ARTICLES_CHANNEL_SWITCH_ENABLED = _env_is_true("ARTICLES_CHANNEL_SWITCH_ENABLED", False)
 ARTICLES_SOURCE_REPIN_ENABLED = _env_is_true("ARTICLES_SOURCE_REPIN_ENABLED", False)
 # Kill switch, on by default and for every startup (not cohort-gated): a push

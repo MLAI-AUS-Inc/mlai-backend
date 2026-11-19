@@ -229,6 +229,11 @@ def run_decision(organization, run, *, config, user, now, queue=None, follow_pub
         if is_delivered_content_only(run):
             exhausted = mapping(mapping(getattr(config, "pillar_strategy", None)).get("self_heal")).get("ladder")
             copy_id = "done_copy_ready_ladder_exhausted" if mapping(exhausted).get("exhausted_at") else "done_copy_ready_strategy"
+    if copy_id is None and run.status in {"failed", "blocked"}:
+        from .failure_policy_engine import class_before_wall_enabled, settled_without_delivery
+        if class_before_wall_enabled() and settled_without_delivery(run):
+            # D16: the points came back, so the founder starts again, never resumes.
+            copy_id = "stopped"
     if copy_id is None and count:
         copy_id = "ask_check_highlighted"
     from .founder_journey_contract import effective_approval_state

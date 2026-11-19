@@ -20460,6 +20460,13 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
         return founder_run_commands.execute(context=context, user=user, run=run, action=action, data=data,
             header=idempotency_key, invoke=lambda current: control_article_run(user=user, context=context,
                 run=current, action=action, data=data, run_id=run_id, goal_operation_id=goal_operation_id))
+    if action == "resume":
+        from .failure_policy_engine import class_before_wall_enabled, settled_without_delivery
+        if class_before_wall_enabled() and settled_without_delivery(run):
+            # D16: a founder ask answered after its points were returned never
+            # resumes on unpaid points; the founder starts again instead.
+            return Response({"detail": "We returned the points for this article, so it can't continue. Start again to write it.",
+                             "code": "run_refunded_start_again"}, status=status.HTTP_409_CONFLICT)
     from .run_owned_controls import prepare_owned_control
     owned_response = prepare_owned_control(run=run, user=user, action=action, context=context)
     if owned_response is not None:

@@ -506,7 +506,7 @@
       "identity": "content_factory/failure_policy_engine.py:_execute_run:9dafb5e1e6a42ea00eca1cb80c500dba33bc4beac02348091989e208f5012c33:1",
       "path": "content_factory/failure_policy_engine.py",
       "function": "_execute_run",
-      "line": 409,
+      "line": 545,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -518,13 +518,14 @@
         "operation"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "96876e7cc79986959cd3707eab0d9232f209b110908194bf611b0b46e6c41ac0",
+      "function_sha256": "7bdd28ae8cba769eb682842cf742bca615bbc9e9fba4cda938f42b974ef3cba2",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
-        "content_factory/tests_failure_policy.py"
+        "content_factory/tests_failure_policy.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "This newly inferred save is WebsiteConnectionOperation receipt/payload/state, not Run; the enclosing legacy policy executor freshly refuses owned Run before effects.",
+      "reason": "This newly inferred save is WebsiteConnectionOperation receipt/payload/state, not Run; the enclosing legacy policy executor freshly refuses owned Run before effects. A capped stop records the engine stop under self_heal_v1.stop beside the unchanged original error_code (B2, flagged).",
       "guard": "_fresh_owned_run early return; decide/apply/scheduler owned-goal child defer; operation queryset/type.",
       "pending_owner": null
     },
@@ -532,7 +533,7 @@
       "identity": "content_factory/founder_journey_alerts.py:queue_founder_journey_alerts_batch:5adbb928cf9ff656c8d707d2d99bb4b0f42e21b84fa7ad4138037ebea720ca8f:1",
       "path": "content_factory/founder_journey_alerts.py",
       "function": "queue_founder_journey_alerts_batch",
-      "line": 310,
+      "line": 330,
       "kind": "model_bulk_update",
       "fields": [],
       "statement_sha256": "5adbb928cf9ff656c8d707d2d99bb4b0f42e21b84fa7ad4138037ebea720ca8f",
@@ -540,13 +541,14 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "040b8444851d956165c93c0ac4f1bd835c9f90543a4e052efb83b53d99ba3c63",
+      "function_sha256": "56cc5f1cce3851dfceeed174da194743f5dc9c16c21030b2db93dc79064d711d",
       "classification": "owned_backend_observation",
       "test_refs": [
         "content_factory/tests_founder_journey_alerts.py",
-        "content_factory/tests_background_alert_audience.py"
+        "content_factory/tests_background_alert_audience.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Bulk target writes only ops-alert result receipts on fresh locked Run rows, never status/approval/request/clocks; scheduler runs are skipped and get no receipt (A2).",
+      "reason": "Bulk target writes only ops-alert result receipts on fresh locked Run rows, never status/approval/request/clocks; scheduler runs are skipped and get no receipt (A2). run_terminal and self_heal_capped default to the run incident slot (B5); the written fields are unchanged.",
       "guard": "Independent backend alert receipt namespace; bulk_update fields exactly result.",
       "pending_owner": null
     },
@@ -2978,7 +2980,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:a1a285a9d42b926c2996cce6d69065829e73c1dc4a8de28e218ec2483e708f5e:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 21252,
+      "line": 21408,
       "kind": "inferred_run_save",
       "fields": [
         "approval_state",
@@ -2995,7 +2997,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
+      "function_sha256": "927c6465c0af8e0f79e0d307ffd61baaf9987aa61ea9b20a2690753ff81043cb",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3003,9 +3005,10 @@
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
         "content_factory/tests_founder_run_commands.py",
-        "content_factory/tests_founder_library_commands.py"
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged. A resume of a refunded or released run is refused with 409 before any write or dispatch (B1, D16).",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3118,7 +3121,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 20868,
+      "line": 21024,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3130,7 +3133,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
+      "function_sha256": "927c6465c0af8e0f79e0d307ffd61baaf9987aa61ea9b20a2690753ff81043cb",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3138,9 +3141,10 @@
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
         "content_factory/tests_founder_run_commands.py",
-        "content_factory/tests_founder_library_commands.py"
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged. A resume of a refunded or released run is refused with 409 before any write or dispatch (B1, D16).",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3148,7 +3152,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:2",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 20918,
+      "line": 21074,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3160,7 +3164,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
+      "function_sha256": "927c6465c0af8e0f79e0d307ffd61baaf9987aa61ea9b20a2690753ff81043cb",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3168,9 +3172,10 @@
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
         "content_factory/tests_founder_run_commands.py",
-        "content_factory/tests_founder_library_commands.py"
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged. A resume of a refunded or released run is refused with 409 before any write or dispatch (B1, D16).",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3178,7 +3183,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:3418387b1f3686713bd20e8926e5824cf845c9fb6b6b0eff05d165df49eadd92:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 20957,
+      "line": 21113,
       "kind": "inferred_run_save",
       "fields": [
         "status",
@@ -3192,7 +3197,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
+      "function_sha256": "927c6465c0af8e0f79e0d307ffd61baaf9987aa61ea9b20a2690753ff81043cb",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3200,9 +3205,10 @@
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
         "content_factory/tests_founder_run_commands.py",
-        "content_factory/tests_founder_library_commands.py"
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged. A resume of a refunded or released run is refused with 409 before any write or dispatch (B1, D16).",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3451,7 +3457,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:f4ff89e68ed66f9063658270eb03abec69d12cda8deea5e3abe011406ddb0f95:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 21205,
+      "line": 21361,
       "kind": "model_create",
       "fields": [
         "status",
@@ -3465,7 +3471,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
+      "function_sha256": "927c6465c0af8e0f79e0d307ffd61baaf9987aa61ea9b20a2690753ff81043cb",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3473,9 +3479,10 @@
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
         "content_factory/tests_founder_run_commands.py",
-        "content_factory/tests_founder_library_commands.py"
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged. A resume of a refunded or released run is refused with 409 before any write or dispatch (B1, D16).",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -5728,21 +5735,23 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_decide",
-      "function_sha256": "beb3a9669d5129ae9dc18ecfce5a8ebed562fa09110dd8078a203cdfbb80f9be",
+      "function_sha256": "a4d67d19b78ff4ab5c6a6f0463af23b553a7841527a7c94e314bd4331828e24f",
       "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
-        "content_factory/tests_background_alert_audience.py"
+        "content_factory/tests_background_alert_audience.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ]
     },
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "apply",
-      "function_sha256": "f2945748568cebbe3456a977c08510ae0bc1e4b67ad61c396ec70ba7b3f7e792",
+      "function_sha256": "e1ca8671498ebe0ca1ddea6a308124253a775ca9e3b67f79645f5456ee55709e",
       "reason": "Private policy metadata writes use the already locked fresh Run, retain event-owner refusal and unrelated result fields, preserve the worker clock, and keep every original authority and decision check in apply. All five apply call sites and the lock-acquiring compatibility wrapper were manually reviewed.",
       "test_refs": [
         "content_factory/tests_p2_policy.py",
-        "content_factory/tests_run_policy_retirement.py"
+        "content_factory/tests_run_policy_retirement.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ]
     },
     {
@@ -5768,10 +5777,11 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_execute_run",
-      "function_sha256": "96876e7cc79986959cd3707eab0d9232f209b110908194bf611b0b46e6c41ac0",
+      "function_sha256": "7bdd28ae8cba769eb682842cf742bca615bbc9e9fba4cda938f42b974ef3cba2",
       "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
       "test_refs": [
-        "content_factory/tests_run_policy_retirement.py"
+        "content_factory/tests_run_policy_retirement.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ]
     },
     {
@@ -5804,11 +5814,12 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_candidates",
-      "function_sha256": "7e38002e97358f34eabf8e90ee0466933429606cf7575f27cf203bb68dd92302",
+      "function_sha256": "4c15e6bb6493716af7bde5cb4a9f1dd1ca0697f28e51bccc8e114473b85cca59",
       "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
-        "content_factory/tests_background_alert_audience.py"
+        "content_factory/tests_background_alert_audience.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ]
     },
     {
