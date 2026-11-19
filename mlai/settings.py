@@ -2775,6 +2775,9 @@ ARTICLES_SOURCE_FOLLOW_ENABLED = _env_is_true("ARTICLES_SOURCE_FOLLOW_ENABLED", 
 # (one GitHub compare) keeps the website Ready; the proof is re-checked in the
 # background for free and articles lock only if that re-check fails.
 ARTICLES_PROOF_CARRY_FORWARD_ENABLED = _env_is_true("ARTICLES_PROOF_CARRY_FORWARD_ENABLED", True)
+# A push to a live-URL website that left preparation finished is re-verified by
+# its own source check (setup scan + live check) instead of reopening preparation.
+ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED = _env_is_true("ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED", True)
 # Kill switch, default on: a worker callback for a bound run that omits its
 # website connection fields is checked against that run's own saved consent
 # instead of being refused as "Reconnect this website" (La Vie, 18 Nov 2026).

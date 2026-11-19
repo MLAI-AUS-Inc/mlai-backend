@@ -1368,6 +1368,11 @@ def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_i
             return latest
     if enrolled(connection.organization_id) and latest and owns_goal(latest):
         return wake_goal_for_source(config, company_id=company.pk, user=connection.authorized_by, now=timezone.now())
+    if not owned_merge_run_id and _source_check_owns_push(connection, config, latest):
+        # The push's own source check rescans for build proof at the new commit
+        # and checks the live page; reopening a finished preparation here only
+        # ran an inventory scan and stopped at the old commit's proof (MLAI, 17 Nov 2026).
+        return None
     op = start_prepare(config, company_id=company.pk, user=connection.authorized_by)
     reopenable = ["completed", "needs_user", "needs_attention", "pending", "stopped"]
     owned_setup = bool(owned_merge_run_id) and ContentFactoryRun.objects.filter(run_id=owned_merge_run_id,
@@ -1383,6 +1388,37 @@ def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_i
         return None
     _adopt_source_checks(connection, op)
     return op
+
+
+# A finished preparation's states. A push never needs it reopened when the
+# push's own source check can re-verify the website on its own.
+SOURCE_CHECK_OWNS_PUSH_STATES = frozenset({"completed", "needs_attention"})
+
+
+def _source_check_owns_push(connection, config, latest):
+    """Whether a customer push is left to its own source check instead of reopening preparation.
+
+    Preparation's source recheck dispatches an inventory scan, which records no
+    build proof, then checks the live page against the selected target's older
+    commit, so GitHub's moved branch fails it with ``website_source_changed``
+    and the source check it adopted never runs. A live-URL website's source
+    check runs the setup scan that records build proof at the pushed commit and
+    then the live check, which moves the verified commit and clears the
+    ``repository_source_changed`` blocker. Preparation still in progress keeps
+    reopening; ``ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED`` (default on) restores
+    the old behaviour.
+    """
+    from django.conf import settings
+    if not getattr(settings, "ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED", True):
+        return False
+    if latest is None or latest.state not in SOURCE_CHECK_OWNS_PUSH_STATES:
+        return False
+    target_key = getattr(config, "default_publish_target_id", "") or ""
+    target = connection.targets.filter(generation=connection.generation, target_key=target_key).first() if target_key else None
+    if target is None:
+        return False
+    from .website_reconciliation import _renews_by_live_url
+    return bool(_renews_by_live_url(connection, target))
 
 
 # Cancellation bookkeeping stays with the cancel follow-up that owns the cleanup.
