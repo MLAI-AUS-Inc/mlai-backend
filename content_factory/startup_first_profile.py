@@ -65,11 +65,6 @@ SITE_PLATFORMS = frozenset({"wix", "squarespace", "webflow", "wordpress", "ghost
 _COMPLETED = "completed"
 _RUNNING = frozenset({"queued", "running"})
 _TERMINAL = frozenset({"completed", "failed", "blocked", "cancelled", "denied"})
-_TWO_LEVEL_SUFFIXES = frozenset({
-    "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
-    "co.nz", "net.nz", "org.nz", "co.uk", "org.uk", "ac.uk", "me.uk",
-    "com.sg", "co.in", "com.br", "co.za", "com.my", "co.jp",
-})
 _STOPWORDS = frozenset("""
 a an and are as at be by for from has have helps help in into is it its of on or our that the their them they this to
 we with you your who what which while will can all any more most new best get make made just only also over under via
@@ -96,24 +91,16 @@ def first_profile_applies(organization, config=None) -> bool:
 
 
 def derive_company_name(domain) -> str:
-    """A readable startup name from a website: ``banksia-studio.com.au`` gives "Banksia Studio"."""
-    host = str(domain or "").strip().lower()
-    if "://" in host or "/" in host:
-        try:
-            host = urlsplit(host if "://" in host else f"//{host}").hostname or ""
-        except ValueError:
-            host = ""
-    labels = [label for label in host.strip(".").split(".") if label]
-    if labels and labels[0] == "www":
-        labels = labels[1:]
-    if len(labels) >= 3 and ".".join(labels[-2:]) in _TWO_LEVEL_SUFFIXES:
-        labels = labels[:-2]
-    elif len(labels) >= 2:
-        labels = labels[:-1]
-    if not labels:
-        return ""
-    words = [word for word in re.split(r"[-_]+", labels[-1]) if word]
-    return " ".join(word[:1].upper() + word[1:] for word in words)[:255]
+    """A readable startup name from a website: ``banksia-studio.com.au`` gives "Banksia Studio".
+
+    Plan E2: the one server-owned rule lives in
+    ``founder_tools.website_hosts.derive_company_name`` (platform suffixes,
+    account labels and random suffixes stripped); this name stays for its
+    existing callers.
+    """
+    from founder_tools.website_hosts import derive_company_name as derive
+
+    return derive(domain)
 
 
 def _clean(value, limit) -> str:
@@ -134,15 +121,6 @@ def _https(value, base=None):
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
         return None
     return raw[:2048]
-
-
-def _title_name(title) -> str:
-    """The brand part of a page title: "Banksia | Garden design" gives "Banksia"."""
-    text = _clean(title, 200)
-    for separator in (" | ", " - ", " \u2013 ", " \u2014 ", " :: ", " \u00b7 ", " \u2022 "):
-        if separator in text:
-            text = text.split(separator)[0].strip()
-    return text[:80]
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +471,9 @@ def _candidates(autofill, state):
     homepage = _mapping(_mapping(state.get("siteProfile")).get("homepage"))
     research_name = _clean(autofill.get("brandName"), 120)
     research_line = _clean(fields.get("shortDescription"), 280)
-    name = research_name or _clean(meta.get("ogSiteName"), 120) or _title_name(meta.get("title")) or _title_name(homepage.get("title"))
+    # Plan E2: one rule for a homepage's name (a template title is never one).
+    from founder_tools.website_hosts import homepage_name
+    name = research_name or homepage_name(meta) or homepage_name({"title": homepage.get("title")})
     line = research_line or _clean(meta.get("description"), 280) or _clean(homepage.get("description"), 280)
     return {
         "name": name, "shortDescription": line,

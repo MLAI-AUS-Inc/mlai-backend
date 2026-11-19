@@ -40,6 +40,7 @@ additive, and authentication, origin and company ownership checks still apply.
 | `MY_STARTUP_READ_RATE` | `120/minute` | Other authenticated startup reads |
 | `MY_STARTUP_POLL_RATE` | `120/minute` | Marketing run/research automation status and startup update active-run/status reads |
 | `MY_STARTUP_WRITE_RATE` | `30/minute` | All authenticated startup mutations, including profile/bootstrap endpoints when mutated |
+| `FOUNDER_WEBSITE_PREFLIGHT_RATE` | `20/minute` | The website preflight (`founder-tools/website-preflight/`, plan E1), on top of the write budget: an uncached check fetches a homepage and may try a few close spellings |
 
 These limits are bounded across an account's companies and devices. A denied
 request returns HTTP 429 with DRF's `Retry-After` header and a private/no-store

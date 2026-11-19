@@ -157,7 +157,10 @@ class FounderToolsCompanyView(APIView):
         from content_factory.startup_first_profile import record_create, seed_no_website_keywords
         from . import one_field_start
 
-        body, error, derived_name = one_field_start.prepare_body(request.data)
+        error, preflight = one_field_start.check_website(request.data)
+        if error is not None:
+            return Response(error, status=status.HTTP_400_BAD_REQUEST)
+        body, error, derived_name = one_field_start.prepare_body(request.data, preflight=preflight)
         if error is not None:
             return Response(error, status=status.HTTP_400_BAD_REQUEST)
         key_sha = one_field_start.create_key_sha256(request)
@@ -180,6 +183,13 @@ class FounderToolsCompanyView(APIView):
                     existing = one_field_start.find_created_company(profile, request.user.pk, key_sha)
                     if existing is not None:
                         return self._one_field_response(existing, status_code=status.HTTP_200_OK)
+                # Plan E5: the caller's own profile only. Another account's
+                # startup is never named here (the exact-domain claim below
+                # stays the only cross-account answer).
+                from .website_preflight import already_added_body, own_duplicate
+                duplicate, match = own_duplicate(profile, name=body.get("name"), domain=body.get("domain"))
+                if duplicate is not None and not (match == "name" and one_field_start.add_anyway(request.data)):
+                    return Response(already_added_body(duplicate, match), status=status.HTTP_409_CONFLICT)
                 response = self._save_company(request, data=body)
                 if response.status_code != status.HTTP_200_OK:
                     return response
