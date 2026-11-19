@@ -1,4 +1,6 @@
 import ast
+import re
+import shlex
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -243,9 +245,9 @@ class ReusePrChecksTests(TestCase):
         self.assertIn("  workflow_dispatch:", workflow)
         self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
         self.assertIn("github.ref == 'refs/heads/main'", workflow)
-        # Main pushes and manual releases share one group and are never
-        # cancelled. Each pull request has its own group, where a newer push
-        # cancels the run for the commit it replaced.
+        # Main pushes and manual releases share one group, where a run in
+        # progress is never cancelled. Each pull request has its own group,
+        # where a later run cancels the one in progress.
         self.assertEqual(
             yaml.load(workflow, Loader=yaml.BaseLoader)["concurrency"],
             {
@@ -283,7 +285,64 @@ class ReusePrChecksTests(TestCase):
             )
             first_step = jobs[lane]['steps'][0]['run']
             self.assertIn('= tmpfs', first_step, lane)
+            # The image's first-start server answers on the socket only. Every
+            # database command of this step waits for, and uses, the address
+            # that only the final server serves.
+            self.assertIn('pg_isready -q -h 127.0.0.1', first_step, lane)
+            self.assertIn('psql -h 127.0.0.1', first_step, lane)
+            self.assertEqual(first_step.count(' -h 127.0.0.1 '), 2, lane)
             self.assertIn("ALTER SYSTEM SET checkpoint_timeout = '30s'", first_step, lane)
             self.assertIn("ALTER SYSTEM SET max_wal_size = '256MB'", first_step, lane)
             self.assertIn('pg_reload_conf()', first_step, lane)
 
+    def test_every_postgres_only_test_is_selected_by_a_postgresql_lane(self):
+        root = Path(__file__).resolve().parents[1]
+        jobs = yaml.safe_load((root / '.github/workflows/deploy.yml').read_text())['jobs']
+        # Labels of the PostgreSQL commands that run tests with this tag. The
+        # SQLite lane excludes the tag, so nothing else runs them.
+        selected = set()
+        for lane in ('postgres-search', 'migration-tests'):
+            for step in jobs[lane]['steps']:
+                for command in step.get('run', '').replace('\\\n', ' ').splitlines():
+                    if 'manage.py test' not in command or '--tag' in command:
+                        continue
+                    if re.search(r'--exclude-tag[= ]postgres-only', command):
+                        continue
+                    selected.update(
+                        token for token in shlex.split(command)
+                        if re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+', token)
+                    )
+
+        def tagged(node):
+            return any(
+                isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name)
+                and decorator.func.id == 'tag' and any(
+                    isinstance(argument, ast.Constant) and argument.value == 'postgres-only'
+                    for argument in decorator.args
+                )
+                for decorator in node.decorator_list
+            )
+
+        targets = []
+        for path in root.rglob('test*.py'):
+            if any(part.startswith('.') for part in path.relative_to(root).parts):
+                continue
+            module = '.'.join(path.relative_to(root).with_suffix('').parts)
+            for parent in ast.parse(path.read_text()).body:
+                if not isinstance(parent, ast.ClassDef):
+                    continue
+                if tagged(parent):
+                    targets.append(f'{module}.{parent.name}')
+                targets.extend(
+                    f'{module}.{parent.name}.{node.name}' for node in parent.body
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and tagged(node)
+                )
+
+        # The six Slack founder-link migration classes run nowhere else.
+        founder_links = [target for target in targets if target.startswith('core.tests_slack_founder_links.')]
+        self.assertGreaterEqual(len(founder_links), 6)
+        missing = sorted(
+            target for target in targets
+            if not any(target == label or target.startswith(label + '.') for label in selected)
+        )
+        self.assertEqual(missing, [])

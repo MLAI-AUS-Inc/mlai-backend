@@ -151,7 +151,10 @@ copy; each later command starts from that copy and still runs Django's own
 keep-database setup. SQLite keeps the copy as a private file and loads it into
 the in-memory test database. PostgreSQL keeps it as a template database. The
 copy is keyed on the migration files, the installed apps and the Django
-version. Leave the variable unset locally to keep Django's default runner.
+version. That key does not cover project code that migrations import, which
+cannot change within one CI job but can between two local runs, so leave the
+variable unset locally to keep Django's default runner. A command that selects
+no database test neither loads nor saves a copy.
 
 The `postgres-search` and `migration-tests` lanes hold the PostgreSQL data
 directory in memory, because emptying every table after each
@@ -161,14 +164,19 @@ and an in-memory filesystem holds a limited number of files. The option and the
 step belong together. `p2-performance` keeps a disk-backed database so its
 timed tick is measured as before.
 
-Migration tests that rebuild the schema carry `@tag("postgres-only")`. The
-SQLite lane excludes that tag, and the `migration-tests` lane selects those
-classes by name. Production runs PostgreSQL only.
+The six Slack founder-link migration classes carry `@tag("postgres-only")`,
+like some other PostgreSQL-specific tests. The main SQLite regression command
+is the only one that excludes that tag, and the `migration-tests` lane selects
+the six classes by name. Production runs PostgreSQL only. A contract test fails
+when a class or method with that tag is not selected by a PostgreSQL command,
+so a newly tagged test cannot drop out of every lane unnoticed.
 
-A newer push to a pull request cancels the run for the commit it replaced. Runs
-on `main` and manual releases are never cancelled. A main push reuses only a
-fully successful run on the pull request's final commit, so a cancelled run is
-never read.
+Each pull request has its own run group, where a later run cancels the one in
+progress: normally a newer push replacing the commit before it. A run in
+progress on `main` or a manual release is never cancelled; a run still waiting
+for its turn there gives way to a newer one, as before. A main push reuses only
+a fully successful run on the pull request's final commit, so a cancelled run
+is never read, and a main push that finds no such run runs every lane.
 
 The proposed [26 September disposable-test inventory](refactor-release-test-migrations-2026-09-26.json)
 is enforced by `scripts/test_refactor_database.py`. The harness requires recorded

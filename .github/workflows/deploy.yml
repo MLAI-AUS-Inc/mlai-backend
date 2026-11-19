@@ -14,10 +14,12 @@ permissions:
   pull-requests: read
 
 # Main push and manual releases share one concurrency group so they cannot
-# mutate the droplet together, and they are never cancelled. Each pull request
-# has its own group, where a newer push cancels the run for the commit it
-# replaced: only a run on the pull request's final commit is ever reused or
-# required, so the older run's result has no reader.
+# mutate the droplet together, and a run in progress there is never cancelled
+# (a run still waiting its turn gives way to a newer one, as before). Each pull
+# request has its own group, where a later run cancels the one in progress.
+# That is normally a newer push replacing an older commit: only a successful
+# run on the pull request's final commit is ever reused or required, so a
+# cancelled run has no reader and a main push without one runs every lane.
 concurrency:
   group: mlai-backend-deploy-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -806,7 +808,13 @@ jobs:
         POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
       run: |
         docker exec "$POSTGRES_CONTAINER" sh -c 'test "$(stat -f -c %T "$PGDATA")" = tmpfs'
-        docker exec "$POSTGRES_CONTAINER" psql -U mlai -d mlai_test -v ON_ERROR_STOP=1 \
+        # The image's first-start server answers on the socket only and is
+        # then replaced, so wait on the address only the final server serves.
+        for attempt in $(seq 30); do
+          if docker exec "$POSTGRES_CONTAINER" pg_isready -q -h 127.0.0.1 -U mlai -d mlai_test; then break; fi
+          sleep 1
+        done
+        docker exec "$POSTGRES_CONTAINER" psql -h 127.0.0.1 -U mlai -d mlai_test -v ON_ERROR_STOP=1 \
           -c "ALTER SYSTEM SET checkpoint_timeout = '30s'" \
           -c "ALTER SYSTEM SET max_wal_size = '256MB'" \
           -c "SELECT pg_reload_conf()"
@@ -1056,7 +1064,13 @@ jobs:
         POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
       run: |
         docker exec "$POSTGRES_CONTAINER" sh -c 'test "$(stat -f -c %T "$PGDATA")" = tmpfs'
-        docker exec "$POSTGRES_CONTAINER" psql -U mlai -d mlai_test -v ON_ERROR_STOP=1 \
+        # The image's first-start server answers on the socket only and is
+        # then replaced, so wait on the address only the final server serves.
+        for attempt in $(seq 30); do
+          if docker exec "$POSTGRES_CONTAINER" pg_isready -q -h 127.0.0.1 -U mlai -d mlai_test; then break; fi
+          sleep 1
+        done
+        docker exec "$POSTGRES_CONTAINER" psql -h 127.0.0.1 -U mlai -d mlai_test -v ON_ERROR_STOP=1 \
           -c "ALTER SYSTEM SET checkpoint_timeout = '30s'" \
           -c "ALTER SYSTEM SET max_wal_size = '256MB'" \
           -c "SELECT pg_reload_conf()"

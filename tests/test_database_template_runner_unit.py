@@ -4,12 +4,13 @@ Fakes and SQLite's own in-process memory stand in for the databases: no Django
 connection is opened, no migration is applied and no PostgreSQL is contacted.
 """
 
+import io
 import os
 import re
 import sqlite3
 import tempfile
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
@@ -34,6 +35,8 @@ class FakeSqliteConnection:
             _get_test_db_name=lambda: self.test_name,
             is_in_memory_db=lambda name: in_memory,
         )
+        # The configured database, until Django switches to the test database.
+        self.settings_dict = {"NAME": ":memory:"}
         self.connection = None
 
     def ensure_connection(self):
@@ -46,13 +49,15 @@ class FakePostgresConnection:
 
     vendor = "postgresql"
 
-    def __init__(self, databases):
+    def __init__(self, databases, *, test_name="test_mlai"):
         self.databases = set(databases)
         self.statements = []
         self.events = []
-        self.creation = SimpleNamespace(_get_test_db_name=lambda: "test_mlai")
+        self.test_name = test_name
+        self.creation = SimpleNamespace(_get_test_db_name=lambda: test_name)
         self.ops = SimpleNamespace(quote_name=lambda name: f'"{name}"')
-        self.settings_dict = {"NAME": "test_mlai"}
+        # The configured database, until Django switches to the test database.
+        self.settings_dict = {"NAME": "mlai"}
 
     def close(self):
         self.events.append("close")
@@ -84,7 +89,8 @@ class _FakePostgresCursor:
 
 class RunnerCase(TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
+        # The path needs quoting inside a SQLite URI.
+        self.temporary = tempfile.TemporaryDirectory(prefix="mlai runner #1 ")
         self.addCleanup(self.temporary.cleanup)
         for patcher in (
             patch.dict(os.environ, {TEMPLATE_ENV: "1"}),
@@ -96,21 +102,30 @@ class RunnerCase(TestCase):
         self.copy_directory = Path(self.temporary.name) / f"mlai-test-database-{os.getuid()}"
         self.copy_path = self.copy_directory / f"{FINGERPRINT}.sqlite3"
 
-    def run_setup(self, connection, django_setup, *, keepdb=False, aliases=("default",)):
+    def run_setup(
+        self, connection, django_setup, *, keepdb=False, configured=("default",),
+        switches_database=True, verbosity=0, parallel=1, **setup_arguments,
+    ):
         """Run the runner's database setup with Django's own setup replaced."""
-        runner = TemplateDatabaseRunner(verbosity=0, keepdb=keepdb)
+        runner = TemplateDatabaseRunner(verbosity=verbosity, keepdb=keepdb, parallel=parallel)
         calls = []
 
         def setup_databases(self_, **kwargs):
             calls.append(self_.keepdb)
+            selected = kwargs.get("aliases")
+            if switches_database and hasattr(connection, "test_name") and (
+                selected is None or "default" in selected
+            ):
+                # Django points the connection at the test database it built.
+                connection.settings_dict["NAME"] = connection.test_name
             return django_setup(self_)
 
-        registry = {alias: connection for alias in aliases}
+        registry = {alias: connection for alias in configured}
         with (
             patch.object(test_runner, "connections", registry),
             patch.object(DiscoverRunner, "setup_databases", setup_databases),
         ):
-            result = runner.setup_databases()
+            result = runner.setup_databases(**setup_arguments)
         return runner, calls, result
 
 
@@ -120,6 +135,7 @@ class SqliteReuseTests(RunnerCase):
 
         def django_setup(runner):
             connection.ensure_connection()
+            connection.connection.execute("CREATE TABLE django_migrations (name TEXT)")
             connection.connection.execute("CREATE TABLE thing (name TEXT)")
             connection.connection.execute("INSERT INTO thing VALUES ('seed')")
             connection.connection.commit()
@@ -127,10 +143,19 @@ class SqliteReuseTests(RunnerCase):
 
         return django_setup
 
-    def build_copy(self):
+    def build_copy(self, **options):
         connection = FakeSqliteConnection()
         self.addCleanup(lambda: connection.connection.close())
-        return self.run_setup(connection, self.migrate(connection))
+        return self.run_setup(connection, self.migrate(connection), **options)
+
+    def assert_rebuilt(self, **options):
+        """A run that could not use the saved state migrates and saves again."""
+        connection = FakeSqliteConnection()
+        self.addCleanup(lambda: connection.connection.close())
+        runner, calls, _result = self.run_setup(connection, self.migrate(connection), **options)
+        self.assertEqual(calls, [False])
+        self.assertFalse(runner.keepdb)
+        return connection
 
     def test_first_run_migrates_normally_and_saves_a_private_copy(self):
         runner, calls, result = self.build_copy()
@@ -239,6 +264,93 @@ class SqliteReuseTests(RunnerCase):
         self.assertFalse(self.copy_path.is_symlink())
         self.assertTrue(self.copy_path.is_file())
 
+    def test_a_copy_directory_owned_by_someone_else_is_not_trusted(self):
+        other_user = os.getuid() + 1
+        (Path(self.temporary.name) / f"mlai-test-database-{other_user}").mkdir(mode=0o700)
+
+        with patch.object(os, "getuid", return_value=other_user):
+            self.assertIsNone(test_runner._sqlite_copy_directory())
+
+    def test_a_copy_directory_everyone_can_write_is_not_trusted(self):
+        self.build_copy()
+        self.copy_directory.chmod(0o707)
+
+        self.assertIsNone(test_runner._sqlite_copy_directory())
+
+    def test_a_file_in_place_of_the_copy_directory_is_not_trusted(self):
+        self.copy_directory.write_text("not a directory")
+
+        self.assertIsNone(test_runner._sqlite_copy_directory())
+        self.assert_rebuilt()
+        self.assertEqual(self.copy_directory.read_text(), "not a directory")
+
+    def test_the_copy_appears_only_once_it_is_complete(self):
+        seen = []
+        real_replace = os.replace
+
+        def replace(source, target):
+            written = sqlite3.connect(source)
+            seen.append((Path(target).exists(), written.execute("SELECT name FROM thing").fetchall()))
+            written.close()
+            real_replace(source, target)
+
+        with patch.object(os, "replace", replace):
+            self.build_copy()
+
+        self.assertEqual(seen, [(False, [("seed",)])])
+        self.assertEqual([path.name for path in self.copy_directory.iterdir()], [self.copy_path.name])
+
+    def test_a_damaged_copy_is_rebuilt_and_replaced(self):
+        for damage in (b"not a database" * 400, b""):
+            with self.subTest(size=len(damage)):
+                self.build_copy()
+                self.copy_path.write_bytes(damage)
+
+                self.assert_rebuilt()
+
+                saved = sqlite3.connect(self.copy_path)
+                self.assertEqual(saved.execute("SELECT name FROM thing").fetchall(), [("seed",)])
+                saved.close()
+                self.copy_path.unlink()
+
+    def test_a_selection_without_database_tests_neither_loads_nor_saves(self):
+        connection = FakeSqliteConnection()
+
+        runner, calls, _result = self.run_setup(connection, lambda runner: [], aliases={})
+
+        self.assertEqual(calls, [False])
+        self.assertFalse(runner.keepdb)
+        self.assertFalse(self.copy_directory.exists())
+
+        self.build_copy()
+        runner, calls, _result = self.run_setup(FakeSqliteConnection(), lambda runner: [], aliases={})
+
+        self.assertEqual(calls, [False])
+        self.assertFalse(runner.keepdb)
+
+    def test_the_configured_database_is_never_saved_as_the_copy(self):
+        # Django returned without switching to a test database.
+        connection = FakeSqliteConnection()
+
+        runner, calls, _result = self.run_setup(connection, lambda runner: [], switches_database=False)
+
+        self.assertEqual(calls, [False])
+        self.assertIsNone(connection.connection)
+        self.assertEqual(list(self.copy_directory.iterdir()), [])
+
+    def test_reuse_is_reported_at_normal_verbosity(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.build_copy(verbosity=1)
+            connection = FakeSqliteConnection()
+            self.run_setup(connection, lambda runner: connection.ensure_connection(), verbosity=1)
+            self.addCleanup(connection.connection.close)
+
+        self.assertEqual(output.getvalue().splitlines(), [
+            f"Saved migrated test database as copy {self.copy_path.name}.",
+            f"Loaded test database from migrated copy {self.copy_path.name}.",
+        ])
+
 
 class DjangoBehaviourKeptTests(RunnerCase):
     def assert_django_default(self, connection, **options):
@@ -258,7 +370,7 @@ class DjangoBehaviourKeptTests(RunnerCase):
         self.assertEqual(connection.statements, [])
 
     def test_more_than_one_database_keeps_django_setup(self):
-        self.assert_django_default(FakeSqliteConnection(), aliases=("default", "replica"))
+        self.assert_django_default(FakeSqliteConnection(), configured=("default", "replica"))
 
     def test_file_backed_sqlite_test_database_keeps_django_setup(self):
         self.assert_django_default(FakeSqliteConnection(in_memory=False))
@@ -290,6 +402,50 @@ class PostgresTemplateTests(RunnerCase):
             "close",
             f'CREATE DATABASE "{self.template}" TEMPLATE "test_mlai"',
         ])
+
+    def test_the_configured_database_never_becomes_the_template(self):
+        for options in ({"aliases": {}}, {"switches_database": False}):
+            with self.subTest(options=options):
+                connection = FakePostgresConnection({"postgres", "mlai"})
+
+                runner, calls, result = self.run_setup(connection, lambda runner: [], **options)
+
+                self.assertEqual(calls, [False])
+                self.assertFalse(runner.keepdb)
+                self.assertEqual(result, [])
+                self.assertEqual([sql for sql in connection.statements if sql.startswith("CREATE")], [])
+                self.assertNotIn("close", connection.events)
+
+    def test_a_long_database_name_keeps_the_whole_fingerprint(self):
+        long_name = "test_" + "x" * 58
+        connection = FakePostgresConnection({"postgres"}, test_name=long_name)
+
+        self.run_setup(connection, lambda runner: "old-config")
+
+        template = re.fullmatch(r'CREATE DATABASE "(.+)" TEMPLATE ".+"', connection.statements[-1]).group(1)
+        self.assertEqual(len(template), 63)
+        self.assertTrue(template.endswith(f"_tpl_{FINGERPRINT}"))
+
+    def test_a_parallel_run_still_starts_from_the_template(self):
+        connection = FakePostgresConnection({"postgres", "mlai", "test_mlai", self.template, "test_mlai_1"})
+
+        runner, calls, _result = self.run_setup(connection, lambda runner: "old-config", parallel=2)
+
+        self.assertEqual(calls, [True])
+        self.assertIn('DROP DATABASE IF EXISTS "test_mlai_1"', connection.statements)
+        self.assertIn(f'CREATE DATABASE "test_mlai" TEMPLATE "{self.template}"', connection.statements)
+
+    def test_worker_clones_are_matched_by_the_literal_database_name(self):
+        name = "test.mlai"
+        connection = FakePostgresConnection(
+            {"postgres", name, f"{name}_tpl_{FINGERPRINT}", f"{name}_1", "testxmlai_1"},
+            test_name=name,
+        )
+
+        self.run_setup(connection, lambda runner: "old-config")
+
+        dropped = [sql for sql in connection.statements if sql.startswith("DROP")]
+        self.assertEqual(dropped, [f'DROP DATABASE IF EXISTS "{name}_1"', f'DROP DATABASE IF EXISTS "{name}"'])
 
     def test_later_run_recreates_the_database_and_drops_stale_worker_clones(self):
         connection = FakePostgresConnection({
@@ -353,8 +509,19 @@ class SchemaFingerprintTests(TestCase):
         self.assertEqual(len(seen), 4)
 
     def test_django_version_and_installed_apps_change_the_fingerprint(self):
-        baseline = test_runner._schema_fingerprint()
+        def with_apps(*names):
+            with patch.object(test_runner, "settings", SimpleNamespace(INSTALLED_APPS=list(names))):
+                return test_runner._schema_fingerprint()
+
+        baseline = with_apps("one.app", "two.app")
         with patch.object(test_runner.django, "get_version", return_value="0.0"):
-            self.assertNotEqual(test_runner._schema_fingerprint(), baseline)
-        with patch.object(test_runner, "settings", SimpleNamespace(INSTALLED_APPS=["only.this"])):
-            self.assertNotEqual(test_runner._schema_fingerprint(), baseline)
+            self.assertNotEqual(with_apps("one.app", "two.app"), baseline)
+        # Same number of apps, so only the names can tell them apart.
+        self.assertNotEqual(with_apps("one.app", "other.app"), baseline)
+        self.assertEqual(with_apps("two.app", "one.app"), baseline)
+
+    def test_the_order_apps_are_listed_in_does_not_change_the_fingerprint(self):
+        baseline = test_runner._schema_fingerprint()
+        configs = test_runner.apps.get_app_configs()
+        with patch.object(test_runner, "apps", SimpleNamespace(get_app_configs=lambda: configs[::-1])):
+            self.assertEqual(test_runner._schema_fingerprint(), baseline)

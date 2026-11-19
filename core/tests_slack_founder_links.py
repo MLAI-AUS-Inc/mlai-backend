@@ -284,7 +284,9 @@ class SlackServiceStrictUserLookupTests(SimpleTestCase):
 
 # The migration tests below each rebuild the schema, which takes minutes, and
 # production runs PostgreSQL only. CI therefore runs them in the PostgreSQL
-# migration lane and leaves them out of the SQLite lane.
+# migration lane and leaves them out of the SQLite lane. A class with this tag
+# runs only where a PostgreSQL command names it: add a new one to "Run
+# migration tests" in .github/workflows/deploy.yml (a contract test checks).
 @tag("postgres-only")
 class SlackFounderSyntheticIdentityMigrationTests(TransactionTestCase):
     migrate_from = [("core", "0060_slackfounderlinkrequest_consumed_by_user")]

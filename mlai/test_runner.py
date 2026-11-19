@@ -2,8 +2,8 @@
 
 Every ``manage.py test`` invocation normally builds its test database by
 applying the whole migration chain (about 400 migrations, roughly three
-minutes on CI). The CI jobs run 15 or more invocations each, so most of their
-wall time was spent re-applying identical migrations.
+minutes on CI). The larger CI jobs run about 15 invocations each, so most of
+their wall time was spent re-applying identical migrations.
 
 When ``MLAI_TEST_DATABASE_TEMPLATE`` is set, the first invocation in a job
 builds the test database the normal way, then saves a copy before any test
@@ -22,8 +22,12 @@ in-memory database Django would have created.
 Each run therefore starts from a database identical to a freshly migrated one.
 ``--parallel`` works with both: Django clones its per-worker databases from
 that fresh database, and stale PostgreSQL worker clones are dropped first. An
-explicit ``--keepdb``, a file-backed SQLite test database and multi-database
-setups keep Django's behaviour.
+explicit ``--keepdb``, a file-backed SQLite test database, multi-database
+setups and a selection with no database tests keep Django's behaviour.
+
+The key covers what CI can change between two commands of one job. It does not
+cover project code that migrations import, so the switch is for CI's
+single-checkout jobs and stays unset on a developer machine.
 """
 
 import hashlib
@@ -68,6 +72,32 @@ def _schema_fingerprint():
 
 def _quote(connection, name):
     return connection.ops.quote_name(name)
+
+
+def _template_name(test_name, fingerprint):
+    """Name the PostgreSQL template within the 63-character identifier limit.
+
+    The fingerprint is kept whole: a shortened one could let a database built
+    from other migrations pass for this one.
+    """
+    suffix = f"_tpl_{fingerprint}"
+    return f"{test_name[:63 - len(suffix)]}{suffix}"
+
+
+def _load_sqlite_copy(copy_path, target):
+    """Fill ``target`` from the saved copy; False when the copy is unusable."""
+    try:
+        saved = sqlite3.connect(f"file:{quote(str(copy_path))}?mode=ro", uri=True)
+        try:
+            saved.backup(target)
+        finally:
+            saved.close()
+        migrated = target.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'django_migrations'"
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return migrated is not None
 
 
 def _sqlite_copy_directory():
@@ -119,13 +149,18 @@ class TemplateDatabaseRunner(DiscoverRunner):
         connection = self._template_connection()
         if connection is None:
             return super().setup_databases(**kwargs)
+        aliases = kwargs.get("aliases")
+        if aliases is not None and "default" not in aliases:
+            # No selected test uses the database, so Django builds none. There
+            # is nothing to reuse and no migrated database to save.
+            return super().setup_databases(**kwargs)
         if connection.vendor == "sqlite":
             return self._setup_sqlite(connection, **kwargs)
         return self._setup_postgresql(connection, **kwargs)
 
     def _setup_postgresql(self, connection, **kwargs):
         test_name = connection.creation._get_test_db_name()
-        template_name = f"{test_name}_tpl_{_schema_fingerprint()}"[:63]
+        template_name = _template_name(test_name, _schema_fingerprint())
         with connection._nodb_cursor() as cursor:
             cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", [template_name])
             template_exists = cursor.fetchone() is not None
@@ -151,12 +186,16 @@ class TemplateDatabaseRunner(DiscoverRunner):
             return super().setup_databases(**kwargs)
 
         old_config = super().setup_databases(**kwargs)
+        if connection.settings_dict["NAME"] != test_name:
+            # Django did not switch to a test database, so the configured
+            # database is still selected and must not become the template.
+            return old_config
         # CREATE DATABASE ... TEMPLATE needs the source to have no sessions.
         connection.close()
         with connection._nodb_cursor() as cursor:
             cursor.execute(
                 f"CREATE DATABASE {_quote(connection, template_name)} "
-                f"TEMPLATE {_quote(connection, connection.settings_dict['NAME'])}"
+                f"TEMPLATE {_quote(connection, test_name)}"
             )
         if self.verbosity >= 1:
             print(f"Saved migrated test database as template {template_name}.")
@@ -175,19 +214,24 @@ class TemplateDatabaseRunner(DiscoverRunner):
             # has opened its own, which it keeps for the whole run.
             anchor = sqlite3.connect(test_name, uri=True)
             try:
-                saved = sqlite3.connect(f"file:{quote(str(copy_path))}?mode=ro", uri=True)
-                try:
-                    saved.backup(anchor)
-                finally:
-                    saved.close()
-                if self.verbosity >= 1:
-                    print(f"Loaded test database from migrated copy {copy_path.name}.")
-                self.keepdb = True
-                return super().setup_databases(**kwargs)
+                if _load_sqlite_copy(copy_path, anchor):
+                    if self.verbosity >= 1:
+                        print(f"Loaded test database from migrated copy {copy_path.name}.")
+                    self.keepdb = True
+                    return super().setup_databases(**kwargs)
             finally:
                 anchor.close()
+            # A damaged or unmigrated copy would fail or slow every later run.
+            # Closing the only connection discarded what was loaded, so build
+            # normally and replace the copy.
+            if self.verbosity >= 1:
+                print(f"Rebuilding unusable migrated copy {copy_path.name}.")
 
         old_config = super().setup_databases(**kwargs)
+        if connection.settings_dict["NAME"] != test_name:
+            # Django did not switch to a test database, so the configured
+            # database is still selected and must not become the saved copy.
+            return old_config
         connection.ensure_connection()
         # Write beside the final name and rename, so a killed run never leaves
         # a partial copy that a later invocation would trust.
