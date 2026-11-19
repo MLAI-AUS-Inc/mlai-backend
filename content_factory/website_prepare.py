@@ -1315,6 +1315,16 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 op.receipt.update(current_step=step, blocked_step=step)
                 raise WebsiteAuthorityError(blocked.get("reasonCode") or blocked.get("reason_code") or journey.get("reasonCode") or "website_prepare_blocked",
                     blocked.get("reason") or blocked.get("message") or journey.get("reason") or "Website preparation needs attention.", retryable=False)
+            if step not in {"verify-access", "scan"}:
+                # Plan C15: articles that live in a CMS or database can't be
+                # wired by any tier. Stop honestly before any setup run, charge
+                # or staff alert, once the scan of this source says so.
+                from . import website_cms_content as cms_content
+                observed = (journey.get("repository") or {}).get("observedSourceSha") or ""
+                cms = cms_content.classification(journey.get("discovery"), source_sha=observed)
+                if cms is not None:
+                    cms_content.stop(op, cms, now=now, source_sha=observed or (journey.get("discovery") or {}).get("sourceSha") or "")
+                    return _finish_prepare(op, now=now)
             if step == "setup" and not op.payload.get("repair_setup"):
                 from .website_connections import settled_setup_run
                 if settled_setup_run(op.connection, source_sha=(journey.get("repository") or {}).get("observedSourceSha") or ""):

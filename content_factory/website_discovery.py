@@ -15,6 +15,60 @@ def scan_payload(value):
     return payload
 
 
+# Ids match Content Factory's setup ladder (native, agentic, static_dropin,
+# content_files) plus the two non-tier states.
+SETUP_TIERS = ("native", "agentic", "static_dropin", "content_files", "cannot_yet", "not_checked")
+TIER_RANKS = {"native": 1, "agentic": 2, "static_dropin": 3, "content_files": 4}
+# Founder words for each tier (plan C3, 7.3): "works", "works with one step
+# from you", or "can't be done yet" with the reason. Never "unsupported".
+TIER_LABELS = {
+    "native": "Works: MLAI sets up your articles page directly.",
+    "agentic": "Works: MLAI's setup agent fits the articles page to your site, and checks it before anything changes.",
+    "static_dropin": "Works: MLAI adds styled article pages beside your site.",
+    "content_files": "Works with one step from you: MLAI sends the articles as files, and your developer adds them.",
+    "cannot_yet": "Can't be done yet: your articles live in a content system, not in your website's code.",
+    "not_checked": "We haven't checked your website's code yet.",
+}
+CMS_KINDS = ("wordpress", "drupal", "ghost", "headless_cms")
+
+
+def content_source_snapshot(value):
+    """Bounded view of CF's content-source classification (plan C15); {} when absent."""
+    value = mapping(value)
+    if value.get("version") != 1:
+        return {}
+    kind = value.get("kind") if value.get("kind") in {"cms", "repository", "unknown"} else "unknown"
+    cms = value.get("cms") if kind == "cms" and value.get("cms") in CMS_KINDS else None
+    if kind == "cms" and cms is None:
+        kind = "unknown"
+    # ``reason`` is the closed "can't be done yet" reason, not a registry failure code.
+    out = {"version": 1, "kind": kind, "cms": cms, "reason": "cms_content" if cms else None,
+           "signals": [str(item)[:200] for item in (value.get("signals") or [])[:8] if isinstance(item, str)]}
+    if cms and isinstance(value.get("vendor"), str):
+        out["vendor"] = value["vendor"][:40]
+    return out
+
+
+def setup_tier(normalized, content_source=None, *, complete=False):
+    """The tier label for a scanned site; ``cannot_yet`` only for CMS content."""
+    normalized = mapping(normalized)
+    stored = mapping(normalized.get("setup_tier"))
+    level = str(normalized.get("support_level") or "")
+    if mapping(content_source).get("kind") == "cms":
+        tier, reason = "cannot_yet", "cms_content"
+    elif stored.get("id") in {"native", "agentic"}:
+        tier, reason = stored["id"], ""
+    elif level in {"native", "adapter_available"}:
+        tier, reason = "native", ""
+    elif level or complete:
+        # Older scans labelled every site without a native adapter
+        # "unsupported"; setup takes those to tier 2.
+        tier, reason = "agentic", ""
+    else:
+        tier, reason = "not_checked", ""
+    return {"id": tier, "rank": TIER_RANKS.get(tier), "label": TIER_LABELS[tier], "reason": reason}
+
+
 def discovery_snapshot(value):
     """Return display evidence without synthesizing targets or ready verdicts."""
     payload = scan_payload(value)
@@ -51,7 +105,14 @@ def discovery_snapshot(value):
         "framework": inventory.get("detected_framework") or inventory.get("framework")
             or payload.get("detected_framework") or payload.get("framework") or normalized.get("framework"),
         "resolution": resolution, "candidates": candidates, "publishReady": False,
-        "supportLevel": str(normalized.get("support_level") or "unsupported")[:100], "supportPaths": support_paths}
+        "supportPaths": support_paths}
+    complete = result["complete"]
+    content_source = content_source_snapshot(inventory.get("content_source") or normalized.get("content_source")
+                                             or payload.get("content_source"))
+    tier = setup_tier(normalized, content_source, complete=complete)
+    # Plan C3: tier wording, never "unsupported" (older scans said so for any
+    # site without a native adapter, which only means setup goes to tier 2).
+    result.update(supportLevel=tier["id"], setupTier=tier, contentSource=content_source)
     from .website_site_fingerprint import project, framework_hint
     fingerprint = project(inventory.get('site_fingerprint'), github_repo=result['githubRepo'],
         source_sha=result['sourceSha'], branch=result['branch'], app_root=result['appRoot'])

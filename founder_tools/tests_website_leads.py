@@ -152,3 +152,18 @@ class WebsiteLeadTests(TestCase):
         match = resolve("/api/v1/my-startup/founder-tools/website-lead/")
         self.assertTrue(issubclass(match.func.view_class, FounderWebsiteLeadView))
         self.assertEqual(match.func.view_class.startup_read_bucket, "read")
+
+    def test_cms_content_interest_is_recorded_without_the_gate_or_a_not_on_github_event(self):
+        """Plan C15: "Tell me when this changes" on a CMS-held site shares the lead row only."""
+        response, events = self.post({"reason": "cms_content", "domain": "blog.example.com", "hostClass": "wordpress",
+                                      "notifyWhenChanged": True})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(events, [])
+        self.assertTrue(response.data["recorded"])
+        self.assertIn("content system", response.data["message"])
+        lead = self.leads()["cms_content:blog.example.com"]
+        self.assertEqual((lead["hostClass"], lead["notifyWhenChanged"], lead["source"]),
+                         ("wordpress", True, "my_startup.cms_content"))
+        now = timezone.now()
+        report = journey_funnel(since=now - timedelta(days=1), until=now + timedelta(days=1))
+        self.assertEqual(report["stages"]["not_on_github"]["users"], 0)
