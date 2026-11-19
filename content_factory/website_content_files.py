@@ -86,6 +86,18 @@ def is_content_files_article(article) -> bool:
     return path == CONTENT_ROOT or path.startswith(CONTENT_ROOT + "/")
 
 
+def not_live_q():
+    """A ``WrittenArticle`` filter for content-file articles that are not live yet.
+
+    Querysets that count published articles exclude these: a merged content
+    file is not a page anyone can read (``article_bucket`` applies the same rule).
+    """
+    from django.db.models import Q
+    from .models import ArticlePublishStatus
+    return ((Q(content_path=CONTENT_ROOT) | Q(content_path__startswith=CONTENT_ROOT + "/"))
+            & ~Q(publish_status=ArticlePublishStatus.LIVE))
+
+
 def run_has_live_article(run) -> bool:
     """True once any written article of this run passed the live check of its real URL."""
     from .models import ArticlePublishStatus, WrittenArticle

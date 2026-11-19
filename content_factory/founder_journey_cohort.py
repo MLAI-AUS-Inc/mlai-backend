@@ -524,9 +524,12 @@ def _runs(organization):
 
 def _published_articles(organization):
     from .models import ArticlePublishStatus, WrittenArticle
+    from .website_content_files import not_live_q
+    # Plan C7: a content file merged onto main is not a published article.
     return WrittenArticle.objects.filter(organization_id=organization.pk).filter(
         Q(publish_status__in=[ArticlePublishStatus.MERGED, ArticlePublishStatus.LIVE])
-        | Q(published_at__isnull=False) | Q(on_main_verified_at__isnull=False) | Q(live_verified_at__isnull=False))
+        | Q(published_at__isnull=False) | Q(on_main_verified_at__isnull=False) | Q(live_verified_at__isnull=False)
+    ).exclude(not_live_q())
 
 
 def legacy_reasons(organization, config=None) -> list[str]:

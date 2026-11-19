@@ -17626,6 +17626,12 @@ class VibeMarketingAutofillView(APIView):
         )
 
 
+def _content_files_not_live_q():
+    from content_factory.website_content_files import not_live_q
+
+    return not_live_q()
+
+
 def _baseline_published_articles(organization, *, limit=8):
     """Publicly reachable articles we wrote, for AI-citation checks.
 
@@ -17644,6 +17650,8 @@ def _baseline_published_articles(organization, *, limit=8):
                 article_url__isnull=False,
             )
         )
+        # Plan C7: a content file that is not live is not a page anyone can cite.
+        .exclude(_content_files_not_live_q())
         .order_by("-pr_merged_at", "-created_at")[: limit * 2]
     )
     seen = set()
