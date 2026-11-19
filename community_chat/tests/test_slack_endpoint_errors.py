@@ -7,6 +7,7 @@ from rest_framework.test import APIRequestFactory
 from slack_sdk.errors import SlackApiError, SlackRequestError
 
 from community_chat.slack_views import SlackDmStartView, SlackUserDirectoryView
+from integrations.services.message_sync.scheduler import BudgetDeferred
 from integrations.services.slack_dm_mirror import (
     SlackDmMirrorError,
     SlackDmMirrorUpstreamError,
@@ -92,9 +93,43 @@ class SlackEndpointErrorMappingTests(SimpleTestCase):
                     {
                         "error": "slack_rate_limited",
                         "retry_after_seconds": 17,
+                        "detail": "Slack is busy right now. Try again in 17 seconds.",
                     },
                 )
                 self.assertEqual(response["Retry-After"], "17")
+
+    def test_our_own_slack_budget_deferral_is_retryable_not_500(self):
+        # Prod 19 Nov: users.info inside open_slack_dm was deferred by our
+        # Slack budget and surfaced as an uncaught 500.
+        for endpoint in ("directory", "dm_start"):
+            with self.subTest(endpoint=endpoint):
+                response = self._request_with_service_error(
+                    endpoint, BudgetDeferred(12)
+                )
+                self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+                self.assertEqual(
+                    response.data,
+                    {
+                        "error": "slack_rate_limited",
+                        "retry_after_seconds": 12,
+                        "detail": "Slack is busy right now. Try again in 12 seconds.",
+                    },
+                )
+                self.assertEqual(response["Retry-After"], "12")
+
+    def test_mention_directory_budget_deferral_is_retryable_not_500(self):
+        with patch(
+            "integrations.services.slack_mention_directory.search_workspace_mentions",
+            side_effect=BudgetDeferred(9),
+        ):
+            request = self.factory.get(
+                "/community-chat/slack/users/", {"channel_id": "c1", "q": ""}
+            )
+            response = SlackUserDirectoryView.as_view(
+                authentication_classes=(), permission_classes=(), throttle_classes=()
+            )(request)
+        self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertEqual(response["Retry-After"], "9")
 
     def test_other_slack_api_errors_are_bad_gateway(self):
         self._assert_both_endpoints(
@@ -146,5 +181,40 @@ class SlackEndpointErrorMappingTests(SimpleTestCase):
             {
                 "slack": "Slack is not linked.",
                 "code": "slack_dm_mirror_error",
+                "detail": "Slack is not linked.",
             },
         )
+
+
+class InteractiveSlackBudgetWaitTests(SimpleTestCase):
+    """A member opening a DM waits out a brief shared-budget slot, not longer."""
+
+    def _call(self, side_effect):
+        from integrations.services import slack_dm_mirror
+
+        with patch.object(
+            slack_dm_mirror, "_call_slack_with_grant_authority", side_effect=side_effect
+        ) as call, patch.object(slack_dm_mirror.time, "sleep") as sleep:
+            try:
+                result = slack_dm_mirror._call_slack_interactive(
+                    MagicMock(), "users_info", required_scopes=set(), user="U1"
+                )
+            except BudgetDeferred as exc:
+                result = exc
+        return result, call, sleep
+
+    def test_brief_deferral_is_waited_out(self):
+        result, call, sleep = self._call([BudgetDeferred(1), {"ok": True}])
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(call.call_count, 2)
+        sleep.assert_called_once_with(1.0)
+
+    def test_long_deferral_still_surfaces(self):
+        result, call, sleep = self._call([BudgetDeferred(30)])
+        self.assertIsInstance(result, BudgetDeferred)
+        sleep.assert_not_called()
+
+    def test_waits_are_capped_in_total(self):
+        result, call, sleep = self._call([BudgetDeferred(2)] * 5)
+        self.assertIsInstance(result, BudgetDeferred)
+        self.assertEqual(sleep.call_count, 2)
