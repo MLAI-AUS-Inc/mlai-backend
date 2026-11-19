@@ -118,6 +118,32 @@ class StaffTests(TestCase):
         self.assertEqual(doctor["companyId"], str(self.built.company.pk))
         self.assertEqual(doctor["connectionId"], str(site.pk))
 
+    def test_staff_see_sites_by_tier_from_the_capability_record(self):
+        """Plan C10: the sweep stores each site's tier; the list counts and filters by it, the detail shows the record."""
+        from .website_models import WebsiteConnection, WebsiteConnectionOperation
+        from .website_capability_record import run_capability_record_sweep
+        from .tests_website_capability_record_unit import validate
+        site = WebsiteConnection.objects.create(organization=self.org, github_repo="synthetic/site", branch="main",
+            verified_sha="a"*40, repository_id=123)
+        self.built.config.website_connection = site
+        self.built.config.save(update_fields=["website_connection"])
+        WebsiteConnectionOperation.objects.create(connection=site, generation=site.generation, action="prepare",
+            idempotency_key="staff-tier", state="stopped", payload={"company_id": str(self.built.company.pk)},
+            receipt={"status": "cant_be_done_yet", "reason_code": "cms_content",
+                     "cant_be_done_yet": {"version": 1, "reason": "cms_content"}})
+        self.assertEqual(run_capability_record_sweep()["checked"], 1)
+        site.refresh_from_db()
+        self.assertEqual(site.capabilities["capabilityRecord"]["tier"], "cannot_yet")
+        page = console.startup_list({})
+        self.assertEqual(page["results"][0]["siteTier"], "cannot_yet")
+        self.assertEqual(page["tierCounts"]["cannot_yet"], 1)
+        self.assertEqual(console.startup_list({"tier": "native"})["results"], [])
+        self.assertEqual(len(console.startup_list({"tier": "cannot_yet"})["results"]), 1)
+        with self.assertRaises(ValueError):
+            console.startup_list({"tier": "unsupported"})
+        record = validate(console.startup_detail(self.org.pk)["website"]["capability"])
+        self.assertEqual((record["state"], record["tier"]["reason"]), ("cannot_yet", "cms_content"))
+
     def test_every_startup_paginated_with_at_most_six_queries(self):
         Organization.objects.bulk_create([Organization(name=f"Startup {i}", domain=f"staff-{i}.example.test") for i in range(103)])
         with CaptureQueriesContext(connection) as queries:

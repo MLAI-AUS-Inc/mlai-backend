@@ -34,6 +34,11 @@ LEADS_KEY = "founder_website_leads"
 MAX_LEADS = 10
 REMIND_AFTER = timedelta(days=7)
 REASONS = frozenset({"not_on_github", "other_git_host", "not_in_git", "someone_else_holds_code", "no_github_account"})
+# Plan C15: "Tell me when this changes" on a site whose articles live in a CMS
+# or database. It shares the lead row, not the not-on-GitHub funnel event, and
+# it is not gated on the GitHub-first switch (the stop happens either way).
+INTEREST_REASONS = frozenset({"cms_content"})
+CMS_MESSAGE = "MLAI can't add articles to a website whose posts live in a content system yet."
 DEFAULT_REASON = "not_on_github"
 HOST_CLASS = re.compile(r"[a-z][a-z0-9_]{0,39}")
 HOSTNAME = re.compile(r"(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
@@ -75,7 +80,7 @@ def parse_lead(data) -> dict:
     """Validate the request body. Raises ValueError with founder copy."""
     data = data if hasattr(data, "get") else {}
     reason = str(_text(data, "reason") or DEFAULT_REASON).strip()
-    if reason not in REASONS:
+    if reason not in REASONS | INTEREST_REASONS:
         raise ValueError("Choose why the code isn't on GitHub.")
     host_class = str(_text(data, "hostClass", "host_class") or "unknown").strip().lower()
     if not HOST_CLASS.fullmatch(host_class):
@@ -182,19 +187,22 @@ class FounderWebsiteLeadView(APIView):
     """Record the not-on-GitHub exit ("Tell me when this changes" sets notifyWhenChanged)."""
 
     def post(self, request):
-        if not lead_exit_enabled():
+        interest = isinstance(getattr(request, "data", None), dict) and request.data.get("reason") in INTEREST_REASONS
+        if not interest and not lead_exit_enabled():
             return Response(dict(NOT_ENABLED), status=status.HTTP_404_NOT_FOUND)
         try:
             lead = parse_lead(request.data)
         except ValueError as exc:
             return Response({"detail": str(exc), "reason": "invalid_lead"}, status=status.HTTP_400_BAD_REQUEST)
-        public, created, stored = record_lead(request.user, lead)
+        source = "my_startup.cms_content" if lead["reason"] in INTEREST_REASONS else "my_startup.website_step"
+        public, created, stored = record_lead(request.user, lead, source=source)
+        base = CMS_MESSAGE if lead["reason"] in INTEREST_REASONS else MESSAGE
         # "We'll email you" only for a request this server actually keeps.
         if stored and public["notifyWhenChanged"]:
-            message = f"{MESSAGE} {NOTIFY_MESSAGE}"
+            message = f"{base} {NOTIFY_MESSAGE}"
         elif not stored and lead["notify"]:
-            message = f"{MESSAGE} {NOT_STORED_MESSAGE}"
+            message = f"{base} {NOT_STORED_MESSAGE}"
         else:
-            message = MESSAGE
+            message = base
         return Response({"lead": public, "recorded": stored, "message": message},
                         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
