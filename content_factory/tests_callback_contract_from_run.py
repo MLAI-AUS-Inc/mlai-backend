@@ -43,7 +43,10 @@ class CallbackContractFromRunTests(WebsiteDatabaseFixture, TestCase):
     @override_settings(ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED=False)
     def test_kill_switch_restores_the_refusal(self):
         response = self.post(self.bare())
-        self.assertEqual(response.data.get("code"), "website_connection_required")
+        # B12: the run is bound and its connection live, so this is the
+        # retryable protocol fault, not "Reconnect this website".
+        self.assertEqual(response.data.get("code"), "callback_contract_missing")
+        self.assertEqual(response.data.get("legacy_code"), "website_connection_required")
         self.assertEqual(Endpoint.calls, [])
 
     def test_run_saved_for_an_older_generation_is_still_refused(self):
@@ -55,14 +58,14 @@ class CallbackContractFromRunTests(WebsiteDatabaseFixture, TestCase):
 
     def test_a_callback_naming_another_domain_is_not_bound(self):
         response = self.post(self.bare(domain="other.example.test"))
-        self.assertEqual(response.data.get("code"), "website_connection_required")
+        self.assertEqual(response.data.get("code"), "website_scope_mismatch")
         self.assertEqual(Endpoint.calls, [])
 
     def test_a_run_without_saved_consent_is_not_bound(self):
         self.run.run_request = {"topic": "Unbound"}
         self.run.save(update_fields=["run_request"])
         response = self.post(self.bare())
-        self.assertEqual(response.data.get("code"), "website_connection_required")
+        self.assertEqual(response.data.get("code"), "invalid_connection_contract")
         self.assertEqual(Endpoint.calls, [])
 
     def test_an_explicit_contract_is_never_replaced(self):

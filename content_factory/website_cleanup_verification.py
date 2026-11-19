@@ -24,7 +24,8 @@ def verify_cleanup_deployment(config, *, data):
         raise WebsiteAuthorityError("invalid_operation_id", "Select a valid cleanup operation.", status=422) from exc
     reviewed = connection_contract(data)
     if not config.website_connection_id:
-        raise WebsiteAuthorityError("website_connection_required", "Select the connection whose cleanup you reviewed.")
+        from .website_connection_codes import not_connected
+        raise not_connected("Select the connection whose cleanup you reviewed.")
     with transaction.atomic():
         Organization.objects.select_for_update().get(pk=config.organization_id)
         config.refresh_from_db()

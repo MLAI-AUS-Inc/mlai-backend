@@ -30,7 +30,7 @@ PERMISSION_STEPS = {
 
 AUTHORIZATION_CODES = frozenset({"github_reconnect_required", "github_authorization_required",
     "github_repository_unavailable", "github_workflow_permission_required", "github_ci_evidence_permission_required",
-    "website_connection_required", "github_access_required", "github_verification_required"})
+    "website_connection_required", "website_not_connected", "github_access_required", "github_verification_required"})
 DEPLOYMENT_WAIT_CODES = frozenset({"deployment_source_unverified", "deployment_marker_unverified",
     "live_route_unavailable", "ci_attestation_required", "ci_evidence_unavailable", "verified_target_required",
     "deployment_verification_required", "native_ci_attestation_missing", "ci_proof_unavailable"})
@@ -217,7 +217,8 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
     """Reuse one prepare receipt for the current consent generation."""
     connection = config.website_connection
     if connection is None:
-        raise WebsiteAuthorityError("website_connection_required", "Select and authorize your website repository first.")
+        from .website_connection_codes import not_connected
+        raise not_connected("Select and authorize your website repository first.")
     # A new-journey setup never merges without the owner's click, and that
     # stays true even if V2 is later switched off (G10).
     from .website_setup_owner_approval import require_owner_click

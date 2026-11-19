@@ -18,7 +18,10 @@ def start_disconnect(config, *, user, data):
         raise WebsiteAuthorityError("invalid_disconnect_choice", "Choose whether to keep the articles pages.", status=400)
     contract = connection_contract(data)
     connection = config.website_connection
-    if connection is None or not contract or contract["website_connection_id"] != str(connection.pk):
+    if connection is None:
+        from .website_connection_codes import not_connected
+        raise not_connected("Select the current website to disconnect.")
+    if not contract or contract["website_connection_id"] != str(connection.pk):
         raise WebsiteAuthorityError("website_connection_required", "Select the current website to disconnect.")
     operation_id = data.get("operation_id")
     if operation_id:
