@@ -67,6 +67,87 @@ class DecideTests(SimpleTestCase):
         self.assertEqual(carry.decide(SETUP, _compare(*many), owned_merge=False)["reason"], "compare_truncated")
 
 
+def _truncated(blobs_from=None, blobs_to=None, *, complete=True):
+    many = _compare(*[f"src/file{index}.ts" for index in range(carry.COMPARE_FILE_LIMIT)])
+    if blobs_from is not None:
+        many[carry.SETUP_BLOBS_KEY] = {"from": blobs_from, "to": blobs_to, "complete": complete}
+    return many
+
+
+SAME = {path: f"{index:040x}" for index, path in enumerate(carry.setup_paths(SETUP), start=1)}
+
+
+class TruncatedCompareTests(SimpleTestCase):
+    """A push with 300+ changed files is judged by the setup files' blob ids (MLAI's own site, 19 Nov 2026)."""
+
+    def test_unchanged_setup_blobs_carry(self):
+        decision = carry.decide(SETUP, _truncated(SAME, dict(SAME)), owned_merge=False)
+        self.assertEqual((decision["carry"], decision["method"]), (True, "setup_blobs"))
+
+    def test_a_changed_setup_blob_does_not_carry(self):
+        changed = {**SAME, "src/app/blog/page.tsx": "f" * 40}
+        decision = carry.decide(SETUP, _truncated(SAME, changed), owned_merge=False)
+        self.assertEqual((decision["carry"], decision["reason"]), (False, "setup_files_changed"))
+        self.assertEqual(decision["changed_setup_files"], ["src/app/blog/page.tsx"])
+
+    def test_a_setup_file_missing_on_either_side_does_not_carry(self):
+        gone = {**SAME, "src/lib/articles.ts": ""}
+        self.assertFalse(carry.decide(SETUP, _truncated(SAME, gone), owned_merge=False)["carry"])
+        self.assertFalse(carry.decide(SETUP, _truncated(gone, dict(gone)), owned_merge=False)["carry"])
+
+    def test_an_mlai_merge_may_change_the_registry_blob(self):
+        registry = {**SAME, "src/content/articles/registry.ts": "f" * 40}
+        self.assertFalse(carry.decide(SETUP, _truncated(SAME, registry), owned_merge=False)["carry"])
+        self.assertTrue(carry.decide(SETUP, _truncated(SAME, registry), owned_merge=True)["carry"])
+
+    def test_unread_or_partial_blobs_keep_the_old_lock(self):
+        self.assertEqual(carry.decide(SETUP, _truncated(), owned_merge=False)["reason"], "compare_truncated")
+        self.assertEqual(carry.decide(SETUP, _truncated(SAME, dict(SAME), complete=False), owned_merge=False)["reason"],
+            "compare_truncated")
+
+    def test_compare_sources_reads_both_trees_only_when_truncated(self):
+        class Response:
+            def __init__(self, data):
+                self.status_code, self._data = 200, data
+
+            def json(self):
+                return self._data
+
+        paths = carry.setup_paths(SETUP)
+        tree = {"truncated": False, "tree": [{"path": path, "type": "blob", "sha": SAME[path]} for path in paths]
+            + [{"path": "src/app/page.tsx", "type": "blob", "sha": "a" * 40}]}
+        website = type("Website", (), {"pk": 1, "installation_id": 1, "github_repo": "o/r", "repository_id": 1})()
+        credential = type("Credential", (), {"token": "t"})()
+        for comparison, tree_reads in ((_truncated(), 2), (_compare("src/app/page.tsx"), 0)):
+            calls = []
+
+            def get(url, **_kwargs):
+                calls.append(url)
+                return Response(tree if "/git/trees/" in url else comparison)
+
+            with patch("integrations.services.github_app.create_installation_access_token", return_value=credential), \
+                    patch("content_factory.website_connections.require_unlocked_remote_call"), \
+                    patch("integrations.http_client.get", side_effect=get), patch("integrations.http_client.delete"):
+                data = carry.compare_sources(website, "a" * 40, "b" * 40, setup_files=paths)
+            self.assertEqual(sum("/git/trees/" in url for url in calls), tree_reads)
+            if tree_reads:
+                self.assertEqual(data[carry.SETUP_BLOBS_KEY], {"from": SAME, "to": SAME, "complete": True})
+                self.assertTrue(carry.decide(SETUP, data, owned_merge=False)["carry"])
+            else:
+                self.assertNotIn(carry.SETUP_BLOBS_KEY, data)
+
+    def test_a_truncated_tree_is_not_trusted(self):
+        class Response:
+            status_code = 200
+
+            def json(self):
+                return {"truncated": True, "tree": []}
+
+        website = type("Website", (), {"github_repo": "o/r"})()
+        with patch("integrations.http_client.get", return_value=Response()):
+            self.assertIsNone(carry._tree_blobs(website, {}, "a" * 40, ["x.ts"]))
+
+
 class CarriedSite(LiveUrlFixture):
     """A merged site Ready on MLAI's build proof, with its setup files recorded."""
 
@@ -138,6 +219,14 @@ class CarryPushTests(CarriedSite, TestCase):
         op = self.operation()
         self.assertTrue(op.payload["scan_required"])
         self.assertEqual(op.payload["carried_from"], "")
+
+    def test_a_large_push_with_the_setup_files_unchanged_stays_ready(self):
+        paths = carry.setup_paths(SETUP)
+        blobs = {path: "c" * 40 for path in paths}
+        result, _ = self.push(_truncated(blobs, dict(blobs)))
+        self.assertEqual(result["carried"], 1)
+        self.assertEqual(self.connection.verified_sha, PUSHED)
+        self.assertTrue(self.connection.capabilities["publishingReady"])
 
     def test_an_unreadable_comparison_locks_as_before(self):
         self.push(None)
