@@ -53,6 +53,28 @@ def classification(discovery, *, source_sha=None):
     return source
 
 
+def setup_already_ran(op, journey, *, source_sha=""):
+    """True when this website is past repository selection, so C15 must not stop it.
+
+    The stop belongs before any paid setup. A preparation that already
+    dispatched or merged a setup run, a journey still pointing at an open setup
+    pull request, a verified integration, or a settled setup run on this
+    connection all mean the decision was made earlier; a later scan never
+    closes a working site as "can't be done yet".
+    """
+    receipt = op.receipt if isinstance(op.receipt, dict) else {}
+    if receipt.get("setup_run_id") or receipt.get("merged_setup_run_id"):
+        return True
+    journey = journey if isinstance(journey, dict) else {}
+    if (journey.get("nextAction") or {}).get("setupRunId"):
+        return True
+    integration = (journey.get("prerequisites") or {}).get("integration") or {}
+    if integration.get("status") == "complete":
+        return True
+    from .website_connections import settled_setup_run
+    return bool(settled_setup_run(op.connection, source_sha=source_sha))
+
+
 def stop(op, source, *, now=None, source_sha=""):
     """Close preparation ``op`` as "can't be done yet: cms_content". The caller persists ``op``."""
     now = now or timezone.now()

@@ -76,21 +76,24 @@ class PrepareStopTests(SimpleTestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def advance(self, name, step="setup", observed=None):
+    def advance(self, name, step="setup", observed=None, extra=None, settled=None, receipt=None):
         op = operation_fixtures.PrepareJourneyTests().operation()
         op.connection.organization = SimpleNamespace(pk=7, domain="example.com")
+        op.receipt.update(receipt or {})
         config = SimpleNamespace(website_connection=op.connection, website_connection_id=op.connection_id)
         context = SimpleNamespace(company=SimpleNamespace(pk=9), organization=SimpleNamespace(pk=7))
         scan = discovery(name)
         journey = {"nextAction": {"id": step}, "capabilities": {"canPublishArticle": False}, "discovery": scan,
                    "repository": {"observedSourceSha": scan["sourceSha"] if observed is None else observed}}
+        for key, value in (extra or {}).items():
+            journey[key] = {**journey[key], **value} if isinstance(journey.get(key), dict) else value
         handler = Mock(return_value={"status": "completed", "run_id": "setup-run"})
         with patch.object(prepare, "_claim_prepare", return_value=op), \
                 patch.object(prepare, "_prepare_context", return_value=(context, config, SimpleNamespace(pk=4))), \
                 patch.object(prepare, "journey_for_context", return_value=journey), \
                 patch.object(prepare, "_selected_setup_child", return_value=None), \
                 patch.object(prepare, "_return_to_open_setup_pr", return_value=None), \
-                patch("content_factory.website_connections.settled_setup_run", return_value=None), \
+                patch("content_factory.website_connections.settled_setup_run", return_value=settled), \
                 patch("content_factory.website_prepare_sticky_stop._relevant", return_value=([], [])), \
                 patch("content_factory.website_prepare_sticky_stop._stop_source", return_value=""), \
                 patch.object(prepare, "_persist_prepare", side_effect=lambda operation, **kwargs: operation):
@@ -134,6 +137,32 @@ class PrepareStopTests(SimpleTestCase):
         op, setup = self.advance("wordpress-theme", observed="f" * 40)
         setup.assert_called_once()
         self.assertNotEqual(op.receipt.get("status"), "cant_be_done_yet")
+
+    def test_the_permissions_step_stops_before_any_grant_is_asked(self):
+        op, permissions = self.advance("wordpress-theme", step="permissions")
+        permissions.assert_not_called()
+        self.assertEqual(op.receipt["cant_be_done_yet"]["reason"], "cms_content")
+
+    def test_a_site_past_repository_selection_is_never_closed_by_a_later_scan(self):
+        # The stop belongs before any paid setup: a verified integration, an
+        # open or merged setup pull request, or an earlier setup run all mean
+        # the site was already taken on, so a re-scan must not close it.
+        cases = (
+            ("ci-attestation", {}, None, None),
+            ("verify", {}, None, None),
+            ("setup", {"prerequisites": {"integration": {"status": "complete"}}}, None, None),
+            ("setup", {"nextAction": {"setupRunId": "setup-open"}}, None, None),
+            ("setup", {}, SimpleNamespace(run_id="setup-merged"), None),
+            ("setup", {}, None, {"setup_run_id": "setup-earlier"}),
+        )
+        for step, extra, settled, receipt in cases:
+            with self.subTest(step=step, extra=extra, settled=settled, receipt=receipt):
+                self.refund.reset_mock(), self.lead.reset_mock()
+                op, _ = self.advance("next-contentful-blog", step=step, extra=extra, settled=settled, receipt=receipt)
+                self.assertNotEqual(op.receipt.get("status"), "cant_be_done_yet")
+                self.assertNotIn("cant_be_done_yet", op.receipt)
+                self.refund.assert_not_called()
+                self.lead.assert_not_called()
 
     def test_an_incomplete_scan_never_stops(self):
         value = discovery("wordpress-theme")

@@ -4195,14 +4195,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ad008e9b77f6d4f5e276138aee93d15acb6dc14d2faec8e9cc5486a668ea0b3b",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py",
         "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4223,14 +4223,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ad008e9b77f6d4f5e276138aee93d15acb6dc14d2faec8e9cc5486a668ea0b3b",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py",
         "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4238,7 +4238,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:e0f6dc9a8b4e36827f0f0b6dd598f821f3c7219a519e129bd5d062ff6a2c438a:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1358,
+      "line": 1361,
       "kind": "model_update",
       "fields": [
         "current_step",
@@ -4251,14 +4251,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ad008e9b77f6d4f5e276138aee93d15acb6dc14d2faec8e9cc5486a668ea0b3b",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py",
         "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4278,14 +4278,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ad008e9b77f6d4f5e276138aee93d15acb6dc14d2faec8e9cc5486a668ea0b3b",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py",
         "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4305,14 +4305,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ad008e9b77f6d4f5e276138aee93d15acb6dc14d2faec8e9cc5486a668ea0b3b",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py",
         "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4320,7 +4320,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:4758533f8b3da0df3160a618e903ebdf6827677f3217dbf1b86c5831d943d64f:2",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1390,
+      "line": 1393,
       "kind": "model_update",
       "fields": [
         "status",
@@ -4333,14 +4333,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ad008e9b77f6d4f5e276138aee93d15acb6dc14d2faec8e9cc5486a668ea0b3b",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py",
         "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4360,14 +4360,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ad008e9b77f6d4f5e276138aee93d15acb6dc14d2faec8e9cc5486a668ea0b3b",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py",
         "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4388,14 +4388,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ad008e9b77f6d4f5e276138aee93d15acb6dc14d2faec8e9cc5486a668ea0b3b",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
         "content_factory/tests_prepare_journey_unit.py",
         "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
