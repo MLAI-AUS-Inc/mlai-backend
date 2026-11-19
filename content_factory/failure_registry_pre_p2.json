@@ -205,6 +205,18 @@
     "retry_policy": "await_owner_action",
     "retryable": false
   },
+  "editorial_catalog_policy_changed": {
+    "action_id": null,
+    "failure_class": "strategy",
+    "retry_policy": "advance_strategy",
+    "retryable": false
+  },
+  "editorial_catalog_selection_not_current": {
+    "action_id": null,
+    "failure_class": "strategy",
+    "retry_policy": "advance_strategy",
+    "retryable": false
+  },
   "github_ci_evidence_permission_required": {
     "action_id": "review_github_permissions",
     "failure_class": "needs_user",

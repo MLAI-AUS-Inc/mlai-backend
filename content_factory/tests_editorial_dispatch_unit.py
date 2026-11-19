@@ -302,7 +302,11 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
     def test_actual_start_handler_does_not_downgrade_an_empty_configured_catalog(self):
         self.strategy = {"editorial_catalog": {}}
         self.config.pillar_strategy = deepcopy(self.strategy)
-        self.assertEqual(self.start({"topic": "Delivery"}).status_code, 400)
+        # Plan B19: one founder question (no approved customer profile yet), not a bare 400.
+        response = self.start({"topic": "Delivery"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual((response.data["code"], response.data["action"]["id"]),
+                         ("editorial_brief_required", "describe_customer"))
         self.charge.assert_not_called()
         self.http.post.assert_not_called()
 
