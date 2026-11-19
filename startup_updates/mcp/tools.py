@@ -263,7 +263,15 @@ def save_draft(principal, arguments):
         if draft.groundedness_status not in {"passed", "founder_asserted"}:
             validation = {"groundedness_status": draft.groundedness_status}
     memo = old
+    # The founder's saved introduction (or their startup's own description)
+    # stays as written; an AI only fills it when there is none.
+    profile = getattr(company.organization, "startup_profile", None)
+    kept_overview = next((value.strip() for value in (old.get("startupOverview"), getattr(profile, "short_description", None))
+        if isinstance(value, str) and value.strip()), None)
     for incoming, field in NARRATIVE_FIELDS.items():
+        if field == "startupOverview" and kept_overview is not None:
+            memo[field] = kept_overview
+            continue
         if incoming in arguments["narrative"]:
             value = arguments["narrative"][incoming].strip()
             memo[field] = value if field in {"summary", "startupOverview"} else [line.strip() for line in value.splitlines() if line.strip()]
