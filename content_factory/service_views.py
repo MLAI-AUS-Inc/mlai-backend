@@ -7361,13 +7361,15 @@ class ContentFactoryCallbackView(APIView):
         from content_factory.run_backend_facts import save_job_facts
         from content_factory.models import ContentFactoryJob
         from integrations.services.article_generation import maybe_auto_refund_terminal_failure
-        from integrations.services.notification_adapters import resolve_automation_run, send_research_empty
+        from integrations.services.notification_adapters import (
+            research_empty_applies, resolve_automation_run, send_research_empty)
         from integrations.utils import normalize_domain
 
         job_id = str(data.get('job_id') or data.get('run_id') or '')
         run = resolve_automation_run(data.get('notification_context'))
-        from integrations.services.research_automations import MANUAL_SLOT_BASE
-        if (run is None or run.slot_index >= MANUAL_SLOT_BASE
+        # Check before refunding: a late empty callback for a night that already
+        # delivered topics, or for another job, must not credit anything back.
+        if (not research_empty_applies(run, data)
                 or normalize_domain(run.automation.organization.domain) != normalize_domain(data.get('domain') or '')):
             return Response({'status': 'ignored', 'reason': 'no_scheduled_automation_run', 'job_id': job_id})
         job = ContentFactoryJob.objects.filter(job_id=job_id).first() if job_id else None

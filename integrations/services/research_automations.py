@@ -437,12 +437,28 @@ def resume_automations_paused_for_points(*, limit: int = 200) -> int:
     for automation in paused:
         if (automation.metadata or {}).get(MEMORY_KEY, {}).get("pause_reason") != POINTS_PAUSE_REASON:
             continue
-        payer = automation.user or automation.notification_channel.user
-        if payer is None:
-            continue
-        balance = _content_factory_balance_for_user(payer)
-        resumed += resume_after_points(automation.organization, balance=balance)
+        try:
+            payer = _automation_payer(automation)
+            if payer is None:
+                continue
+            balance = _content_factory_balance_for_user(payer)
+            # A refusal that did not say how many points it needed still waits
+            # for at least the price of one run, so a pause is not lifted (and
+            # re-announced) every night by a balance that cannot pay.
+            floor = get_content_factory_research_cost_points(automation.organization.domain or "", 3)
+            resumed += resume_after_points(automation.organization, balance=balance, minimum_points=floor)
+        except Exception:
+            # One wallet lookup must not stop the scheduler for everyone else.
+            logger.warning("automation_points_resume_check_failed automation=%s", automation.id, exc_info=True)
     return resumed
+
+
+def _automation_payer(automation: ResearchAutomation):
+    """The wallet dispatch charges: the billing actor first, then the channel and automation owners."""
+    from integrations.services.github_installations import resolve_user_for_actor_id
+    actor = automation_billing_actor_slack_id(automation)
+    payer = resolve_user_for_actor_id(actor) if actor else None
+    return payer or automation.notification_channel.user or automation.user
 
 
 def dispatch_due_automation_runs(*, now: Optional[datetime] = None, limit: int = 20) -> list[dict[str, Any]]:

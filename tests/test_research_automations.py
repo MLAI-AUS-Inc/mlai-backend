@@ -2061,6 +2061,18 @@ class AutomationPointsPauseTests(TestCase):
         record_manual_pause(self.org)
         self.assertEqual(run_research_automation_scheduler(now=night + timedelta(days=2))["resumed_after_points"], 0)
 
+    @patch("integrations.services.research_automations.get_content_factory_research_cost_points", return_value=6)
+    @patch("integrations.services.research_automations._content_factory_balance_for_user", return_value=3)
+    def test_a_refusal_without_numbers_waits_for_the_price_of_a_run(self, balance, _cost):
+        from integrations.services.daily_research_policy import pause_for_insufficient_points
+        from integrations.services.research_automations import resume_automations_paused_for_points
+        self.assertTrue(pause_for_insufficient_points(self.org))
+        self.assertEqual(resume_automations_paused_for_points(), 0)
+        balance.return_value = 6
+        self.assertEqual(resume_automations_paused_for_points(), 1)
+        # The wallet checked is the one dispatch charges (the billing actor).
+        self.assertEqual(balance.call_args.args[0], self.user)
+
     def test_a_content_factory_points_refusal_also_pauses(self):
         from integrations.services.notification_adapters import send_error
         run = AutomationRun.objects.create(
@@ -2152,6 +2164,42 @@ class EmptyResearchNightTests(TestCase):
         self.assertFalse(NotificationDelivery.objects.filter(event_type="research_empty").exists())
         self._empty(self._night(7))
         self.assertEqual(NotificationDelivery.objects.filter(event_type="research_empty").count(), 1)
+
+    def test_an_empty_night_refunds_its_own_job_once(self):
+        run = self._night(0)
+        ContentFactoryJob.objects.create(job_id=run.content_factory_run_id, domain=self.org.domain,
+                                         slack_user_id="", status="queued", request_meta={})
+        with patch("integrations.services.article_generation.maybe_auto_refund_terminal_failure",
+                   return_value=(True, 6)) as refund:
+            response = self._empty(run)
+        refund.assert_called_once()
+        self.assertEqual(refund.call_args.kwargs["error_code"], "NO_OPPORTUNITIES")
+        self.assertEqual(response.json()["refunded_points"], 6)
+        self.assertEqual(ContentFactoryJob.objects.get(job_id=run.content_factory_run_id).status, "completed")
+
+    def test_a_late_empty_callback_after_topics_or_for_another_job_changes_nothing(self):
+        delivered = self._night(0)
+        delivered.selected_topic = "clinic rostering"
+        delivered.status = AutomationRunStatus.GENERATING
+        delivered.save(update_fields=["selected_topic", "status"])
+        other = self._night(1)
+        for run in (delivered, other):
+            ContentFactoryJob.objects.create(job_id=run.content_factory_run_id, domain=self.org.domain,
+                                             slack_user_id="", status="queued", request_meta={})
+        with patch("integrations.services.article_generation.maybe_auto_refund_terminal_failure",
+                   return_value=(True, 6)) as refund:
+            self.assertEqual(self._empty(delivered).json()["status"], "ignored")
+            response = self.client.post(reverse("content_factory_callback"), {
+                "event_type": "research_empty", "job_id": "someone-elses-run", "run_id": "someone-elses-run",
+                "domain": self.org.domain, "workflow": "auto_discovery", "outcome": "empty",
+                "empty_reason": "no_opportunities", "notification_context": notification_context_for_run(other),
+            }, format="json")
+            self.assertEqual(response.json()["status"], "ignored")
+        refund.assert_not_called()
+        delivered.refresh_from_db()
+        other.refresh_from_db()
+        self.assertEqual(delivered.status, AutomationRunStatus.GENERATING)
+        self.assertEqual(other.status, AutomationRunStatus.QUEUED)
 
     def test_a_manual_run_is_not_an_empty_night(self):
         run = self._night(0, slot_index=100)

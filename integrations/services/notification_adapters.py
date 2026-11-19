@@ -1438,6 +1438,22 @@ def research_empty_notice_text(run: AutomationRun) -> str:
     )
 
 
+def research_empty_applies(run: Optional[AutomationRun], data: dict[str, Any]) -> bool:
+    """Whether a ``research_empty`` callback may close this automation run (B23).
+
+    Only a scheduled slot of the callback's own Content Factory run can be an
+    empty night. A night that already delivered topics is not empty, whatever
+    arrives late, and a callback for a different job never closes this slot.
+    """
+    if run is None or run.slot_index >= _manual_slot_base():
+        return False
+    job_id = _callback_job_id(data)
+    if run.content_factory_run_id and job_id != run.content_factory_run_id:
+        return False
+    return not (run.selected_topic
+                or run.deliveries.filter(event_type="topic_selection", status="sent").exists())
+
+
 def send_research_empty(data: dict[str, Any]) -> list[NotificationDelivery]:
     """Record a scheduled night that found nothing new as a completed, empty run (B23).
 
@@ -1445,10 +1461,7 @@ def send_research_empty(data: dict[str, Any]) -> list[NotificationDelivery]:
     nights in a row the founder gets one notice suggesting new seeds.
     """
     run = resolve_automation_run(data.get("notification_context"))
-    if not run or run.slot_index >= _manual_slot_base():
-        return []
-    # A night that already delivered topics is not empty, whatever arrives late.
-    if run.selected_topic or run.deliveries.filter(event_type="topic_selection", status="sent").exists():
+    if not research_empty_applies(run, data):
         return []
     job_id = _callback_job_id(data)
     run.callback_payload = data

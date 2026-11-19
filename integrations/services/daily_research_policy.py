@@ -247,7 +247,7 @@ def pause_for_insufficient_points(organization, *, required_points=None, current
         return True
 
 
-def resume_after_points(organization, *, balance, now=None):
+def resume_after_points(organization, *, balance, minimum_points=0, now=None):
     """Resume automations paused for points once the wallet covers the next run.
 
     Only a points pause is lifted here; a founder's own pause or the
@@ -262,7 +262,7 @@ def resume_after_points(organization, *, balance, now=None):
             if memory.get("pause_reason") != POINTS_PAUSE_REASON:
                 continue
             required = int(memory.get("points_required") or 0)
-            if int(balance or 0) < max(required, 1):
+            if int(balance or 0) < max(required, int(minimum_points or 0), 1):
                 continue
             for key in ("pause_reason", "paused_at", "points_required", "points_balance"):
                 memory.pop(key, None)
