@@ -249,10 +249,12 @@ def _decide(subject, *, now=None, prospective=False):
         return Decision('none', None, 'waiting', attempt, None, mode)
     if receipt.get('code') == 'pull_request_daily_cap' and (stamp(receipt.get('next_at')) or now) > now:
         return Decision('wait', stamp(receipt['next_at']), 'waiting', attempt, 'pull_request_day', mode)
-    if class_first:
+    in_flight = mapping(receipt.get('pending_action')).get('state') in {'reserved', 'uncertain'}
+    if class_first and not in_flight:
         # Class before wall (B1): the wall only bounds work the engine retries or
         # repairs. A founder ask waits for the founder; a code no automatic path
         # can fix (unsupported) or that the registry does not know stops now.
+        # An action still in flight is the engine's own work: it settles first.
         classification = entry.get('failure_class') if entry else None
         if classification == 'needs_user':
             return finish('await_owner', None, 'owner', None)

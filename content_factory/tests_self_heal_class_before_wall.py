@@ -170,6 +170,16 @@ class ClassBeforeWallTests(SelfHealFixture):
                 decision = engine.decide(run, now=self.now)
                 self.assertEqual((decision.action, decision.reason, decision.cap), ("stop", "terminal", None))
 
+    def test_an_action_still_in_flight_settles_before_the_class_decides(self):
+        pending = {"self_heal_v1": {"version": 1, "mode": "policy", "attempts": 1, "pending_action": {
+            "state": "uncertain", "claim": "c", "action": "retry", "attempt": 1, "cap": None, "reason": "backoff",
+            "lease_until": (self.now - timedelta(minutes=1)).isoformat()}}}
+        for code in (UNSUPPORTED, NEEDS_USER):
+            with self.subTest(code=code):
+                run = self.make(code, failed_for=timedelta(minutes=5), result=pending)
+                decision = engine.decide(run, now=self.now)
+                self.assertEqual((decision.action, decision.attempt), ("retry", 1))
+
     def test_flag_off_keeps_the_wall_first(self):
         run = self.make(NEEDS_USER, failed_for=timedelta(hours=49), age=timedelta(hours=49))
         with override_settings(ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED=False):
@@ -378,10 +388,18 @@ class BackgroundDigestTests(SelfHealFixture):
         self.assertEqual(receipt["details"]["last_code"], "NO_KEYWORDS")
         _, texts = self.founder_sweep(now=self.now + timedelta(minutes=1))
         self.assertEqual(len([text for text in texts if "background_job_failing" in text]), 1)
-        # A fourth failed night continues the same streak: no second alert.
+        # A fourth and a ninth failed night continue the same streak: no second alert.
         self.assertEqual(digest.run_background_job_digest(now=self.now)["queued"], 0)
-        self.nightly(0, workflow="island_refresh")
-        self.assertEqual(digest.run_background_job_digest(now=self.now + timedelta(hours=1))["queued"], 0)
+        self.nightly(-1)
+        self.assertEqual(digest.run_background_job_digest(now=self.now + timedelta(days=1))["queued"], 0)
+        for nights_ahead in range(2, 7):
+            self.nightly(-nights_ahead)
+        self.assertEqual(digest.run_background_job_digest(now=self.now + timedelta(days=6))["queued"], 0)
+        # Past the lookback the streak's first night is cut off: still the same alert.
+        for nights_ahead in range(7, 12):
+            self.nightly(-nights_ahead)
+            self.assertEqual(digest.run_background_job_digest(
+                now=self.now + timedelta(days=nights_ahead))["queued"], 0)
         self.assertEqual(len(self.receipts_for("background_job_failing")), 1)
 
     def test_two_failed_nights_give_none(self):
@@ -417,6 +435,13 @@ class BackgroundDigestTests(SelfHealFixture):
         spikes = [row for row in global_alerts(now=self.now) if row["alert_reason"] == digest.SPIKE_REASON]
         self.assertEqual(len(spikes), 1)
         self.assertEqual(spikes[0]["details"]["failing_orgs"], 4)
+
+    def test_a_startup_that_also_completed_that_night_is_not_failing(self):
+        orgs = [self.org] + [make_p2_org().organization for _ in range(3)]
+        for organization in orgs:
+            self.nightly(0, org=organization)
+            self.nightly(0, org=organization, status="completed")
+        self.assertEqual(digest.run_background_job_digest(now=self.now)["spikes"], 0)
 
     def test_one_failing_startup_is_not_a_spike(self):
         self.nightly(0)

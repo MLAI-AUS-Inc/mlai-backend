@@ -84,13 +84,24 @@ def failing_streak(nights) -> tuple | None:
     return first, length, nights[latest]["last_code"]
 
 
+def _alerted_before(receipts, workflow, first) -> bool:
+    """A streak alert for this workflow whose first night is on or before ``first``."""
+    for receipt in receipts.values():
+        details = receipt.get("details") if isinstance(receipt, dict) else None
+        if (isinstance(details, dict) and receipt.get("alert_reason") == STREAK_REASON
+                and details.get("workflow") == workflow and str(details.get("first_night") or "9999") <= first.isoformat()):
+            return True
+    return False
+
+
 def _spike_nights(table):
     """{night: (failing orgs, orgs that ran a nightly job)}."""
     ran, failing = defaultdict(set), defaultdict(set)
     for (organization_id, _workflow), nights in table.items():
         for night, state in nights.items():
             ran[night].add(organization_id)
-            if state["failed"]:
+            # A failed night as the streak rule counts it: no completed run that night.
+            if state["failed"] and not state["completed"]:
                 failing[night].add(organization_id)
     return {night: (len(failing[night]), len(orgs)) for night, orgs in ran.items()}
 
@@ -130,13 +141,19 @@ def run_background_job_digest(now=None) -> dict:
             streaks.append((organization_id, workflow, *streak))
     queued = 0
     if streaks:
-        known = {org_id: set(receipts) for org_id, receipts in _receipt_index({row[0] for row in streaks})}
+        known = dict(_receipt_index({row[0] for row in streaks}))
         organizations = Organization.objects.in_bulk({row[0] for row in streaks})
+        window_start = _night(now) - timedelta(days=LOOKBACK_NIGHTS)
         for organization_id, workflow, first, length, code in sorted(streaks, key=lambda row: (row[0], row[1])):
             slot = f"nightly-{re.sub(r'[^A-Za-z0-9_.-]', '_', workflow)[:40]}-{first.isoformat()}"
             key = founder_journey_alert_id(organization_id=organization_id, alert_reason=STREAK_REASON, slot=slot)
             organization = organizations.get(organization_id)
-            if organization is None or key in known.get(organization_id, ()):
+            receipts = known.get(organization_id, {})
+            if organization is None or key in receipts:
+                continue
+            if first <= window_start and _alerted_before(receipts, workflow, first):
+                # The streak is older than the lookback, so its first night is cut
+                # off here; it already alerted under its real first night.
                 continue
             details = {"workflow": workflow, "nights": length, "first_night": first.isoformat()}
             if code:

@@ -5735,7 +5735,7 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_decide",
-      "function_sha256": "a4d67d19b78ff4ab5c6a6f0463af23b553a7841527a7c94e314bd4331828e24f",
+      "function_sha256": "510fd654ad3d7b6eea3104787bf1d921be73b22dd7be95ae277550e89ede66eb",
       "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
