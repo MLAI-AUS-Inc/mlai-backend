@@ -5,7 +5,7 @@
   "repository_discovery": {
     "content_source": {
       "cms": "headless_cms",
-      "code": "cms_content",
+      "reason": "cms_content",
       "kind": "cms",
       "signals": [
         "package:@contentful/rich-text-react-renderer",
@@ -71,7 +71,7 @@
     "branch": "main",
     "content_source": {
       "cms": "headless_cms",
-      "code": "cms_content",
+      "reason": "cms_content",
       "kind": "cms",
       "repository_article_files": 0,
       "signals": [

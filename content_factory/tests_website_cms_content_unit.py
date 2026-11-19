@@ -106,7 +106,8 @@ class PrepareStopTests(SimpleTestCase):
                 self.assertNotIn("setup_run_id", op.receipt)
                 self.assertEqual(op.state, "stopped")
                 self.assertEqual(op.receipt["status"], "cant_be_done_yet")
-                self.assertEqual(op.receipt["reason_code"], "cms_content")
+                # A closed "can't be done yet" reason, not a failure registry code.
+                self.assertEqual(op.receipt["reason_code"], "")
                 self.assertEqual(op.receipt["cant_be_done_yet"]["reason"], "cms_content")
                 self.assertEqual(op.receipt["cant_be_done_yet"]["stage"], "repository_selection")
                 self.assertIsNone(op.next_attempt_at)

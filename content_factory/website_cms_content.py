@@ -28,7 +28,7 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-CODE = "cms_content"
+REASON = "cms_content"
 LEAD_REASON = "cms_content"
 CMS_KINDS = frozenset({"wordpress", "drupal", "ghost", "headless_cms"})
 MESSAGE = ("We can't add articles to this website yet: its posts live in a content system ({cms}), not in your "
@@ -62,10 +62,15 @@ def stop(op, source, *, now=None, source_sha=""):
     receipt.pop("channel_options", None)
     cms = source.get("cms")
     receipt.update(
-        status="cant_be_done_yet", reason_code=CODE, failure_class="unsupported", retryable=False,
+        # cms_content is a closed "can't be done yet" reason (the B25 list,
+        # website_staff_fixing.CANT_BE_DONE_REASONS), carried in
+        # ``cant_be_done_yet.reason`` like a staff close; it is not a failure
+        # registry code, so no unregistered reason_code is emitted. Any code
+        # left from an earlier attempt is cleared.
+        status="cant_be_done_yet", reason_code="", failure_class="unsupported", retryable=False,
         current_step="scan", blocked_step="setup",
         message=MESSAGE.format(cms=CMS_NAMES.get(cms, "a CMS")),
-        cant_be_done_yet={"version": 1, "reason": CODE, "decided_at": now.isoformat(), "stage": "repository_selection",
+        cant_be_done_yet={"version": 1, "reason": REASON, "decided_at": now.isoformat(), "stage": "repository_selection",
                           "cms": cms, "vendor": str(source.get("vendor") or "")[:40] or None,
                           "source_sha": str(source_sha or "")[:64] or None,
                           "signals": [str(item)[:200] for item in (source.get("signals") or [])[:8]]})

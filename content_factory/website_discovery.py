@@ -41,7 +41,8 @@ def content_source_snapshot(value):
     cms = value.get("cms") if kind == "cms" and value.get("cms") in CMS_KINDS else None
     if kind == "cms" and cms is None:
         kind = "unknown"
-    out = {"version": 1, "kind": kind, "cms": cms, "code": "cms_content" if cms else None,
+    # ``reason`` is the closed "can't be done yet" reason, not a registry failure code.
+    out = {"version": 1, "kind": kind, "cms": cms, "reason": "cms_content" if cms else None,
            "signals": [str(item)[:200] for item in (value.get("signals") or [])[:8] if isinstance(item, str)]}
     if cms and isinstance(value.get("vendor"), str):
         out["vendor"] = value["vendor"][:40]

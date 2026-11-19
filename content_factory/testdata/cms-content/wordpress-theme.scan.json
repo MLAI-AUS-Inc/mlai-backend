@@ -5,7 +5,7 @@
   "repository_discovery": {
     "content_source": {
       "cms": "wordpress",
-      "code": "cms_content",
+      "reason": "cms_content",
       "kind": "cms",
       "signals": [
         "wordpress_theme"
@@ -68,7 +68,7 @@
     "branch": "main",
     "content_source": {
       "cms": "wordpress",
-      "code": "cms_content",
+      "reason": "cms_content",
       "kind": "cms",
       "repository_article_files": 0,
       "signals": [
