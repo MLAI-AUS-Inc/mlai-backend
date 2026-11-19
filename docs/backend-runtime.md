@@ -164,6 +164,13 @@ and an in-memory filesystem holds a limited number of files. The option and the
 step belong together. `p2-performance` keeps a disk-backed database so its
 timed tick is measured as before.
 
+`Run migration tests` passes `--parallel=auto`, because those tests spend their
+time planning migrations in Python on one core. Each worker runs whole test
+classes against its own clone of the migrated database. The job installs
+`tblib` from `.github/requirements-ci.lock` first, which Django needs to carry a
+failure's traceback back from a worker. The other commands stay serial: several
+of their suites depend on timing.
+
 The six Slack founder-link migration classes carry `@tag("postgres-only")`,
 like some other PostgreSQL-specific tests. The main SQLite regression command
 is the only one that excludes that tag, and the `migration-tests` lane selects

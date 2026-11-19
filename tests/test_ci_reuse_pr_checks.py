@@ -346,3 +346,28 @@ class ReusePrChecksTests(TestCase):
             if not any(target == label or target.startswith(label + '.') for label in selected)
         )
         self.assertEqual(missing, [])
+
+    def test_parallel_test_commands_can_report_a_failure(self):
+        root = Path(__file__).resolve().parents[1]
+        jobs = yaml.safe_load((root / '.github/workflows/deploy.yml').read_text())['jobs']
+        parallel = {}
+        for name, job in jobs.items():
+            runs = [step.get('run', '') for step in job.get('steps', [])]
+            commands = [index for index, run in enumerate(runs) if '--parallel' in run]
+            if not commands:
+                continue
+            parallel[name] = [job['steps'][index]['name'] for index in commands]
+            # Without tblib a worker cannot send a failure's traceback back, and
+            # Django stops at the first failing test with an error about that.
+            installs = [
+                index for index, run in enumerate(runs)
+                if '-r .github/requirements-ci.lock' in run
+                and '--require-hashes' in run and '--only-binary=:all:' in run
+            ]
+            self.assertTrue(installs and installs[0] < commands[0], name)
+            # Each worker clones the migrated database, which the reuse sets up.
+            self.assertEqual(job['env']['MLAI_TEST_DATABASE_TEMPLATE'], '1', name)
+        # Only the migration tests, which are bound by one core each, run in
+        # parallel. Timing-sensitive suites stay serial.
+        self.assertEqual(parallel, {'migration-tests': ['Run migration tests']})
+        self.assertIn('tblib==', (root / '.github/requirements-ci.txt').read_text())

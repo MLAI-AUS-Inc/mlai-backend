@@ -1086,6 +1086,11 @@ jobs:
         python -m pip install --upgrade pip
         pip install --require-hashes -r requirements.lock
 
+    # A parallel test worker needs tblib to send a failure's traceback back.
+    - name: Install hash-pinned parallel test dependency
+      run: |
+        python -m pip install --only-binary=:all: --require-hashes -r .github/requirements-ci.lock
+
     - name: Verify reviewed Run lifecycle writer contexts
       run: python scripts/check_run_writer_retirement.py
 
@@ -1300,9 +1305,12 @@ jobs:
           workflow_runs.tests \
           --noinput --verbosity=2
 
+    # These tests spend their time planning migrations in Python, one core at
+    # a time, so they are the one command that runs its classes in parallel.
+    # Each worker gets its own copy of the migrated database.
     - name: Run migration tests
       run: |
-        python manage.py test \
+        python manage.py test --parallel=auto \
           core.tests_slack_founder_links.SlackFounderSyntheticIdentityMigrationTests \
           core.tests_slack_founder_links.SlackFounderActorReferenceMigrationTests \
           core.tests_slack_founder_links.SlackFounderActorMigrationHistoryGuardTests \
