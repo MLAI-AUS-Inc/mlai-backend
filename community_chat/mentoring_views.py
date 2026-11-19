@@ -170,6 +170,23 @@ class MentorSessionMeetingRetryView(MentorSessionActionView):
     action = 'retry_meeting'
 
 
+class MentorSessionFeedbackView(MentoringBaseView):
+    """The founder rates a finished session from MLAI Chat (same data as the email and Slack faces)."""
+
+    def post(self, request, session_id):
+        from mentoring import feedback
+        if not feedback.enabled():
+            raise MentoringError('feedback_disabled', 'Session feedback is not switched on.', 404)
+        data = _body(request)
+        try:
+            feedback.rate_in_app(session_id, request.user, data.get('rating'), data.get('comment'))
+        except feedback.FeedbackError as exc:
+            raise MentoringError(exc.code, exc.message, exc.status_code) from exc
+        session = (MentorSession.objects.select_related('mentor__user', 'founder')
+                   .prefetch_related('feedback').get(pk=session_id, founder=request.user))
+        return Response(serialize_session(session, request.user))
+
+
 # ----------------------------------------------------------- staff-only admin
 
 def mentoring_admin_level(request):

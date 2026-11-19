@@ -152,6 +152,37 @@ not queued, only when the mentor has a Slack id. The outcome is stored in
 failed DM cannot change a booking. Mentors can also poll
 `mentor/sessions/?role=mentor&status=requested`.
 
+### Post-session feedback (three faces)
+
+`mentoring/feedback.py`. The scheduler runner `mentor_session_feedback` finds
+sessions that are `accepted` or `completed` whose booked `ends_at` passed
+`MENTOR_FEEDBACK_DELAY_MINUTES` (5) ago, at most `MENTOR_FEEDBACK_MAX_AGE_HOURS`
+(24) ago and not before `MENTOR_FEEDBACK_NOT_BEFORE`. It skips a session while a
+calendar time change is pending. For each, it creates one `MentorSessionFeedback`
+row for the founder (unique per session and person) and sends:
+
+- an email (`system_email` key `mentor_session_feedback`, Resend, optional mail with
+  `List-Unsubscribe`), idempotency key `mentor-feedback/{row}/email`;
+- a Roo Slack DM with three URL buttons. The DM is claimed before posting, so a
+  crash never posts twice. Its channel and ts are stored so it can be edited.
+
+Each face links to `GET /api/v1/mentoring/feedback/{token}/?r=happy|neutral|sad|no_show`.
+The token is an HMAC over the row id (no token stored), valid
+`MENTOR_FEEDBACK_TOKEN_DAYS` (30). A GET never writes, because mail scanners open
+every link. The page submits the rating itself with a nonce'd script; without
+JavaScript it shows a Confirm button. `POST` records the answer (latest wins, history
+kept). `POST .../comment/` saves an optional comment. `GET/POST .../unsubscribe/` stops
+the emails (`MentorFeedbackOptOut`); Slack still asks. Three different faces within
+seconds of the send set `suspect_scanner` and never alert.
+
+An answer edits the Slack DM to say thanks. "Not great" or "Didn't happen" posts once
+to `MENTOR_FEEDBACK_ALERT_CHANNEL`, and later changes and comments reply in that
+thread. Founders can also rate in MLAI Chat:
+`POST mentor/sessions/{id}/feedback/` with `{rating, comment?}` (`can_rate` and
+`my_feedback` on the founder's session). Staff see `feedback` in Mentoring admin ›
+Sessions; read-only staff see the face only, never the comment. Mentors never see it.
+Delivery outcomes stay on the feedback row and never change the session.
+
 ## Google Meet and free/busy
 
 Code: `mentoring/google.py`. One MLAI-owned free Google account (consumer Gmail, not
@@ -249,6 +280,11 @@ Open questions that need a live test before the pilot relies on them:
 `MENTORING_GOOGLE_CLIENT_ID`, `MENTORING_GOOGLE_CLIENT_SECRET`, `MENTORING_GOOGLE_REFRESH_TOKEN`
 (all empty, env only), `COMMUNITY_CHAT_MENTORING_RATE` (60/minute),
 `COMMUNITY_CHAT_MENTORING_WRITE_RATE` (20/minute).
+Post-session feedback: `MENTOR_FEEDBACK_ENABLED` (false), `MENTOR_FEEDBACK_NOT_BEFORE`
+(empty: the runner refuses to run), `MENTOR_FEEDBACK_CHANNELS` (`email,slack`),
+`MENTOR_FEEDBACK_DELAY_MINUTES` (5), `MENTOR_FEEDBACK_MAX_AGE_HOURS` (24),
+`MENTOR_FEEDBACK_MAX_PER_TICK` (20), `MENTOR_FEEDBACK_TOKEN_DAYS` (30),
+`MENTOR_FEEDBACK_ALERT_CHANNEL` (empty: no staff alerts).
 
 ## Tests
 

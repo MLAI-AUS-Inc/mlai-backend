@@ -202,6 +202,16 @@ def session_flags(session, now=None):
     return flags
 
 
+def _admin_feedback(session):
+    """The founder's post-session rating for staff, or None."""
+    from .feedback import serialize_admin
+    try:
+        rows = [row for row in session.feedback.all() if row.respondent_id == session.founder_id]
+    except Exception:
+        return None
+    return serialize_admin(rows[0]) if rows else None
+
+
 def serialize_admin_session(session, now=None):
     return {
         'id': str(session.pk),
@@ -219,6 +229,7 @@ def serialize_admin_session(session, now=None):
         'responded_at': _iso(session.responded_at),
         'cancelled_at': _iso(session.cancelled_at),
         'flags': session_flags(session, now),
+        'feedback': _admin_feedback(session),
     }
 
 
@@ -529,7 +540,7 @@ class MentoringAdminService:
         if problem and problem not in SESSION_PROBLEMS:
             raise MentoringError('invalid_problem', 'Unknown problem filter.', 400)
         now = timezone.now()
-        query = MentorSession.objects.select_related('mentor__user', 'founder')
+        query = MentorSession.objects.select_related('mentor__user', 'founder').prefetch_related('feedback')
         if status:
             query = query.filter(status=status)
         video_booked = Q(
