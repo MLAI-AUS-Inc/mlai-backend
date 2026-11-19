@@ -122,7 +122,10 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                 effective_action = action
                 if run_operation and run_action:
                     effective_action = run_action_authority(run, run_action)
-                with authority_guard(payload, action=effective_action):
+                # The owner's preview retry may follow a moved site commit;
+                # Content Factory re-pins the run before it builds.
+                follow = {"follow_moved_preview": True} if run_operation and effective_action == "preview" else {}
+                with authority_guard(payload, action=effective_action, **follow):
                     if local_only:
                         return invoke()
                 # The worker synchronously reauthorizes dispatch and mutations.

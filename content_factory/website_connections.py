@@ -434,12 +434,20 @@ def require_run_not_stopped(payload, *, lock=False):
 
 @contextmanager
 def authority_guard(data, *, action="read", domain="", github_repo="", require_selected=True,
-                    require_current_head=False):
+                    require_current_head=False, follow_moved_preview=False):
     """Verify provider evidence outside locks, then conditionally fence persistence.
 
     The second phase repeats consent and operation checks. A concurrent revoke,
     source observation or rebind invalidates the provider snapshot before any
     local write. A provider read never grants a transferable mutation lease.
+
+    ``follow_moved_preview`` is for the owner's own preview retry only. With
+    the source follow switch on, a site commit newer than the run's pin does
+    not refuse it: Content Factory finds the moved branch when it lays the
+    preview commit, re-pins the run through ``source_repin.repin_source``
+    (which checks the current head itself) and builds on the new commit.
+    Refusing here stranded a draft whose site was fixed after its build
+    failed (La Vie run 30c8dadc, 20 Nov 2026).
     """
     from .website_operations import validate_operation
     from .website_rollout import require_repository_write_policy
@@ -511,7 +519,13 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         if needs_native:
             verify_repository_native_target(candidate)
         if needs_head and reviewed_source is None:
-            verify_repository_head(candidate, expected or candidate.verified_sha)
+            try:
+                verify_repository_head(candidate, expected or candidate.verified_sha)
+            except WebsiteAuthorityError as exc:
+                from .source_repin import follow_enabled as source_follow_enabled
+                if not (follow_moved_preview and action == "preview" and exc.code == "website_source_changed"
+                        and source_follow_enabled()):
+                    raise
         with transaction.atomic():
             Organization.objects.select_for_update().get(pk=candidate.organization_id)
             connection = WebsiteConnection.objects.select_for_update().select_related("organization").get(pk=candidate.pk)
