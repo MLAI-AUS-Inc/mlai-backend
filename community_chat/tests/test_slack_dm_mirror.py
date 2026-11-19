@@ -4506,6 +4506,61 @@ class SlackDmMirrorOwnerTests(APITestCase):
         self.assertTrue(child.metadata["thread_parent_unavailable"])
         self.assertEqual(deliver_private.call_args.kwargs["parent_message_id"], "")
 
+    @override_settings(SLACK_DM_MIRROR_DEPENDENCY_WAIT_LIMIT=3)
+    @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private")
+    def test_edit_waiting_on_a_dead_original_backs_off_then_dead_letters(
+        self,
+        deliver_private,
+    ):
+        _, conversation = self._live_conversation()
+        target = recent_slack_ts("1787903000.000100")
+        # The original was rejected by the adapter and is dead.
+        SlackDmMirrorDelivery.objects.create(
+            conversation=conversation,
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_message_id=target,
+            source_author_id="UTWO",
+            operation=CommunityBridgeDeliveryType.CREATE,
+            status=CommunityBridgeDeliveryStatus.DEAD,
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "permanent_failure": True,
+            },
+            available_at=timezone.now(),
+        )
+        edit = SlackDmMirrorDelivery.objects.create(
+            conversation=conversation,
+            source_platform=CommunityBridgePlatform.SLACK,
+            source_message_id=f"{target}:edit",
+            source_author_id="UTWO",
+            operation=CommunityBridgeDeliveryType.EDIT,
+            encrypted_text="edited body",
+            metadata={
+                "participant_hash": conversation.participant_hash,
+                "backfill": True,
+                "target_source_message_id": target,
+            },
+            available_at=timezone.now(),
+        )
+        delays = []
+        for _ in range(4):
+            before = timezone.now()
+            process_ready_deliveries(limit=5)
+            edit.refresh_from_db()
+            if edit.status == CommunityBridgeDeliveryStatus.DEAD:
+                break
+            delays.append(round((edit.available_at - before).total_seconds()))
+            self.assertEqual(edit.attempts, 0)
+            SlackDmMirrorDelivery.objects.filter(pk=edit.pk).update(
+                available_at=timezone.now()
+            )
+        deliver_private.assert_not_called()
+        self.assertEqual(len(delays), 3)
+        self.assertTrue(delays[0] < delays[1] < delays[2], delays)
+        self.assertEqual(edit.status, CommunityBridgeDeliveryStatus.DEAD)
+        self.assertEqual(edit.encrypted_text, "")
+        self.assertEqual(edit.metadata["dependency_waits"], 4)
+
     @patch("integrations.services.slack_dm_mirror.BuzzBridgeClient.deliver_private")
     def test_dependency_target_arriving_after_legacy_grace_is_not_discarded(
         self,

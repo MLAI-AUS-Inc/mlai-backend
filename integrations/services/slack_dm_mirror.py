@@ -4839,10 +4839,32 @@ def _record_private_delivery_failure(
         if not authorized or permanent:
             delivery.status = CommunityBridgeDeliveryStatus.DEAD
         retry_after = _slack_retry_after_seconds(exc)
+        dependency_wait = 0
+        if dependency_pending:
+            # Back off instead of a flat 15s, and dead-letter an operation whose
+            # target never arrives. Waits don't count as delivery attempts.
+            waits_metadata = dict(delivery.metadata or {})
+            waits = int(waits_metadata.get("dependency_waits") or 0) + 1
+            waits_metadata["dependency_waits"] = waits
+            delivery.metadata = waits_metadata
+            dependency_metadata_changed = True
+            dependency_wait = min(
+                DEPENDENCY_WAIT_MAX_SECONDS,
+                DEPENDENCY_WAIT_BASE_SECONDS * 2 ** min(waits - 1, 10),
+            )
+            if waits > dependency_wait_limit():
+                delivery.status = CommunityBridgeDeliveryStatus.DEAD
+                logger.warning(
+                    "slack_dm_mirror_dependency_wait_exhausted delivery_id=%s waits=%s",
+                    delivery.pk,
+                    waits,
+                )
         delivery.available_at = timezone.now() + timedelta(
             seconds=max(
                 retry_after,
-                15 if dependency_pending else min(900, 2 ** min(delivery.attempts, 10)),
+                dependency_wait
+                if dependency_pending
+                else min(900, 2 ** min(delivery.attempts, 10)),
             )
         )
         delivery.last_error = f"{exc.__class__.__name__}: {exc}"[:2000]
@@ -4864,7 +4886,7 @@ def _record_private_delivery_failure(
                 metadata["history_recovery_scheduled"] = True
                 delivery.metadata = metadata
             update_fields.append("encrypted_text")
-            if permanent:
+            if permanent or dependency_metadata_changed:
                 update_fields.append("metadata")
         elif dependency_metadata_changed:
             update_fields.append("metadata")
@@ -7863,6 +7885,19 @@ def _assert_private_delivery_authorized_locked(
             raise SlackDmMirrorAuthorizationError(
                 "The originating MLAI Chat device is no longer authorized."
             )
+
+
+# A mirrored edit/reaction waiting on its original message backs off from 15s
+# to 15 minutes; after the limit (default 96 waits, about a day, enough for
+# parent recovery to revive a dead original) it is dead-lettered with its body
+# erased. Prod 19 Nov: rows waiting on dead originals re-queued every 15s for
+# three weeks.
+DEPENDENCY_WAIT_BASE_SECONDS = 15
+DEPENDENCY_WAIT_MAX_SECONDS = 900
+
+
+def dependency_wait_limit() -> int:
+    return max(1, int(getattr(settings, "SLACK_DM_MIRROR_DEPENDENCY_WAIT_LIMIT", 96)))
 
 
 def _dependency_rows_can_progress(rows) -> bool:
