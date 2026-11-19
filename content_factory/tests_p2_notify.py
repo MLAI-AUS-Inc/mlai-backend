@@ -345,7 +345,9 @@ class NotificationTests(TransactionTestCase):
                 before = journeys.project_founder_journey(legacy.organization, user=legacy.owner, company=legacy.company)
             after = journeys.project_founder_journey(legacy.organization, user=legacy.owner, company=legacy.company)
             self.assertEqual(before, after)
-            self.assertFalse(transitions.owns_notifications(legacy.organization))
+            # Plan E7 (D14, D15): the ladder owns every cohort's sends, so the
+            # goal notifier stands down for legacy startups too.
+            self.assertTrue(transitions.owns_notifications(legacy.organization))
 
     def test_flagoff_and_two_actual_claims_cannot_send_twice(self):
         with override_settings(MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED=False):

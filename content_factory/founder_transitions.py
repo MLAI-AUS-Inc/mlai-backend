@@ -1,4 +1,13 @@
-"""Durable per-recipient founder transitions and reminders for P2 startups."""
+"""Durable per-recipient founder transitions, reminders and ask escalation for every cohort.
+
+Plan E7: every founder ask, in every cohort (legacy included), is told at 0 h
+and reminded at 24 and 72 h while ``MY_STARTUP_TURN_REMINDERS_ENABLED`` is on,
+stops when the ask clears, and is deduplicated through the callback ledger and
+the private outbox, so a redeploy or a fresh process never sends a rung twice.
+An ask that waits past its per-action threshold (:data:`ASK_STAFF_THRESHOLDS`)
+raises one staff alert (``ask_waiting``), resolved when the ask clears.
+``MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED`` switches the whole module.
+"""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -30,6 +39,15 @@ REMINDER_HOURS = (24, 72)
 # switched on, is backlog: per sweep at most this many such items are queued,
 # and the rest wait for a later sweep. Backlog asks get one follow-up only.
 FIRST_RUN_SEND_CAP = 10
+# Plan E13: a pending GitHub organisation-owner request is one item per startup.
+OWNER_REQUEST_ITEM = "github-owner:"
+OWNER_REQUEST_ASKS = {"waiting_github_owner_approval", "choose_repository"}
+# Plan E7: hours an ask may wait before staff get one alert. A slow merge,
+# setup review or GitHub permission is normal, so those wait longer.
+STAFF_THRESHOLD_HOURS = 72
+ASK_STAFF_THRESHOLDS = {"approve_on_github": 120, "approve_setup": 120, "authorize_github": 120,
+                        "waiting_github_owner_approval": 72, "choose_repository": 72}
+STAFF_ALERT_REASON = "ask_waiting"
 STALE_ASK = timedelta(hours=24)
 CATCH_UP_GRACE = timedelta(hours=12)
 mapping = projection.mapping
@@ -46,9 +64,25 @@ def _assert_claim(row):
 
 
 def owns_notifications(organization):
-    """True only while this module owns the P2 startup's transition sends."""
+    """True while this module owns the startup's transition sends: every cohort (plan E7, D14, D15).
+
+    The legacy cohort is included, so the goal notifier stands down for it
+    too and the two never both send (``website_notification_outbox.enabled``).
+    """
     return bool(getattr(settings, "MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
-                and p2_foundation.p2_applies(organization))
+                and organization is not None and getattr(organization, "pk", None) is not None)
+
+
+def escalates_asks(organization):
+    """True while this module raises the per-action staff alerts for the startup's asks."""
+    return bool(owns_notifications(organization) and getattr(settings, "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED", False))
+
+
+def tracks_item(organization_id, item):
+    """Whether the ladder is following ``item`` for this startup (its staff alert replaces the generic one)."""
+    strategy = OrganizationContentConfig.objects.filter(organization_id=organization_id).values_list(
+        "pillar_strategy", flat=True).first()
+    return item in mapping(mapping(mapping(strategy).get("founder_notices")).get("last"))
 
 
 def _owner(organization):
@@ -57,7 +91,25 @@ def _owner(organization):
 
 
 def resolve_recipients(organization, *, item, ask=None):
-    """Fresh, active recipients; owner-only asks never inherit a broad team list."""
+    """Fresh, active recipients; owner-only asks never inherit a broad team list.
+
+    An owner-request ask (plan E13) goes only to the founder who asked the
+    GitHub owner, while they are still a current recipient.
+    """
+    if ask in OWNER_REQUEST_ASKS:
+        status = _owner_request_status(organization)
+        requester = (status or {}).get("user_id")
+        return [user for user in _resolve_recipients(organization, item=item, ask=None) if user.pk == requester]
+    return _resolve_recipients(organization, item=item, ask=ask)
+
+
+def _owner_request_status(organization, now=None):
+    from integrations.services import github_owner_requests as owner_requests
+    config = OrganizationContentConfig.objects.filter(organization=organization).first()
+    return owner_requests.wait_status(config, now=now) if config is not None else None
+
+
+def _resolve_recipients(organization, *, item, ask=None):
     from founder_tools.membership import active_memberships, shared_workspace
 
     workspace = shared_workspace(organization)
@@ -136,6 +188,11 @@ def _copy(event, state, organization):
             "agree_terms": ("Please agree to our updated terms", "Our terms were just updated. Please tick to agree again.", "Agree to the terms"),
             "approve_join_request": ("Someone asked to join your team", "Review the request in MLAI.", "Review request"),
             "choose_articles_page": ("Choose your articles page", "We found more than one page that could hold your articles. Pick the one to use.", "Choose a page"),
+            "waiting_github_owner_approval": ("Your GitHub owner hasn't approved MLAI yet",
+                "Send your GitHub organisation owner the approval link from MLAI, or invite your developer to your team to do it.",
+                "Get the link"),
+            "choose_repository": ("Choose your website's repository", "Pick the GitHub repository that holds your website so we can keep going.",
+                "Choose your repository"),
         }
         if ask == "buy_points":
             from .founder_journey import article_price_and_balance
@@ -319,6 +376,15 @@ def observe(config, item, state, *, now, budget=None):
     same = (previous.get("state"), previous.get("ask"), previous.get("event")) == (state["state"], state.get("ask"), event_kind)
     reminders = bool(getattr(settings, "MY_STARTUP_TURN_REMINDERS_ENABLED", False))
     event = None
+    if not same and previous.get("escalated"):
+        # The ask this alert was about cleared or changed: the alert resolves.
+        _resolve_escalation(config, previous["escalated"], now=now)
+    if same and state["state"] == "your_turn" and state.get("ask"):
+        created_alert = _escalate(config, item, state, previous, now=now)
+        if created_alert:
+            previous = mapping(mapping(mapping(config.pillar_strategy).get("founder_notices")).get("last")).get(item)
+            notices = deepcopy(mapping(mapping(config.pillar_strategy).get("founder_notices")))
+            last = notices.setdefault("last", {})
     if not same:
         started = _ask_started(state)
         stale = started is not None and now - started >= STALE_ASK
@@ -341,6 +407,67 @@ def observe(config, item, state, *, now, budget=None):
     if same and state["state"] == "your_turn" and state.get("ask") and reminders:
         created += _remind(config, item, state, previous, now=now, budget=budget)
     return created
+
+
+def staff_threshold(ask):
+    """Hours ``ask`` may wait before one staff alert (plan E7)."""
+    return ASK_STAFF_THRESHOLDS.get(ask, STAFF_THRESHOLD_HOURS)
+
+
+def escalation_alert_id(config, item, ask, since):
+    """The stable staff alert id for one item's ask that began at ``since``."""
+    from .founder_journey_alerts import founder_journey_alert_id
+    return founder_journey_alert_id(organization_id=config.organization_id, alert_reason=STAFF_ALERT_REASON,
+        slot=_escalation_slot(item, ask, since))
+
+
+def _escalation_slot(item, ask, since):
+    return "ask-" + hashlib.sha256(f"{item}|{ask}|{since}".encode()).hexdigest()[:40]
+
+
+def _escalate(config, item, state, previous, *, now):
+    """Queue one staff alert when an ask has waited past its threshold; True when queued now."""
+    organization = config.organization
+    since = _moment(previous.get("at"))
+    if since is None or previous.get("escalated") or not escalates_asks(organization):
+        return False
+    hours = staff_threshold(state.get("ask"))
+    if now - since < timedelta(hours=hours):
+        return False
+    from .founder_journey_alerts import queue_founder_journey_alert
+    kind = item.split(":", 1)[0]
+    details = {"ask": state.get("ask"), "ask_item": {"github-owner": "github_owner"}.get(kind, kind),
+               "threshold_hours": hours, "waiting_since_at": since}
+    if state.get("run_id"):
+        details["item_run_id"] = str(state["run_id"])[:100]
+    # Stored before the receipt is queued, so a concurrent sweep that loses
+    # the lock race sees it; the alert id is stable, so a repeat is a no-op.
+    strategy = deepcopy(mapping(config.pillar_strategy))
+    record = mapping(mapping(strategy.setdefault("founder_notices", {}).setdefault("last", {})).get(item))
+    alert_id = escalation_alert_id(config, item, state.get("ask"), previous.get("at"))
+    strategy["founder_notices"]["last"][item] = {**record, "escalated": alert_id}
+    OrganizationContentConfig.objects.filter(pk=config.pk).update(pillar_strategy=strategy)
+    queue_founder_journey_alert(organization=organization, alert_reason=STAFF_ALERT_REASON, details=details,
+        slot=_escalation_slot(item, state.get("ask"), previous.get("at")))
+    # The receipt is written into the same config row: re-read it, so later
+    # writes in this observation keep it.
+    config.pillar_strategy = OrganizationContentConfig.objects.values_list("pillar_strategy", flat=True).get(pk=config.pk)
+    return True
+
+
+def _resolve_escalation(config, alert_id, *, now):
+    from .founder_journey_alerts import resolve_founder_journey_alert
+    resolve_founder_journey_alert(config.organization, alert_id, now=now)
+    config.pillar_strategy = OrganizationContentConfig.objects.values_list("pillar_strategy", flat=True).get(pk=config.pk)
+
+
+def owner_request_item_state(config, *, now):
+    """The startup's GitHub owner-request ask (plan E13), or None when there is none."""
+    from integrations.services import github_owner_requests as owner_requests
+    status = owner_requests.wait_status(config, now=now)
+    if status is None:
+        return None
+    return {"state": "your_turn", "ask": status["ask"], "run_id": None, "since": status["since"]}
 
 
 def _remind(config, item, state, previous, *, now, budget):
@@ -398,6 +525,11 @@ def _current(config, notice, *, now):
         if notice["item"].startswith("website:"):
             state = website_item_state(config, now=now)
             return user if state and state.get("state") == "your_turn" and state.get("ask") == notice.get("ask") else None
+        if notice["item"].startswith(OWNER_REQUEST_ITEM):
+            # Plan E13: stops the moment the owner approves, the website is
+            # connected or the request is cleared.
+            state = owner_request_item_state(config, now=now)
+            return user if state and state.get("ask") == notice.get("ask") else None
         run = ContentFactoryRun.objects.filter(run_id=notice.get("run_id"), organization=organization).first()
         if run is not None:
             from .founder_journey import is_hidden_run
@@ -523,14 +655,15 @@ def run_transition_sweep(now=None, limit=None):
     cursor = cursor if type(cursor) is int else 0
     query = OrganizationContentConfig.objects.select_related("organization").annotate(
         has_runs=Exists(ContentFactoryRun.objects.filter(organization_id=OuterRef("organization_id")))).filter(
-        Q(has_runs=True) | Q(website_connection__isnull=False) | Q(pillar_strategy__founder_notices__isnull=False) | Q(pillar_strategy__startup_team__requests__isnull=False)).order_by("organization_id")
+        Q(has_runs=True) | Q(website_connection__isnull=False) | Q(pillar_strategy__founder_notices__isnull=False) | Q(pillar_strategy__startup_team__requests__isnull=False)
+        | Q(article_system__has_key="github_owner_request")).order_by("organization_id")
     configs = list(query.filter(organization_id__gt=cursor)[:ceiling])
     if not configs and cursor:configs = list(query[:ceiling])
     if configs:cache.set("founder-transitions:cursor", configs[-1].organization_id, 3600)
     created = checked = 0
     budget = first_run_budget()
     for candidate in configs:
-        if not registry_policy.cohort_for_report(candidate.organization, candidate):continue
+        # Every cohort (plan E7, D15): the legacy cohort is reminded too.
         with transaction.atomic():
             Organization.objects.select_for_update().get(pk=candidate.organization_id)
             config = OrganizationContentConfig.objects.select_for_update().get(pk=candidate.pk)
@@ -552,6 +685,14 @@ def run_transition_sweep(now=None, limit=None):
             website = website_item_state(config, now=now, setup_run=setup_run)
             if website is not None:
                 created += observe(config, "website:" + str(config.organization_id), website, now=now, budget=budget)
+            owner_item = OWNER_REQUEST_ITEM + str(config.organization_id)
+            owner_request = owner_request_item_state(config, now=now)
+            if owner_request is None and mapping(mapping(mapping(mapping(config.pillar_strategy).get("founder_notices")).get("last")).get(owner_item)).get("state") == "your_turn":
+                # The request cleared (connected, or forgotten): record it so
+                # reminders stop and the staff alert resolves.
+                owner_request = {"state": "done", "ask": None, "run_id": None}
+            if owner_request is not None:
+                created += observe(config, owner_item, owner_request, now=now, budget=budget)
             requests = mapping(mapping(config.pillar_strategy).get("startup_team")).get("requests")
             pending = projection.optional("founder_tools.startup_team", "pending_request_ids", config.organization, default=[]) if requests and getattr(settings, "MY_STARTUP_TEAM_ENABLED", False) else []
             for identifier in pending:

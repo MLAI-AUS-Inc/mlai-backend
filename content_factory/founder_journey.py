@@ -39,8 +39,11 @@ VERSION = 1
 # says they choose the page (plan A9, decision D3); otherwise MLAI picks it.
 # ``deploy_site`` is sent only while the deploy link is on (plan C14,
 # ``ARTICLES_LIVE_URL_VERIFICATION_ENABLED``), worded for the founder's host.
+# ``waiting_github_owner_approval`` and its fallback ``choose_repository`` are
+# the founder's GitHub organisation-owner request (plan E13).
 FOUNDER_ASKS = ("review_draft", "describe_customer", "agree_terms", "authorize_github", "approve_setup",
-                "approve_on_github", "buy_points", "approve_join_request", "choose_articles_page", "deploy_site")
+                "approve_on_github", "buy_points", "approve_join_request", "choose_articles_page", "deploy_site",
+                "waiting_github_owner_approval", "choose_repository")
 NEXT_KINDS = ("add_website", "write_first_article", "write_article", "view_progress", "view_draft", "view_article")
 STAGES = ("website", "first_article", "writing", "review", "setup", "publishing", "done")
 HOLDING_REASONS = ("slow", "website_update", "busy_today")
@@ -75,6 +78,10 @@ def retired_actions(*, page_policy=None) -> frozenset:
 
 
 SETUP_ASKS = frozenset({"approve_setup", "authorize_github", "approve_on_github"})
+# Plan E13: a pending GitHub organisation-owner request, and its picker fallback.
+OWNER_WAIT_ACTION = "waiting_github_owner_approval"
+REPOSITORY_PICKER_ACTION = "choose_repository"
+OWNER_REQUEST_ASKS = frozenset({OWNER_WAIT_ACTION, REPOSITORY_PICKER_ACTION})
 
 POLL_AFTER_MS = {"working": 5000, "publishing": 15000, "your_turn": 30000, None: 30000, "done": 60000,
                  "legacy": 60000}
@@ -143,6 +150,18 @@ COPY = {
     "deploy_site": ("Your live site hasn't updated yet",
                     "Your change is merged on GitHub, but your website hasn't picked it up.", "How to fix this"),
     "done_copy_ready": ("Your article is ready to post", None, "Open your article"),
+    # Plan E13: the founder asked their GitHub organisation owner to approve MLAI.
+    "waiting_github_owner_approval": ("Waiting for your GitHub owner to approve MLAI",
+                                      "Send your GitHub organisation owner this link to approve MLAI, "
+                                      "or invite your developer to your team to do it.",
+                                      "Copy the link for your owner"),
+    "choose_repository_ambiguous": ("Where is your website's code on GitHub?",
+                                    "Your GitHub owner approved MLAI. Choose the repository that holds your website.",
+                                    "Choose your repository"),
+    "choose_repository_expired": ("Where is your website's code on GitHub?",
+                                  "Your request to your GitHub owner has expired. "
+                                  "Choose your website's repository, or connect GitHub again.",
+                                  "Choose your repository"),
     # Shared fallback for an unknown or retired action (contract section 11.1).
     "still_working": ("Working on it", "Still working.", "See progress"),
 }
@@ -792,6 +811,10 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
         decision = _setup_decision(organization=organization, company=company, config=config, user=user,
                                    marker=marker, connection=connection, setup_run=setup_run, run=run)
 
+    if decision is None and connection is None:
+        decision = _owner_request_decision(organization=organization, company=company, config=config,
+                                           user=user, now=now)
+
     if decision is None:
         decision = _publishing_or_done(organization=organization, config=config, marker=marker, run=run,
                                        connection=connection)
@@ -812,8 +835,9 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
 
     if policy_v2_applies(organization) and not decision.get("copyId"):
         ask = _mapping(decision.get("action")).get("id")
-        if ask == DEPLOY_ACTION:
-            # The host class's exact copy is the line: no P2 copy id replaces it.
+        if ask == DEPLOY_ACTION or ask in OWNER_REQUEST_ASKS:
+            # The host class's (C14) or the owner request's (E13) exact copy
+            # is the line: no P2 copy id replaces it.
             pass
         elif ask in FOUNDER_ASKS:
             if ask == "buy_points":
@@ -981,6 +1005,32 @@ def _setup_decision(*, organization, company, config, user, marker, connection, 
         elif operation.get("actionId") in retired_actions(page_policy=operation.get("pagePolicy")):
             logger.info("founder_journey_retired_action org=%s action=%s", organization.pk, operation.get("actionId"))
     return None
+
+
+def _owner_request_decision(*, organization, company, config, user, now):
+    """Plan E13: the founder's pending GitHub organisation-owner request, never silent.
+
+    Shown only to the founder who asked (another viewer keeps today's
+    journey). While the owner has not approved, the ask carries the
+    copyable owner link; an ambiguous or expired pickup falls back to the
+    repository picker on the website step.
+    """
+    from integrations.services import github_owner_requests as owner_requests
+    if getattr(config, "pk", None) is None:
+        return None
+    status = owner_requests.wait_status(config, now=now)
+    if status is None or status.get("user_id") != getattr(user, "pk", None):
+        return None
+    if status["ask"] == OWNER_WAIT_ACTION:
+        return _decide("setup", "your_turn", OWNER_WAIT_ACTION, action=OWNER_WAIT_ACTION,
+                       url=owner_requests.owner_link())
+    from urllib.parse import urlencode
+    origin = str(getattr(settings, "COMMUNITY_CHAT_FRONTEND_URL", "") or "https://chat.mlai.au").rstrip("/")
+    picker = (origin + "/my-startup/website?"
+              + urlencode({"github": "multiple_repos", "company_id": str(getattr(company, "pk", "") or "")}))
+    decision = _decide("setup", "your_turn", f"{REPOSITORY_PICKER_ACTION}_{status['state']}",
+                       action=REPOSITORY_PICKER_ACTION, url=_https_or_none(picker))
+    return decision
 
 
 def _deploy_decision(connection, *, stage, run_id=None, staff_alerted=False):

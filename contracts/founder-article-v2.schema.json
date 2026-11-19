@@ -181,7 +181,9 @@
                     "buy_points",
                     "approve_join_request",
                     "choose_articles_page",
-                    "deploy_site"
+                    "deploy_site",
+                    "waiting_github_owner_approval",
+                    "choose_repository"
                   ]
                 },
                 "label": {

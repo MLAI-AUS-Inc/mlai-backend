@@ -711,7 +711,8 @@ class HelperTests(TestCase):
         self.assertFalse(journeys.matches_if_none_match("", "abc"))
 
     def test_registry_mapping_covers_only_the_eight_asks(self):
-        self.assertEqual(len(journeys.FOUNDER_ASKS), 10)
+        # Plan E13 added the owner wait and its repository-picker fallback.
+        self.assertEqual(len(journeys.FOUNDER_ASKS), 12)
         self.assertTrue(set(journeys.REGISTRY_ASKS.values()) <= set(journeys.FOUNDER_ASKS))
         self.assertIsNone(journeys.founder_ask("choose_articles_page"))
 

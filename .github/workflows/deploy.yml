@@ -855,6 +855,7 @@ jobs:
           content_factory.tests_p2_policy \
           content_factory.tests_p2_policy_review \
           content_factory.tests_p2_notify \
+          content_factory.tests_ask_ladder \
           content_factory.tests_founder_funnel_journey \
           content_factory.tests_founder_funnel_review \
           content_factory.tests_founder_funnel_report \
