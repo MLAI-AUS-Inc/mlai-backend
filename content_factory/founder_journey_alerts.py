@@ -461,10 +461,10 @@ def resolve_founder_journey_alert(organization, alert_id, *, now=None) -> dict |
     return dict(receipt)
 
 
-def _ladder_tracks(organization, item) -> bool:
+def _ladder_tracks(organization, item, now=None) -> bool:
     """Whether founder_transitions escalates this item itself, with its per-action threshold (plan E7)."""
     from .founder_transitions import escalates_asks, tracks_item
-    return bool(escalates_asks(organization) and tracks_item(organization.pk, item))
+    return bool(escalates_asks(organization) and tracks_item(organization.pk, item, now=now))
 
 
 def run_founder_journey_alert_sweep(now=None, limit=None) -> dict:
@@ -740,7 +740,7 @@ def _detect(*, now, since, limit) -> dict:
                     organization_id=organization_id, alert_reason=reason, run_id=run_id)):
                 continue
             run = ContentFactoryRun.objects.select_related("organization").filter(pk=pk).first()
-            if run and reason == "your_turn_72h" and _ladder_tracks(run.organization, "article:" + run.run_id):
+            if run and reason == "your_turn_72h" and _ladder_tracks(run.organization, "article:" + run.run_id, now=now):
                 continue
             if run and reason in run_alert_reasons(run, now=now) and reason not in _receipts_in(run.result):
                 shared = run_alert_id(run, reason) if reason in INCIDENT_SLOT_REASONS else None
@@ -789,7 +789,7 @@ def _detect_waiting_website_operations(*, now, since, budget, queue, seen):
         organization = operation.connection.organization
         if seen(organization.pk, founder_journey_alert_id(organization_id=organization.pk, alert_reason="your_turn_72h")):
             continue
-        if _ladder_tracks(organization, "website:" + str(organization.pk)):
+        if _ladder_tracks(organization, "website:" + str(organization.pk), now=now):
             continue
         queue("your_turn_72h", organization=organization, details={"website_operation": operation.action})
 

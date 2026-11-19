@@ -78,11 +78,25 @@ def escalates_asks(organization):
     return bool(owns_notifications(organization) and getattr(settings, "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED", False))
 
 
-def tracks_item(organization_id, item):
-    """Whether the ladder is following ``item`` for this startup (its staff alert replaces the generic one)."""
+def tracks_item(organization_id, item, now=None):
+    """Whether the ladder's staff alert covers ``item``'s current ask (it replaces the generic one).
+
+    True only while the ladder last saw the item as a founder ask and either
+    already raised its own alert or is still inside that ask's threshold
+    (plus a sweep's grace). An item the ladder stopped following (older than
+    its run window, or recorded as done) falls back to the generic detector,
+    so a stuck founder is never left without any staff alert.
+    """
     strategy = OrganizationContentConfig.objects.filter(organization_id=organization_id).values_list(
         "pillar_strategy", flat=True).first()
-    return item in mapping(mapping(mapping(strategy).get("founder_notices")).get("last"))
+    record = mapping(mapping(mapping(mapping(strategy).get("founder_notices")).get("last")).get(item))
+    if record.get("state") != "your_turn" or not record.get("ask"):
+        return False
+    if record.get("escalated"):
+        return True
+    since = _moment(record.get("at"))
+    now = now or timezone.now()
+    return since is not None and now - since < timedelta(hours=staff_threshold(record.get("ask"))) + CATCH_UP_GRACE
 
 
 def _owner(organization):

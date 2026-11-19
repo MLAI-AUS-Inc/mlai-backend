@@ -179,6 +179,23 @@ class AskLadderTests(TestCase):
         with self.settings(MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED=False):
             self.assertFalse(alerts._ladder_tracks(built.organization, "website:" + str(built.organization.pk)))
 
+    def test_the_generic_detector_takes_over_when_the_ladder_stops_following(self):
+        built = self.legacy_revoked()
+        item = "website:" + str(built.organization.pk)
+        self.sweep(0)
+        # Inside the ask's threshold (120 h for authorize_github) the ladder covers it.
+        self.assertTrue(alerts._ladder_tracks(built.organization, item, now=self.start + timedelta(hours=100)))
+        # The ladder stopped observing (no sweep raised its alert): the generic
+        # detector is not silenced, so a stuck founder still reaches staff.
+        self.assertFalse(alerts._ladder_tracks(built.organization, item, now=self.start + timedelta(hours=200)))
+        # Once the ladder raised its own alert, the generic one stays aside.
+        self.sweep(120)
+        self.assertTrue(alerts._ladder_tracks(built.organization, item, now=self.start + timedelta(hours=400)))
+        # An item the ladder recorded as no longer the founder's turn is not covered.
+        WebsiteConnection.objects.filter(organization=built.organization).update(state="connected")
+        self.sweep(121)
+        self.assertFalse(alerts._ladder_tracks(built.organization, item, now=self.start + timedelta(hours=122)))
+
     @override_settings(MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED=False)
     def test_flags_off_send_nothing(self):
         self.legacy_revoked()
