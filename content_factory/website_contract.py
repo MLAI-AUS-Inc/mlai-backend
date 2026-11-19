@@ -49,6 +49,11 @@ class WebsiteAuthorityError(ValueError):
 
     def as_dict(self):
         result = {"allowed": False, "error": self.code, "code": self.code, "detail": str(self), "retryable": self.retryable, "fieldErrors": self.field_errors}
+        from .website_connection_codes import legacy_code
+        legacy = legacy_code(self.code)
+        if legacy:
+            # B12: old clients still read the code this one was split from.
+            result["legacy_code"] = legacy
         if self.taxonomy_policy:
             result.update(error_code=self.code, failure=self.failure, failure_class=self.failure["failure_class"],
                           failure_fingerprint=self.failure["failure_fingerprint"])

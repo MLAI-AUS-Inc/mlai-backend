@@ -166,6 +166,12 @@ def copy_id_for(code: str | None, *, organization, terminal: bool, self_heal: di
     """
     if not _policy_v2_for(organization):
         return None
+    from . import no_generic_stop
+    if (terminal and not _engine_will_act(self_heal) and no_generic_stop.enabled()
+            and no_generic_stop.generic_stop_reason(code, organization)):
+        # B10: a missing, generic or unregistered code, or an ask with no
+        # action, is ours to fix (the P1 path applies the same rule).
+        return no_generic_stop.FIXING
     entry = effective_entry(code, organization)
     if entry is not None and entry["failure_class"] == "needs_user":
         copy_id = entry.get("founder_copy_id")

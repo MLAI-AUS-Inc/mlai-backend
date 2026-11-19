@@ -490,7 +490,8 @@ def verify_live_url_deployment(config, target, *, setup_run_id="", renew=True):
     from .website_contract import SHA_PATTERN
     website = config.website_connection
     if website is None:
-        raise WebsiteAuthorityError("website_connection_required", "Select and authorize your website repository first.")
+        from .website_connection_codes import not_connected
+        raise not_connected("Select and authorize your website repository first.")
     if target is None or not live.applicable(target) or not live.build_proof(target):
         raise WebsiteAuthorityError("verified_target_required", "Waiting for articles build and render proof.", retryable=True)
     source_sha = str(target.source_sha or "")

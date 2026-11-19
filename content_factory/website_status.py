@@ -169,6 +169,11 @@ def add_p2_fields(result, op, *, organization):
             result["action"] = None
     copy_id = registry_policy.copy_id_for(code, organization=organization, terminal=state == "stopped",
                                           self_heal=goals.mapping(receipt.get("self_heal_v1")) or None)
+    if copy_id == "fixing" and not code:
+        # B10 applies to a stop that names a generic or unknown code. A website
+        # operation that ended without one (cancelled) keeps the stop; Chat
+        # already shows a setup stop as "We're fixing this".
+        copy_id = "stopped"
     if not registered and state == "needs_you" and ask and ask != "approve_setup":
         candidate = f"ask_{ask}"
         if candidate in _founder_copy_ids() and policy_v2_applies(organization):

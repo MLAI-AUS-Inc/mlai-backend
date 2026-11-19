@@ -23,6 +23,7 @@ import time
 from contextlib import contextmanager, nullcontext
 
 from .website_contract import CONNECTION_FIELDS, WebsiteAuthorityError, connection_contract
+from .website_connection_codes import not_connected as _not_connected
 from .website_connections import (
     REPOSITORY_WORKFLOWS, authority_guard, bind_website, contract_for,
     scoped_run_contract, summary_for as website_summary, transition_connection,
@@ -830,7 +831,7 @@ def _reserve_article_start_connection(context, payload, *, reserve_operation=Tru
             config = _get_config(context.organization)
             website = config.website_connection
             if website is None:
-                raise WebsiteAuthorityError("website_connection_required", "Prepare this website before generating an article.")
+                raise _not_connected("Prepare this website before generating an article.")
             supplied = connection_contract(payload) or connection_contract(owner_operation_contract())
             if supplied and any(connection_contract(contract_for(website)).get(key) != value for key, value in supplied.items() if key != "connection_target_id"):
                 raise WebsiteAuthorityError("website_connection_changed", "The website changed before the article charge.")
@@ -5509,7 +5510,7 @@ def _github_app_token_payload_for_domain(*, domain: str, github_repo: str, permi
     from .website_tokens import mint_website_token
     config = OrganizationContentConfig.objects.select_related("website_connection__organization").get(organization__domain=normalize_company_domain(domain))
     if not config.website_connection:
-        raise WebsiteAuthorityError("website_connection_required", "Connect this website before repository work.")
+        raise _not_connected("Connect this website before repository work.")
     payload = {**contract_for(config.website_connection), "github_repo": github_repo}
     return mint_website_token(payload, permission_mode=permission_mode, action="setup" if permission_mode == "write" else "read")
 
@@ -15182,7 +15183,7 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, 
         website = config.website_connection
         try:
             if website is None:
-                raise WebsiteAuthorityError("website_connection_required", "Connect and verify this website before continuing.")
+                raise _not_connected("Connect and verify this website before continuing.")
             supplied = connection_contract(payload) or connection_contract(owner_operation_contract())
             if supplied and any(connection_contract(contract_for(website)).get(key) != value for key, value in supplied.items() if key != "connection_target_id"):
                 raise WebsiteAuthorityError("website_connection_changed", "The website changed before dispatch.")

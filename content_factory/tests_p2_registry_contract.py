@@ -349,15 +349,17 @@ class UnknownCodeAndCopyIdTests(TestCase):
     def test_terminal_items_stop_unless_the_engine_will_act(self):
         from .self_heal_testing import self_heal_receipt
         org = make_p2_org().organization
-        self.assertEqual(registry_policy.copy_id_for("GITHUB_TEMPORARILY_UNAVAILABLE", organization=org,
+        # B10: a registered code stops; an unregistered one is ours to fix (below).
+        self.assertEqual(registry_policy.copy_id_for("EDITORIAL_REJECTED", organization=org,
                                                      terminal=True, self_heal=None), "stopped")
         acting = self_heal_receipt(next_at="2026-11-01T00:00:00+00:00")
         self.assertEqual(registry_policy.copy_id_for("NOT_A_CODE", organization=org, terminal=True, self_heal=acting),
                          "working")
         for receipt in (self_heal_receipt(next_at=None), self_heal_receipt(next_at="2026-11-01T00:00:00+00:00", capped=True),
                         self_heal_receipt(mode="observe", next_at="2026-11-01T00:00:00+00:00")):
+            # B10: an unregistered terminal code is ours to fix, not a plain stop.
             self.assertEqual(registry_policy.copy_id_for("NOT_A_CODE", organization=org, terminal=True,
-                                                         self_heal=receipt), "stopped")
+                                                         self_heal=receipt), "fixing")
 
     @override_settings(**ALL_FLAGS_ON)
     def test_needs_user_codes_give_their_ask(self):

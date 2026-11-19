@@ -387,7 +387,7 @@ class ArticleGenerationGateEndpointTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 409, response.data)
-        self.assertEqual(response.data.get("code"), "website_connection_required")
+        self.assertEqual(response.data.get("code"), "website_not_connected")  # B12: nothing is connected
         self.assertFalse(post.called)
 
     @override_settings(

@@ -125,7 +125,9 @@ def setup_merge_observation_guard(run):
     if not connection_contract(original):
         if OrganizationContentConfig.objects.filter(organization__domain__iexact=run.domain,
                 website_connection__isnull=False).exists():
-            raise WebsiteAuthorityError("website_connection_required", "This setup has no original website consent.")
+            # B12: a run without saved consent on a connected site is not a
+            # disconnect; retrying cannot help and there is nothing to reconnect.
+            raise WebsiteAuthorityError("invalid_connection_contract", "This setup has no original website consent.")
         yield None
         return
     if run.workflow != "article_system_setup":
@@ -456,7 +458,9 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
                 payload.setdefault(key, inventory[key])
     contract = connection_contract(payload)
     if not contract:
-        raise WebsiteAuthorityError("website_connection_required", "Reconnect this website to continue.")
+        # B12: decided from the saved run and the connection's real state.
+        from .website_connection_codes import missing_contract_error
+        raise missing_contract_error(payload)
     domain = str(domain or payload.get("domain") or "").lower().strip()
     github_repo = str(github_repo or payload.get("github_repo") or "").strip()
     candidate = WebsiteConnection.objects.select_related("organization").filter(pk=contract["website_connection_id"]).first()
@@ -804,19 +808,31 @@ def queue_website_followup(kind, *, data, arguments):
 
 
 def needs_repository_authority(data):
-    """Research-only callbacks remain independent of website publishing consent."""
+    """Research-only callbacks remain independent of website publishing consent.
+
+    B12: decided from the saved run's workflow and binding, not from the
+    callback's event name. Connection or repository-config fields in the
+    payload, a repository workflow claimed by the payload, or a repository
+    without a workflow always require the guard. Event-name prefixes are read
+    only for a callback whose run is not saved here.
+    """
     if any(key in data for key in CONNECTION_FIELDS) or REPOSITORY_CONFIG_FIELDS.intersection(data) or (data.get("github_repo") and not data.get("workflow")):
         return True
     if str(data.get("workflow") or "") in REPOSITORY_WORKFLOWS:
         return True
-    event = str(data.get("event_type") or data.get("event") or "")
-    if event.startswith(("scan_", "scaffold_", "article_system_setup_", "generation_", "preview_", "publish_", "article_")):
-        return True
     run_id = data.get("run_id") or data.get("job_id")
     if run_id:
         from workflow_runs.models import ContentFactoryRun
-        return ContentFactoryRun.objects.filter(run_id=run_id, workflow__in=REPOSITORY_WORKFLOWS).exists()
-    return False
+        run = ContentFactoryRun.objects.filter(run_id=run_id).only("run_id", "workflow", "run_request", "domain", "github_repo").first()
+        if run is not None:
+            if run.workflow in REPOSITORY_WORKFLOWS:
+                return True
+            try:
+                return bool(connection_contract(_payload_with_context(getattr(run, "run_request", None) or {})))
+            except WebsiteAuthorityError:
+                return True
+    event = str(data.get("event_type") or data.get("event") or "")
+    return event.startswith(("scan_", "scaffold_", "article_system_setup_", "generation_", "preview_", "publish_", "article_"))
 
 
 def archive_repository_templates(config, connection=None):
@@ -1068,8 +1084,11 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
     with transaction.atomic():
         Organization.objects.select_for_update().get(pk=config.organization_id)
         config.refresh_from_db()
-        if not config.website_connection_id or not contract:
-            raise WebsiteAuthorityError("website_connection_required", "Connect this website before changing its lifecycle.")
+        if not config.website_connection_id:
+            from .website_connection_codes import not_connected
+            raise not_connected("Connect this website before changing its lifecycle.")
+        if not contract:
+            raise WebsiteAuthorityError("website_connection_required", "Reload the web app or update MLAI, then change this website's lifecycle.")
         connection = WebsiteConnection.objects.select_for_update().get(pk=config.website_connection_id)
         key = f"{connection.pk}:{idempotency_key or uuid.uuid4()}"
         existing = WebsiteConnectionOperation.objects.filter(idempotency_key=key).first()
@@ -1426,7 +1445,8 @@ def dispatch_contract(domain, payload, *, action="read", source_run_id=""):
     else:
         config = OrganizationContentConfig.objects.select_related("website_connection__organization").filter(organization__domain=domain).first()
         if not config or not config.website_connection:
-            raise WebsiteAuthorityError("website_connection_required", "Connect the selected website before repository work.")
+            from .website_connection_codes import not_connected
+            raise not_connected("Connect the selected website before repository work.")
         supplied = connection_contract(payload)
         binding = dict(payload) if supplied else contract_for(config.website_connection)
     binding = {**binding, "domain": domain, "github_repo": payload.get("github_repo") or binding.get("github_repo")}

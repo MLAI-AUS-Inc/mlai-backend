@@ -173,6 +173,17 @@ def line(copy_id, *, run=None, count=None, notify=False, queue=None, outcome=Non
         headline = "Your articles are still ready to copy" if exhausted else "Your article is ready to copy"
         body = "Your website's own checks didn't accept the new blog page." if exhausted else "We'll offer to add it to your website once your blog page works."
         label, next_kind = ("Send details to my developer" if exhausted else "Read your article"), "view_draft"
+    elif copy_id == "fixing":
+        # B10: a generic stop is ours to fix. Staff were alerted when it arrived;
+        # the points lines are the stop's, so a refund still shows.
+        outcome = outcome or {}
+        from .first_article_entitlement import entitled_request
+        free = bool(run and entitled_request(mapping(run.run_request)) and outcome.get("state") == "no_charge")
+        headline = "We're fixing this"
+        body = "Your free article is still waiting for you." if free else f"Refunded {outcome.get('points', 0)} points." if outcome.get("state") == "refunded" else "No charge."
+        if outcome.get("state") in {None, "pending"}:body = "We're checking the points for this article."
+        elif outcome.get("state") in {"charged", "kept"}:body = f"This article used {outcome.get('points') or 0} points."
+        next_kind = None
     elif copy_id == "stopped":
         outcome = outcome or {}
         from .first_article_entitlement import entitled_request
@@ -250,7 +261,7 @@ def run_decision(organization, run, *, config, user, now, queue=None, follow_pub
         copy_id = "working_publishing"
     if copy_id is None and (run.status in {"failed", "blocked", "cancelled", "denied"} or code):
         copy_id = registry_policy.copy_id_for(code, organization=organization, terminal=run.status in {"failed", "blocked", "cancelled", "denied"}, self_heal=mapping(result.get("self_heal_v1")))
-        if entry is None:
+        if entry is None and copy_id != "fixing":
             copy_id = "working"
     if copy_id is None:
         return None
