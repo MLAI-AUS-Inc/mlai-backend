@@ -1,10 +1,10 @@
 {
   "files": {
-    "contracts/failure-codes.json": "8120e1faa1e0d1b4a7dbed6204df9721fff4be8cbc39f0c15ab78b4bee353c73",
-    "contracts/failure-envelope-v1.schema.json": "0139fa71440257c0f073bae8c721fdb7bd4ee0cb1ebe2f47b33242905ef76e0d",
+    "contracts/failure-codes.json": "692feabbf329ed3e855b370ed324c3a260cccb13e3706d0174e7873280e32aeb",
+    "contracts/failure-envelope-v1.schema.json": "d351a8df6cb44516ee38052ae3e1c1ea542c8add89f3a6b05368979941fbed22",
     "contracts/setup-delivery-v1.schema.json": "6a604e610716ba45c6c1e8491daae94cc51ece99e8e3d6c693ac378674581069"
   },
   "schema_version": 1,
   "source_repository": "drsamdonegan/content-factory",
-  "source_revision": "4aab1f37167fe8cfaf52a9e336db18ec24c7847d"
+  "source_revision": "bb0724ab4730f1ecd7c9450aa86e26129bf02061"
 }

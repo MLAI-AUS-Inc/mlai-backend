@@ -1,0 +1,44 @@
+{
+  "dynamic_adapters": [],
+  "nonfailure_sites": [
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "staff alert label; repeats the operation's already-classified stop code, emits no new failure",
+      "expression": "str(saved.receipt.get('reason_code') or '')",
+      "field": "code",
+      "function": "_finish_prepare",
+      "owner": "backend.website_prepare",
+      "path": "content_factory/website_prepare.py",
+      "site_sha256": "f91ec73c7e5decfad4ed312ee523c4a48892fc72ca174075f42984b31573ee4c",
+      "source": "At the owner retry cap (plan B4) the stuck-founder alert is queued with the stop code the preparation already recorded through prepare_failure; it classifies nothing.",
+      "test": "content_factory.tests_prepare_sticky_stop_unit.HonestNumbersTests.test_the_message_counts_identical_stops_across_reopens"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "receipt counter bookkeeping; records the stop code already on the receipt",
+      "expression": "code",
+      "field": "code",
+      "function": "observe",
+      "owner": "backend.website_prepare",
+      "path": "content_factory/website_prepare_counters.py",
+      "site_sha256": "d6f5b991fd3ee83a7dbb7b4c5a54ee54ba09dedaf8e21960053317c202d12aab",
+      "source": "The never-reset stop streak (plan B4) keys identical stops by the receipt's own reason_code or failure.code; it is a counter, not a failure emission.",
+      "test": "content_factory.tests_prepare_sticky_stop_unit.HonestNumbersTests.test_the_message_counts_identical_stops_across_reopens"
+    },
+    {
+      "adapter": "nonfailure_category",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "category": "stop_v1 bookkeeping; copies the stop code already on the receipt",
+      "expression": "code",
+      "field": "reason_code",
+      "function": "record_stop",
+      "owner": "backend.website_prepare",
+      "path": "content_factory/website_prepare_sticky_stop.py",
+      "site_sha256": "f38bcd2f6010536663a123a5f958d885343285de8c9a265c4bde4f70d472fd7b",
+      "source": "The sticky-stop record (plan B3) copies the receipt's own reason_code so a later push can judge whether it can change the outcome; it classifies nothing.",
+      "test": "content_factory.tests_prepare_sticky_stop_unit.JudgeTests.test_a_change_outside_the_stop_does_not_reopen"
+    }
+  ]
+}
