@@ -122,6 +122,7 @@ class RooAvatarApiTests(TestCase):
         self.state.historical_microroo = 250 * MICROROO
         self.state.save()
         selected = {
+            "fur": "snow_gum",
             "hair": "mint_mohawk",
             "glasses": "lilac_stars",
             "jacket": "lilac_puffer",
@@ -133,13 +134,107 @@ class RooAvatarApiTests(TestCase):
             self.state.save()
             result = self.client.get(self.url).data
             self.assertEqual(result["outfit"], selected)
-            self.assertEqual(result["effective_outfit"], empty_outfit())
+            self.assertEqual(
+                result["effective_outfit"], {**empty_outfit(), "fur": "snow_gum"}
+            )
             self.assertEqual(result["history_reconciled"], total is not None)
             self.assertEqual(result["current_level"], 0 if total == 0 else None)
         self.assertEqual(
             self.patch({**empty_outfit(), "glasses": "classic_black"}, 1).status_code,
             200,
         )
+
+    def test_fur_catalog_is_fully_unlocked_and_hair_names_are_styles(self):
+        for total in [0, None]:
+            self.state.historical_microroo = total
+            self.state.save()
+            result = self.client.get(self.url).data
+            self.assertEqual(result["catalog_version"], "roo-avatar-v1")
+            self.assertEqual(result["history_reconciled"], total is not None)
+            for key in ["outfit", "effective_outfit", "catalog"]:
+                self.assertEqual(
+                    list(result[key]), ["fur", "hair", "glasses", "jacket", "shoes"]
+                )
+            self.assertIsNone(result["outfit"]["fur"])
+            self.assertEqual(
+                [(item["id"], item["name"]) for item in result["catalog"]["fur"]],
+                [
+                    ("golden_sand", "Golden sand"),
+                    ("blue_flier", "Blue flier"),
+                    ("ironbark", "Ironbark"),
+                    ("snow_gum", "Snow gum"),
+                    ("midnight_wallaroo", "Midnight wallaroo"),
+                ],
+            )
+            for item in result["catalog"]["fur"]:
+                self.assertEqual(item["required_level"], 0)
+                self.assertTrue(item["unlocked"])
+                self.assertIsNone(item["unavailable_reason"])
+            self.assertEqual(
+                [(item["id"], item["name"]) for item in result["catalog"]["hair"]],
+                [
+                    ("honey_tuft", "Tuft"),
+                    ("cocoa_curls", "Curls"),
+                    ("peach_fringe", "Swept fringe"),
+                    ("lilac_bob", "Bob"),
+                    ("mint_mohawk", "Mohawk"),
+                ],
+            )
+
+    def test_fur_saves_for_unreconciled_history_and_can_return_to_default(self):
+        self.state.historical_microroo = None
+        self.state.save()
+        saved = self.patch({**empty_outfit(), "fur": "midnight_wallaroo"})
+        self.assertEqual(saved.status_code, 200)
+        self.assertIsNone(saved.data["current_level"])
+        self.assertEqual(saved.data["outfit"]["fur"], "midnight_wallaroo")
+        self.assertEqual(saved.data["effective_outfit"]["fur"], "midnight_wallaroo")
+        self.assertEqual(
+            CommunityRooAvatar.objects.get(user=self.user).fur, "midnight_wallaroo"
+        )
+        cleared = self.patch(empty_outfit(), 1)
+        self.assertEqual(cleared.status_code, 200)
+        self.assertIsNone(cleared.data["outfit"]["fur"])
+        self.assertIsNone(CommunityRooAvatar.objects.get(user=self.user).fur)
+
+    def test_four_slot_outfit_from_an_earlier_client_keeps_the_saved_fur(self):
+        earlier = {
+            "hair": "honey_tuft",
+            "glasses": None,
+            "jacket": None,
+            "shoes": "red_sneakers",
+        }
+        first = self.patch(earlier)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.data["version"], 1)
+        self.assertEqual(first.data["outfit"], {"fur": None, **earlier})
+        self.assertIsNone(CommunityRooAvatar.objects.get(user=self.user).fur)
+        chosen = self.patch({**empty_outfit(), "fur": "ironbark"}, 1)
+        self.assertEqual(chosen.status_code, 200)
+        kept = self.patch({**earlier, "glasses": "classic_black"}, 2)
+        self.assertEqual(kept.status_code, 200)
+        self.assertEqual(kept.data["version"], 3)
+        self.assertEqual(
+            kept.data["outfit"],
+            {"fur": "ironbark", **earlier, "glasses": "classic_black"},
+        )
+        self.assertEqual(kept.data["effective_outfit"], kept.data["outfit"])
+        row = CommunityRooAvatar.objects.get(user=self.user)
+        self.assertEqual(
+            (row.fur, row.glasses, row.version), ("ironbark", "classic_black", 3)
+        )
+
+    def test_unknown_fur_is_rejected_without_changing_the_saved_outfit(self):
+        self.assertEqual(
+            self.patch({**empty_outfit(), "fur": "golden_sand"}).status_code, 200
+        )
+        for fur in ["outback_red", "honey_tuft", 7]:
+            result = self.patch({**empty_outfit(), "fur": fur}, 1)
+            self.assertEqual(result.status_code, 400)
+            self.assertEqual(result.data["error"], "invalid_roo_avatar")
+            self.assertEqual(result.data["slots"], ["fur"])
+        row = CommunityRooAvatar.objects.get(user=self.user)
+        self.assertEqual((row.fur, row.version), ("golden_sand", 1))
 
     def test_large_spendable_balance_is_not_contribution_rank(self):
         PointsAccount.objects.create(
