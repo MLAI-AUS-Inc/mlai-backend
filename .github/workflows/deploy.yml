@@ -1307,8 +1307,14 @@ jobs:
 
     # These tests spend their time planning migrations in Python, one core at
     # a time, so they are the one command that runs its classes in parallel.
-    # Each worker gets its own copy of the migrated database.
+    # Each worker gets its own copy of the migrated database. Two things differ
+    # from a serial run. A worker that dies mid-test leaves Django waiting for
+    # its result forever, so the step has its own time limit (it takes about 12
+    # minutes). And the first transaction test class on each worker starts with
+    # the rows that data migrations seed, while later ones start empty, so a
+    # class here must pass either way.
     - name: Run migration tests
+      timeout-minutes: 30
       run: |
         python manage.py test --parallel=auto \
           core.tests_slack_founder_links.SlackFounderSyntheticIdentityMigrationTests \

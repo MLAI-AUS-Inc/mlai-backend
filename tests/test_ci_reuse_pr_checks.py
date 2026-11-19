@@ -365,9 +365,17 @@ class ReusePrChecksTests(TestCase):
                 and '--require-hashes' in run and '--only-binary=:all:' in run
             ]
             self.assertTrue(installs and installs[0] < commands[0], name)
+            self.assertNotIn('if', job['steps'][installs[0]], name)
+            # A dead worker hangs a parallel run instead of failing it.
+            for index in commands:
+                self.assertLessEqual(job['steps'][index].get('timeout-minutes', 0) or 999, 60, name)
             # Each worker clones the migrated database, which the reuse sets up.
             self.assertEqual(job['env']['MLAI_TEST_DATABASE_TEMPLATE'], '1', name)
         # Only the migration tests, which are bound by one core each, run in
         # parallel. Timing-sensitive suites stay serial.
         self.assertEqual(parallel, {'migration-tests': ['Run migration tests']})
         self.assertIn('tblib==', (root / '.github/requirements-ci.txt').read_text())
+        self.assertRegex(
+            (root / '.github/requirements-ci.lock').read_text(),
+            r'(?m)^tblib==\S+ \\\n\s+--hash=sha256:[0-9a-f]{64}',
+        )
