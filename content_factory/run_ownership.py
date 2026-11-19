@@ -45,6 +45,12 @@ R3_BACKEND_RESULT_KEYS = frozenset({OWNER_RESULT_KEY, OWNER_EXECUTION_KEY, EVENT
 R3_BACKEND_REQUEST_KEYS = frozenset({WIRE_REQUEST_KEY, WIRE_EXECUTION_KEY, BUDGET_KEY})
 SCOPE_FIELDS = (*CONNECTION_FIELDS, *OPERATION_FIELDS, "expected_source_sha", "source_run_id")
 SCHEDULER_SERVICES = frozenset({"island_refresh", "daily_discovery", "research_automation"})
+# B16: research that reads only organization data carries its authority inside
+# the admission (and so inside its digest) instead of leaving Content Factory to
+# infer it from which request keys happen to be present.
+AUTHORITY_SCOPE_KEY = "authority_scope"
+ORGANIZATION_RESEARCH_SCOPE = "organization_research"
+ORGANIZATION_RESEARCH_WORKFLOWS = frozenset({"auto_discovery", "island_refresh"})
 WORKER_WORKFLOW_ALIASES = {
     "article_generation": frozenset({"direct_generate", "confirmed_topic"}),
     "scaffold_articles": frozenset({"article_system_setup"}),
@@ -278,10 +284,38 @@ def _identity(*, organization, principal, workflow, payload):
     connection = connection_contract(request)
     scope = {field: deepcopy(connection.get(field, request.get(field))) for field in SCOPE_FIELDS}
     scope = {field: None if type(value) is str and value == "" else value for field, value in scope.items()}
-    return {"schema_version": 1, "dispatch_key": key, "organization_id": str(organization.pk),
-            "principal": principal, "workflow": workflow, "domain": organization.domain,
-            "github_repo": request.get("github_repo") or "", "request_digest": evidence_digest(request),
-            "scope": scope}, request
+    identity = {"schema_version": 1, "dispatch_key": key, "organization_id": str(organization.pk),
+                "principal": principal, "workflow": workflow, "domain": organization.domain,
+                "github_repo": request.get("github_repo") or "", "request_digest": evidence_digest(request),
+                "scope": scope}
+    if organization_research_scope(workflow=workflow, github_repo=identity["github_repo"], scope=scope,
+                                   request=request):
+        identity[AUTHORITY_SCOPE_KEY] = ORGANIZATION_RESEARCH_SCOPE
+    return identity, request
+
+
+def organization_research_scope(*, workflow, github_repo, scope, request):
+    """Whether this admission is research over organization data only (B16).
+
+    True only for a research workflow with an empty repository identity, a
+    complete null website/operation/source scope and no saved connection
+    contract. Anything bound to a website keeps its own website authority.
+    """
+    return (workflow in ORGANIZATION_RESEARCH_WORKFLOWS and github_repo == ""
+            and all(value is None for value in scope.values())
+            and not connection_contract(request) and not request.get("connection_contract"))
+
+
+def _matching_legacy_identity(saved, identity):
+    """An admission saved before the B16 stamp keeps its original, unstamped identity.
+
+    Old inference stays valid for one release: a retry of such a run must not
+    conflict only because new admissions now carry ``authority_scope``.
+    """
+    if (isinstance(saved, dict) and AUTHORITY_SCOPE_KEY not in saved
+            and identity.get(AUTHORITY_SCOPE_KEY) == ORGANIZATION_RESEARCH_SCOPE):
+        return {key: value for key, value in identity.items() if key != AUTHORITY_SCOPE_KEY}
+    return identity
 
 
 def admitted_run_for_key(key, *, lock=False):
@@ -377,6 +411,8 @@ def reserve_admitted_run(*, organization, principal, workflow, payload, reserved
             if not created and owner_receipt(run) is None:
                 raise RunOwnershipConflict("An existing legacy execution already owns that key.")
         saved = owner_receipt(run)
+        if saved is not None:
+            identity = _matching_legacy_identity(saved["identity"], identity)
         if (saved is None or not _exact(saved["identity"], identity) or run.organization_id != organization.pk
                 or run.workflow != workflow or run.domain != organization.domain
                 or run.github_repo != identity["github_repo"]

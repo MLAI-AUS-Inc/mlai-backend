@@ -22,12 +22,13 @@ from .self_heal_testing import ALL_FLAGS_ON, make_named_legacy_org, make_p2_org
 
 ROOT = Path(__file__).resolve().parents[1]
 # cf-registry's bytes, checked with cmp when vendored. Merge provenance is checked remotely.
-# Registry/envelope bytes: adds the SDK and sandbox fault codes (A5) ahead of the CF pin bump.
+# Registry/envelope bytes: adds the SDK and sandbox fault codes (A5) and the research rows
+# (B16 research_scope_invalid, B23 add_seed_topics) ahead of the CF pin bump.
 VENDORED_SHA256 = {
-    "contracts/failure-codes.json": "bf11e9aa3bf81e36088d2350e08c9c9abf6fb258e3671bf15d712957a9196990",
-    "contracts/failure-envelope-v1.schema.json": "5bcb909016d3f4e6e1026e35f85e7bd2ee2d786413ec9c63f2cefaef322c0056",
+    "contracts/failure-codes.json": "d625f46ca3cedc06e9d9a12e9816cc1a0bdbe1233653265cd3f76c3c1de8143f",
+    "contracts/failure-envelope-v1.schema.json": "04c3b62745324bd2ec9f39dfb4267ebb4bfd31db9ea0f253c514e1c1811831a7",
     "contracts/setup-delivery-v1.schema.json": "6a604e610716ba45c6c1e8491daae94cc51ece99e8e3d6c693ac378674581069",
-    "content_factory/failure_registry_pre_p2.json": "f8ca80a13c17497fc2dab0f2bfc2cb3f8c08840c09737e6082d52022ebbd5cc2",
+    "content_factory/failure_registry_pre_p2.json": "4ce48c28e2b86f59f3b2ab1e66201134fa1ec81af945d0f38dd86210d86be48b",
     "content_factory/tests/fixtures/p2/failure-codes.pre-p2.json": "5dc161ae1f02212f3898ec0a2bc4bee347ccbc0cf8c26cf640ced545dd4d8b3e",
 }
 FIXTURE_PATH = ROOT / "content_factory/tests/fixtures/p2/failure-codes.pre-p2.json"
@@ -295,7 +296,7 @@ class WireActionIdTests(SimpleTestCase):
 
     LEGACY = {"approve_setup": "review_setup", "describe_customer": "review_setup", "agree_terms": "review_setup",
               "approve_on_github": "merge_pr", "authorize_github": "authorize_github", "review_draft": "review_draft",
-              "buy_points": "buy_points", "approve_join_request": None}
+              "buy_points": "buy_points", "approve_join_request": None, "add_seed_topics": None}
 
     def test_flag_off_sends_legacy_ids(self):
         self.assertEqual(registry_policy.LEGACY_WIRE_ACTION_IDS, self.LEGACY)

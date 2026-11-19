@@ -19,6 +19,11 @@ from .run_ownership import bind_admitted_run, current_execution_ticket, owner_re
 from .self_heal_testing import make_p2_org
 from .tests_run_event_authority import FLAGS
 
+# B16: the testdata/r3 recordings were made against admissions from before the
+# backend stamped organization research authority. Admit their runs as the
+# recording backend did, so the recorded worker echoes stay byte-identical.
+RECORDED_BEFORE_RESEARCH_STAMP = patch("content_factory.run_ownership.organization_research_scope", new=lambda **_: False)
+
 
 @override_settings(**FLAGS, **ALL_P1_FLAGS_ON, ARTICLES_FREE_FIRST_ARTICLE_ENABLED=True,
                    ARTICLES_RUN_CONTROL_MODEL_USD="5", ARTICLES_RUN_CONTROL_MODEL_TOKENS=100000)
@@ -223,6 +228,7 @@ class TopicBenefitTests(TransactionTestCase):
         return value, run, original
 
     @override_settings(CONTENT_FACTORY_URL="https://topic.fixture.invalid", CONTENT_FACTORY_API_KEY="synthetic-topic-key")
+    @RECORDED_BEFORE_RESEARCH_STAMP
     def test_actual_paired_paid_topic_failure_refunds_original_once_with_unchanged_worker_echo(self):
         from .run_terminal_settlement import settle_authoritative_terminal
         value, run, original = self.paired("paid", "settlement")
@@ -237,6 +243,7 @@ class TopicBenefitTests(TransactionTestCase):
         self.assertEqual(value["cancel_replay"]["terminal_topic_settlement_v1"], value["cancel_response"]["terminal_topic_settlement_v1"])
 
     @override_settings(CONTENT_FACTORY_URL="https://topic.fixture.invalid", CONTENT_FACTORY_API_KEY="synthetic-topic-key")
+    @RECORDED_BEFORE_RESEARCH_STAMP
     def test_actual_paired_free_topic_failure_releases_only_its_real_original_grant(self):
         from .run_terminal_settlement import settle_authoritative_terminal
         from .run_dispatch_settlement import _free_obligation_state
@@ -279,10 +286,12 @@ class TopicBenefitTests(TransactionTestCase):
             self.assertEqual(_free_obligation_state(run), "reserved")
 
     @override_settings(CONTENT_FACTORY_URL="https://topic.fixture.invalid", CONTENT_FACTORY_API_KEY="synthetic-topic-key")
+    @RECORDED_BEFORE_RESEARCH_STAMP
     def test_actual_paired_paid_choices_stay_earned_after_cancel_and_replay(self):
         self.paired_delivery("paid")
 
     @override_settings(CONTENT_FACTORY_URL="https://topic.fixture.invalid", CONTENT_FACTORY_API_KEY="synthetic-topic-key")
+    @RECORDED_BEFORE_RESEARCH_STAMP
     def test_actual_paired_free_choices_never_release_the_used_original_batch(self):
         self.paired_delivery("free")
 
@@ -464,6 +473,7 @@ class TopicBenefitTests(TransactionTestCase):
         self.assertFalse(original.service_refunds.exists())
 
     @override_settings(CONTENT_FACTORY_URL="https://topic.fixture.invalid", CONTENT_FACTORY_API_KEY="synthetic-topic-key")
+    @RECORDED_BEFORE_RESEARCH_STAMP
     def test_verified_choices_are_recovered_by_real_history_pull_without_any_callback(self):
         from .run_reconciliation import reconcile_authoritative_run
         from .models import ContentFactoryJob

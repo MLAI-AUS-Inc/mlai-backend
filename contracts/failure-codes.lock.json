@@ -1,7 +1,7 @@
 {
   "files": {
-    "contracts/failure-codes.json": "bf11e9aa3bf81e36088d2350e08c9c9abf6fb258e3671bf15d712957a9196990",
-    "contracts/failure-envelope-v1.schema.json": "5bcb909016d3f4e6e1026e35f85e7bd2ee2d786413ec9c63f2cefaef322c0056",
+    "contracts/failure-codes.json": "d625f46ca3cedc06e9d9a12e9816cc1a0bdbe1233653265cd3f76c3c1de8143f",
+    "contracts/failure-envelope-v1.schema.json": "04c3b62745324bd2ec9f39dfb4267ebb4bfd31db9ea0f253c514e1c1811831a7",
     "contracts/setup-delivery-v1.schema.json": "6a604e610716ba45c6c1e8491daae94cc51ece99e8e3d6c693ac378674581069"
   },
   "schema_version": 1,

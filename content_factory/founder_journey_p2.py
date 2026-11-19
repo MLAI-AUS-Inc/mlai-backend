@@ -165,6 +165,7 @@ def line(copy_id, *, run=None, count=None, notify=False, queue=None, outcome=Non
             "ask_approve_on_github_protected": ("GitHub needs you to approve one change for your blog", None, "Approve on GitHub"),
             "ask_approve_on_github_site_test": (f"Your site has a test that expects exactly {expected if type(expected) is int else 'a fixed number of'} pages", "Approve a one-line change on GitHub.", "Approve on GitHub"),
             "ask_approve_join_request": ("Someone asked to join your team", None, "Review request"),
+            "ask_add_seed_topics": ("Research found nothing new", "Add seed topics or competitors, then run research again.", "Add seed topics"),
         }
         headline, body, label = rows.get(copy_id, ("Your articles", None, "Continue"))
         next_kind = None

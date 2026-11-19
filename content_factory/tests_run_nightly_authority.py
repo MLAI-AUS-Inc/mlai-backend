@@ -15,6 +15,11 @@ from .run_ownership import owner_receipt, current_execution_ticket, wire_identit
 from .self_heal_testing import make_p2_org
 from .tests_run_event_authority import FLAGS
 
+# B16: the testdata/r3 recordings were made against admissions from before the
+# backend stamped organization research authority. Admit their runs as the
+# recording backend did, so the recorded worker echoes stay byte-identical.
+RECORDED_BEFORE_RESEARCH_STAMP = patch("content_factory.run_ownership.organization_research_scope", new=lambda **_: False)
+
 
 @override_settings(**FLAGS, **ALL_P1_FLAGS_ON, CONTENT_FACTORY_URL="https://nightly.fixture.invalid",
     CONTENT_FACTORY_API_KEY="synthetic-nightly-key", ROO_API_KEY="synthetic-nightly-service-key",
@@ -271,6 +276,8 @@ class NightlyAuthorityTests(TransactionTestCase):
         self.assertEqual(response.status_code, 409, response.data)
         self.assertEqual(calls, 0)
         self.assertEqual(ResearchAutomation.objects.values().get(pk=automation.pk), malformed)
+
+    @RECORDED_BEFORE_RESEARCH_STAMP
 
     def test_actual_cf_orphan_control_request_and_budget_receive_one_real_backend_ticket(self):
         import requests

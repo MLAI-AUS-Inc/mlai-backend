@@ -373,6 +373,7 @@
               "PORTABLE_REVIEW_PROTECTED",
               "SCAFFOLD_APPROVAL_REQUIRED",
               "SITE_TEST_CHANGE_REQUIRED",
+              "VALIDATION_ERROR",
               "WEBSITE_CONNECTION_REQUIRED",
               "article_founder_review_required",
               "article_preview_safety_review_required",
@@ -483,7 +484,6 @@
               "ISLAND_RESEARCH_FAILED",
               "LOCAL_PREVIEW_PROOF_INVALID",
               "NATIVE_VERIFICATION_FAILED",
-              "NO_OPPORTUNITIES",
               "OPERATION_ATTEMPT_MISMATCH",
               "OPERATION_AUTHORIZATION_MISMATCH",
               "PORTABLE_PACKAGE_DRIFT",
@@ -686,6 +686,7 @@
               "request_failed",
               "research_audience_changed",
               "research_owner_changed",
+              "research_scope_invalid",
               "restoration_scope_mismatch",
               "revision_mismatch",
               "revision_superseded",
@@ -850,7 +851,6 @@
         "properties": {
           "code": {
             "enum": [
-              "VALIDATION_ERROR",
               "reviewed_contract_required"
             ]
           }
@@ -1035,6 +1035,104 @@
         "properties": {
           "code": {
             "enum": [
+              "NO_OPPORTUNITIES"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "unsupported"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "action": {
+                "type": "object"
+              },
+              "failure_class": {
+                "const": "needs_user"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "VALIDATION_ERROR"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "properties": {
+              "id": {
+                "enum": [
+                  "add_seed_topics",
+                  "approve_setup",
+                  "review_setup"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "NO_OPPORTUNITIES"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "properties": {
+              "id": {
+                "const": "add_seed_topics"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
               "BRANCH_PROTECTION_APPROVAL_REQUIRED",
               "SITE_TEST_CHANGE_REQUIRED",
               "manual_merge_required"
@@ -1168,7 +1266,6 @@
               "NO_KEYWORDS",
               "PUBLISH_TARGET_ACTION_REQUIRED",
               "SCAFFOLD_APPROVAL_REQUIRED",
-              "VALIDATION_ERROR",
               "cleanup_proposal_changed",
               "cleanup_proposal_required",
               "cleanup_restoration_marker_required",
@@ -1366,6 +1463,7 @@
           "properties": {
             "id": {
               "enum": [
+                "add_seed_topics",
                 "agree_terms",
                 "approve_join_request",
                 "approve_on_github",
@@ -1931,6 +2029,7 @@
         "request_failed",
         "research_audience_changed",
         "research_owner_changed",
+        "research_scope_invalid",
         "restart_pending",
         "restoration_approval_required",
         "restoration_contract_unavailable",

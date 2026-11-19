@@ -377,6 +377,9 @@ def dispatch_automation_run(run_id: str) -> dict[str, Any]:
             status=AutomationRunStatus.FAILED,
             last_error=f"insufficient_roo_points: {exc}"[:1000],
         )
+        # B18: one points refusal pauses the automation and tells the founder
+        # once, instead of failing again every night until they notice.
+        pause_automation_for_points(run, exc.payload)
         return {"status": "failed", "automation_run_id": str(run.id), "error": "insufficient_roo_points"}
     except Exception as exc:
         logger.warning("Failed to dispatch research automation run %s: %s", run.id, exc)
@@ -390,6 +393,56 @@ def dispatch_automation_run(run_id: str) -> dict[str, Any]:
             last_error=str(exc),
         )
         return {"status": "failed", "automation_run_id": str(run.id), "error": str(exc)}
+
+
+def pause_automation_for_points(run: AutomationRun, refusal: Optional[dict[str, Any]] = None) -> bool:
+    """Pause the founder's research automations after one insufficient-points result (B18).
+
+    Returns True when this refusal paused them; only then is the one notice sent.
+    """
+    from .daily_research_policy import pause_for_insufficient_points
+    from .notification_adapters import send_automation_paused_points
+    refusal = refusal if isinstance(refusal, dict) else {}
+    required = _whole_points(refusal.get("required_points") or refusal.get("cost_points"))
+    balance = _whole_points(refusal.get("current_balance"))
+    if not pause_for_insufficient_points(run.automation.organization, required_points=required, current_balance=balance):
+        return False
+    try:
+        send_automation_paused_points(run, required_points=required, current_balance=balance)
+    except Exception:
+        # The pause is the guard; a notice that cannot be sent is retried by nobody
+        # and must not undo it.
+        logger.warning("automation_paused_points_notice_failed automation_run=%s", run.id, exc_info=True)
+    return True
+
+
+def _whole_points(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def resume_automations_paused_for_points(*, limit: int = 200) -> int:
+    """Scheduler sweep: resume points-paused automations whose wallet now covers a run (B18)."""
+    from .daily_research_policy import MEMORY_KEY, POINTS_PAUSE_REASON, resume_after_points
+    resumed = 0
+    paused = (ResearchAutomation.objects.filter(status=ResearchAutomationStatus.PAUSED,
+                                                metadata__daily_research__pause_reason=POINTS_PAUSE_REASON)
+              .select_related("organization", "user", "notification_channel", "notification_channel__user")
+              .order_by("updated_at")[: max(1, limit)])
+    for automation in paused:
+        if (automation.metadata or {}).get(MEMORY_KEY, {}).get("pause_reason") != POINTS_PAUSE_REASON:
+            continue
+        payer = automation.user or automation.notification_channel.user
+        if payer is None:
+            continue
+        balance = _content_factory_balance_for_user(payer)
+        resumed += resume_after_points(automation.organization, balance=balance)
+    return resumed
 
 
 def dispatch_due_automation_runs(*, now: Optional[datetime] = None, limit: int = 20) -> list[dict[str, Any]]:
@@ -569,11 +622,14 @@ def fail_stuck_automation_runs(
 
 def run_research_automation_scheduler(*, now: Optional[datetime] = None, limit: int = 20) -> dict[str, Any]:
     current = now or timezone.now()
+    # B18: a topped-up wallet resumes a points pause before the next slots are made.
+    resumed = resume_automations_paused_for_points()
     ensured = ensure_due_automation_runs(now=current)
     results = dispatch_due_automation_runs(now=current, limit=limit)
     failed_stuck = fail_stuck_automation_runs(now=current)
     return {
         "status": "ok",
+        "resumed_after_points": resumed,
         "ensured": len(ensured),
         "queued": sum(1 for result in results if result.get("status") == "queued"),
         "failed": sum(1 for result in results if result.get("status") == "failed"),

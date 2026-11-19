@@ -144,7 +144,10 @@ class WebsiteStatusP2Tests(TestCase):
                     expected_ask = registry_policy.founder_ask_for_code(code, org)
                     self.assertEqual(result["copyId"], registry_policy.copy_id_for(
                         code, organization=org, terminal=False, self_heal=None))
-                    if expected_ask:
+                    if expected_ask and registry_policy.wire_action_id(expected_ask) is None:
+                        # B23: an ask old builds cannot open travels without an action id.
+                        self.assertIsNone(result["action"])
+                    elif expected_ask:
                         self.assertEqual(result["action"]["id"], registry_policy.wire_action_id(expected_ask))
                     else:
                         self.assertIsNone(result["action"])

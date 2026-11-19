@@ -35,10 +35,11 @@ def record_engagement(organization, *, resume=False, now=None):
             metadata = dict(automation.metadata or {})
             memory = dict(metadata.get(MEMORY_KEY) or {})
             memory["last_engaged_at"] = current.isoformat()
-            if resume and (memory.get("pause_reason") == PAUSE_REASON or automation.status == "active"):
+            if resume and (memory.get("pause_reason") in {PAUSE_REASON, POINTS_PAUSE_REASON}
+                           or automation.status == "active"):
                 automation.status = "active"
-                memory.pop("pause_reason", None)
-                memory.pop("paused_at", None)
+                for key in ("pause_reason", "paused_at", "points_required", "points_balance"):
+                    memory.pop(key, None)
                 OrganizationContentConfig.objects.filter(organization=organization).update(daily_discovery_enabled=True)
             metadata[MEMORY_KEY] = memory
             automation.metadata = metadata
@@ -151,3 +152,124 @@ def daily_topic_policy(run, *, now=None):
             preferences.append({"id": key, "keywords": [island.pillar_keyword or island.name]})
     return {"version": 1, "cooldown_days": COOLDOWN_DAYS, "recent_topics": list(recent.values()),
             "preferences": preferences[:20]}
+
+
+# B23: research that finds nothing new on a scheduled night is an empty,
+# completed run. After this many consecutive empty local nights the founder
+# hears once, with a suggestion to add seed topics or competitors.
+EMPTY_NIGHTS_BEFORE_NOTICE = 3
+EMPTY_STREAK_KEY = "empty_nights"
+EMPTY_NOTICE_KEY = "empty_notice_sent_for"
+
+
+def record_empty_night(run, *, now=None):
+    """Record one empty scheduled night and say whether its streak's notice is now due.
+
+    Nights are local calendar dates in the automation's time zone, so a
+    callback replay or two empty slots on one night count once. A gap of a
+    night starts a new streak. The notice is due once per streak: the first
+    time the streak reaches ``EMPTY_NIGHTS_BEFORE_NOTICE``.
+    """
+    from content_factory.models import ResearchAutomation
+    current = now or timezone.now()
+    night = (run.scheduled_for_at or current).astimezone(zone(run.automation.timezone)).date()
+    with transaction.atomic():
+        automation = ResearchAutomation.objects.select_for_update().get(pk=run.automation_id)
+        metadata = dict(automation.metadata or {})
+        memory = dict(metadata.get(MEMORY_KEY) or {})
+        nights = [str(value) for value in memory.get(EMPTY_STREAK_KEY) or []]
+        last = nights[-1] if nights else ""
+        if night.isoformat() == last:
+            return False
+        if last and (night - timedelta(days=1)).isoformat() != last:
+            nights = []
+            memory.pop(EMPTY_NOTICE_KEY, None)
+        nights = (nights + [night.isoformat()])[-EMPTY_NIGHTS_BEFORE_NOTICE:]
+        due = len(nights) >= EMPTY_NIGHTS_BEFORE_NOTICE and not memory.get(EMPTY_NOTICE_KEY)
+        if due:
+            memory[EMPTY_NOTICE_KEY] = nights[0]
+        memory[EMPTY_STREAK_KEY] = nights
+        metadata[MEMORY_KEY] = memory
+        automation.metadata = metadata
+        automation.save(update_fields=["metadata", "updated_at"])
+        return due
+
+
+def reset_empty_streak(organization):
+    """A night with topics ends the empty streak, so a later streak may notify again."""
+    from content_factory.models import ResearchAutomation
+    with transaction.atomic():
+        for automation in ResearchAutomation.objects.select_for_update().filter(organization=organization):
+            metadata = dict(automation.metadata or {})
+            memory = dict(metadata.get(MEMORY_KEY) or {})
+            if EMPTY_STREAK_KEY not in memory and EMPTY_NOTICE_KEY not in memory:
+                continue
+            memory.pop(EMPTY_STREAK_KEY, None)
+            memory.pop(EMPTY_NOTICE_KEY, None)
+            metadata[MEMORY_KEY] = memory
+            automation.metadata = metadata
+            automation.save(update_fields=["metadata", "updated_at"])
+
+
+# B18: one insufficient-points result pauses the automation instead of
+# retrying (and failing) every night. The founder hears once per pause.
+POINTS_PAUSE_REASON = "insufficient_points"
+
+
+def pause_for_insufficient_points(organization, *, required_points=None, current_balance=None, now=None):
+    """Pause every active automation of ``organization`` after a points refusal.
+
+    Returns True only when this call paused something, so the caller sends the
+    one founder notice; a replay or a second refusal while paused returns False.
+    Scheduled nightly slots are cancelled. A manual "Run today now" slot is left
+    to its own result.
+    """
+    from content_factory.models import AutomationRun, OrganizationContentConfig, ResearchAutomation
+    current = now or timezone.now()
+    with transaction.atomic():
+        active = list(ResearchAutomation.objects.select_for_update().filter(organization=organization, status="active"))
+        if not active:
+            return False
+        for automation in active:
+            metadata = dict(automation.metadata or {})
+            memory = {**metadata.get(MEMORY_KEY, {}), "pause_reason": POINTS_PAUSE_REASON,
+                      "paused_at": current.isoformat()}
+            if required_points is not None:
+                memory["points_required"] = int(required_points)
+            if current_balance is not None:
+                memory["points_balance"] = int(current_balance)
+            metadata[MEMORY_KEY] = memory
+            automation.metadata, automation.status = metadata, "paused"
+            automation.save(update_fields=["metadata", "status", "updated_at"])
+        OrganizationContentConfig.objects.filter(organization=organization).update(daily_discovery_enabled=False)
+        AutomationRun.objects.filter(automation__organization=organization, status="scheduled", slot_index__lt=100).update(
+            status="cancelled", last_error=POINTS_PAUSE_REASON, updated_at=current)
+        return True
+
+
+def resume_after_points(organization, *, balance, now=None):
+    """Resume automations paused for points once the wallet covers the next run.
+
+    Only a points pause is lifted here; a founder's own pause or the
+    unanswered-days pause stays until the founder acts.
+    """
+    from content_factory.models import OrganizationContentConfig, ResearchAutomation
+    with transaction.atomic():
+        resumed = 0
+        for automation in ResearchAutomation.objects.select_for_update().filter(organization=organization, status="paused"):
+            metadata = dict(automation.metadata or {})
+            memory = dict(metadata.get(MEMORY_KEY) or {})
+            if memory.get("pause_reason") != POINTS_PAUSE_REASON:
+                continue
+            required = int(memory.get("points_required") or 0)
+            if int(balance or 0) < max(required, 1):
+                continue
+            for key in ("pause_reason", "paused_at", "points_required", "points_balance"):
+                memory.pop(key, None)
+            metadata[MEMORY_KEY] = memory
+            automation.metadata, automation.status = metadata, "active"
+            automation.save(update_fields=["metadata", "status", "updated_at"])
+            resumed += 1
+        if resumed:
+            OrganizationContentConfig.objects.filter(organization=organization).update(daily_discovery_enabled=True)
+        return resumed
