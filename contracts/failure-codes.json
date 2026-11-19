@@ -6,6 +6,7 @@
     "review_setup": "approve_setup"
   },
   "actions": {
+    "add_seed_topics": "Add seed topics",
     "agree_terms": "Agree to the terms",
     "approve_join_request": "Review request",
     "approve_on_github": "Approve on GitHub",
@@ -3474,15 +3475,15 @@
       "user_message": "Review the required website action to continue."
     },
     {
-      "action_id": null,
+      "action_id": "add_seed_topics",
       "aliases": [],
       "code": "NO_OPPORTUNITIES",
       "emitter_scopes": [
         "content_factory"
       ],
-      "failure_class": "unsupported",
+      "failure_class": "needs_user",
       "fingerprint_profile": "semantic_findings_v1",
-      "founder_copy_id": "stopped",
+      "founder_copy_id": "ask_add_seed_topics",
       "introduced_in": 1,
       "legacy": {
         "code": "NO_OPPORTUNITIES",
@@ -3491,7 +3492,7 @@
       },
       "owner": "content_factory",
       "refund": true,
-      "retry_policy": "stop_contract",
+      "retry_policy": "await_owner_action",
       "user_message": "The saved operation cannot safely continue. Review its diagnostics."
     },
     {
@@ -5284,15 +5285,15 @@
       "user_message": "An unregistered failure was stopped for operator review."
     },
     {
-      "action_id": null,
+      "action_id": "add_seed_topics",
       "aliases": [],
       "code": "VALIDATION_ERROR",
       "emitter_scopes": [
         "content_factory"
       ],
-      "failure_class": "unsupported",
+      "failure_class": "needs_user",
       "fingerprint_profile": "semantic_findings_v1",
-      "founder_copy_id": "stopped",
+      "founder_copy_id": "ask_add_seed_topics",
       "introduced_in": 1,
       "legacy": {
         "code": "VALIDATION_ERROR",
@@ -5301,7 +5302,7 @@
       },
       "owner": "content_factory",
       "refund": true,
-      "retry_policy": "stop_contract",
+      "retry_policy": "await_owner_action",
       "user_message": "Review the required website action to continue."
     },
     {
@@ -11069,6 +11070,27 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "research_scope_invalid",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "research_scope_invalid",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "Research stopped at a safety check, and MLAI has been told and will fix it."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "restart_pending",
       "emitter_scopes": [
         "backend.articles"
@@ -13380,6 +13402,7 @@
   ],
   "fingerprint_version": 1,
   "founder_copy_ids": [
+    "ask_add_seed_topics",
     "ask_agree_terms",
     "ask_approve_join_request",
     "ask_approve_on_github",

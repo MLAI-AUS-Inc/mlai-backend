@@ -24,7 +24,9 @@ ROOT = Path(__file__).resolve().parents[1]
 # cf-registry's bytes, checked with cmp when vendored. Merge provenance is checked remotely.
 # Registry/envelope bytes: adds the SDK and sandbox fault codes (A5) and puts the
 # editorial currency codes on existing policies (B9), adds
-# the B10 codes and RUN_BUDGET_NOT_CONFIGURED (B14) ahead of the CF pin bump.
+# the B10 codes and RUN_BUDGET_NOT_CONFIGURED (B14),
+# and the research rows (B16 research_scope_invalid, B23 add_seed_topics) ahead of
+# the CF pin bump.
 VENDORED_SHA256 = {
     "contracts/failure-codes.json": "8120e1faa1e0d1b4a7dbed6204df9721fff4be8cbc39f0c15ab78b4bee353c73",
     "contracts/failure-envelope-v1.schema.json": "0139fa71440257c0f073bae8c721fdb7bd4ee0cb1ebe2f47b33242905ef76e0d",
@@ -297,7 +299,7 @@ class WireActionIdTests(SimpleTestCase):
 
     LEGACY = {"approve_setup": "review_setup", "describe_customer": "review_setup", "agree_terms": "review_setup",
               "approve_on_github": "merge_pr", "authorize_github": "authorize_github", "review_draft": "review_draft",
-              "buy_points": "buy_points", "approve_join_request": None}
+              "buy_points": "buy_points", "approve_join_request": None, "add_seed_topics": None}
 
     def test_flag_off_sends_legacy_ids(self):
         self.assertEqual(registry_policy.LEGACY_WIRE_ACTION_IDS, self.LEGACY)

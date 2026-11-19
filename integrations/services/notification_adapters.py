@@ -47,6 +47,9 @@ NOTIFICATION_CONTEXT_KEYS = {
     "channel_type",
     "channel_route_id",
     "recipient_user_id",
+    # B23: "scheduled" for a nightly slot, "manual" for "Run today now". Content
+    # Factory completes an empty scheduled night instead of failing it.
+    "automation_trigger",
 }
 AUTOMATION_ACTION_SALT = "content-factory-research-automation-action"
 DEFAULT_ACTION_MAX_AGE_SECONDS = 14 * 24 * 60 * 60
@@ -76,7 +79,14 @@ def notification_context_for_run(run: AutomationRun) -> dict[str, str]:
         "channel_type": channel.channel_type,
         "channel_route_id": str(channel.id),
         "recipient_user_id": recipient_user_id,
+        "automation_trigger": automation_trigger_for_run(run),
     }
+
+
+def automation_trigger_for_run(run: AutomationRun) -> str:
+    """``scheduled`` for a nightly slot, ``manual`` for a founder's "Run today now"."""
+    from .research_automations import MANUAL_SLOT_BASE
+    return "manual" if int(run.slot_index or 0) >= MANUAL_SLOT_BASE else "scheduled"
 
 
 def resolve_automation_run(context: Optional[dict[str, Any]]) -> Optional[AutomationRun]:
@@ -1281,6 +1291,8 @@ def send_topic_selection(data: dict[str, Any]) -> list[NotificationDelivery]:
     run.status = AutomationRunStatus.TOPIC_SELECTION_SENT
     run.last_error = ""
     run.save(update_fields=["callback_payload", "content_factory_run_id", "status", "last_error", "updated_at"])
+    from .daily_research_policy import reset_empty_streak
+    reset_empty_streak(run.automation.organization)
 
     # One digest for the whole fan-out: the analytics update leads the message
     # on every channel, then the research topics follow.
@@ -1417,6 +1429,99 @@ def send_review_ready(data: dict[str, Any]) -> list[NotificationDelivery]:
     )
 
 
+def research_empty_notice_text(run: AutomationRun) -> str:
+    from founder_tools.my_startup.links import frontend_origin
+    return (
+        f"Research for {run.automation.organization.domain} has found nothing new for "
+        "a few nights. Add seed topics or competitors so it has fresh ground to cover: "
+        f"{frontend_origin()}/my-startup/settings"
+    )
+
+
+def research_empty_applies(run: Optional[AutomationRun], data: dict[str, Any]) -> bool:
+    """Whether a ``research_empty`` callback may close this automation run (B23).
+
+    Only a scheduled slot of the callback's own Content Factory run can be an
+    empty night. A night that already delivered topics is not empty, whatever
+    arrives late, and a callback for a different job never closes this slot.
+    """
+    if run is None or run.slot_index >= _manual_slot_base():
+        return False
+    job_id = _callback_job_id(data)
+    if run.content_factory_run_id and job_id != run.content_factory_run_id:
+        return False
+    return not (run.selected_topic
+                or run.deliveries.filter(event_type="topic_selection", status="sent").exists())
+
+
+def send_research_empty(data: dict[str, Any]) -> list[NotificationDelivery]:
+    """Record a scheduled night that found nothing new as a completed, empty run (B23).
+
+    No failure, no staff alert. After ``EMPTY_NIGHTS_BEFORE_NOTICE`` empty
+    nights in a row the founder gets one notice suggesting new seeds.
+    """
+    run = resolve_automation_run(data.get("notification_context"))
+    if not research_empty_applies(run, data):
+        return []
+    job_id = _callback_job_id(data)
+    run.callback_payload = data
+    if job_id and not run.content_factory_run_id:
+        run.content_factory_run_id = job_id
+    run.status = AutomationRunStatus.COMPLETED
+    run.last_error = ""
+    run.save(update_fields=["callback_payload", "content_factory_run_id", "status", "last_error", "updated_at"])
+    from .daily_research_policy import EMPTY_NIGHTS_BEFORE_NOTICE, record_empty_night
+    if not record_empty_night(run):
+        return []
+    text = research_empty_notice_text(run)
+    return _fan_out_event(
+        run=run,
+        event_type="research_empty",
+        request_payload={"event_type": "research_empty", "job_id": job_id,
+                         "empty_nights": EMPTY_NIGHTS_BEFORE_NOTICE,
+                         "empty_reason": str(data.get("empty_reason") or "")},
+        build_kwargs=lambda channel: {
+            "text": text,
+            "subject": "Research needs new seed topics",
+            "html_body": html.escape(text).replace("\n", "<br>"),
+        },
+    )
+
+
+def automation_paused_points_text(run: AutomationRun, *, required_points=None, current_balance=None) -> str:
+    from founder_tools.my_startup.links import frontend_origin
+    numbers = ""
+    if required_points and current_balance is not None and current_balance < required_points:
+        numbers = (f" The next run uses {required_points} points and you have {current_balance}, "
+                   f"so you need {required_points - current_balance} more.")
+    return (
+        f"Daily research for {run.automation.organization.domain} is paused because there are not "
+        f"enough points.{numbers} Get points and it starts again on its own: "
+        f"{frontend_origin()}/my-startup/credits"
+    )
+
+
+def send_automation_paused_points(run: AutomationRun, *, required_points=None, current_balance=None) -> list[NotificationDelivery]:
+    """The one notice for a points pause (B18), idempotent per run and channel."""
+    text = automation_paused_points_text(run, required_points=required_points, current_balance=current_balance)
+    return _fan_out_event(
+        run=run,
+        event_type="automation_paused_points",
+        request_payload={"event_type": "automation_paused_points", "required_points": required_points,
+                         "current_balance": current_balance},
+        build_kwargs=lambda channel: {
+            "text": text,
+            "subject": "Daily research is paused",
+            "html_body": html.escape(text).replace("\n", "<br>"),
+        },
+    )
+
+
+def _manual_slot_base() -> int:
+    from .research_automations import MANUAL_SLOT_BASE
+    return MANUAL_SLOT_BASE
+
+
 def send_error(data: dict[str, Any]) -> list[NotificationDelivery]:
     run = resolve_automation_run_for_callback(data)
     if not run:
@@ -1430,6 +1535,10 @@ def send_error(data: dict[str, Any]) -> list[NotificationDelivery]:
     run.status = AutomationRunStatus.FAILED
     run.last_error = str(data.get("error") or data.get("error_message") or "").strip()
     run.save(update_fields=["callback_payload", "status", "last_error", "updated_at"])
+    if str(data.get("error_code") or "").strip().upper() == "INSUFFICIENT_ROO_POINTS":
+        # B18: Content Factory refused the slot on points; pause rather than retry nightly.
+        from .research_automations import pause_automation_for_points
+        pause_automation_for_points(run, data)
 
     logger.warning("content_factory_failure_recorded_without_customer_notification automation_run=%s job=%s", run.id, job_id)
     return []

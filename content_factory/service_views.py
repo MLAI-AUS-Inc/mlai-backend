@@ -3931,7 +3931,7 @@ class ContentFactoryCallbackView(APIView):
         # Order before *any* handler can mutate state, refund or notify. Use the
         # existing run JSON and row lock; no schema migration is required.
         run_id = str(data.get("run_id") or job_id)
-        if event_type in {"topic_selection", "discovery_progress"}:
+        if event_type in {"topic_selection", "discovery_progress", "research_empty"}:
             from .research_workspace import accepts_research_write, research_config
             organization = Organization.objects.filter(domain=data.get("domain") or "").first()
             if organization and not accepts_research_write(research_config(organization), run_id):
@@ -4034,6 +4034,8 @@ class ContentFactoryCallbackView(APIView):
             return self._handle_article_review_preview_event(data, event_type)
         elif event_type == 'discovery_progress':
             return self._handle_discovery_progress(data)
+        elif event_type == 'research_empty':
+            return self._handle_research_empty(data)
         elif event_type == 'article_progress':
             return self._handle_article_progress(data)
         elif event_type == 'scan_progress':
@@ -7358,6 +7360,44 @@ class ContentFactoryCallbackView(APIView):
             'message': 'Article complete callback processed',
             'job_id': job_id,
         }, status=status.HTTP_200_OK)
+
+    def _handle_research_empty(self, data):
+        """A scheduled research night that found nothing new (B23).
+
+        Content Factory completed the run empty. The paid slot gets its points
+        back, the automation run completes, and no failure or alert is raised.
+        Only a run the backend scheduled can arrive here; a founder-started run
+        still fails as their ask.
+        """
+        from content_factory.run_backend_facts import save_job_facts
+        from content_factory.models import ContentFactoryJob
+        from integrations.services.article_generation import maybe_auto_refund_terminal_failure
+        from integrations.services.notification_adapters import (
+            research_empty_applies, resolve_automation_run, send_research_empty)
+        from integrations.utils import normalize_domain
+
+        job_id = str(data.get('job_id') or data.get('run_id') or '')
+        run = resolve_automation_run(data.get('notification_context'))
+        # Check before refunding: a late empty callback for a night that already
+        # delivered topics, or for another job, must not credit anything back.
+        if (not research_empty_applies(run, data)
+                or normalize_domain(run.automation.organization.domain) != normalize_domain(data.get('domain') or '')):
+            return Response({'status': 'ignored', 'reason': 'no_scheduled_automation_run', 'job_id': job_id})
+        job = ContentFactoryJob.objects.filter(job_id=job_id).first() if job_id else None
+        refunded, refund_points = False, 0
+        if job is not None:
+            refunded, refund_points = maybe_auto_refund_terminal_failure(
+                job, error_code='NO_OPPORTUNITIES',
+                error_message='Research found nothing new.', refundable=True)
+            job.status = 'completed'
+            job.error_message = ''
+            save_job_facts(job, update_fields=['status', 'error_message', 'updated_at'])
+        deliveries = send_research_empty(data)
+        logger.info('research_empty job=%s automation_run=%s reason=%s refunded=%s',
+                    job_id, run.id, data.get('empty_reason'), refunded)
+        return Response({'status': 'received', 'job_id': job_id, 'outcome': 'empty',
+                         'refunded_points': refund_points if refunded else 0,
+                         'notified': bool(deliveries)}, status=status.HTTP_200_OK)
 
     def _handle_error(self, data):
         """Handle error event from content-factory."""

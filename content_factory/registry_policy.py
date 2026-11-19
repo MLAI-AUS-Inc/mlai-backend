@@ -7,7 +7,7 @@ organisation in the P2 cohort while ``ARTICLES_FAILURE_POLICY_V2_ENABLED`` is on
 The only database access is ``p2_foundation.p2_applies(organization)`` when an
 organisation is passed.
 
-Action ids: the registry's ``actions`` hold the 8 canonical asks. Old desktop
+Action ids: the registry's ``actions`` hold the 9 canonical asks. Old desktop
 builds know only the legacy ids, so a payload builder that takes an id from the
 P2 view sends it through :func:`wire_action_id`, which keeps the legacy id
 until ``MY_STARTUP_CANONICAL_ACTION_IDS_ENABLED`` is on.
@@ -33,6 +33,8 @@ LEGACY_WIRE_ACTION_IDS: dict[str, str | None] = {
     "review_draft": "review_draft",
     "buy_points": "buy_points",
     "approve_join_request": None,
+    # B23: old desktop builds have no seed-topics screen, so the ask travels without an id.
+    "add_seed_topics": None,
 }
 WORKING = "working"
 STOPPED = "stopped"

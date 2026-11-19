@@ -216,6 +216,7 @@ jobs:
           startup_updates.tests_mcp_articles_unit \
           content_factory.tests_mcp_operations_unit \
           content_factory.tests_research_dispatch_unit \
+          content_factory.tests_research_authority_contract \
           community_chat.tests.test_mlai_mcp_community \
           community_chat.tests.test_startup_publication \
           startup_updates.tests_month_scope \

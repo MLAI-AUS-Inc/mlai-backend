@@ -95,6 +95,12 @@
     "retry_policy": "await_owner_action",
     "retryable": false
   },
+  "NO_OPPORTUNITIES": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
   "PORTABLE_REVIEW_PROTECTED": {
     "action_id": "review_setup",
     "failure_class": "needs_user",
