@@ -7,7 +7,8 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.utils import timezone
 
-from .founder_funnel import ARTICLE_WORKFLOWS, RESEARCH_WORKFLOWS, draft_time, emit_event, mapping, timestamp, remember_first_draft
+from .founder_funnel import (ARTICLE_WORKFLOWS, BASELINE_WORKFLOWS, RESEARCH_WORKFLOWS, SCAN_WORKFLOWS, draft_time,
+                             emit_event, mapping, timestamp, remember_first_draft)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,11 @@ def startup_created(sender, instance, created, raw=False, using='default', **kwa
         org_id, at = instance.organization_id, instance.created_at
         after_commit(lambda: emit_for_organization('startup_created', org_id, at=at,
             source='startup.created', using=using), using=using)
+        from .founder_journey_cohort import organization_has_website
+        if organization_has_website(instance.organization):
+            # E10: the website was entered with the startup (the create carries the domain).
+            after_commit(lambda: emit_for_organization('website_entered', org_id, at=at,
+                source='startup.created_with_website', using=using), using=using)
 
 
 @receiver(post_save, sender='workflow_runs.ContentFactoryRun', dispatch_uid='founder_funnel_run')
@@ -78,6 +84,16 @@ def run_observed(sender, instance, created, raw=False, using='default', **kwargs
         from .run_reconciliation import authoritative_run
         if not authoritative_run(instance):
             after_commit(lambda: remember_first_draft(org_id, run_id=run_id, using=using), using=using)
+    if created and (instance.workflow in BASELINE_WORKFLOWS or (instance.workflow in ARTICLE_WORKFLOWS and str(
+            mapping(instance.run_request).get('delivery_mode') or '') == 'content_only')):
+        # E10, D6: work started before any website is connected is its own event.
+        from .founder_journey_cohort import has_connected_website
+        if not has_connected_website(instance.organization):
+            kind = 'website_check_started' if instance.workflow in BASELINE_WORKFLOWS else 'content_only_article_started'
+            milestones.append((kind, instance.created_at, 'run.admitted_before_connection'))
+    if instance.workflow in SCAN_WORKFLOWS and instance.status == 'completed':
+        milestones.append(('scan_complete', timestamp(mapping(instance.result).get('completed_at')) or timezone.now(),
+                           'scan.completed_observed'))
     if instance.workflow in RESEARCH_WORKFLOWS and instance.status == 'completed':
         milestones.append(('research_done', timestamp(mapping(instance.result).get('completed_at')) or timezone.now(),
                            'research.completed_observed'))
@@ -105,6 +121,40 @@ def published(sender, instance, raw=False, using='default', **kwargs):
         org_id, at, run_id = instance.organization_id, instance.live_verified_at, instance.source_run_id
         after_commit(lambda: emit_for_organization('published', org_id, at=at, run_id=run_id,
             source='article.live_verified', using=using), using=using)
+        # E10: C14's live check is the last approved stage.
+        after_commit(lambda: emit_for_organization('article_live', org_id, at=at, run_id=run_id,
+            source='article.live_verified', using=using), using=using)
+
+
+@receiver(post_save, sender='content_factory.WebsiteConnection', dispatch_uid='founder_funnel_github_connection')
+def github_connection_created(sender, instance, created, raw=False, using='default', **kwargs):
+    """E10: GitHub authorised, and the repository chosen, when the connection is first recorded."""
+    if not created or raw or not instance.organization_id:
+        return
+    org_id, at = instance.organization_id, instance.created_at
+    after_commit(lambda: emit_for_organization('github_authorised', org_id, at=at,
+        source='website.connection_created', using=using), using=using)
+    if str(instance.github_repo or '').strip():
+        after_commit(lambda: emit_for_organization('repo_selected', org_id, at=at,
+            source='website.connection_created', using=using), using=using)
+
+
+@receiver(post_save, sender='content_factory.WebsiteConnectionTarget', dispatch_uid='founder_funnel_articles_page')
+def articles_page_verified(sender, instance, created, raw=False, using='default', update_fields=None, **kwargs):
+    """E10: the articles page is verified when a target first records its verification."""
+    if raw or not instance.verified_at or not (created or update_fields is None or 'verified_at' in update_fields):
+        return
+    connection_id, at = instance.connection_id, instance.verified_at
+
+    def emit():
+        # Resolved after commit, so a save with the journey flag off reads nothing.
+        from .website_models import WebsiteConnection
+        org_id = WebsiteConnection.objects.using(using).filter(pk=connection_id).values_list(
+            'organization_id', flat=True).first()
+        if org_id:
+            emit_for_organization('articles_page_verified', org_id, at=at, source='website.target_verified',
+                                  using=using)
+    after_commit(emit, using=using)
 
 
 @receiver(post_save, sender='content_factory.WebsiteConnection', dispatch_uid='founder_funnel_github')

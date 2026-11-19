@@ -207,15 +207,23 @@ def _with_etag(payload: dict) -> dict:
     return payload
 
 
-def legacy_payload(company_id) -> dict:
-    """The legacy short-circuit body (no reads beyond the cohort)."""
-    return _with_etag({
+def legacy_payload(company_id, setup=None) -> dict:
+    """The legacy short-circuit body (no reads beyond the cohort and, when asked for, the setup facts).
+
+    ``setup`` is the E6 server-owned setup state (decision D15: every cohort
+    gets it). It is added only when the client asked for it, so a client
+    that never asks reads exactly the body it always did.
+    """
+    payload = {
         "version": VERSION, "companyId": str(company_id), "cohort": cohorts.LEGACY, "stage": "legacy",
         "state": None, "headline": None, "body": None, "holdingReason": None, "action": None, "next": None,
         "runId": None, "etaSeconds": None, "queuePosition": None, "draftReadyNotifications": False,
         "switchTopicAvailable": False, "githubReturn": None, "website": None, "firstArticle": None,
         "pollAfterMs": POLL_AFTER_MS["legacy"], "supportCode": None,
-    })
+    }
+    if setup is not None:
+        payload["setup"] = setup
+    return _with_etag(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -631,17 +639,24 @@ def _audience_known(organization, config, facts) -> bool:
     return audience_for(organization, config, facts) is not None
 
 
-def project_founder_journey(organization, *, user, company, now=None, run_id=None) -> dict:
+def project_founder_journey(organization, *, user, company, now=None, run_id=None, include_setup=False) -> dict:
     """The IF-P1-03 journey body for this company, with its ``etag``.
 
     A legacy organisation (``is_new_journey`` false) returns the legacy body
-    before any read beyond the cohort marker.
+    before any read beyond the cohort marker. With ``include_setup`` (the
+    client sent ``?setup=1``) both bodies carry the E6 ``setup`` state; the
+    legacy one reads only the setup facts for it, never the article or
+    entitlement state.
     """
     company_id = str(getattr(company, "pk", "") or "")
     if organization is None or not cohorts.is_new_journey(organization):
         from .p2_foundation import p2_applies
         if organization is None or not p2_applies(organization):
-            payload = legacy_payload(company_id)
+            setup = None
+            if include_setup and organization is not None:
+                from .founder_setup_state import setup_state
+                setup = setup_state(organization, company=company, user=user)
+            payload = legacy_payload(company_id, setup=setup)
             if getattr(user, "is_staff", False) and getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False):
                 payload["staffConsole"] = True
                 return _with_etag(payload)
@@ -887,6 +902,10 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
                     payload["website"]["connectedBy"] = {"firstName": name[0][:100]}
     if getattr(user, "is_staff", False) and getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False):
         payload["staffConsole"] = True
+    if include_setup:
+        from .founder_setup_state import setup_state
+        payload["setup"] = setup_state(organization, company=company, config=config, user=user, marker=marker,
+                                       connection=connection, setup_run=_setup_run(organization), read_runs=False)
     action_id = (payload["action"] or {}).get("id")
     logger.info("founder_journey_projection org=%s stage=%s state=%s action=%s", organization.pk,
                 payload["stage"], payload["state"], action_id or "")
