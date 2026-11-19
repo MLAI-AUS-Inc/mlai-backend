@@ -2797,6 +2797,8 @@ ARTICLES_SETUP_LADDER_ENABLED = _env_is_true("ARTICLES_SETUP_LADDER_ENABLED", Fa
 # My Startup one-field create re-checks it. Staged rollout, code default off:
 # off, the endpoint answers 404 and clients keep today's website step.
 MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED", False)
+# Plan E3b: reminders and guidance-change notices for website leads (no organisation). Default off.
+MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED", False)
 
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort
@@ -2890,8 +2892,6 @@ ARTICLES_READY_ON_MERGE_ENABLED = _env_is_true("ARTICLES_READY_ON_MERGE_ENABLED"
 ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED", False)
 MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
 MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)
-# Plan E3b: reminders and guidance-change notices for website leads (no organisation). Default off.
-MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED", False)
 ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED = _env_is_true("ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED", False)
 # Startup team (held until its security sign-off; declared here so the block is complete).
 MY_STARTUP_TEAM_ENABLED = _env_is_true("MY_STARTUP_TEAM_ENABLED", False)
