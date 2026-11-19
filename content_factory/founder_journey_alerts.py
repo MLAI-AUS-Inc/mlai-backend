@@ -112,6 +112,8 @@ P2_REASON_LABELS = {
     "background_job_failure_spike": "Nightly job failures passed 5% of startups in one night",
     # B22: website_connection_invariants, one per broken connection.
     "connection_invariant": "A website connection is in a state that should never happen",
+    # E7: founder_transitions, one per ask that waited past its per-action threshold.
+    "ask_waiting": "A founder ask has waited past its staff threshold",
 }
 P2_ALERT_REASONS = frozenset(P2_REASON_LABELS)
 ALERT_REASONS = ALERT_REASONS | P2_ALERT_REASONS
@@ -427,6 +429,44 @@ def acknowledge_founder_journey_alert(organization, alert_id, *, by_user) -> dic
     return dict(receipt)
 
 
+def resolve_founder_journey_alert(organization, alert_id, *, now=None) -> dict | None:
+    """Mark one alert resolved because what it reported has cleared (plan E7), and return it.
+
+    Sets ``resolved_at`` (the staff console's existing field) once. A receipt
+    still pending is never sent afterwards (state ``resolved``); a sent one
+    keeps its delivery record. Returns None when the org has no such alert.
+    """
+    from .models import OrganizationContentConfig
+    if organization is None or getattr(organization, "pk", None) is None or not alert_id:
+        return None
+    now = now or timezone.now()
+    with transaction.atomic():
+        row = OrganizationContentConfig.objects.select_for_update().filter(organization=organization).first()
+        if row is None:
+            return None
+        strategy = dict(row.pillar_strategy) if isinstance(row.pillar_strategy, dict) else {}
+        receipts = dict(_receipts_in(strategy))
+        receipt = receipts.get(str(alert_id))
+        if not isinstance(receipt, dict):
+            return None
+        if receipt.get("resolved_at"):
+            return dict(receipt)
+        receipt = {**receipt, "resolved_at": now.isoformat(), "resolved_by": "cleared"}
+        if receipt.get("state") == "pending":
+            receipt["state"] = "resolved"
+            receipt.pop("next_attempt_at", None)
+        receipts[str(alert_id)] = receipt
+        OrganizationContentConfig.objects.filter(pk=row.pk).update(pillar_strategy={**strategy, RECEIPTS_KEY: receipts})
+    _mirror_settled(receipt)
+    return dict(receipt)
+
+
+def _ladder_tracks(organization, item, now=None) -> bool:
+    """Whether founder_transitions escalates this item itself, with its per-action threshold (plan E7)."""
+    from .founder_transitions import escalates_asks, tracks_item
+    return bool(escalates_asks(organization) and tracks_item(organization.pk, item, now=now))
+
+
 def run_founder_journey_alert_sweep(now=None, limit=None) -> dict:
     """Queue newly stuck founders and deliver pending alerts; one scheduler tick."""
     if not getattr(settings, "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED", False):
@@ -700,6 +740,8 @@ def _detect(*, now, since, limit) -> dict:
                     organization_id=organization_id, alert_reason=reason, run_id=run_id)):
                 continue
             run = ContentFactoryRun.objects.select_related("organization").filter(pk=pk).first()
+            if run and reason == "your_turn_72h" and _ladder_tracks(run.organization, "article:" + run.run_id, now=now):
+                continue
             if run and reason in run_alert_reasons(run, now=now) and reason not in _receipts_in(run.result):
                 shared = run_alert_id(run, reason) if reason in INCIDENT_SLOT_REASONS else None
                 if shared and seen(organization_id, shared):
@@ -746,6 +788,8 @@ def _detect_waiting_website_operations(*, now, since, budget, queue, seen):
             return
         organization = operation.connection.organization
         if seen(organization.pk, founder_journey_alert_id(organization_id=organization.pk, alert_reason="your_turn_72h")):
+            continue
+        if _ladder_tracks(organization, "website:" + str(organization.pk), now=now):
             continue
         queue("your_turn_72h", organization=organization, details={"website_operation": operation.action})
 

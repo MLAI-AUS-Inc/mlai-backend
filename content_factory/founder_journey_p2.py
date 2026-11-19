@@ -94,7 +94,8 @@ def destination(organization, company_id, *, run_id=None, ask=None, item=None):
         path = "runs/" + quote(str(run_id), safe="") + "/draft"
     elif ask == "approve_join_request" or str(item or "").startswith("team:"):
         path = "team"
-    elif ask in {"approve_setup", "authorize_github", "approve_on_github"} or str(item or "").startswith("website:"):
+    elif (ask in {"approve_setup", "authorize_github", "approve_on_github", "waiting_github_owner_approval", "choose_repository"}
+          or str(item or "").startswith(("website:", "github-owner:"))):
         path = "website"
     else:
         path = ""
