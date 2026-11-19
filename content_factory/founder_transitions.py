@@ -154,6 +154,10 @@ def _copy(event, state, organization):
         return "We couldn't write this one", line["body"], "Open your startup"
     return {
         "ladder_exhausted": ("Your website's checks didn't accept the blog page", "Your articles are still ready to copy.", "Open your startup"),
+        "staff_fixing_update": ("We're still fixing your blog setup", "This one is on us and nothing is needed from you. "
+            "Within a week of it stopping you'll have a working blog page or a straight answer.", "Open your startup"),
+        "staff_fixing_cant_be_done": ("We couldn't set up your blog yet", "We couldn't make your website work with MLAI "
+            "articles yet. Anything you paid for this setup is refunded, and we'll tell you when that changes.", "Open your startup"),
         "team_resolved": ("All sorted", "We fixed the problem and picked up where we left off.", "Open your startup"),
         "join_approved": ("You're on the team", "You're on the team for " + str(organization.name)[:120] + ".", "Open your startup"),
         "member_joined": ("Someone joined your team", str(state.get("first_name") or "Someone")[:100] + " joined " + str(organization.name)[:120] + ".", "Review your team"),
@@ -557,6 +561,14 @@ def _notify(organization, item, event, *, only_user=None, first_name=None):
         if config is None:return 0
         config.organization = organization
         return _reserve(config, item, event, {"state": event, "first_name": first_name}, now=timezone.now(), only_user=only_user)
+
+
+def notify_staff_fixing(organization, op, event):
+    """Tell the founder how a staff fix stands (plan B25): one notice per fix and event."""
+    if event not in {"staff_fixing_update", "staff_fixing_cant_be_done"}:
+        raise ValueError("Unknown staff-fixing notice")
+    since = str(((op.receipt or {}).get("staff_fixing") or {}).get("since") or "")
+    return _notify(organization, f"website:staff-fixing:{op.pk}:{since}", event)
 
 
 def notify_team_resolved(organization, item, *, by_user):

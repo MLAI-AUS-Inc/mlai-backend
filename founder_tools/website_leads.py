@@ -146,6 +146,24 @@ def record_lead(user, lead: dict, *, now=None):
     return public, created, stored
 
 
+def record_staff_lead(organization, *, reason, cause, domain="", now=None):
+    """Record a lead row when staff could not set up a founder's website (plan B25).
+
+    The row goes on the startup owner's contact, beside the not-on-GitHub
+    leads, so the same follow-up finds it when the cause is fixed. ``reason``
+    is the lead kind; ``cause`` the closed-list "can't be done yet" reason.
+    Returns (public lead, created, stored), or None without a billing user.
+    """
+    from django.contrib.auth import get_user_model
+    user = get_user_model().objects.filter(pk=getattr(organization, "billing_user_id", None)).first()
+    if user is None:
+        logger.info("founder_website_staff_lead_without_owner org=%s reason=%s", getattr(organization, "pk", None), reason)
+        return None
+    host_class = cause if HOST_CLASS.fullmatch(str(cause or "")) else "unknown"
+    return record_lead(user, {"reason": reason, "domain": normalise_lead_domain(domain), "hostClass": host_class,
+                              "notify": True}, now=now)
+
+
 def _emit(emit_event, user_id, at, signed_up):
     try:
         emit_event("not_on_github", user_id=user_id, at=at, signed_up_at=signed_up, source="website_lead.recorded")

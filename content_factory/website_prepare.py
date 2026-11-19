@@ -414,6 +414,11 @@ def _finish_prepare(op, *, now):
     from .website_goal_runner import owns_goal, finish_goal
     if owns_goal(op):
         finish_goal(op, now=now)
+    if op.state == "completed":
+        # B25: a staff fix that reached Ready ends its bounded life as Ready.
+        from .website_staff_fixing import active as staff_fixing_active, close as close_staff_fixing
+        if staff_fixing_active(op):
+            close_staff_fixing(op, "ready", now=now)
     if op.state not in {"pending", "running"} and op.receipt.get("staff_alerted"):
         # Ready, or stopped, cancelled or superseded: this preparation's own
         # deadline alert is no longer a founder waiting on it.
@@ -488,6 +493,21 @@ def prepare_failure(op, step, error, *, now=None):
     if observation_enabled:
         op.receipt["failure_taxonomy_observation"] = {"failure": decision["failure"], "classification": decision["failure"]["failure_class"] if decision["failure"] else None,
             "policy_classification": classification, "contract_invalid": decision["contract_invalid"]}
+    from .website_staff_fixing import enter as enter_staff_fixing, repair_exhausted
+    repair = repair_exhausted(getattr(error, "result", None))
+    if repair is not None and code not in SOURCE_CHANGED_CODES:
+        # B11: the repair loop ran out on our own candidate. Staff fix it; the
+        # founder is told nothing is needed. Keyed on the receipt, not the code.
+        source = getattr(error, "result", None) or {}
+        enter_staff_fixing(op, now=now, code=code, step=step, repair_receipt=repair,
+                           run_id=str(source.get("setup_run_id") or source.get("run_id") or ""))
+        from .website_operations import prepare_receipt
+        op.receipt = prepare_receipt(op)
+        return
+    if code == "RUN_BUDGET_NOT_CONFIGURED":
+        # B14: no dollar ceiling source is our configuration fault. Staff are
+        # alerted at once; the founder sees "working" and is never charged.
+        _alert_budget_not_configured(op, now=now)
     if code in SOURCE_CHANGED_CODES and _repin_to_current_source(op, now=now):
         pass
     elif (getattr(error, "user_action", None) and (classification == "needs_user" or not strict_policy and getattr(error, "result", None) is None)
@@ -592,6 +612,18 @@ def prepare_failure(op, step, error, *, now=None):
         op.receipt.update(status="needs_attention", user_action={"id": "retry", "label": "Try again"})
     from .website_operations import prepare_receipt
     op.receipt = prepare_receipt(op)
+
+
+def _alert_budget_not_configured(op, *, now):
+    from .founder_journey_alerts import queue_founder_journey_alert
+    logger.error("website_prepare_budget_not_configured operation=%s connection=%s", op.pk, op.connection_id)
+    try:
+        queue_founder_journey_alert(organization=op.connection.organization, alert_reason="our_team_item",
+            company_id=op.payload.get("company_id"), slot=f"budget-not-configured-{op.pk}-{op.generation}",
+            details={"kind": "run_budget_not_configured", "code": "RUN_BUDGET_NOT_CONFIGURED",
+                     "website_operation_id": str(op.pk)})
+    except Exception:  # noqa: BLE001 - the log line above still reaches staff
+        logger.error("website_prepare_budget_alert_failed operation=%s", op.pk, exc_info=True)
 
 
 def _repin_to_current_source(op, *, now):

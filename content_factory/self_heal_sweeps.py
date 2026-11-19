@@ -28,6 +28,7 @@ SWEEPS: tuple[tuple[str, str, str], ...] = (
     ("no_delivery_refunds", "content_factory.no_delivery_refunds", "run_refund_sweep"),             # be-runs
     ("merge_worker", "content_factory.publish_merge_worker", "run_merge_sweep"),                    # be-merge
     ("deployment_watch", "content_factory.publish_merge_worker", "run_deployment_watch_sweep"),     # be-merge
+    ("staff_fixing", "content_factory.website_staff_fixing", "run_staff_fixing_sweep"),            # B25
     ("founder_transitions", "content_factory.founder_transitions", "run_transition_sweep"),         # be-notify
     ("team_requests", "founder_tools.startup_team", "run_team_request_sweep"),                      # be-team (held)
     ("staff_alert_rules", "content_factory.staff_alert_rules", "run_alert_rule_sweep"),             # be-staff

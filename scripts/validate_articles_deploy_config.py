@@ -178,9 +178,16 @@ JOURNEY_DISABLED_ORGANIZATIONS = "MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZ
 # A Django REST framework rate such as 30/minute. A malformed one breaks every
 # invite resolve at request time.
 INVITE_RESOLVE_RATE = "COMMUNITY_CHAT_INVITE_RESOLVE_RATE"
+# The backend's model allowance for a maintained SDK setup run (plan B14): a
+# positive dollar amount and a positive token count. The SDK control switch
+# needs both; without them a setup run reaches Content Factory with no ceiling.
+SDK_CONTROL_FLAG = "ARTICLES_RUN_SDK_CONTROL_ENABLED"
+CONTROL_USD = "ARTICLES_RUN_CONTROL_MODEL_USD"
+CONTROL_TOKENS = "ARTICLES_RUN_CONTROL_MODEL_TOKENS"
+MAX_CONTROL_TOKENS = 20_000_000
 DISCOVERY_RECONCILIATION_SINCE = "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE"
 NIGHTLY_RECONCILIATION_SINCE = "CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE"
-KEYS = (*FLAG_KEYS, *COUNT_KEYS, *POSITIVE_KEYS, ALERTS_SINCE, WORKSHOP_WINDOWS,
+KEYS = (*FLAG_KEYS, *COUNT_KEYS, *POSITIVE_KEYS, ALERTS_SINCE, WORKSHOP_WINDOWS, CONTROL_USD, CONTROL_TOKENS,
         JOURNEY_LAUNCHED_AT, JOURNEY_DISABLED_ORGANIZATIONS, INVITE_RESOLVE_RATE, DISCOVERY_RECONCILIATION_SINCE, NIGHTLY_RECONCILIATION_SINCE)
 MAX_DISABLED_ORGANIZATIONS_LENGTH = 2000
 
@@ -237,6 +244,13 @@ def validate_single(key: str, value: str, *, optional: bool = False) -> None:
     elif key in POSITIVE_KEYS:
         if not re.fullmatch(r"[1-9][0-9]{0,8}", value):
             raise ValueError(f"{key} must be a whole number of 1 or more")
+    elif key == CONTROL_USD:
+        # The same shape the backend accepts when it issues the allowance.
+        if not re.fullmatch(r"[0-9]{1,7}(?:\.[0-9]{1,12})?", value) or float(value) <= 0 or float(value) > 1_000_000:
+            raise ValueError(f"{key} must be a positive dollar amount")
+    elif key == CONTROL_TOKENS:
+        if not re.fullmatch(r"[1-9][0-9]{0,7}", value) or int(value) > MAX_CONTROL_TOKENS:
+            raise ValueError(f"{key} must be a whole number from 1 to {MAX_CONTROL_TOKENS}")
     elif key == ALERTS_SINCE:
         try:
             if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
@@ -267,6 +281,12 @@ def validate(environment: dict[str, str]) -> None:
     """Validate every Articles setting a release may carry; each may be left empty."""
     for key in KEYS:
         validate_single(key, environment.get(key, ""), optional=True)
+    if environment.get(SDK_CONTROL_FLAG, "") == "true":
+        # B14: a release that switches SDK control on carries its positive
+        # allowance too, rather than trusting whatever the host holds.
+        missing = [key for key in (CONTROL_USD, CONTROL_TOKENS) if not environment.get(key, "")]
+        if missing:
+            raise ValueError(f"{SDK_CONTROL_FLAG}=true needs positive {' and '.join(missing)} in the same release")
 
 
 if __name__ == "__main__":

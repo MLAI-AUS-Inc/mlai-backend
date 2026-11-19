@@ -336,6 +336,9 @@ def prepare_receipt(op):
     it never mutates the persisted receipt or writes the operation.
     """
     receipt = dict(op.receipt or {})
+    if receipt.get("status") in {"staff_fixing", "cant_be_done_yet"}:
+        # B11/B25: ours to fix, or an honest closed-list answer; never "Try again".
+        return receipt
     message = str(receipt.get("message") or "")
     scheduled = op.state == "pending" and getattr(op, "next_attempt_at", None) is not None
     if scheduled:

@@ -21,6 +21,8 @@ NO_DELIVERY_REFUND_CODES = frozenset({
     # must not take the refund away.
     "SDK_CONTROLLER_FAILED", "SDK_MODEL_REQUEST_REFUSED", "SANDBOX_UNAVAILABLE",
     "SANDBOX_AUTHORITY_CHANGED", "SANDBOX_INTEGRITY_VIOLATION",
+    # No dollar ceiling source (B14): our configuration fault, never the founder's.
+    "RUN_BUDGET_NOT_CONFIGURED",
 })
 
 
