@@ -766,7 +766,8 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         from .service_views import _apply_run_snapshot
                         safe = observation_payload(payload, original)
                         refusals = list((safe.get("result") or {}).get("authority_refusals") or [])
-                        refusals.append({"at": timezone.now().isoformat(), "code": exc.code})
+                        refusals.append({"at": timezone.now().isoformat(), "code": exc.code,
+                            **({"raise_site": exc.raise_site} if getattr(exc, "raise_site", None) else {})})
                         safe["result"] = {**(safe.get("result") or {}), "authority_refusals": refusals[-100:]}
                         response = _apply_run_snapshot(run_id, safe)
                         if response.status_code < 300:
@@ -1011,6 +1012,13 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
         if same and current.state != "connected" and not reconnect:
             # Choosing the same repository again is the explicit reconnect.
             reconnect = True
+        if same and current.state == "paused" and _same_owner(current, metadata, user):
+            # B20: resume keeps generation, proof, targets and runs. Pushes were
+            # tracked while paused, so the verified source is still current.
+            return _resume_paused(config, current, metadata, user=user)
+        restorable = revoked_proof(current, metadata, user) if same else None
+        kept_config = ({name: getattr(config, name) for name in REPOSITORY_CONFIG_FIELDS if hasattr(config, name)}
+            if restorable else None)
         if current:
             archive_repository_templates(config, current)
         elif any(getattr(config, key) for key in ("article_template", "design_guide", "resource_prompt")):
@@ -1042,7 +1050,29 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
         config.github_repo = metadata["github_repo"]
         config.github_installation_id = metadata["installation_id"]
         config.save(update_fields=["website_connection", "github_repo", "github_installation_id", "updated_at"])
-        return connection
+    if restorable:
+        # D17: the same repository, installation and owner reconnected after a
+        # revoke. Proof comes back only after a fresh head read; runs never do.
+        _restore_after_reconnect(config, connection, restorable, kept_config)
+    return connection
+
+
+def _restore_after_reconnect(config, connection, restorable, kept_config):
+    """Put back the revoked proof and its repository settings, or keep the fresh scan (never raises)."""
+    try:
+        if kept_config:
+            config.refresh_from_db()
+            fields = [name for name in kept_config if name not in {"publish_targets", "default_publish_target_id"}]
+            for name in fields:
+                setattr(config, name, kept_config[name])
+            restored = restore_revoked_proof(config, connection, restorable)
+            if restored and fields:
+                OrganizationContentConfig.objects.filter(pk=config.pk).update(
+                    **{name: kept_config[name] for name in fields}, updated_at=timezone.now())
+            config.refresh_from_db()
+            connection.refresh_from_db()
+    except Exception:
+        logger.exception("website_reconnect_proof_restore_failed connection=%s", connection.pk)
 
 
 def _refresh_same_repository(config, connection, metadata, *, user, reconnect):
@@ -1100,6 +1130,12 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
             raise WebsiteAuthorityError("website_configuration_changed", "Refresh the reviewed website configuration.")
         if str(connection.pk) != contract["website_connection_id"] or connection.generation != contract["connection_generation"]:
             raise WebsiteAuthorityError("website_connection_changed", "The website connection changed. Refresh and retry.")
+        if action == "pause":
+            # B20: pausing holds repository writes (validate_authority refuses
+            # every write action while paused) and nothing else. Generation,
+            # verified source, targets, settings and in-flight runs are kept,
+            # so resume continues where pause stopped.
+            return _pause_connection(config, connection, key=key)
         if action == "cleanup":
             # A cleanup request proposes a patch; it is never authority to push
             # after disconnection or to delete untracked customer files.
@@ -1108,6 +1144,7 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
                     "setup_run_ids": list(connection.repository_mutations.exclude(run_id="").values_list("run_id", flat=True)), "attempt": 1},
                 receipt={"status": "proposal_requested", "requires_review": True, "repository_modified": False})
         old_generation = connection.generation
+        restorable = _restorable_proof(config, connection) if action == "revoke" else None
         from .website_first_article_billing import cancel_held_goals
         cancel_held_goals(connection)
         connection.operations.filter(generation=old_generation).exclude(
@@ -1194,18 +1231,179 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         # cancellation, not a claim that an already-issued remote write vanished.
         from .website_cancellation_retirement import bindings_for
         cancel_bindings = bindings_for(scoped_run_rows)
-        ContentFactoryRun.objects.filter(pk__in=[run.pk for run in active_runs if not authoritative_run(run)]).update(
-            status="cancelled", error="Website connection changed.", resume_available=False, updated_at=timezone.now())
+        for run in active_runs:
+            if authoritative_run(run):
+                continue
+            # B24: a transition, not the founder, stopped this run; record who
+            # and why so its follow-up restarts it or tells the founder once.
+            run.status, run.error, run.resume_available = "cancelled", "Website connection changed.", False
+            run.result = {**(run.result if isinstance(run.result, dict) else {}), "cancellation_reason": "system_stop",
+                "cancelled_by": "system", "cancellation_transition": action, "cancellation_generation": old_generation}
+            run.save(update_fields=["status", "error", "resume_available", "result", "updated_at"])
         return WebsiteConnectionOperation.objects.create(connection=connection, generation=connection.generation, idempotency_key=key,
             action=action, state="pending", payload={"cancel_run_ids": runs, "stop_preview_run_ids": stop_preview_runs, "previous_generation": old_generation, "disable_auto_merge_prs": sorted(set(pending_auto_merge_prs)), "attempt": 1, "deletion_epoch": watermark,
                 "cancel_run_bindings": cancel_bindings,
-                "preserve_published_articles": True},
+                "preserve_published_articles": True,
+                **({"restorable_proof": restorable} if restorable else {})},
             receipt={"authority_revoked": action != "reconnect", "repository_modified": False,
                 "retained": ["published_articles", "website_files", "company_details", "editorial_policy", "history"],
                 "artifact_retention": {"status": "retained", "erasure_performed": False,
                     "categories": ["worker_run_artifacts", "worker_checkpoints", "generated_media", "repository_copies"]},
                 "remote_cleanup_pending": True})
 
+
+
+def _pause_connection(config, connection, *, key):
+    """Hold writes without wiping proof, targets, settings or runs (B20); inside the lifecycle lock."""
+    if connection.state == "paused":
+        existing = connection.operations.filter(action="pause", generation=connection.generation).order_by("-created_at").first()
+        if existing is not None:
+            return existing
+    connection.state = "paused"
+    connection.save(update_fields=["state", "updated_at"])
+    return WebsiteConnectionOperation.objects.create(connection=connection, generation=connection.generation,
+        idempotency_key=key, action="pause", state="completed", payload={"attempt": 1, "kept": PAUSE_KEEPS},
+        receipt={"status": "paused", "authority_revoked": False, "repository_modified": False, "retained": list(PAUSE_KEEPS)})
+
+
+# What a pause keeps; only repository writes wait for resume.
+PAUSE_KEEPS = ("generation", "verified_source", "publish_targets", "settings", "runs")
+
+
+def _restorable_proof(config, connection):
+    """The proof a revoke may hand back to a reconnect of the very same repository (D17).
+
+    Only a build-proof target (one whose Ready rests on MLAI's own build, not
+    the founder's sealed CI) is restorable: its proof needs no operation of
+    the old generation. Returns None when nothing may be restored.
+    """
+    from .website_contract import SHA_PATTERN
+    key = str(config.default_publish_target_id or "")
+    target = connection.targets.filter(generation=connection.generation, target_key=key).first() if key else None
+    if (target is None or not target.verified_at or not SHA_PATTERN.fullmatch(connection.verified_sha or "")
+            or target.source_sha != connection.verified_sha or not (connection.capabilities or {}).get("publishingReady")):
+        return None
+    from .website_source_carry import carriable
+    if not carriable(connection, target):
+        return None
+    return {"generation": connection.generation, "target_key": key, "verified_sha": connection.verified_sha,
+        "repository_id": connection.repository_id, "installation_id": str(connection.installation_id or ""),
+        "authorized_by_id": connection.authorized_by_id, "branch": connection.branch, "app_root": connection.app_root,
+        "capabilities": dict(connection.capabilities or {}),
+        "last_verified_at": connection.last_verified_at.isoformat() if connection.last_verified_at else None,
+        "publish_targets": list(config.publish_targets or [])}
+
+
+def _resume_paused(config, connection, metadata, *, user):
+    """Resume a paused website in place: same repository, installation and owner (B20)."""
+    connection.state = "connected"
+    connection.disconnected_at = None
+    connection.github_repo = metadata["github_repo"]
+    connection.save(update_fields=["state", "disconnected_at", "github_repo", "updated_at"])
+    WebsiteConnectionOperation.objects.create(connection=connection, generation=connection.generation,
+        idempotency_key=f"{connection.pk}:resume:{uuid.uuid4()}", action="reconnect", state="completed",
+        payload={"attempt": 1, "resumed_from": "paused"},
+        receipt={"status": "resumed", "authority_revoked": False, "repository_modified": False, "retained": list(PAUSE_KEEPS)})
+    if config.github_repo != metadata["github_repo"]:
+        config.github_repo = metadata["github_repo"]
+        config.save(update_fields=["github_repo", "updated_at"])
+    return connection
+
+
+def _same_owner(connection, metadata, user):
+    """Same installation and same consenting owner as the saved connection."""
+    owner = getattr(user, "pk", None)
+    return (owner is not None and str(connection.installation_id or "") == str(metadata.get("installation_id") or "")
+        and connection.authorized_by_id == owner)
+
+
+def revoked_proof(connection, metadata, user):
+    """The proof the latest revoke of this connection kept, if this reconnect may restore it (D17).
+
+    Same repository id, installation and owner as at revoke time, on the
+    generation the revoke created. Anything else starts from a fresh scan.
+    """
+    if connection.state != "revoked":
+        return None
+    revoke = connection.operations.filter(action="revoke").order_by("-created_at").first()
+    saved = (revoke.payload or {}).get("restorable_proof") if revoke else None
+    if (not isinstance(saved, dict) or revoke.generation != connection.generation
+            or saved.get("repository_id") != metadata.get("repository_id")
+            or saved.get("repository_id") != connection.repository_id
+            or saved.get("installation_id") != str(metadata.get("installation_id") or "")
+            or saved.get("authorized_by_id") is None or saved.get("authorized_by_id") != getattr(user, "pk", None)
+            or saved.get("branch") != connection.branch or saved.get("app_root") != connection.app_root):
+        return None
+    return saved
+
+
+def restore_revoked_proof(config, connection, saved):
+    """After a reconnect, restore the revoked proof only once GitHub's head is read again (D17).
+
+    The head is read fresh. At the saved verified commit the proof is restored
+    as it was; past it, only when one GitHub compare shows the articles setup
+    files untouched (the same carry rule a push uses). Runs are never revived:
+    the revoke cancelled them and only their "start again" notice remains.
+    Returns the restored source, or "" when the reconnect keeps its fresh scan.
+    """
+    from datetime import datetime
+    from .website_source_sync import read_head
+    from . import website_source_carry as carry
+    try:
+        require_unlocked_remote_call()
+    except RuntimeError:
+        return ""
+    head = read_head(connection)
+    if not head:
+        return ""
+    old_sha = saved["verified_sha"]
+    decision = {"carry": True, "from_sha": old_sha}
+    if head != old_sha:
+        cache = getattr(config, "article_system_setup_cache", None)
+        comparison = carry.compare_sources(connection, old_sha, head)
+        decision = {**carry.decide(cache, comparison, owned_merge=False), "from_sha": old_sha} if comparison else {"carry": False}
+        if not decision.get("carry"):
+            return ""
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=config.organization_id)
+        website = WebsiteConnection.objects.select_for_update().get(pk=connection.pk)
+        old = website.targets.filter(generation=saved["generation"], target_key=saved["target_key"]).first()
+        if (website.state != "connected" or website.generation <= saved["generation"] or old is None
+                or old.source_sha != old_sha or website.verified_sha
+                or website.targets.filter(generation=website.generation).exists()):
+            return ""
+        target = WebsiteConnectionTarget.objects.create(connection=website, target_key=old.target_key,
+            generation=website.generation, version=old.version, adapter=old.adapter, adapter_version=old.adapter_version,
+            source_sha=old.source_sha, contract=dict(old.contract or {}),
+            capabilities={**(old.capabilities or {}), "restoredFromGeneration": saved["generation"]}, verified_at=old.verified_at)
+        if not carry.carriable(website, target):
+            target.delete()
+            return ""
+        website.verified_sha = old_sha
+        if head != old_sha and not carry.apply_carry(website, target.target_key, head, decision):
+            target.delete()
+            return ""
+        website.capabilities = {**(website.capabilities or {}), **{key: value for key, value in saved["capabilities"].items()
+            if key in CAPABILITY_KEYS}}
+        website.blockers = [item for item in website.blockers or [] if not (isinstance(item, dict)
+            and item.get("code") in {"scan_required", "repository_source_changed"})]
+        stamp = saved.get("last_verified_at")
+        website.last_verified_at = datetime.fromisoformat(stamp) if stamp else old.verified_at
+        website.save(update_fields=["verified_sha", "capabilities", "blockers", "last_verified_at", "updated_at"])
+        WebsiteScanSnapshot.objects.get_or_create(connection=website, generation=website.generation,
+            run_id=f"github-head:{head}", fingerprint=evidence_digest({"source_sha": head}),
+            defaults={"source_sha": head, "detector_version": "github_head", "evidence": {"source": "reconnect_head_read",
+                "branch": website.branch}})
+        current = OrganizationContentConfig.objects.select_for_update().get(pk=config.pk)
+        current.default_publish_target_id = saved["target_key"]
+        current.publish_targets = saved.get("publish_targets") or []
+        current.save(update_fields=["default_publish_target_id", "publish_targets", "updated_at"])
+        WebsiteConnectionOperation.objects.create(connection=website, generation=website.generation,
+            idempotency_key=f"{website.pk}:restore-proof:{website.generation}", action="reconnect", state="completed",
+            payload={"attempt": 1, "restored_from_generation": saved["generation"], "head_sha": head, "carried_from": old_sha if head != old_sha else ""},
+            receipt={"status": "proof_restored", "authority_revoked": False, "repository_modified": False, "runs_revived": False})
+    logger.info("website_reconnect_proof_restored connection=%s generation=%s head=%s", connection.pk, website.generation, head)
+    return head
 
 
 def offboard_website_connections(organization, *, user=None, purge=False):
@@ -1859,7 +2057,8 @@ def record_denied_terminal_callback(payload, denial):
         failure = {**failure, "code": failure.get("code") or payload.get("error_code") or denial.code,
             "callback_denial_code": denial.code, "retryable": False}
         run.result = {**merge_reliability_fields(run.result or {}, payload), "failure": failure,
-            "error_code": failure["code"], "callback_rejection": {"code": denial.code, "detail": str(denial)}}
+            "error_code": failure["code"], "callback_rejection": {"code": denial.code, "detail": str(denial),
+                **({"raise_site": denial.raise_site} if getattr(denial, "raise_site", None) else {})}}
         run.status = "blocked" if event == "generation_blocked" or payload.get("status") == "blocked" else "failed"
         run.resume_available = False
         run.error = str(payload.get("error") or payload.get("error_message") or str(denial))

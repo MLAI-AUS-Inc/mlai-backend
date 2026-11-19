@@ -110,6 +110,8 @@ P2_REASON_LABELS = {
     # B6: the only alerts on nightly scheduler runs (content_factory.background_job_digest).
     "background_job_failing": "A startup's nightly job failed three nights running",
     "background_job_failure_spike": "Nightly job failures passed 5% of startups in one night",
+    # B22: website_connection_invariants, one per broken connection.
+    "connection_invariant": "A website connection is in a state that should never happen",
 }
 P2_ALERT_REASONS = frozenset(P2_REASON_LABELS)
 ALERT_REASONS = ALERT_REASONS | P2_ALERT_REASONS

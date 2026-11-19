@@ -572,6 +572,10 @@ jobs:
           content_factory.tests_connection_code_split \
           content_factory.tests_no_generic_stop \
           content_factory.tests_website_source_carry \
+          content_factory.tests_website_source_sync \
+          content_factory.tests_website_connection_lifecycle \
+          content_factory.tests_website_connection_invariants \
+          content_factory.tests_system_stopped_runs \
           content_factory.tests_prepare_setup_cap \
           content_factory.tests_prepare_sticky_stop \
           content_factory.tests_worker_target_projection \
@@ -1651,6 +1655,8 @@ jobs:
         ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED: ${{ vars.ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED || '' }}
         ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED: ${{ vars.ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED || '' }}
         ARTICLES_PREPARE_STICKY_STOP_ENABLED: ${{ vars.ARTICLES_PREPARE_STICKY_STOP_ENABLED || '' }}
+        ARTICLES_SOURCE_SYNC_ENABLED: ${{ vars.ARTICLES_SOURCE_SYNC_ENABLED || '' }}
+        ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP: ${{ vars.ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP || '' }}
         ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED: ${{ vars.ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED || '' }}
         CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK: ${{ vars.CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK || '' }}
         ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT: ${{ vars.ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT || '' }}

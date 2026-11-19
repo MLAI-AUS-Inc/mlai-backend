@@ -99,6 +99,7 @@ FLAG_KEYS = (
     "ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED",
     "ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED",
     "ARTICLES_PREPARE_STICKY_STOP_ENABLED",
+    "ARTICLES_SOURCE_SYNC_ENABLED",
     "ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED",
     "CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK",
     "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED",
@@ -159,6 +160,8 @@ COUNT_KEYS = (
     "CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS",
     # Setup runs per website preparation (default 3, 0 = no cap).
     "ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT",
+    # Service source rescans per website in 24 hours (default 6, 0 = none).
+    "ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP",
 )
 # 0 is refused: the sweep reads it as 1, and a per-IP sign-in limit of 0 removes
 # that ceiling altogether. Raise a limit for a large event instead.
