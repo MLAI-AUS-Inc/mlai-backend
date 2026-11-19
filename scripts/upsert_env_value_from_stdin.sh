@@ -187,7 +187,7 @@ case "$key" in
   SYSTEM_EMAIL_RESEND_MESSAGES)
     # Empty keeps every message on its legacy provider; otherwise "all" or registered keys.
     # Keep in step with system_email/registry.py (tests/test_system_email_deploy_config.py checks).
-    system_email_keys=" all chat_sign_in_code magic_link password_reset mentor_invite mentor_session_feedback startup_team_invite event_perk_code notification_channel_verify article_review_ready article_content_ready article_report_ready daily_research_topics monthly_update_7d monthly_update_1d "
+    system_email_keys=" all chat_sign_in_code magic_link password_reset mentor_invite mentor_session_feedback startup_team_invite event_perk_code notification_channel_verify article_review_ready article_content_ready article_report_ready daily_research_topics founder_website_lead_reminder monthly_update_7d monthly_update_1d "
     IFS=',' read -r -a system_email_values <<< "$value"
     for system_email_value in "${system_email_values[@]}"; do
       # Settings strip spaces around each key, so "a, b" is valid too.
