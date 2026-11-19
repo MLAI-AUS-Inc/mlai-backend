@@ -173,8 +173,12 @@ def _profile_grant_permissions(payload, *, profile) -> dict[str, str]:
     if payload.get("suspended_at"):
         raise GitHubInstallationAccessRequired("The selected GitHub installation is suspended.")
     repository_modes = {"write"} if profile == "workflow_files" else {"read", "write"}
-    if any(permissions.get(key) not in repository_modes for key in ("contents", "pull_requests")):
-        raise GitHubInstallationAccessRequired("The selected GitHub installation lacks the required repository permissions.")
+    missing = tuple(key for key in ("contents", "pull_requests") if permissions.get(key) not in repository_modes)
+    if missing:
+        error = GitHubInstallationAccessRequired("The selected GitHub installation lacks the required repository permissions.")
+        # Plan E8: repository selection names the missing grant to the founder.
+        error.missing_permissions = missing
+        raise error
     if profile == "workflow_files" and permissions.get("workflows") != "write":
         raise GitHubWorkflowPermissionRequired(WORKFLOW_PERMISSION_DETAIL)
     if profile == "ci_evidence" and any(permissions.get(key) not in {"read", "write"} for key in ("checks", "statuses")):

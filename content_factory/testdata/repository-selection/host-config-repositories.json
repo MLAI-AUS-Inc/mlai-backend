@@ -1,0 +1,23 @@
+{
+  "_recorded": "GET /installation/repositories; two candidate sites, only one names the domain in its host config",
+  "repositories": [
+    {"id": 920001, "name": "web", "full_name": "fixture-agency/web", "owner": {"login": "fixture-agency"},
+     "private": true, "default_branch": "main", "homepage": null, "pushed_at": "2026-11-10T09:00:00Z",
+     "archived": false, "fork": false, "language": "TypeScript", "topics": []},
+    {"id": 920002, "name": "landing", "full_name": "fixture-agency/landing", "owner": {"login": "fixture-agency"},
+     "private": true, "default_branch": "main", "homepage": null, "pushed_at": "2026-11-12T09:00:00Z",
+     "archived": false, "fork": false, "language": "TypeScript", "topics": []}
+  ],
+  "contents": {
+    "fixture-agency/web": {
+      "": [{"name": "package.json", "type": "file"}, {"name": "wrangler.jsonc", "type": "file"}, {"name": "src", "type": "dir"}],
+      "wrangler.jsonc": "{\n  \"name\": \"web\",\n  \"routes\": [{\"pattern\": \"blueharbour.example/*\", \"zone_name\": \"blueharbour.example\"}]\n}\n"
+    },
+    "fixture-agency/landing": {
+      "": [{"name": "package.json", "type": "file"}, {"name": "CNAME", "type": "file"}, {"name": "vercel.json", "type": "file"}, {"name": "netlify.toml", "type": "file"}],
+      "CNAME": "landing.other-brand.example\n",
+      "vercel.json": "{\"cleanUrls\": true}",
+      "netlify.toml": "[build]\ncommand = \"npm run build\"\n"
+    }
+  }
+}

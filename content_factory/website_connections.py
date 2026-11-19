@@ -986,6 +986,13 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
             metadata = verify_repository_access(user=user, repo=repo, organization=config.organization, **by_id)
         else:
             metadata = verify_repository_access(user=user, repo=repo, **by_id)
+    prior = config.website_connection
+    selecting = prior is None or prior.repository_id != metadata["repository_id"]
+    if selecting:
+        # Plan E8: a grant without contents access fails here, at selection,
+        # with the missing permission named, not later inside a paid setup.
+        from .website_repository_selection import permission_check
+        permission_check(metadata["installation_id"])
     if new_journey and branch and branch.removeprefix("refs/heads/") == metadata["branch"]:
         # D-09: naming the repository's default branch is the same as leaving it empty.
         branch = ""
@@ -1054,6 +1061,11 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
         # D17: the same repository, installation and owner reconnected after a
         # revoke. Proof comes back only after a fresh head read; runs never do.
         _restore_after_reconnect(config, connection, restorable, kept_config)
+    if not same:
+        # Plan E8: can the founder merge alone? Advice for the journey's ask
+        # only; every merge still re-reads the live policy (never raises).
+        from .website_repository_selection import record_merge_ability
+        record_merge_ability(connection, user=user)
     return connection
 
 

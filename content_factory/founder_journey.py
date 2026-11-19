@@ -39,8 +39,11 @@ VERSION = 1
 # says they choose the page (plan A9, decision D3); otherwise MLAI picks it.
 # ``deploy_site`` is sent only while the deploy link is on (plan C14,
 # ``ARTICLES_LIVE_URL_VERIFICATION_ENABLED``), worded for the founder's host.
+# ``send_pr_to_reviewer`` replaces ``approve_on_github`` when the founder
+# cannot merge alone: a required review or read-only access (plan E8).
 FOUNDER_ASKS = ("review_draft", "describe_customer", "agree_terms", "authorize_github", "approve_setup",
-                "approve_on_github", "buy_points", "approve_join_request", "choose_articles_page", "deploy_site")
+                "approve_on_github", "buy_points", "approve_join_request", "choose_articles_page", "deploy_site",
+                "send_pr_to_reviewer")
 NEXT_KINDS = ("add_website", "write_first_article", "write_article", "view_progress", "view_draft", "view_article")
 STAGES = ("website", "first_article", "writing", "review", "setup", "publishing", "done")
 HOLDING_REASONS = ("slow", "website_update", "busy_today")
@@ -65,6 +68,9 @@ PAGE_CHOICE_ACTION = "choose_articles_page"
 # Un-retired while the deploy link is on (plan C14): merging that does not
 # reach the live site is one named ask, worded for the host class.
 DEPLOY_ACTION = "deploy_site"
+# Plan E8: a protected branch or a founder without merge rights gets a share
+# link for their reviewer, never a stuck "approve it on GitHub".
+REVIEWER_ACTION = "send_pr_to_reviewer"
 
 
 def retired_actions(*, page_policy=None) -> frozenset:
@@ -142,6 +148,11 @@ COPY = {
     # Plan C14 fallback; the ask itself carries the host class's copy.
     "deploy_site": ("Your live site hasn't updated yet",
                     "Your change is merged on GitHub, but your website hasn't picked it up.", "How to fix this"),
+    # Plan E8 fallback; the ask itself carries the reviewer's name when known.
+    "send_pr_to_reviewer": ("Send this change to your reviewer",
+                            "Your website's GitHub settings need someone with review rights to approve this pull "
+                            "request before it goes live. Open it and send them the link. If you can review it "
+                            "yourself, approve it on GitHub.", "Open the pull request"),
     "done_copy_ready": ("Your article is ready to post", None, "Open your article"),
     # Shared fallback for an unknown or retired action (contract section 11.1).
     "still_working": ("Working on it", "Still working.", "See progress"),
@@ -810,9 +821,13 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
         decision = _first_article_decision(organization=organization, company=company, config=config, user=user,
                                            first_article=first_article)
 
+    if _mapping(decision.get("action")).get("id") == "approve_on_github":
+        decision = _reviewer_decision(decision, connection=connection,
+                                      run=run if decision.get("runId") == getattr(run, "run_id", None) else setup_run)
+
     if policy_v2_applies(organization) and not decision.get("copyId"):
         ask = _mapping(decision.get("action")).get("id")
-        if ask == DEPLOY_ACTION:
+        if ask in {DEPLOY_ACTION, REVIEWER_ACTION}:
             # The host class's exact copy is the line: no P2 copy id replaces it.
             pass
         elif ask in FOUNDER_ASKS:
@@ -994,6 +1009,26 @@ def _deploy_decision(connection, *, stage, run_id=None, staff_alerted=False):
     decision.update(headline=ask["headline"], body=ask["body"])
     decision["action"]["label"] = ask["label"]
     return decision
+
+
+def _reviewer_decision(decision, *, connection, run):
+    """``approve_on_github`` becomes ``send_pr_to_reviewer`` when the founder cannot merge alone (plan E8).
+
+    Only the ask changes. Merging still re-reads the live branch policy and
+    merges the exact validated head; GitHub still enforces protection.
+    """
+    from .website_repository_selection import reviewer_ask, reviewer_needed
+    if not reviewer_needed(connection, run):
+        return decision
+    url = _mapping(decision.get("action")).get("url")
+    ask = reviewer_ask(connection, url=url)
+    if not ask["url"]:
+        return decision
+    updated = _decide(decision.get("stage") or "setup", "your_turn", REVIEWER_ACTION, action=REVIEWER_ACTION,
+                      run_id=decision.get("runId"), url=ask["url"])
+    updated.update(headline=ask["headline"], body=ask["body"])
+    updated["action"]["label"] = ask["label"]
+    return updated
 
 
 def _article_not_live(organization, run, now=None):

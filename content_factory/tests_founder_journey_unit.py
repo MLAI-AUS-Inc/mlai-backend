@@ -711,7 +711,9 @@ class HelperTests(TestCase):
         self.assertFalse(journeys.matches_if_none_match("", "abc"))
 
     def test_registry_mapping_covers_only_the_eight_asks(self):
-        self.assertEqual(len(journeys.FOUNDER_ASKS), 10)
+        self.assertEqual(len(journeys.FOUNDER_ASKS), 11)
+        # Plan E8: send_pr_to_reviewer is the journey's own ask; no registry row maps to it.
+        self.assertNotIn("send_pr_to_reviewer", journeys.REGISTRY_ASKS.values())
         self.assertTrue(set(journeys.REGISTRY_ASKS.values()) <= set(journeys.FOUNDER_ASKS))
         self.assertIsNone(journeys.founder_ask("choose_articles_page"))
 
