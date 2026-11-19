@@ -38,7 +38,10 @@ def observe(op) -> None:
     receipt = op.receipt if isinstance(op.receipt, dict) else {}
     attempt = op.payload.get("attempt", 1) if isinstance(op.payload, dict) else 1
     receipt["tries"] = max(_int(receipt.get("tries")), _int(attempt) or 1)
-    if op.state in STOPPED_STATES:
+    if op.state == "completed":
+        # A finished preparation breaks the streak: stops are consecutive.
+        receipt.pop(STREAK_KEY, None)
+    elif op.state in STOPPED_STATES:
         code = str(receipt.get("reason_code") or _mapping(receipt.get("failure")).get("code") or "")
         # One stop per claim: a second observation of the same claim is a
         # replayed save, never another stop.
@@ -86,8 +89,8 @@ def owner_can_retry(state, receipt) -> bool:
     if state not in STOPPED_STATES:
         return False
     from . import website_prepare_setup_cap as setup_cap
-    from .website_prepare_sticky_stop import BUDGET_HELD_KEY
-    if isinstance(receipt.get(setup_cap.HELD_KEY), dict) or isinstance(receipt.get(BUDGET_HELD_KEY), dict):
+    from .website_prepare_sticky_stop import budget_hold_active
+    if isinstance(receipt.get(setup_cap.HELD_KEY), dict) or budget_hold_active(receipt):
         return False
     failure = _mapping(receipt.get("failure"))
     if receipt.get("failure_taxonomy_policy_applied") and failure.get("failure_class") == "unsupported":

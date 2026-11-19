@@ -140,7 +140,9 @@ the articles route or a build manifest, or the stop was transient. Otherwise
 the push's paid source rescan is settled without a scan, from both the push
 handler and the source-reverify worker. An owned setup merge still re-opens.
 Repository scans are budgeted per operation and per organisation per day; at
-the budget the operation is held and staff get one alert. Preparation
+the budget the operation is held and staff get one alert. A daily hold lapses
+after a day; the per-operation count starts again once preparation reaches
+Ready, so only a loop that never finishes waits for staff. Preparation
 receipts carry never-reset counters (`tries`, `failures_total`, `child_runs`,
 `stop_streak`) and `owner_can_retry`, which is false while staff hold the
 operation and once the same failure stopped three times.

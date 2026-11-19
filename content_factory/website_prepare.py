@@ -272,7 +272,8 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
                 "reason_code": "", "blocked_step": None, "deployment_attempts": 0,
                 "dispatch_outcome": "replayed" if check_again else "new_attempt"}
             for key in ("deployment_wait_started_at", "transient_started_at", "child_resume_pending", "failure_class",
-                    "source_repins"):
+                    "source_repins", "child_dispatch_budget"):
+                # A scan-budget hold is judged again at the next scan (plan B3).
                 op.receipt.pop(key, None)
             op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + (0 if check_again else 1),
                 "user_clicks": op.payload.get("user_clicks", 1) + 1}
@@ -418,6 +419,10 @@ def _finish_prepare(op, *, now):
     from . import website_prepare_sticky_stop as sticky
     counters.observe(op)
     sticky.record_stop(op, now=now)
+    if op.state == "completed":
+        # The operation's scan budget bounds a loop that never finishes; a
+        # website that reached Ready starts it again (plan B3).
+        sticky.reset_scan_budget(op)
     if op.state not in {"pending", "running"} and op.receipt.get("staff_alerted"):
         # Ready, or stopped, cancelled or superseded: this preparation's own
         # deadline alert is no longer a founder waiting on it.
@@ -1471,7 +1476,9 @@ def _source_check_owns_push(connection, config, latest):
 # Cancellation bookkeeping stays with the cancel follow-up that owns the cleanup.
 SOURCE_RECHECK_DROPPED_RECEIPT_KEYS = frozenset({"scan_run_id", "setup_run_id", "completed_steps", "deployment_wait_started_at",
     "transient_started_at", "child_resume_pending", "remote_effects", "remote_outcome_unknown", "remote_cleanup_pending",
-    "cancellation_undoes_remote_writes"})
+    "cancellation_undoes_remote_writes",
+    # A scan-budget hold is judged again at the next scan (plan B3).
+    "child_dispatch_budget"})
 
 
 def _source_recheck_values(op, *, message, merged_setup_run_id=""):

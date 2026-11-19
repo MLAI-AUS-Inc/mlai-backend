@@ -65,6 +65,8 @@ PAGE_CHOICE_ACTION = "choose_articles_page"
 def retired_actions(*, page_policy=None) -> frozenset:
     """The retired owner actions for an operation whose consent records ``page_policy``."""
     return RETIRED_ACTIONS - {PAGE_CHOICE_ACTION} if page_policy == "pick" else RETIRED_ACTIONS
+
+
 SETUP_ASKS = frozenset({"approve_setup", "authorize_github", "approve_on_github"})
 
 POLL_AFTER_MS = {"working": 5000, "publishing": 15000, "your_turn": 30000, None: 30000, "done": 60000,

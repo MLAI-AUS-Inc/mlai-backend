@@ -142,6 +142,31 @@ class BudgetTests(SimpleTestCase):
         alert.assert_called_once()
 
 
+    def test_a_daily_hold_lapses_after_a_day_and_an_operation_hold_waits_for_staff(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        now = timezone.now()
+        day = {"child_dispatch_budget": {"scope": "day", "held_at": now.isoformat()}}
+        self.assertTrue(sticky.budget_hold_active(day, now=now + timedelta(hours=23)))
+        self.assertFalse(sticky.budget_hold_active(day, now=now + timedelta(days=1, minutes=1)))
+        operation = {"child_dispatch_budget": {"scope": "operation", "held_at": now.isoformat()}}
+        self.assertTrue(sticky.budget_hold_active(operation, now=now + timedelta(days=30)))
+        lapsed = {"reason_code": "prepare_no_progress", "child_dispatch_budget": {
+            "scope": "day", "held_at": (now - timedelta(days=2)).isoformat()}}
+        self.assertTrue(counters.owner_can_retry("needs_attention", lapsed))
+
+    def test_a_finished_preparation_starts_its_scan_budget_and_streak_again(self):
+        op = SimpleNamespace(pk="prepare", state="completed", attempts=4, payload={"attempt": 2}, connection=None,
+            receipt={"scan_dispatch_run_ids": ["a", "b"], "scan_dispatches": sticky.OPERATION_SCAN_LIMIT,
+                     "child_dispatch_budget": {"scope": "operation"}, "stop_streak": {"key": "X", "count": 2}})
+        sticky.reset_scan_budget(op)
+        counters.observe(op)
+        for key in ("scan_dispatch_run_ids", "scan_dispatches", "child_dispatch_budget", "stop_streak"):
+            self.assertNotIn(key, op.receipt)
+        with patch.object(sticky, "daily_scans", return_value=0):
+            self.assertIsNone(sticky.scan_budget_reached(op, now=None))
+
+
 class HonestNumbersTests(SimpleTestCase):
     """B4: after 3 identical failures the message says 3 and Try again is not offered at the cap."""
 

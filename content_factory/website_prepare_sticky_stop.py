@@ -35,7 +35,7 @@ to the repository. Nothing here loosens consent, spend or publish checks.
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import timedelta, timezone as dt_timezone
 from typing import Any
 
 from django.conf import settings
@@ -156,9 +156,43 @@ def record_stop(op, *, now=None) -> None:
         "at": (now or timezone.now()).isoformat()}
 
 
-def _held(receipt) -> bool:
+def budget_hold_active(receipt, *, now=None) -> bool:
+    """Whether the scan budget still holds this receipt.
+
+    An operation-budget hold waits for staff. A daily hold lapses one day
+    after it was taken, so a quiet day never leaves the site stopped for good.
+    """
+    held = _mapping(_mapping(receipt).get(BUDGET_HELD_KEY))
+    if not held:
+        return False
+    if held.get("scope") != "day":
+        return True
+    from django.utils.dateparse import parse_datetime
+    try:
+        held_at = parse_datetime(str(held.get("held_at") or ""))
+    except (TypeError, ValueError):
+        held_at = None
+    if held_at is None:
+        return True
+    if timezone.is_naive(held_at):
+        held_at = timezone.make_aware(held_at, dt_timezone.utc)
+    return (now or timezone.now()) - held_at < timedelta(days=1)
+
+
+def _held(receipt, *, now=None) -> bool:
     from . import website_prepare_setup_cap as setup_cap
-    return isinstance(receipt.get(setup_cap.HELD_KEY), dict) or isinstance(receipt.get(BUDGET_HELD_KEY), dict)
+    return isinstance(receipt.get(setup_cap.HELD_KEY), dict) or budget_hold_active(receipt, now=now)
+
+
+def reset_scan_budget(op) -> None:
+    """Forget this operation's scan count once preparation finished (or the owner restarts it).
+
+    The operation budget bounds a loop that never makes progress; a website
+    that reached Ready and later re-checks after real pushes starts again.
+    """
+    receipt = op.receipt if isinstance(op.receipt, dict) else {}
+    for key in (SCAN_RECEIPT_KEY, "scan_dispatches", BUDGET_HELD_KEY):
+        receipt.pop(key, None)
 
 
 # --- Judging a push ----------------------------------------------------------
@@ -219,7 +253,7 @@ def decide(op, connection, source_sha: str) -> dict[str, Any]:
     stop = _mapping(receipt.get(STOP_KEY))
     code = str(stop.get("reason_code") or receipt.get("reason_code") or "")
     failure_class = str(stop.get("failure_class") or receipt.get("failure_class") or "")
-    if _held(receipt) or stop.get("held"):
+    if _held(receipt):
         return {"reopen": False, "reason": "budget_held"}
     if failure_class in REOPEN_CLASSES or code in SOURCE_CHANGED_CODES:
         return {"reopen": True, "reason": "waiting_stop"}
