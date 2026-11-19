@@ -39,7 +39,7 @@ def fact(complete=False, *, code="", reason="", status=None, verified_at=None, o
         "reason": "" if complete else reason, "verifiedAt": verified_at, "operationId": operation}
 
 
-def project_journey(*, company_id, domain, website=None, capabilities=None, discovery=None, target=None, operation=None, epoch=0, proof=None, source_runs=None, ci_source_runs=None, permissions=None, setup_pull_request=None, source_check=None, live_watch=None):
+def project_journey(*, company_id, domain, website=None, capabilities=None, discovery=None, target=None, operation=None, epoch=0, proof=None, source_runs=None, ci_source_runs=None, permissions=None, setup_pull_request=None, source_check=None, live_watch=None, owner_view=False):
     """Project verified facts without interpreting legacy completion ticks.
 
     ``source_check`` names the server's own re-check of the current source,
@@ -61,6 +61,15 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
     verified = bool(capabilities.get("canGenerateArticle") and authoring_supported)
     access = bool(capabilities.get("repositoryAccessVerified"))
     account_access = bool(capabilities.get("accountAccessVerified", access))
+    # A read that made no GitHub check (bootstrap never probes; a verified
+    # check is cached for 15 minutes) leaves saved access unknown. The owner
+    # sees the saved connection as connected rather than as a step to redo;
+    # every write still probes GitHub before it runs.
+    # article_capabilities reports that unknown as "github_verification_required".
+    # Only owner reads mask it: preparation still sees the unchecked account and
+    # runs its own forced verify-access step before choosing work.
+    saved_access = bool(owner_view and not access and capabilities.get("reasonCode") == "github_verification_required"
+        and website.get("status") == "connected" and website.get("repositoryId"))
     write_access = bool(capabilities.get("repositoryWriteVerified", access))
     connected = website.get("status") == "connected"
     policy = mapping(website.get("writePolicy"))
@@ -117,8 +126,8 @@ def project_journey(*, company_id, domain, website=None, capabilities=None, disc
         "Approve Workflows: write to install or update .github/workflows/mlai-articles-verification.yml." if workflow_missing
         else f"Approve {' and '.join(missing_ci)} to read the current in-repository CI result.")
     prerequisites = {
-        "account": fact(account_access, code="github_access_required", reason="Check saved GitHub access."),
-        "repository": fact(access and bool(website.get("repositoryId")), code="repository_required", reason="Select and verify your website repository."),
+        "account": fact(account_access or saved_access, code="github_access_required", reason="Check saved GitHub access."),
+        "repository": fact((access or saved_access) and bool(website.get("repositoryId")), code="repository_required", reason="Select and verify your website repository."),
         "inventory": fact(bool(discovery.get("complete")) and not inventory_stale,
             code="scan_stale" if inventory_stale else "scan_required", reason="Scan the current repository.", status="stale" if inventory_stale else None),
         "permissions": fact(permissions_ready, code=permission_code, reason=permission_reason),
@@ -493,7 +502,7 @@ def journey_for_context(context, config, *, capabilities=None, owner_view=False)
                 "savedSetup": (pending.get("setup_run_id") or pending.get("setupRunId")) == run.run_id}
     journey = project_journey(company_id=context.company.pk, domain=context.organization.domain, website=website,
         capabilities=capabilities, discovery=discovery, target=target, operation=operation, epoch=epoch, proof=proof, source_runs=source_runs, ci_source_runs=ci_source_runs, permissions=grants,
-        setup_pull_request=setup_pull_request, source_check=source_check, live_watch=live_watch)
+        setup_pull_request=setup_pull_request, source_check=source_check, live_watch=live_watch, owner_view=owner_view)
     if config.website_connection_id:
         journey["historicalCleanup"] = cleanup_history_for_connection(config.website_connection, latest)
         journey["revision"] = evidence_digest({"current": journey["revision"], "cleanup": journey["historicalCleanup"]})
