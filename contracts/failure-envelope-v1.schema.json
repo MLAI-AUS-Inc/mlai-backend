@@ -314,8 +314,6 @@
               "deployment_route_contract_invalid",
               "deployment_source_mismatch",
               "dev_server_command_missing",
-              "editorial_catalog_policy_changed",
-              "editorial_catalog_selection_not_current",
               "hosted_preview_materialization_command_missing",
               "missing_node_runtime",
               "missing_preview_env",
@@ -750,6 +748,94 @@
             "const": false
           }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "editorial_catalog_selection_not_current"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "strategy"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "repairable"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "editorial_catalog_policy_changed"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "action": {
+                "type": "null"
+              },
+              "failure_class": {
+                "const": "strategy"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "action": {
+                "type": "object"
+              },
+              "failure_class": {
+                "const": "needs_user"
+              },
+              "retryable": {
+                "const": false
+              }
+            }
+          }
+        ]
       }
     },
     {
@@ -1333,6 +1419,7 @@
               "article_preview_safety_review_required",
               "editorial_brief_invalid",
               "editorial_brief_required",
+              "editorial_catalog_policy_changed",
               "portable_publication_requires_review",
               "unresolved_comments"
             ]

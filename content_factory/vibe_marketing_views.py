@@ -671,11 +671,14 @@ def _get_config(organization):
     return config
 
 
-def _refresh_article_editorial_payload(*, organization, payload):
+def _refresh_article_editorial_payload(*, organization, payload, superseded=None):
     """Revalidate at an effect boundary; an outage is not an empty catalogue.
 
     This is a fresh read, not a lease across a later billing or HTTP operation.
     The receiving worker must still validate current policy at its boundaries.
+    ``superseded`` (plan B9) names how a brief whose customer profile was only
+    re-saved as a newer approved version is treated; see
+    ``editorial_catalog.superseded_brief``.
     """
     try:
         config = OrganizationContentConfig.objects.filter(organization=organization).only("pillar_strategy").first()
@@ -684,7 +687,15 @@ def _refresh_article_editorial_payload(*, organization, payload):
                 {"detail": "Article policy is unavailable. Reload before trying again.", "field": "editorialBrief", "code": "editorial_catalog_unavailable"},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        brief = article_brief_for_catalog(config.pillar_strategy, payload)
+        try:
+            brief = article_brief_for_catalog(config.pillar_strategy, payload)
+        except ValueError:
+            if not superseded:
+                raise
+            from content_factory.editorial_catalog import superseded_brief
+            brief = superseded_brief(config.pillar_strategy, payload, superseded)
+            if brief is None:
+                raise
     except DatabaseError:
         from .website_failure_scope import taxonomy_enabled
         code = "editorial_catalog_transient" if taxonomy_enabled(organization.pk) else "editorial_catalog_unavailable"
@@ -718,7 +729,8 @@ def _revision_editorial_payload_from_run(*, context, run):
     for key in ("editorial_brief", "editorialBrief"):
         if key in request:
             payload[key] = copy.deepcopy(request[key])
-    error = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
+    error = _refresh_article_editorial_payload(organization=context.organization, payload=payload,
+                                               superseded="keep")
     return payload, error
 
 
@@ -15907,7 +15919,8 @@ def _call_content_factory_component_revision(*, organization, run_id, payload, u
             require_revision_requester(original, user)
     except RunOwnershipConflict:
         return Response({"detail": "The current startup reviewer permission changed."}, status=409)
-    editorial_error = _refresh_article_editorial_payload(organization=organization, payload=payload)
+    editorial_error = _refresh_article_editorial_payload(organization=organization, payload=payload,
+                                                         superseded="keep")
     if editorial_error is not None:
         return editorial_error  # No POST; retain any submitted batch for explicit retry.
     if original and connection_contract(scoped_run_contract(original)):
@@ -18998,10 +19011,21 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
     }
     # Resolve the explicit decision without dropping null/conflicting aliases
     # or treating an empty configured catalogue as legacy permission.
+    # Plan B19: a start with no brief gets the server-built default (an already
+    # approved customer profile only) or one founder question, never a bare
+    # "configured catalog requires a brief" refusal. An explicit brief is
+    # validated exactly as before.
+    from .editorial_default_brief import start_brief, startup_country_and_name
     try:
-        editorial_brief = article_brief_for_catalog(config.pillar_strategy, command.data)
+        country, startup_name = startup_country_and_name(context)
+        start = start_brief(config.pillar_strategy, command.data, country=country, startup_name=startup_name)
     except ValueError as exc:
         return Response({"detail": str(exc), "field": "editorialBrief"}, status=status.HTTP_400_BAD_REQUEST)
+    if start.state == "ask":
+        logger.info("vibe_marketing_article_brief_question org_id=%s audience_id=%s",
+                    context.organization.pk, start.audience_id or "")
+        return Response(start.ask_payload(), status=status.HTTP_409_CONFLICT)
+    editorial_brief = start.brief
     if editorial_brief is not None:
         payload["editorial_brief"] = editorial_brief
     # P1.6 (IF-P1-08): a startup with no website has no site to measure, so
@@ -19834,7 +19858,8 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
         )
         if billing_error is not None:
             return billing_error
-        editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=billing_payload)
+        editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=billing_payload,
+                                                             superseded="keep")
         if editorial_error is not None:
             return editorial_error
         retry_existing_batch = False

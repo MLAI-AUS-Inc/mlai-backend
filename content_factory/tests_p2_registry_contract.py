@@ -22,12 +22,13 @@ from .self_heal_testing import ALL_FLAGS_ON, make_named_legacy_org, make_p2_org
 
 ROOT = Path(__file__).resolve().parents[1]
 # cf-registry's bytes, checked with cmp when vendored. Merge provenance is checked remotely.
-# Registry/envelope bytes: adds the SDK and sandbox fault codes (A5) ahead of the CF pin bump.
+# Registry/envelope bytes: adds the SDK and sandbox fault codes (A5) and puts the
+# editorial currency codes on existing policies (B9) ahead of the CF pin bump.
 VENDORED_SHA256 = {
-    "contracts/failure-codes.json": "bf11e9aa3bf81e36088d2350e08c9c9abf6fb258e3671bf15d712957a9196990",
-    "contracts/failure-envelope-v1.schema.json": "5bcb909016d3f4e6e1026e35f85e7bd2ee2d786413ec9c63f2cefaef322c0056",
+    "contracts/failure-codes.json": "8120e1faa1e0d1b4a7dbed6204df9721fff4be8cbc39f0c15ab78b4bee353c73",
+    "contracts/failure-envelope-v1.schema.json": "0139fa71440257c0f073bae8c721fdb7bd4ee0cb1ebe2f47b33242905ef76e0d",
     "contracts/setup-delivery-v1.schema.json": "6a604e610716ba45c6c1e8491daae94cc51ece99e8e3d6c693ac378674581069",
-    "content_factory/failure_registry_pre_p2.json": "f8ca80a13c17497fc2dab0f2bfc2cb3f8c08840c09737e6082d52022ebbd5cc2",
+    "content_factory/failure_registry_pre_p2.json": "cd464eca63b05cac6de891d215848bdef3a979b0b17c5b8692af62974e69070d",
     "content_factory/tests/fixtures/p2/failure-codes.pre-p2.json": "5dc161ae1f02212f3898ec0a2bc4bee347ccbc0cf8c26cf640ced545dd4d8b3e",
 }
 FIXTURE_PATH = ROOT / "content_factory/tests/fixtures/p2/failure-codes.pre-p2.json"
