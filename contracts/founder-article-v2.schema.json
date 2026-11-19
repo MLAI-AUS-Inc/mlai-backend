@@ -91,6 +91,183 @@
         }
       ]
     },
+    "FounderSetupState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "current": {
+          "enum": [
+            "github",
+            "readers",
+            "authors",
+            "articles_page",
+            "complete"
+          ]
+        },
+        "state": {
+          "enum": [
+            "your_turn",
+            "working",
+            "fixing",
+            "done"
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "prefixItems": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "github"
+                },
+                "state": {
+                  "enum": [
+                    "done",
+                    "your_turn",
+                    "working",
+                    "fixing",
+                    "todo"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "readers"
+                },
+                "state": {
+                  "enum": [
+                    "done",
+                    "your_turn",
+                    "working",
+                    "fixing",
+                    "todo"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "authors"
+                },
+                "state": {
+                  "enum": [
+                    "done",
+                    "your_turn",
+                    "working",
+                    "fixing",
+                    "todo"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "state"
+              ]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "const": "articles_page"
+                },
+                "state": {
+                  "enum": [
+                    "done",
+                    "your_turn",
+                    "working",
+                    "fixing",
+                    "todo"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "state"
+              ]
+            }
+          ]
+        },
+        "ask": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "enum": [
+                    "add_website",
+                    "connect_github",
+                    "authorize_github",
+                    "choose_repository",
+                    "describe_customer",
+                    "add_authors",
+                    "set_up_articles_page",
+                    "approve_setup",
+                    "approve_on_github",
+                    "choose_articles_page",
+                    "deploy_site"
+                  ]
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8192
+                },
+                "url": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "label",
+                "url"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "current",
+        "state",
+        "steps",
+        "ask"
+      ]
+    },
     "FounderJourney": {
       "type": "object",
       "additionalProperties": false,
@@ -961,6 +1138,9 @@
               "type": "null"
             }
           ]
+        },
+        "setup": {
+          "$ref": "#/$defs/FounderSetupState"
         }
       },
       "required": [

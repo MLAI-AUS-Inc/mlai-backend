@@ -66,7 +66,9 @@ MARKER_VERSION = 1
 LEGACY = "legacy"
 NEW_JOURNEY = "new_journey"
 COHORTS = frozenset({LEGACY, NEW_JOURNEY})
-ASSIGNED_BY = frozenset({"create", "report_apply", "opt_in", "launch_window"})
+# ``backfill`` (plan E6): the marker-backfill command froze the organisation's
+# effective cohort as it was; it never moves an organisation between cohorts.
+ASSIGNED_BY = frozenset({"create", "report_apply", "opt_in", "launch_window", "backfill"})
 
 NAMED_LEGACY_DOMAINS = frozenset({"talathrive.com", "vyavos.com", "pawshareclub.com", "la-vie.com.au", "mlai.au"})
 SETUP_WORKFLOWS = ("article_system_setup", "repo_scan", "content_factory_scan")

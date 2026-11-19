@@ -152,6 +152,11 @@ def record_lead(user, lead: dict, *, now=None, source="my_startup.website_step")
             from content_factory.founder_funnel import emit_event
             at, signed_up = now, getattr(user, "date_joined", None)
             transaction.on_commit(lambda: _emit(emit_event, user.pk, at, signed_up))
+        elif created and lead["reason"] in INTEREST_REASONS:
+            # E10: the C15 CMS-content lead is its own funnel event, not the exit.
+            from content_factory.founder_funnel import emit_event
+            at, signed_up = now, getattr(user, "date_joined", None)
+            transaction.on_commit(lambda: _emit(emit_event, user.pk, at, signed_up, kind="cms_content_lead"))
     if not stored:
         logger.info("founder_website_lead_not_stored user=%s reason=%s", user.pk, lead["reason"])
     public = {key: entry[key] for key in ("reason", "domain", "hostClass", "notifyWhenChanged", "remindAt", "createdAt")}
@@ -176,9 +181,9 @@ def record_staff_lead(organization, *, reason, cause, domain="", now=None):
                               "notify": True}, now=now, source="staff_fixing.cant_be_done_yet")
 
 
-def _emit(emit_event, user_id, at, signed_up):
+def _emit(emit_event, user_id, at, signed_up, kind="not_on_github"):
     try:
-        emit_event("not_on_github", user_id=user_id, at=at, signed_up_at=signed_up, source="website_lead.recorded")
+        emit_event(kind, user_id=user_id, at=at, signed_up_at=signed_up, source="website_lead.recorded")
     except Exception:  # noqa: BLE001 - telemetry never breaks the founder's action
         logger.exception("founder_website_lead_event_failed")
 
