@@ -675,6 +675,11 @@ Community Chat exposes these owner-authenticated endpoints:
   private MLAI conversation, and returns its participant public keys and
   sanitized profiles. The owner key always comes from the authenticated active
   verified Community Chat device; body-supplied owner keys are ignored.
+- When MLAI's own Slack request budget defers a call (or Slack itself returns
+  429), both `slack/users/` and `slack/dms/` answer `429` with
+  `{"error": "slack_rate_limited", "retry_after_seconds": N, "detail": "..."}`
+  and a `Retry-After` header, never a 500. `detail` is a sentence the client can
+  show as-is.
 - `PATCH /api/v1/community-chat/slack/` accepts `pause`, `resume`, `backfill`, and
   `refresh_channel`. `backfill` accepts `history_days: 0` only as an explicit
   all-history selection and records the v5 consent. The legacy `backfill_all`
