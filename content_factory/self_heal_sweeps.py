@@ -31,6 +31,7 @@ SWEEPS: tuple[tuple[str, str, str], ...] = (
     ("staff_fixing", "content_factory.website_staff_fixing", "run_staff_fixing_sweep"),            # B25
     ("capability_record", "content_factory.website_capability_record", "run_capability_record_sweep"),  # C10
     ("founder_transitions", "content_factory.founder_transitions", "run_transition_sweep"),         # be-notify
+    ("website_lead_reminders", "founder_tools.website_lead_reminders", "run_lead_reminder_sweep"),  # E3b
     ("team_requests", "founder_tools.startup_team", "run_team_request_sweep"),                      # be-team (held)
     ("staff_alert_rules", "content_factory.staff_alert_rules", "run_alert_rule_sweep"),             # be-staff
     ("background_job_digest", "content_factory.background_job_digest", "run_background_job_digest_sweep"),  # B6

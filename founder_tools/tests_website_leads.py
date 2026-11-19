@@ -167,3 +167,40 @@ class WebsiteLeadTests(TestCase):
         now = timezone.now()
         report = journey_funnel(since=now - timedelta(days=1), until=now + timedelta(days=1))
         self.assertEqual(report["stages"]["not_on_github"]["users"], 0)
+
+    @override_settings(**GATE)
+    def test_e3_refining_the_exit_on_the_host_class_screens_keeps_one_lead_and_one_event(self):
+        """Plan E3: a not-on-GitHub exit writes one lead and one funnel event, however it is refined."""
+        response, events = self.post({"reason": "not_on_github", "domain": "acme.lovable.app",
+                                      "hostClass": "ai_builder", "guidanceId": "lovable"})
+        self.assertEqual((response.status_code, len(events)), (201, 1))
+        self.assertEqual(response.data["lead"]["guidanceId"], "lovable")
+        total = 1
+        for reason in ("other_git_host", "not_in_git", "someone_else_holds_code", "no_github_account"):
+            with self.subTest(reason=reason):
+                response, events = self.post({"reason": reason, "domain": "acme.lovable.app",
+                                              "hostClass": "unknown", "notifyWhenChanged": reason == "not_in_git"})
+                total += len(events)
+                self.assertEqual(response.status_code, 200, response.data)
+                self.assertEqual(response.data["lead"]["reason"], reason)
+                leads = self.leads()
+                self.assertEqual(list(leads), [f"{reason}:acme.lovable.app"])
+        self.assertEqual(total, 1)
+        lead = next(iter(self.leads().values()))
+        # "Tell me" stuck through the later refinements; the guidance state follows the latest screen.
+        self.assertTrue(lead["notifyWhenChanged"])
+        self.assertEqual(lead["guidanceState"], "no_github_account:create_account")
+        now = timezone.now()
+        report = journey_funnel(since=now - timedelta(days=1), until=now + timedelta(days=1))
+        self.assertEqual(report["stages"]["not_on_github"]["users"], 1)
+
+    @override_settings(**GATE)
+    def test_e3_another_domain_is_another_exit(self):
+        _response, first = self.post({"reason": "not_on_github", "domain": "one.example.com"})
+        _response, second = self.post({"reason": "not_in_git", "domain": "two.example.com"})
+        self.assertEqual((len(first), len(second), len(self.leads())), (1, 1, 2))
+
+    @override_settings(**GATE)
+    def test_e3_a_malformed_guidance_id_is_dropped(self):
+        response, _events = self.post({"reason": "not_on_github", "guidanceId": "<script>"})
+        self.assertIsNone(response.data["lead"]["guidanceId"])

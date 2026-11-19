@@ -9,6 +9,7 @@ from .views import (
     FounderToolsCompanyView,
     FounderToolsProfileView,
 )
+from .website_lead_reminders import opt_out_view as website_lead_opt_out
 from .website_leads import FounderWebsiteLeadView
 
 
@@ -29,4 +30,5 @@ urlpatterns = [
     ),
     path("active-company/", FounderToolsActiveCompanyView.as_view(), name="founder-tools-active-company"),
     path("website-lead/", FounderWebsiteLeadView.as_view(), name="founder-tools-website-lead"),
+    path("website-lead/opt-out/", website_lead_opt_out, name="founder-tools-website-lead-opt-out"),
 ]

@@ -70,7 +70,20 @@ Body: `{reason?, domain?, hostClass?, notifyWhenChanged?}`. `reason` is one of `
 
 Response: 201 for the first record of that reason and domain, 200 afterwards, with `{lead: {reason, domain, hostClass, notifyWhenChanged, remindAt, createdAt}, recorded, message}`. `message` is the one honest sentence to show ("MLAI can only set up articles for websites whose code is on GitHub today.", plus "Thanks. We'll email you when that changes." once notify is on). `recorded: false` means the lead could not be stored for this account (unverified email, or the email's CRM contact belongs to another account); the funnel event is still emitted, once per account, reason and domain. The lead key is system-owned in the CRM (`RESERVED_ATTRIBUTE_KEYS`), so CRM edits and CSV imports never overwrite it.
 
-Storage: the lead row is an entry under `attributes.founder_website_leads` on the account's CRM `Contact` (no migration). Writing it never changes consent, status or owner. The first record emits one `not_on_github` founder journey event, and `journey_funnel` counts the stage from the stored rows. Nothing sends reminders yet (E3b).
+Storage: the lead row is an entry under `attributes.founder_website_leads` on the account's CRM `Contact` (no migration). Writing it never changes consent, status or owner. The first record emits one `not_on_github` founder journey event, and `journey_funnel` counts the stage from the stored rows.
+
+### Host-class screens (E3)
+
+The body also takes `guidanceId` (a Chat builder guidance id such as `lovable`; anything not shaped like `[a-z][a-z0-9_]{0,39}` is dropped), returned in `lead.guidanceId`. One not-on-GitHub exit is one lead row per domain: a later write with another reason from the not-on-GitHub family (`other_git_host`, `not_in_git`, `someone_else_holds_code`, `no_github_account`) or another builder refines that row in place (200, no second funnel event). "Tell me when this changes", an earlier reminder and an opt-out all survive a refinement; pressing Tell me again after opting out is a fresh opt-in. The row keeps `guidanceState`, the state of the guidance the founder saw (`founder_tools.website_lead_reminders.guidance_state`). The developer hand-off ("Email these steps to my developer", every host class) is a `mailto:` the client builds; the server sends nothing for it.
+
+### Lead reminders (E3b)
+
+`founder_tools.website_lead_reminders.run_lead_reminder_sweep` runs in the scheduled self-heal sweeps (`website_lead_reminders`) behind `MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED` (default off). For a lead with `notifyWhenChanged` and no opt-out it sends, through `system_email` message `founder_website_lead_reminder`:
+
+- one reminder once `remindAt` has passed (then `remindAt` is cleared and `remindedAt` kept; nothing re-arms it), with a link to `/my-startup/start?new=true&step=website&website=<domain>&builder=<guidanceId>` that prefills the website step;
+- one notice per new guidance state when today's state differs from `guidanceState` (a builder's steps checked under A23, or decision D9 changed). Returning to a state the founder already saw is quiet.
+
+At most 10 emails per sweep. Each send is claimed in the lead row under the contact's row lock before the provider call, with a stable idempotency key, so a redeploy or a second sweep never sends twice; a retryable failure is retried with the same key for 23 hours, then closed. The recipient must be the lead's active, verified account whose email still matches the contact, with the contact `active`, not on the suppression list, and without a connected website. Every email carries a signed one-click opt-out, `GET|POST /api/v1/founder-tools/website-lead/opt-out/?token=...` (GET only asks; POST clears `notifyWhenChanged` on every lead of that contact).
 
 ## Verification and limits
 
