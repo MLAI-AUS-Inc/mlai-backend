@@ -240,13 +240,17 @@ def run_article_live_sweep(now=None, limit=None) -> dict:
     now = now or timezone.now()
     if not cache.add(THROTTLE_KEY, now.isoformat(), SWEEP_INTERVAL_SECONDS):
         return {"status": "throttled"}
-    from django.db.models import Q
+    from django.db.models import F, Q
     from .models import ArticlePublishStatus, OrganizationContentConfig, WrittenArticle
-    from .article_publish_status import refresh_publish_statuses
+    from .article_publish_status import REFRESH_INTERVAL, refresh_publish_statuses
     since = now - ARTICLE_WATCH_WINDOW
+    # The least recently checked first, and only those due a re-check, so a
+    # handful of sites that never deploy cannot starve every other website.
     rows = (WrittenArticle.objects.exclude(publish_status=ArticlePublishStatus.LIVE)
             .filter(Q(on_main_verified_at__gte=since) | Q(on_main_verified_at__isnull=True, pr_merged_at__gte=since))
-            .order_by("organization_id").values_list("organization_id", "source_run_id"))
+            .filter(Q(live_checked_at__isnull=True) | Q(live_checked_at__lte=now - REFRESH_INTERVAL))
+            .order_by(F("live_checked_at").asc(nulls_first=True), "pk")
+            .values_list("organization_id", "source_run_id"))
     by_org = {}
     for organization_id, run_id in rows[:500]:
         by_org.setdefault(organization_id, set()).add(run_id)

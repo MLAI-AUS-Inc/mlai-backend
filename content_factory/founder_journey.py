@@ -1073,10 +1073,14 @@ def _publishing_or_done(*, organization, config, marker, run, connection):
             and delivery_mode(run) != "content_only":
         live = _live_article(organization, run)
         if live is None:
-            if _article_not_live(organization, run) is not None:
+            not_live = _article_not_live(organization, run)
+            if not_live is not None:
                 # Plan C14: merged, but the live site has not shown it past the
-                # bound. Staff were alerted; the founder gets the host's step.
-                return _deploy_decision(connection, stage="publishing", run_id=run.run_id, staff_alerted=True)
+                # bound. The founder gets the host's step; "our team has been
+                # told" only once the staff alert for this merge is queued.
+                from .founder_stuck_alerts import article_not_live_alerted
+                return _deploy_decision(connection, stage="publishing", run_id=run.run_id,
+                                        staff_alerted=article_not_live_alerted(not_live))
             return _decide("publishing", "working", "publishing", holding="website_update", run_id=run.run_id)
         return _decide("done", "done", "done_live", next_kind="view_article", run_id=run.run_id,
                        url=_https_or_none(live.live_url))

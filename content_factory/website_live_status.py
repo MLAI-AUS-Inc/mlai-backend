@@ -282,6 +282,9 @@ def observe(config, *, now=None) -> str:
         # watch again from now.
         receipt.update(status="waiting_for_deployment", started_at=now.isoformat(), checks=0)
         receipt.pop("live_at", None)
+        # Plan C14: the new watch proves (or not) the deploy link afresh.
+        for key in ("deploy_link", "deploy_link_proven_at"):
+            receipt.pop(key, None)
         operation.state = "pending"
     from .website_verification import verify_live_url_deployment
     try:

@@ -469,6 +469,25 @@ def queue_budget_alert(connection, op, *, scope, count, limit, now=None) -> int:
     return _queue([condition], organization_ids={organization_id})
 
 
+def _article_not_live_slot(article) -> str:
+    """The alert slot for ``article``'s current merge: one alert per article and merge commit."""
+    merge = re.sub(r"[^a-f0-9]", "", str(article.on_main_commit_sha or article.merge_commit_sha or "").lower())[:12]
+    return f"article-{article.pk}-not-live-{merge or 'unknown'}"
+
+
+def article_not_live_alerted(article) -> bool:
+    """Whether staff hold the ``article_not_live`` alert for ``article``'s current merge.
+
+    The founder copy says "Our team has been told" only when this is true, so
+    the line is never a claim the alert queue cannot back.
+    """
+    if article is None or not getattr(article, "organization_id", None):
+        return False
+    alert_id = alerts.founder_journey_alert_id(organization_id=article.organization_id, alert_reason=STUCK_REASON,
+                                               slot=_article_not_live_slot(article))
+    return any(alert_id in receipts for _, receipts in alerts._receipt_index({article.organization_id}))
+
+
 def queue_article_not_live_alert(article, *, observation=None, since=None, now=None) -> int:
     """Queue one alert for a merged article whose page is still not live (plan C14).
 
@@ -479,13 +498,12 @@ def queue_article_not_live_alert(article, *, observation=None, since=None, now=N
     if not getattr(settings, "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED", True):
         return 0
     now = now or timezone.now()
-    merge = re.sub(r"[^a-f0-9]", "", str(article.on_main_commit_sha or article.merge_commit_sha or "").lower())[:12]
     observation = observation if isinstance(observation, dict) else {}
     reason = str(observation.get("reason") or "")
     check = ("content_mismatch" if observation.get("state") == "content_mismatch"
              else "not_found" if "HTTP 404" in reason else "unavailable")
     condition = StuckCondition(organization_id=article.organization_id,
-                               slot=f"article-{article.pk}-not-live-{merge or 'unknown'}", kind="article_not_live",
+                               slot=_article_not_live_slot(article), kind="article_not_live",
                                step="article-live", code="live_route_unavailable", stuck_since=since or now,
                                details={"run_id": str(article.source_run_id or "")[:100],
                                         "live_check": check})

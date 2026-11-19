@@ -114,7 +114,9 @@ article counts as published only when its live check passes. A merged article
 that still 404s or serves other content one hour after the merge raises one
 `founder_stuck` alert of kind `article_not_live` per merge commit, shows
 `articleLive.state=not_live`, and Home asks `deploy_site` in the publishing
-stage. Drafts in review and articles being written are never blocked by the
+stage. The founder is told "our team has been told" (`articleLive.staffAlerted`)
+only once that alert is queued, so never with `ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED`
+off. The runner re-checks the least recently checked articles first. Drafts in review and articles being written are never blocked by the
 live check. With the flag off, merged articles still count as published and
 `deploy_site` stays retired. Deterministic child failures link to the failed run,
 while explicitly retryable worker failures retain bounded retries. Owners may cancel

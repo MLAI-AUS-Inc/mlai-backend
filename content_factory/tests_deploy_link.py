@@ -115,6 +115,22 @@ class MergeDoesNotDeployFixtureTests(MergedLegacySite, TestCase):
         self.assertEqual(watch.receipt["deploy_link"], "proven")
         self.assertEqual(live_status.summary(watch)["deployLink"], "proven")
 
+    @override_settings(**ON)
+    def test_a_new_watch_proves_the_deploy_link_afresh(self):
+        with self.live():
+            self.assertEqual(live_status.observe(self.config), "live")
+        watch = live_status.watch_for(self.connection)
+        # The marker changed (a new setup merge) and the site no longer serves it.
+        watch.next_attempt_at = timezone.now() - timedelta(minutes=1)
+        watch.save(update_fields=["next_attempt_at"])
+        with self.not_deployed(), mock.patch("content_factory.website_live_status._probe_host", return_value="netlify"), \
+             mock.patch("content_factory.activation.live_deployment_verified", return_value=False):
+            live_status.observe(self.config, now=timezone.now() + timedelta(hours=7))
+        watch = live_status.watch_for(self.connection)
+        self.assertEqual(watch.state, "pending")
+        self.assertNotIn("deploy_link_proven_at", watch.receipt)
+        self.assertIsNone(live_status.summary(watch)["deployLink"])
+
 
 def _package_run(organization):
     body = "<article><h1>Merged article</h1><p>" + "A merged article that has not reached the site yet. " * 6 + "</p></article>"
@@ -186,6 +202,47 @@ class MergedArticle404Tests(TestCase):
         self.assertEqual(payload["articleLive"]["state"], "not_live")
         self.assertEqual(payload["articleLive"]["reason"], "not_found")
 
+    @override_settings(ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED=False, **ON)
+    def test_the_dashboard_says_staff_were_told_only_when_they_were(self):
+        self.refresh()
+        from .vibe_marketing_views import _serialize_written_article
+        self.article.refresh_from_db()
+        self.assertEqual(self.alerts(), {})
+        self.assertIs(_serialize_written_article(self.article)["articleLive"]["staffAlerted"], False)
+        with override_settings(ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED=True):
+            self.refresh()
+        self.article.refresh_from_db()
+        self.assertIs(_serialize_written_article(self.article)["articleLive"]["staffAlerted"], True)
+
+    @override_settings(**ON)
+    def test_the_sweep_checks_the_least_recently_checked_websites_first(self):
+        # Many websites whose articles never deploy, all checked moments ago and
+        # with lower ids: they must not starve a website never checked yet.
+        merged = timezone.now() - timedelta(hours=3)
+        for index in range(deploy_link.SWEEP_ORGANIZATIONS + 2):
+            other = Organization.objects.create(domain=f"other-{index}.example", name=f"Other {index}")
+            OrganizationContentConfig.objects.create(organization=other, github_repo=f"acme/site-{index}")
+            WrittenArticle.objects.create(organization=other, title="Other", slug=f"other-{index}", category="featured",
+                primary_keyword="other", publish_status=ArticlePublishStatus.MERGED, pr_merged_at=merged,
+                on_main_verified_at=merged, live_checked_at=timezone.now() - timedelta(minutes=11 + index))
+        # The never-checked website has the highest id, so id order alone would skip it.
+        latest = Organization.objects.create(domain="latest.example", name="Latest")
+        OrganizationContentConfig.objects.create(organization=latest, github_repo="acme/latest")
+        WrittenArticle.objects.filter(pk=self.article.pk).update(live_checked_at=None, organization=latest)
+        seen = []
+        with mock.patch("content_factory.article_publish_status.refresh_publish_statuses",
+                        side_effect=lambda organization, *args, **kwargs: seen.append(organization.pk) or []):
+            result = deploy_link.run_article_live_sweep()
+        self.assertEqual(result["organizations"], deploy_link.SWEEP_ORGANIZATIONS)
+        self.assertEqual(seen[0], latest.pk)
+        # A website checked within the refresh interval is not due and is skipped.
+        cache.clear()
+        WrittenArticle.objects.exclude(pk=self.article.pk).update(live_checked_at=timezone.now())
+        WrittenArticle.objects.filter(pk=self.article.pk).update(live_checked_at=timezone.now())
+        with mock.patch("content_factory.article_publish_status.refresh_publish_statuses") as refresh:
+            self.assertEqual(deploy_link.run_article_live_sweep()["organizations"], 0)
+        refresh.assert_not_called()
+
     @override_settings(**ON)
     def test_within_the_bound_it_is_checking_and_nobody_is_paged(self):
         merged = timezone.now() - timedelta(minutes=10)
@@ -251,13 +308,28 @@ class JourneyDeployAskTests(JourneyFixture, TestCase):
             publish_status=ArticlePublishStatus.MERGED, pr_merged_at=merged, on_main_verified_at=merged)
 
     def test_a_merged_article_not_live_past_the_bound_asks_to_deploy(self):
-        self.merged_article(self.approved_run())
+        article = self.merged_article(self.approved_run())
         with override_settings(**ON):
             body = self.journey()
         self.assertStep(body, "publishing", "your_turn", ask="deploy_site")
         copy = deploy_link.DEPLOY_ASK_COPY["unknown"]
         self.assertEqual((body["headline"], body["action"]["label"], body["action"]["url"]), (copy[0], copy[2], None))
+        # Nobody was told yet: the founder copy never claims it.
+        self.assertEqual(body["body"], copy[1])
+        from .founder_stuck_alerts import queue_article_not_live_alert
+        self.assertEqual(queue_article_not_live_alert(article), 1)
+        with override_settings(**ON):
+            body = self.journey()
         self.assertTrue(body["body"].endswith(deploy_link.STAFF_TOLD))
+
+    @override_settings(ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED=False, **ON)
+    def test_with_staff_alerts_off_the_founder_is_not_told_staff_know(self):
+        article = self.merged_article(self.approved_run())
+        from .founder_stuck_alerts import queue_article_not_live_alert
+        self.assertEqual(queue_article_not_live_alert(article), 0)
+        body = self.journey()
+        self.assertStep(body, "publishing", "your_turn", ask="deploy_site")
+        self.assertNotIn(deploy_link.STAFF_TOLD.strip(), body["body"])
 
     def test_a_lovable_founder_is_told_to_press_publish(self):
         self.org.domain = f"site-{uuid4().hex[:6]}.lovable.app"

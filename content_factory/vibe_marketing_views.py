@@ -2803,7 +2803,12 @@ def _article_live_payload(article, observation):
     state = article_live_state(article, observation)
     if state is None:
         return None
-    return {key: state[key] for key in ("state", "since", "reason") if state.get(key) is not None}
+    value = {key: state[key] for key in ("state", "since", "reason") if state.get(key) is not None}
+    if state["state"] == "not_live":
+        # "Our team has been told" only once the staff alert for this merge exists.
+        from content_factory.founder_stuck_alerts import article_not_live_alerted
+        value["staffAlerted"] = article_not_live_alerted(article)
+    return value
 
 
 def _serialize_written_article(article, *, publish_attempt=None):
