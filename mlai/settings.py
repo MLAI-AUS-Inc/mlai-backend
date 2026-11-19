@@ -2763,6 +2763,20 @@ MY_STARTUP_EMAIL_INVITES_ENABLED = _env_is_true("MY_STARTUP_EMAIL_INVITES_ENABLE
 # switch that lets an admitted no-offer run continue past the newer version.
 CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK = _env_is_true("CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK", True)
 
+# B13b source sync. It sits before the P2 block because it is its own staged
+# rollout, not one of the contract's P2 switches.
+# Staged rollout, default off: one coalescing source check per connection
+# chases GitHub's current head. A push storm settles on its last commit after a
+# 60-second quiet period, an hourly head read heals a missed webhook, and the
+# rescan a changed setup needs runs as MLAI's "source_sync" service (read and
+# scan only, never setup or publish), so the founder's Roo points are neither
+# required nor charged nor refunded. Content Factory must list "source_sync"
+# among its admitted scheduler services before this goes on with
+# ARTICLES_RUN_OWNERSHIP_ENABLED.
+ARTICLES_SOURCE_SYNC_ENABLED = _env_is_true("ARTICLES_SOURCE_SYNC_ENABLED", False)
+# Service rescans per connection in any 24 hours (default 6, 0 = none).
+ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP = max(0, int(os.getenv("ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP") or "6"))
+
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort
 # (content_factory.p2_foundation.p2_applies) unless the P2 contract names an
@@ -2806,17 +2820,6 @@ ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED = _env_is_true("ARTICLES_SOURCE_CHECK_OW
 # otherwise the push's paid source rescan is settled without a scan. Automatic
 # repository scans also count toward a per-operation and per-day budget.
 ARTICLES_PREPARE_STICKY_STOP_ENABLED = _env_is_true("ARTICLES_PREPARE_STICKY_STOP_ENABLED", True)
-# Staged rollout, default off: one coalescing source check per connection
-# chases GitHub's current head. A push storm settles on its last commit after a
-# 60-second quiet period, an hourly head read heals a missed webhook, and the
-# rescan a changed setup needs runs as MLAI's "source_sync" service (read and
-# scan only, never setup or publish), so the founder's Roo points are neither
-# required nor charged nor refunded. Content Factory must list "source_sync"
-# among its admitted scheduler services before this goes on with
-# ARTICLES_RUN_OWNERSHIP_ENABLED.
-ARTICLES_SOURCE_SYNC_ENABLED = _env_is_true("ARTICLES_SOURCE_SYNC_ENABLED", False)
-# Service rescans per connection in any 24 hours (default 6, 0 = none).
-ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP = max(0, int(os.getenv("ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP") or "6"))
 # Kill switch, default on: a worker callback for a bound run that omits its
 # website connection fields is checked against that run's own saved consent
 # instead of being refused as "Reconnect this website" (La Vie, 18 Nov 2026).

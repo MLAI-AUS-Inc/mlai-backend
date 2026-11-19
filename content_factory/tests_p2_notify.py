@@ -283,14 +283,17 @@ class NotificationTests(TransactionTestCase):
 
     def test_journey_precedence_rules_a_to_j_and_completed_channel_evidence(self):
         cases = [
-            ({"error_code": "UNREGISTERED_EXAMPLE"}, "failed", "working"),
+            # B10: an unregistered terminal code is never a generic stop; it reads "fixing".
+            ({"error_code": "UNREGISTERED_EXAMPLE"}, "failed", "fixing"),
             ({"strict_pass_v1": {"claims": 1}}, "running", "ask_check_highlighted"),
             ({"draft_ready_v1": {"version": 1, "at": self.now.isoformat(), "revision": "r1"}}, "running", "ask_review_draft"),
             ({"error_code": "SITE_TEST_CHANGE_REQUIRED"}, "blocked", "ask_approve_on_github_site_test"),
             ({"error_code": "BRANCH_PROTECTION_APPROVAL_REQUIRED"}, "blocked", "ask_approve_on_github_protected"),
             ({"error_code": "DEPLOYMENT_NOT_DETECTED"}, "completed", "working_website_update"),
             ({"publish_pr_v1": {"kind": "article"}}, "completed", "working_publishing"),
-            ({"error_code": "VALIDATION_ERROR", "self_heal_v1": {"capped": True}, "points_v1": {"state": "refunded", "points": 12}}, "failed", "stopped"),
+            ({"error_code": "SYNC_FAILED", "self_heal_v1": {"capped": True}, "points_v1": {"state": "refunded", "points": 12}}, "failed", "stopped"),
+            # B23: VALIDATION_ERROR is the founder's add-seed-topics ask now, refunded or not.
+            ({"error_code": "VALIDATION_ERROR", "self_heal_v1": {"capped": True}, "points_v1": {"state": "refunded", "points": 12}}, "failed", "ask_add_seed_topics"),
         ]
         for result, status, copy_id in cases:
             run = self.make_run(result, status=status)
