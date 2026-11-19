@@ -3037,10 +3037,12 @@ class CoworkingViewSetTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data['points_cost'], 8)
+        self.assertEqual(response.data['points_balance'], 2)
         self.assertTrue(CoworkingBooking.objects.filter(user=member, status='booked').exists())
         self.assertEqual(PointsService.get_balance(member)['balance'], 2)
         self.assertEqual(replay.status_code, status.HTTP_200_OK)
         self.assertTrue(replay.data['operation_replayed'])
+        self.assertNotIn('points_balance', replay.data)
         self.assertEqual(CoworkingBooking.objects.filter(user=member).count(), 1)
         self.assertEqual(PointsService.get_balance(member)['balance'], 2)
 
