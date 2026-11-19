@@ -155,6 +155,16 @@ class PrepareFailureRoutingTests(SimpleTestCase):
         self.assertNotIn("user_action", op.receipt)
         self.assertEqual(op.receipt["staff_fixing"]["run_id"], "run-9")
         self.assertEqual(self.mocks.alert.call_args.kwargs["alert_reason"], "repair_loop_exhausted")
+        # B4 meets B11: clients hide Try again on owner_can_retry, even when the
+        # stored failure envelope still says the code is retryable.
+        from .website_operations import prepare_receipt
+        from .website_prepare_counters import owner_can_retry
+        op.receipt = {**op.receipt, "failure": {"schema_version": 1, "retryable": True, "failure_class": "transient"}}
+        self.assertIs(prepare_receipt(op)["owner_can_retry"], False)
+        self.assertIs(owner_can_retry(op.state, op.receipt), False)
+        staff.close(op, "cant_be_done_yet", now=MONDAY, reason="not_fixed_in_time")
+        self.assertEqual(op.state, "stopped")
+        self.assertIs(prepare_receipt(op)["owner_can_retry"], False)
 
     def test_same_code_without_a_receipt_keeps_the_existing_path(self):
         op = _operation()

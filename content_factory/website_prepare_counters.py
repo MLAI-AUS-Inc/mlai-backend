@@ -88,6 +88,9 @@ def owner_can_retry(state, receipt) -> bool:
         return True
     if state not in STOPPED_STATES:
         return False
+    if receipt.get("status") in {"staff_fixing", "cant_be_done_yet"}:
+        # B11/B25: staff hold the fix, or it closed with an honest answer.
+        return False
     from . import website_prepare_setup_cap as setup_cap
     from .website_prepare_sticky_stop import budget_hold_active
     if isinstance(receipt.get(setup_cap.HELD_KEY), dict) or budget_hold_active(receipt):
