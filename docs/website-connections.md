@@ -99,7 +99,26 @@ for a legacy-cohort site while `ARTICLES_AUTO_PAGE_ENABLED` is off. Any website
 operation resting in `needs_user` on an action the new journey retired
 (`founder_journey.RETIRED_ACTIONS`) raises one `founder_stuck` staff alert of kind
 `operation_retired_ask`. Unchanged facts after a successful step stop
-with `prepare_no_progress`. Deterministic child failures link to the failed run,
+with `prepare_no_progress`.
+
+While `ARTICLES_LIVE_URL_VERIFICATION_ENABLED` is on, `deploy_site` is no longer
+retired (plan C14). The ready-on-merge live-status watch proves the deploy link at
+setup: one hour after the merge without the marker, website status v1 shows
+`liveStatus.action={id:deploy_site,label,url}` with copy for the host class
+(Lovable, Vercel, Netlify, Cloudflare, GitHub Pages or unknown, from the Content
+Factory site fingerprint, the domain or the deployment provider). A served marker
+records `deploy_link=proven` on the watch receipt. After every article merge the
+scheduled `article_live_checks` runner (throttled to ten minutes, fourteen-day
+window) fetches the article's canonical URL through the same SSRF guard. An
+article counts as published only when its live check passes. A merged article
+that still 404s or serves other content one hour after the merge raises one
+`founder_stuck` alert of kind `article_not_live` per merge commit, shows
+`articleLive.state=not_live`, and Home asks `deploy_site` in the publishing
+stage. The founder is told "our team has been told" (`articleLive.staffAlerted`)
+only once that alert is queued, so never with `ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED`
+off. The runner re-checks the least recently checked articles first. Drafts in review and articles being written are never blocked by the
+live check. With the flag off, merged articles still count as published and
+`deploy_site` stays retired. Deterministic child failures link to the failed run,
 while explicitly retryable worker failures retain bounded retries. Owners may cancel
 an active or waiting prepare operation and explicitly reopen it with another Prepare
 click; cancelling fences its child and queues the ordinary run cancellation path.

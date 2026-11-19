@@ -180,7 +180,8 @@
                     "approve_on_github",
                     "buy_points",
                     "approve_join_request",
-                    "choose_articles_page"
+                    "choose_articles_page",
+                    "deploy_site"
                   ]
                 },
                 "label": {

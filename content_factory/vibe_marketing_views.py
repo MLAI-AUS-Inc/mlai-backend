@@ -2795,10 +2795,27 @@ def _normalize_keyword_memory(value) -> str:
     return normalize_topic_feedback_keyword(value)
 
 
+def _article_live_payload(article, observation):
+    """The founder-safe ``article_live`` state of ``article`` (plan C14), or ``None``."""
+    from content_factory.website_deploy_link import article_live_state, enabled
+    if not enabled():
+        return None
+    state = article_live_state(article, observation)
+    if state is None:
+        return None
+    value = {key: state[key] for key in ("state", "since", "reason") if state.get(key) is not None}
+    if state["state"] == "not_live":
+        # "Our team has been told" only once the staff alert for this merge exists.
+        from content_factory.founder_stuck_alerts import article_not_live_alerted
+        value["staffAlerted"] = article_not_live_alerted(article)
+    return value
+
+
 def _serialize_written_article(article, *, publish_attempt=None):
     from content_factory.article_publish_status import latest_live_observation
+    observation = latest_live_observation(article)
     return {
-        "liveVerification": {key: value for key, value in latest_live_observation(article).items()
+        "liveVerification": {key: value for key, value in observation.items()
             if key not in {"observed_body_text", "previous", "last_verified"}},
         "id": str(article.id),
         "title": article.title,
@@ -2819,6 +2836,9 @@ def _serialize_written_article(article, *, publish_attempt=None):
         # gate the dashboard's recent/live list should use. `onMain` is the proven
         # source-of-truth fact, independent of the weaker sitemap `liveUrl`.
         "bucket": article_bucket(article),
+        # Plan C14: the article_live state (live, checking or not_live) once the
+        # article merged, null before; only while the deploy link is on.
+        "articleLive": _article_live_payload(article, observation),
         "onMain": bool(article.on_main_verified_at),
         "onMainAt": article.on_main_verified_at.isoformat() if article.on_main_verified_at else None,
         "mergeCommitSha": article.merge_commit_sha or "",

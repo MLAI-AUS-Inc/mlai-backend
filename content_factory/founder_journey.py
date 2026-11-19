@@ -37,8 +37,10 @@ VERSION = 1
 # The asks (contract section 3). Nothing else is ever sent as action.id.
 # ``choose_articles_page`` is sent only when the founder's recorded consent
 # says they choose the page (plan A9, decision D3); otherwise MLAI picks it.
+# ``deploy_site`` is sent only while the deploy link is on (plan C14,
+# ``ARTICLES_LIVE_URL_VERIFICATION_ENABLED``), worded for the founder's host.
 FOUNDER_ASKS = ("review_draft", "describe_customer", "agree_terms", "authorize_github", "approve_setup",
-                "approve_on_github", "buy_points", "approve_join_request", "choose_articles_page")
+                "approve_on_github", "buy_points", "approve_join_request", "choose_articles_page", "deploy_site")
 NEXT_KINDS = ("add_website", "write_first_article", "write_article", "view_progress", "view_draft", "view_article")
 STAGES = ("website", "first_article", "writing", "review", "setup", "publishing", "done")
 HOLDING_REASONS = ("slow", "website_update", "busy_today")
@@ -60,11 +62,16 @@ RETIRED_ACTIONS = frozenset({"choose_articles_page", "configure_website", "deplo
 # Retired unless the founder's recorded consent says they choose the page
 # (``page_policy == "pick"``): then Home shows the ask (plan A9, D3).
 PAGE_CHOICE_ACTION = "choose_articles_page"
+# Un-retired while the deploy link is on (plan C14): merging that does not
+# reach the live site is one named ask, worded for the host class.
+DEPLOY_ACTION = "deploy_site"
 
 
 def retired_actions(*, page_policy=None) -> frozenset:
     """The retired owner actions for an operation whose consent records ``page_policy``."""
-    return RETIRED_ACTIONS - {PAGE_CHOICE_ACTION} if page_policy == "pick" else RETIRED_ACTIONS
+    from .website_deploy_link import enabled as deploy_link_enabled
+    retired = RETIRED_ACTIONS - {PAGE_CHOICE_ACTION} if page_policy == "pick" else RETIRED_ACTIONS
+    return retired - {DEPLOY_ACTION} if deploy_link_enabled() else retired
 
 
 SETUP_ASKS = frozenset({"approve_setup", "authorize_github", "approve_on_github"})
@@ -132,6 +139,9 @@ COPY = {
                           "Open on GitHub"),
     "publishing": ("Publishing…", "Waiting for your website to update.", None),
     "done_live": ("Your article is live!", None, "View article"),
+    # Plan C14 fallback; the ask itself carries the host class's copy.
+    "deploy_site": ("Your live site hasn't updated yet",
+                    "Your change is merged on GitHub, but your website hasn't picked it up.", "How to fix this"),
     "done_copy_ready": ("Your article is ready to post", None, "Open your article"),
     # Shared fallback for an unknown or retired action (contract section 11.1).
     "still_working": ("Working on it", "Still working.", "See progress"),
@@ -715,8 +725,12 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
         elif ask is not None:
             decision = _decide("writing", "your_turn", ask, action=ask, run_id=run.run_id,
                                url=_pull_request_url(run) if ask == "approve_on_github" else None)
+        elif registry_action == DEPLOY_ACTION and DEPLOY_ACTION not in retired_actions():
+            # A run stopped on deploy_site while the deploy link is on: the
+            # host class's ask, never a silent Working on it (plan C14).
+            decision = _deploy_decision(connection, stage="publishing", run_id=run.run_id)
         else:
-            if registry_action in RETIRED_ACTIONS:
+            if registry_action in retired_actions():
                 logger.info("founder_journey_retired_action org=%s action=%s", organization.pk, registry_action)
             decision = _decide("writing", "working", "still_working", next_kind="view_progress", run_id=run.run_id,
                                holding="slow")
@@ -798,7 +812,10 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
 
     if policy_v2_applies(organization) and not decision.get("copyId"):
         ask = _mapping(decision.get("action")).get("id")
-        if ask in FOUNDER_ASKS:
+        if ask == DEPLOY_ACTION:
+            # The host class's exact copy is the line: no P2 copy id replaces it.
+            pass
+        elif ask in FOUNDER_ASKS:
             if ask == "buy_points":
                 decision["copyId"] = "ask_buy_points"
             else:
@@ -958,9 +975,43 @@ def _setup_decision(*, organization, company, config, user, marker, connection, 
               and PAGE_CHOICE_ACTION not in retired_actions(page_policy=operation.get("pagePolicy"))):
             # The founder's consent says they choose the page: ask, never hide it.
             return _decide("setup", "your_turn", PAGE_CHOICE_ACTION, action=PAGE_CHOICE_ACTION)
-        elif operation.get("actionId") in RETIRED_ACTIONS:
+        elif operation.get("actionId") == DEPLOY_ACTION and DEPLOY_ACTION not in retired_actions():
+            # A preparation parked on "deploy your site" (plan C14).
+            return _deploy_decision(connection, stage="setup")
+        elif operation.get("actionId") in retired_actions(page_policy=operation.get("pagePolicy")):
             logger.info("founder_journey_retired_action org=%s action=%s", organization.pk, operation.get("actionId"))
     return None
+
+
+def _deploy_decision(connection, *, stage, run_id=None, staff_alerted=False):
+    """The ``deploy_site`` ask with the copy for the connection's host class (plan C14)."""
+    from .website_deploy_link import deploy_ask, host_class
+    from .website_live_status import summary, watch_for
+    watch = summary(watch_for(connection)) if connection is not None else None
+    host = (watch or {}).get("hostClass") or (host_class(connection) if connection is not None else "unknown")
+    ask = deploy_ask(host, staff_alerted=staff_alerted or bool((watch or {}).get("staffAlerted")))
+    decision = _decide(stage, "your_turn", DEPLOY_ACTION, action=DEPLOY_ACTION, run_id=run_id, url=ask["url"])
+    decision.update(headline=ask["headline"], body=ask["body"])
+    decision["action"]["label"] = ask["label"]
+    return decision
+
+
+def _article_not_live(organization, run, now=None):
+    """The merged article of ``run`` whose page is still not live past the bound, or ``None``.
+
+    Only a merge into the default branch counts, so a draft, a review or an
+    open pull request is never held by the live check.
+    """
+    from .website_deploy_link import article_live_state, enabled
+    if not enabled() or run is None:
+        return None
+    from .models import ArticlePublishStatus, WrittenArticle
+    article = (WrittenArticle.objects.filter(organization_id=organization.pk, source_run_id=run.run_id)
+               .exclude(publish_status=ArticlePublishStatus.LIVE).order_by("-created_at").first())
+    if article is None:
+        return None
+    state = article_live_state(article, now=now)
+    return article if state and state["state"] == "not_live" else None
 
 
 def _manual_setup_pull_request_url(organization, run_id, facts):
@@ -1022,6 +1073,14 @@ def _publishing_or_done(*, organization, config, marker, run, connection):
             and delivery_mode(run) != "content_only":
         live = _live_article(organization, run)
         if live is None:
+            not_live = _article_not_live(organization, run)
+            if not_live is not None:
+                # Plan C14: merged, but the live site has not shown it past the
+                # bound. The founder gets the host's step; "our team has been
+                # told" only once the staff alert for this merge is queued.
+                from .founder_stuck_alerts import article_not_live_alerted
+                return _deploy_decision(connection, stage="publishing", run_id=run.run_id,
+                                        staff_alerted=article_not_live_alerted(not_live))
             return _decide("publishing", "working", "publishing", holding="website_update", run_id=run.run_id)
         return _decide("done", "done", "done_live", next_kind="view_article", run_id=run.run_id,
                        url=_https_or_none(live.live_url))

@@ -567,6 +567,7 @@ jobs:
           content_factory.tests_founder_stuck_alerts \
           content_factory.tests_stand_in_preview_approval_unit \
           content_factory.tests_website_live_status \
+          content_factory.tests_deploy_link \
           content_factory.tests_setup_merge_proof \
           content_factory.tests_callback_contract_from_run \
           content_factory.tests_connection_code_split \

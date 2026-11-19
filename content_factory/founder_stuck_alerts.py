@@ -107,6 +107,7 @@ STEP_LABELS = {
     "ci-verify": "Checking the website build",
     "publish-pr": "Publishing an article",
     "live-status": "Waiting for the live website to update",
+    "article-live": "Waiting for a merged article to appear on the live website",
     SETUP_WORKFLOW: "Website setup run",
     "article_generation": "Writing an article",
     "article_revision": "Revising an article",
@@ -120,6 +121,7 @@ KIND_DESCRIPTIONS = {
     "run_stopped": "The latest run stopped and the founder has nothing to press.",
     "operation_retired_ask": "The website step waits on an ask the founder's journey does not show.",
     "operation_budget": "Automatic website checks reached their budget; nothing more is dispatched until staff look.",
+    "article_not_live": "An article merged on GitHub but its page is not on the founder's live website; it is not counted as published.",
 }
 MAX_NAME_LENGTH = 80
 
@@ -290,8 +292,8 @@ def _operation_condition(row, *, kind, stuck_since) -> StuckCondition:
 
 def _retired_actions():
     """Owner actions the new journey retired; an operation resting on one waits unseen (plan A9)."""
-    from .founder_journey import RETIRED_ACTIONS
-    return sorted(RETIRED_ACTIONS)
+    from .founder_journey import retired_actions
+    return sorted(retired_actions())
 
 
 def _stuck_operations(*, now, scope) -> list[StuckCondition]:
@@ -467,6 +469,54 @@ def queue_budget_alert(connection, op, *, scope, count, limit, now=None) -> int:
     return _queue([condition], organization_ids={organization_id})
 
 
+def _article_not_live_slot(article) -> str:
+    """The alert slot for ``article``'s current merge: one alert per article and merge commit."""
+    merge = re.sub(r"[^a-f0-9]", "", str(article.on_main_commit_sha or article.merge_commit_sha or "").lower())[:12]
+    return f"article-{article.pk}-not-live-{merge or 'unknown'}"
+
+
+def article_not_live_alerted(article) -> bool:
+    """Whether staff hold the ``article_not_live`` alert for ``article``'s current merge.
+
+    The founder copy says "Our team has been told" only when this is true, so
+    the line is never a claim the alert queue cannot back.
+    """
+    if article is None or not getattr(article, "organization_id", None):
+        return False
+    alert_id = alerts.founder_journey_alert_id(organization_id=article.organization_id, alert_reason=STUCK_REASON,
+                                               slot=_article_not_live_slot(article))
+    return any(alert_id in receipts for _, receipts in alerts._receipt_index({article.organization_id}))
+
+
+def queue_article_not_live_alert(article, *, observation=None, since=None, now=None) -> int:
+    """Queue one alert for a merged article whose page is still not live (plan C14).
+
+    The slot is the article and its merge commit, so later re-checks of the
+    same merge never alert again, and a new merge (a republish) alerts once
+    more. Honours ``ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED``.
+    """
+    if not getattr(settings, "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED", True):
+        return 0
+    now = now or timezone.now()
+    observation = observation if isinstance(observation, dict) else {}
+    reason = str(observation.get("reason") or "")
+    check = ("content_mismatch" if observation.get("state") == "content_mismatch"
+             else "not_found" if "HTTP 404" in reason else "unavailable")
+    condition = StuckCondition(organization_id=article.organization_id,
+                               slot=_article_not_live_slot(article), kind="article_not_live",
+                               step="article-live", code="live_route_unavailable", stuck_since=since or now,
+                               details={"run_id": str(article.source_run_id or "")[:100],
+                                        "live_check": check})
+    queued = _queue([condition], organization_ids={article.organization_id})
+    if queued:
+        # Queued outside the sweep: remember the organisation so the next pass
+        # delivers it even while the pending set is warm.
+        remembered = cache.get(PENDING_ORGS_KEY)
+        if isinstance(remembered, list) and article.organization_id not in remembered:
+            cache.set(PENDING_ORGS_KEY, [*remembered, article.organization_id][-MAX_PENDING_ORGANIZATIONS:], None)
+    return queued
+
+
 # --- Plain descriptions ------------------------------------------------------
 
 def describe(condition: StuckCondition, *, now) -> dict:
@@ -501,6 +551,8 @@ def stuck_alert_text(receipt, context) -> str:
         parts.append(f"Stuck for {_duration(timezone.now() - since)}.")
     if details.get("action"):
         parts.append(f"Waiting on the retired ask {alerts._safe(details['action'])}.")
+    if details.get("live_check"):
+        parts.append(f"Live check: {alerts._safe(details['live_check'])}.")
     if details.get("attempts"):
         parts.append(f"Attempts {details['attempts']}.")
     if details.get("run_id"):

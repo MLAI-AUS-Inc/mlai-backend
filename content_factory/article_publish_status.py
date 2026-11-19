@@ -76,6 +76,10 @@ def article_bucket(article) -> str:
     source of truth), otherwise still "publishing". The weaker sitemap-based LIVE
     status is honoured as published for back-compat until on-main verification
     backfills it.
+
+    With the deploy link on (plan C14, ``ARTICLES_LIVE_URL_VERIFICATION_ENABLED``)
+    published means live: a merged article counts only once its saved content
+    was observed on the founder's public page (``publish_status == "live"``).
     """
     if article.publish_status == ArticlePublishStatus.LIVE:
         return "published"
@@ -84,7 +88,8 @@ def article_bucket(article) -> str:
         # Plan C7: a content file on main is not a page anyone can read; only
         # the live check of the article's real URL makes it published.
         return "publishing"
-    if article.on_main_verified_at:
+    from .website_deploy_link import enabled as deploy_link_enabled
+    if article.on_main_verified_at and not deploy_link_enabled():
         return "published"
     return "publishing"
 
@@ -223,7 +228,9 @@ def refresh_publish_statuses(organization, config=None, *, limit=6, force=False,
             break
         changed = {"live_checked_at"}
         article.live_checked_at = now
-        live_url = _match_live_url(article, site_urls)
+        # Plan C14: a merged article missing from the sitemap is still checked
+        # at the public URL its saved package names (same pinned origin check).
+        live_url = _match_live_url(article, site_urls) or _expected_live_url(article)
         pr_state = _github_pr_state(article.pr_url, config) if article.pr_url else None
         if pr_state:
             changed.update(apply_pull_request_state(article, pr_state, now=now))
@@ -239,6 +246,10 @@ def refresh_publish_statuses(organization, config=None, *, limit=6, force=False,
         article.save(update_fields=sorted(changed))
         if went_live:
             _settle_content_files_entitlement(article)
+        # Plan C14: a merged article still not served past the bound alerts
+        # staff once; it is advice to the founder and never blocks a draft.
+        from .website_deploy_link import observe_article
+        article._live_alerts_queued = observe_article(article, observation, now=now)
         refreshed.append(article)
     return refreshed
 
@@ -378,6 +389,19 @@ def _site_article_urls(domain):
         return []
     cache.set(cache_key, urls, SITEMAP_CACHE_SECONDS if urls else SITEMAP_FAILURE_CACHE_SECONDS)
     return urls
+
+
+def _expected_live_url(article):
+    """The public URL the saved article names, only while the deploy link is on.
+
+    ``_observe_live_article`` still requires it to be on the organisation's
+    exact HTTPS origin and a public host before anything is fetched.
+    """
+    from .website_deploy_link import enabled as deploy_link_enabled
+    if not deploy_link_enabled():
+        return None
+    url = str(article.canonical_url or "").strip()
+    return url if url.startswith("https://") else None
 
 
 def _match_live_url(article, site_urls):

@@ -127,7 +127,10 @@ def summary(operation):
     from .activation import mapping
     receipt = mapping(operation.receipt)
     return {"state": operation.state, "startedAt": receipt.get("started_at"), "provider": receipt.get("hosting_provider") or "unknown",
-        "checkedAt": receipt.get("checked_at"), "staffAlerted": operation.state == "needs_attention"}
+        "checkedAt": receipt.get("checked_at"), "staffAlerted": operation.state == "needs_attention",
+        "hostClass": receipt.get("host_class") or None,
+        # Plan C14: the deploy link proven (or not) by this setup's merge.
+        "deployLink": "proven" if operation.state == "completed" else receipt.get("deploy_link") or None}
 
 
 def project(*, deployed, ready, watch=None, now=None):
@@ -148,9 +151,18 @@ def project(*, deployed, ready, watch=None, now=None):
     if started is None or now - started < HELP_AFTER:
         return {"status": "checking", "message": CHECKING_MESSAGE, "provider": None, "staffAlerted": False}
     alerted = watch.get("staffAlerted") is True
-    return {"status": "waiting", "message": HOST_HELP[provider] + (STAFF_TOLD if alerted else ""),
+    value = {"status": "waiting", "message": HOST_HELP[provider] + (STAFF_TOLD if alerted else ""),
         "provider": provider if provider != "unknown" else None, "hostName": HOST_NAMES.get(provider),
         "since": started.isoformat(), "staffAlerted": alerted}
+    from .website_deploy_link import deploy_ask, setup_ask_due
+    if setup_ask_due(watch, now=now):
+        # Plan C14: merging did not reach the live site within the bound. One
+        # named ask, worded for the host class; still never a gate.
+        ask = deploy_ask(watch.get("hostClass") or provider, staff_alerted=alerted)
+        value.update(message=ask["body"], headline=ask["headline"], hostClass=ask["hostClass"],
+            hostName=ask["hostName"] or value["hostName"], deployLink="not_live",
+            action={"id": ask["id"], "label": ask["label"], "url": ask["url"]})
+    return value
 
 
 def _reserve(connection, *, now, source_sha=None):
@@ -270,6 +282,9 @@ def observe(config, *, now=None) -> str:
         # watch again from now.
         receipt.update(status="waiting_for_deployment", started_at=now.isoformat(), checks=0)
         receipt.pop("live_at", None)
+        # Plan C14: the new watch proves (or not) the deploy link afresh.
+        for key in ("deploy_link", "deploy_link_proven_at"):
+            receipt.pop(key, None)
         operation.state = "pending"
     from .website_verification import verify_live_url_deployment
     try:
@@ -280,6 +295,13 @@ def observe(config, *, now=None) -> str:
             provider = saved_host(connection)
             receipt["hosting_provider"] = provider if provider != "unknown" else _probe_host(connection.organization.domain)
         receipt.update(checks=checks, checked_at=now.isoformat(), last_code=exc.code)
+        from .website_deploy_link import ASK_AFTER, enabled as deploy_link_enabled, host_class
+        if deploy_link_enabled():
+            # Plan C14: name the host class for the deploy ask once, and record
+            # the deploy link as not proven once the bound has passed.
+            receipt.setdefault("host_class", host_class(connection, provider=receipt.get("hosting_provider")))
+            if now - (_stamp(receipt.get("started_at")) or now) >= ASK_AFTER:
+                receipt["deploy_link"] = "not_live"
         started = _stamp(receipt.get("started_at")) or now
         state = operation.state if operation.state in {"pending", "needs_attention"} else "pending"
         if state == "pending" and now - started >= ALERT_AFTER:
@@ -289,7 +311,8 @@ def observe(config, *, now=None) -> str:
         _settle(operation, state=state, receipt=receipt,
             next_at=now + timedelta(minutes=CHECK_MINUTES[min(checks - 1, len(CHECK_MINUTES) - 1)]))
         return "waiting"
-    receipt.update(status="live", live_at=now.isoformat(), checked_at=now.isoformat())
+    receipt.update(status="live", live_at=now.isoformat(), checked_at=now.isoformat(), deploy_link="proven",
+        deploy_link_proven_at=now.isoformat())
     _settle(operation, state="completed", receipt=receipt, next_at=now + LIVE_RECHECK)
     logger.info("website_live_status_live connection=%s operation=%s", connection.pk, operation.pk)
     return "live"
