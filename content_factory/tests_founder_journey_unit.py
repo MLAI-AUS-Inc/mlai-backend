@@ -237,7 +237,8 @@ class ContractFixtureTests(JourneyFixture, TestCase):
         make_run(self.org, status="failed", step="write_article",
                  request={"delivery_mode": "content_only", "client_request_id": key,
                           "roo_points_billing_status": "charged"},
-                 result={"failure_class": "permanent", "failure_fingerprint": "fp-terminal-1"})
+                 result={"failure_class": "permanent", "failure_fingerprint": "fp-terminal-1",
+                         "error_code": "EDITORIAL_REJECTED"})
         Ledger.objects.create(user=self.owner, delta=-12, kind="SPEND", source="CONTENT_FACTORY",
                               idempotency_key=f"content_factory:charge:{key}")
         Ledger.objects.create(user=self.owner, delta=12, kind="REFUND", source="CONTENT_FACTORY",
@@ -396,7 +397,8 @@ class ExtraCaseTests(JourneyFixture, TestCase):
     def test_a_failed_free_article_whose_entitlement_is_back_offers_it_again(self):
         request = entitled(self.org, self.owner, company=self.company.pk)
         run = make_run(self.org, status="failed", step="write_article", request=request,
-                       result={"failure_class": "permanent", "failure_occurrence_id": "occ-1"})
+                       result={"failure_class": "permanent", "failure_occurrence_id": "occ-1",
+                               "error_code": "EDITORIAL_REJECTED"})
         first_article.release_entitlement(organization=self.org, run=run, reason="failed")
         body = self.journey()
         self.assertStep(body, "first_article", None, next_kind="write_first_article")
@@ -405,7 +407,8 @@ class ExtraCaseTests(JourneyFixture, TestCase):
 
     def test_a_charged_run_whose_refund_is_pending(self):
         key = f"paid-{uuid4().hex[:8]}"
-        make_run(self.org, status="failed", request={"client_request_id": key}, result={"failure_class": "transient"})
+        make_run(self.org, status="failed", request={"client_request_id": key},
+                 result={"failure_class": "transient", "error_code": "EDITORIAL_REJECTED"})
         Ledger.objects.create(user=self.owner, delta=-12, kind="SPEND", source="CONTENT_FACTORY",
                               idempotency_key=f"content_factory:charge:{key}")
         body = self.journey()
@@ -415,7 +418,8 @@ class ExtraCaseTests(JourneyFixture, TestCase):
     def test_a_free_run_that_failed_with_attempts_exhausted_has_no_free_line(self):
         for attempt in (1, 2):
             request = entitled(self.org, self.owner, attempt=attempt, company=self.company.pk)
-            run = make_run(self.org, status="failed", request=request, result={"failure_class": "permanent"},
+            run = make_run(self.org, status="failed", request=request,
+                           result={"failure_class": "permanent", "error_code": "EDITORIAL_REJECTED"},
                            created_at=timezone.now() - timedelta(minutes=10 - attempt))
             first_article.release_entitlement(organization=self.org, run=run, reason="failed")
         body = self.journey()

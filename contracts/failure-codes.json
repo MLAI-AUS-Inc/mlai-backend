@@ -5116,6 +5116,27 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "SYNC_REJECTED",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "SYNC_REJECTED",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "The backend refused this island update. MLAI has been told."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "TEMPLATE_PROVIDER_FAILED",
       "emitter_scopes": [
         "content_factory"
@@ -6038,6 +6059,27 @@
       "refund": true,
       "retry_policy": "stop_contract",
       "user_message": "The saved operation cannot safely continue. Review its diagnostics."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "callback_contract_missing",
+      "emitter_scopes": [
+        "backend.website_authority"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "website_connection_required",
+        "failure_class": "needs_user",
+        "retryable": false
+      },
+      "owner": "backend.website_authority",
+      "refund": true,
+      "retry_policy": "retry_same_step",
+      "user_message": "A worker update arrived without its website identity. MLAI will retry it."
     },
     {
       "action_id": null,
@@ -11386,6 +11428,69 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "sdk_call_indeterminate",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "sdk_call_indeterminate",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "Setup paused because one of its steps has no saved result. MLAI has been told and will check it."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "sdk_call_receipt_conflict",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "sdk_call_receipt_conflict",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "Setup stopped at a check on its own saved progress. MLAI has been told and will check it."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "sdk_controller_conflict",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "sdk_controller_conflict",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "Setup stopped at a check on its own saved progress. MLAI has been told and will check it."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "sdk_controller_failed",
       "emitter_scopes": [
         "content_factory"
@@ -11424,6 +11529,48 @@
       "refund": true,
       "retry_policy": "retry_same_step",
       "user_message": "Our setup assistant hit one of MLAI's internal checks. We will try again shortly."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "sdk_tool_indeterminate",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "sdk_tool_indeterminate",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "Setup paused because one of its steps has no saved result. MLAI has been told and will check it."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "sdk_tool_receipt_conflict",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "sdk_tool_receipt_conflict",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "Setup stopped at a check on its own saved progress. MLAI has been told and will check it."
     },
     {
       "action_id": null,
@@ -11617,6 +11764,69 @@
     {
       "action_id": null,
       "aliases": [],
+      "code": "source_access_refused",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "source_access_refused",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "MLAI could not download your website's code. MLAI has been told and will check it."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "source_branch_missing",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "source_branch_missing",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "MLAI could not find your website's branch. MLAI has been told and will check it."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "source_download_interrupted",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "transient",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "working",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "source_download_interrupted",
+        "failure_class": "transient",
+        "retryable": true
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "retry_same_step",
+      "user_message": "Downloading your website's code was interrupted. We will try again shortly."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
       "code": "source_repin_limit_reached",
       "emitter_scopes": [
         "backend.website_authority",
@@ -11678,6 +11888,48 @@
       "refund": true,
       "retry_policy": "repair_owned_candidate",
       "user_message": "Repository scanning is unavailable."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "source_revision_unavailable",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "source_revision_unavailable",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "MLAI could not download your website's code. MLAI has been told and will check it."
+    },
+    {
+      "action_id": null,
+      "aliases": [],
+      "code": "source_too_large",
+      "emitter_scopes": [
+        "content_factory"
+      ],
+      "failure_class": "unsupported",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "stopped",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "source_too_large",
+        "failure_class": "unsupported",
+        "retryable": false
+      },
+      "owner": "content_factory",
+      "refund": true,
+      "retry_policy": "stop_contract",
+      "user_message": "Your website's code is larger than MLAI can download for website checks. MLAI has been told."
     },
     {
       "action_id": null,
@@ -12266,6 +12518,27 @@
       "refund": true,
       "retry_policy": "stop_contract",
       "user_message": "This website is disconnected. Reconnect it before continuing."
+    },
+    {
+      "action_id": "authorize_github",
+      "aliases": [],
+      "code": "website_not_connected",
+      "emitter_scopes": [
+        "backend.website_authority"
+      ],
+      "failure_class": "needs_user",
+      "fingerprint_profile": "semantic_findings_v1",
+      "founder_copy_id": "ask_authorize_github",
+      "introduced_in": 1,
+      "legacy": {
+        "code": "website_connection_required",
+        "failure_class": "needs_user",
+        "retryable": false
+      },
+      "owner": "backend.website_authority",
+      "refund": true,
+      "retry_policy": "await_owner_action",
+      "user_message": "Connect your website to continue."
     },
     {
       "action_id": null,
@@ -13100,6 +13373,7 @@
     "ask_review_draft",
     "done_copy_ready_ladder_exhausted",
     "done_copy_ready_strategy",
+    "fixing",
     "stopped",
     "working",
     "working_publishing",

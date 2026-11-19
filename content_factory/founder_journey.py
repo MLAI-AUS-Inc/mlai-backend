@@ -94,6 +94,11 @@ COPY = {
     "failed_refund_pending": ("Your articles", "We couldn't write this one. We're returning your points.",
                               "Write an article · {price} points"),
     "failed": ("Your articles", "We couldn't write this one.", "Write an article · {price} points"),
+    # B10: a generic stop (no, generic or unregistered code) is ours to fix.
+    "fixing_free": ("We're fixing this", "Your free article is still waiting for you.", "Write my first article · free"),
+    "fixing_refunded": ("We're fixing this", "Your points are back.", "Write an article · {price} points"),
+    "fixing_refund_pending": ("We're fixing this", "We're returning your points.", "Write an article · {price} points"),
+    "fixing": ("We're fixing this", "Our team has been told.", "Write an article · {price} points"),
     "describe_customer": ("Who is your typical customer?", "We'll write your first article for them.",
                           "Describe your customer"),
     "buy_points": ("This article uses {price} points. You have {balance}.", None, "Get {shortfall} more points"),
@@ -717,13 +722,17 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
             or (run.status == "cancelled" and not is_owner_cancel(run))):
         price, _balance = article_price_and_balance(organization, user)
         support = _support_code(run)
+        from .no_generic_stop import is_generic_stop
+        # B10: the P1 path (policy V2 off or outside the cohort) applies the
+        # same no-generic-stop rule as registry_policy.copy_id_for.
+        prefix, state = ("fixing", "working") if is_generic_stop(run, organization) else ("failed", None)
         if entitled_request(_request(run)) and first_article["status"] == "available":
-            decision = _decide("first_article", None, "failed_free", next_kind="write_first_article",
+            decision = _decide("first_article", state, f"{prefix}_free", next_kind="write_first_article",
                                support_code=support)
         else:
-            case = {"refunded": "failed_refunded", "refund_pending": "failed_refund_pending"}.get(
-                "none" if entitled_request(_request(run)) else _refund_case(run), "failed")
-            decision = _decide("first_article", None, case, next_kind="write_article", support_code=support,
+            case = {"refunded": f"{prefix}_refunded", "refund_pending": f"{prefix}_refund_pending"}.get(
+                "none" if entitled_request(_request(run)) else _refund_case(run), prefix)
+            decision = _decide("first_article", state, case, next_kind="write_article", support_code=support,
                                price=price)
 
     if decision is None and run is not None and run.status in DELIVERED_STATUSES:

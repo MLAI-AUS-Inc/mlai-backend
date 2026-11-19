@@ -564,6 +564,8 @@ jobs:
           content_factory.tests_website_live_status \
           content_factory.tests_setup_merge_proof \
           content_factory.tests_callback_contract_from_run \
+          content_factory.tests_connection_code_split \
+          content_factory.tests_no_generic_stop \
           content_factory.tests_website_source_carry \
           content_factory.tests_prepare_setup_cap \
           content_factory.tests_article_flags \
@@ -1630,6 +1632,7 @@ jobs:
         ARTICLES_SELF_HEAL_REPORT_ENABLED: ${{ vars.ARTICLES_SELF_HEAL_REPORT_ENABLED || '' }}
         ARTICLES_DISPATCH_RELIABILITY_ENABLED: ${{ vars.ARTICLES_DISPATCH_RELIABILITY_ENABLED || '' }}
         ARTICLES_NO_CODELESS_TERMINAL_ENABLED: ${{ vars.ARTICLES_NO_CODELESS_TERMINAL_ENABLED || '' }}
+        ARTICLES_NO_GENERIC_STOP_ENABLED: ${{ vars.ARTICLES_NO_GENERIC_STOP_ENABLED || '' }}
         ARTICLES_REGISTRY_REFUNDS_ENABLED: ${{ vars.ARTICLES_REGISTRY_REFUNDS_ENABLED || '' }}
         ARTICLES_CHANNEL_SWITCH_ENABLED: ${{ vars.ARTICLES_CHANNEL_SWITCH_ENABLED || '' }}
         ARTICLES_SOURCE_REPIN_ENABLED: ${{ vars.ARTICLES_SOURCE_REPIN_ENABLED || '' }}

@@ -24,8 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # cf-registry's bytes, checked with cmp when vendored. Merge provenance is checked remotely.
 # Registry/envelope bytes: adds the SDK and sandbox fault codes (A5) ahead of the CF pin bump.
 VENDORED_SHA256 = {
-    "contracts/failure-codes.json": "bf11e9aa3bf81e36088d2350e08c9c9abf6fb258e3671bf15d712957a9196990",
-    "contracts/failure-envelope-v1.schema.json": "5bcb909016d3f4e6e1026e35f85e7bd2ee2d786413ec9c63f2cefaef322c0056",
+    "contracts/failure-codes.json": "e7cf14a493ed195ed6dde4efc6f2f0888b8cf9f8d19f685a5149de53067e3efd",
+    "contracts/failure-envelope-v1.schema.json": "a47c75677ed18d484887800d05ac5a8aafa2cf3d37da69b95981a14df3bab43f",
     "contracts/setup-delivery-v1.schema.json": "6a604e610716ba45c6c1e8491daae94cc51ece99e8e3d6c693ac378674581069",
     "content_factory/failure_registry_pre_p2.json": "f8ca80a13c17497fc2dab0f2bfc2cb3f8c08840c09737e6082d52022ebbd5cc2",
     "content_factory/tests/fixtures/p2/failure-codes.pre-p2.json": "5dc161ae1f02212f3898ec0a2bc4bee347ccbc0cf8c26cf640ced545dd4d8b3e",
@@ -348,15 +348,17 @@ class UnknownCodeAndCopyIdTests(TestCase):
     def test_terminal_items_stop_unless_the_engine_will_act(self):
         from .self_heal_testing import self_heal_receipt
         org = make_p2_org().organization
-        self.assertEqual(registry_policy.copy_id_for("GITHUB_TEMPORARILY_UNAVAILABLE", organization=org,
+        # B10: a registered code stops; an unregistered one is ours to fix (below).
+        self.assertEqual(registry_policy.copy_id_for("EDITORIAL_REJECTED", organization=org,
                                                      terminal=True, self_heal=None), "stopped")
         acting = self_heal_receipt(next_at="2026-11-01T00:00:00+00:00")
         self.assertEqual(registry_policy.copy_id_for("NOT_A_CODE", organization=org, terminal=True, self_heal=acting),
                          "working")
         for receipt in (self_heal_receipt(next_at=None), self_heal_receipt(next_at="2026-11-01T00:00:00+00:00", capped=True),
                         self_heal_receipt(mode="observe", next_at="2026-11-01T00:00:00+00:00")):
+            # B10: an unregistered terminal code is ours to fix, not a plain stop.
             self.assertEqual(registry_policy.copy_id_for("NOT_A_CODE", organization=org, terminal=True,
-                                                         self_heal=receipt), "stopped")
+                                                         self_heal=receipt), "fixing")
 
     @override_settings(**ALL_FLAGS_ON)
     def test_needs_user_codes_give_their_ask(self):

@@ -3039,7 +3039,8 @@ def _handle_status_failure(job_id: str, result: dict):
         return
 
     error_message = result.get('error') or result.get('error_message') or 'Unknown error'
-    error_code = str(result.get("error_code") or (result.get("failure") or {}).get("code") or "UNCLASSIFIED")
+    from content_factory.no_generic_stop import uncoded_failure_code
+    error_code = str(result.get("error_code") or (result.get("failure") or {}).get("code") or uncoded_failure_code())
     job.status = 'error'
     job.error_message = f"[{error_code}] {error_message}"
     save_job_facts(job, update_fields=['status', 'error_message', 'updated_at'])
