@@ -51,9 +51,10 @@ class StartupMcpReadabilityTests(SimpleTestCase):
                 snapshot=snapshot, structured_memo=old),
             refresh_from_db=MagicMock(), title="title", save=MagicMock(), revisions=MagicMock())
         draft.revisions.filter.return_value.order_by.return_value.first.return_value = None
+        # The founder's saved introduction is kept; an AI cannot rewrite or clear it.
         for narrative, expected in (({"summary": "A busy month."}, "We help clinics."),
-                ({"summary": "A busy month.", "startupOverview": "We help hospitals."}, "We help hospitals."),
-                ({"summary": "A busy month.", "startupOverview": ""}, "")):
+                ({"summary": "A busy month.", "startupOverview": "We help hospitals."}, "We help clinics."),
+                ({"summary": "A busy month.", "startupOverview": ""}, "We help clinics.")):
             with self.subTest(narrative=narrative):
                 _, saved, captured = helper.save_with_mocks(draft, helper.arguments(expectedRevision=5, narrative=narrative))
                 memo = saved.call_args.args[1]
@@ -65,3 +66,15 @@ class StartupMcpReadabilityTests(SimpleTestCase):
                 self.assertIs(saved.call_args.kwargs["snapshot"], snapshot)
                 captured.assert_not_called()
         self.assertEqual(old, {"startupOverview": "We help clinics.", "financial_snapshot": {"income": 123}})
+
+    def test_ai_overview_only_fills_a_missing_introduction(self):
+        helper = fixtures.NarrativeTests()
+        old = {"startupOverview": ""}
+        draft = Obj(pk=10, month=date(2026, 9, 1), status="draft", current_revision_id=5,
+            current_revision=Obj(pk=5, content_hash="revision", validation={},
+                snapshot=Obj(payload={"metrics": []}), structured_memo=old),
+            refresh_from_db=MagicMock(), title="title", save=MagicMock(), revisions=MagicMock())
+        draft.revisions.filter.return_value.order_by.return_value.first.return_value = None
+        _, saved, _ = helper.save_with_mocks(draft, helper.arguments(expectedRevision=5,
+            narrative={"summary": "A busy month.", "startupOverview": "We help hospitals."}))
+        self.assertEqual(saved.call_args.args[1]["startupOverview"], "We help hospitals.")

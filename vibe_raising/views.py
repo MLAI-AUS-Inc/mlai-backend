@@ -1034,6 +1034,10 @@ def _build_manual_structured_memo(payload):
     if "startupOverview" in payload:
         memo["startupOverview"] = str(payload["startupOverview"]).strip()
 
+    if "updateTitle" in payload:
+        # Blank clears a custom title back to the numbered monthly default.
+        memo["custom_title"] = " ".join(str(payload["updateTitle"] or "").split())
+
     display_config = payload.get("displayConfig")
     if display_config is not None:
         memo["display_config"] = display_config

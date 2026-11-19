@@ -23,7 +23,7 @@ from startup_updates.monthly_groups import requested_month
 from vibe_raising import views as founder
 from workflow_runs.models import ContentFactoryRun
 from .presentation import update_payload
-from .publication import approved_updates
+from .publication import approved_updates, community_feed_order
 from .lifecycle import delete_update, pulse_source_visible, source_capabilities, validate_generation_sources
 from .source_preferences import source_preferences
 from vibe_raising.financial_refresh_views import FinancialRefreshView, FinancialRefreshStatusView
@@ -178,7 +178,7 @@ class CommunityView(ChatStartupAccess, APIView):
         except (TypeError, ValueError):
             raise ValidationError({"offset": "Use a nonnegative integer."})
         # Approval must still refer to the same hash and audience as the publication.
-        rows = approved_updates("community", "public").order_by("-published_at", "-id")
+        rows = community_feed_order(approved_updates("community", "public"))
         page = list(rows[offset:offset + 51])
         return Response({"updates": [update_payload(row, published=True, community=True) for row in page[:50]],
             "nextOffset": offset + 50 if len(page) > 50 else None})
