@@ -25,13 +25,14 @@ ROOT = Path(__file__).resolve().parents[1]
 # Registry/envelope bytes: adds the SDK and sandbox fault codes (A5) and puts the
 # editorial currency codes on existing policies (B9), adds
 # the B10 codes and RUN_BUDGET_NOT_CONFIGURED (B14),
-# and the research rows (B16 research_scope_invalid, B23 add_seed_topics) ahead of
+# the research rows (B16 research_scope_invalid, B23 add_seed_topics), and
+# PROFILE_DRAFT_UNAVAILABLE back on its pre-P2 stop in both views (E12) ahead of
 # the CF pin bump.
 VENDORED_SHA256 = {
-    "contracts/failure-codes.json": "692feabbf329ed3e855b370ed324c3a260cccb13e3706d0174e7873280e32aeb",
-    "contracts/failure-envelope-v1.schema.json": "d351a8df6cb44516ee38052ae3e1c1ea542c8add89f3a6b05368979941fbed22",
+    "contracts/failure-codes.json": "5ee1ef81d22892ff565f91f3ef004348d285eb27eed470f1cda34debffe3ec65",
+    "contracts/failure-envelope-v1.schema.json": "ccea15565eae9506b5f9d22f7af258edc4f1c073263b56805fbe27fef2cec97b",
     "contracts/setup-delivery-v1.schema.json": "6a604e610716ba45c6c1e8491daae94cc51ece99e8e3d6c693ac378674581069",
-    "content_factory/failure_registry_pre_p2.json": "05472dcc9d8550c419ab1737944ab24f783c07fc51cf26c471542942163c204b",
+    "content_factory/failure_registry_pre_p2.json": "b13710a9e61383e259226187c6a8b1a23af1b922d85d2369b830eab599b1934e",
     "content_factory/tests/fixtures/p2/failure-codes.pre-p2.json": "5dc161ae1f02212f3898ec0a2bc4bee347ccbc0cf8c26cf640ced545dd4d8b3e",
 }
 FIXTURE_PATH = ROOT / "content_factory/tests/fixtures/p2/failure-codes.pre-p2.json"

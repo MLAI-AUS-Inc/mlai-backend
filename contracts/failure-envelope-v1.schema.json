@@ -493,6 +493,7 @@
               "PREREQUISITE_MISSING",
               "PREVIEW_WRITE_CREDENTIAL_UNAVAILABLE",
               "PREVIEW_WRITE_SCOPE_REQUIRED",
+              "PROFILE_DRAFT_UNAVAILABLE",
               "PUBLIC_EVIDENCE_UNAVAILABLE",
               "PUBLISH_PRECONDITION",
               "REPOSITORY_BRANCH_UNAVAILABLE",
@@ -984,50 +985,6 @@
               },
               "retryable": {
                 "const": false
-              }
-            }
-          }
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "code": {
-            "enum": [
-              "PROFILE_DRAFT_UNAVAILABLE"
-            ]
-          }
-        },
-        "required": [
-          "code"
-        ]
-      },
-      "then": {
-        "anyOf": [
-          {
-            "properties": {
-              "action": {
-                "type": "null"
-              },
-              "failure_class": {
-                "const": "unsupported"
-              },
-              "retryable": {
-                "const": false
-              }
-            }
-          },
-          {
-            "properties": {
-              "action": {
-                "type": "null"
-              },
-              "failure_class": {
-                "const": "transient"
-              },
-              "retryable": {
-                "const": true
               }
             }
           }
