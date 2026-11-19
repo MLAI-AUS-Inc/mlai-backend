@@ -39,6 +39,9 @@ LEGACY_SETTINGS = (("one-field flag off", WITHOUT_ONE_FIELD), ("V2 off", WITHOUT
                    ("new startups legacy", NOT_LAUNCHED))
 NO_WEBSITE = {"createNew": True, "firstProfile": True, "name": "Ledger Mates",
               "shortDescription": "Bookkeeping for tradies"}
+# Plan E5: a second startup with the same name in one profile is offered
+# "Open it" (409 already_added) unless the founder says it is a different one.
+NO_WEBSITE_AGAIN = {**NO_WEBSITE, "notDuplicate": True}
 
 
 def _user(email="one-field@example.test", **extra):
@@ -82,7 +85,7 @@ class OneFieldCreateTests(_Base, TestCase):
 
     def test_a_different_key_creates_a_second_company(self):
         self.assertEqual(self.post(NO_WEBSITE, key="press-1").status_code, 201)
-        second = self.post(NO_WEBSITE, key="press-2")
+        second = self.post(NO_WEBSITE_AGAIN, key="press-2")
         self.assertEqual(second.status_code, 201, second.data)
         self.assertEqual(VibeRaisingCompany.objects.count(), 2)
 
@@ -95,7 +98,7 @@ class OneFieldCreateTests(_Base, TestCase):
                                 "assignedAt": (timezone.now() - timedelta(hours=25)).isoformat()}
         config.pillar_strategy = strategy
         config.save()
-        again = self.post(NO_WEBSITE, key="press-1")
+        again = self.post(NO_WEBSITE_AGAIN, key="press-1")
         self.assertEqual(again.status_code, 201, again.data)
         self.assertNotEqual(again.data["id"], first.data["id"])
         self.assertEqual(VibeRaisingCompany.objects.count(), 2)
@@ -215,8 +218,11 @@ class OneFieldCreateTests(_Base, TestCase):
 
     def test_without_a_key_each_press_is_a_create(self):
         self.assertEqual(self.post(NO_WEBSITE).status_code, 201)
-        self.assertEqual(self.post(NO_WEBSITE).status_code, 201)
+        self.assertEqual(self.post(NO_WEBSITE_AGAIN).status_code, 201)
         self.assertEqual(VibeRaisingCompany.objects.count(), 2)
+        # Without the founder's word, the same name again offers the first one.
+        again = self.post(NO_WEBSITE)
+        self.assertEqual((again.status_code, again.data["reason"]), (409, "already_added"))
 
 
 class LegacyCreateTests(_Base, TestCase):

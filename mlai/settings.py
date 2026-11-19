@@ -561,6 +561,9 @@ REST_FRAMEWORK = {
         'my_startup_read': os.getenv('MY_STARTUP_READ_RATE', '120/minute'),
         'my_startup_poll': os.getenv('MY_STARTUP_POLL_RATE', '120/minute'),
         'my_startup_write': os.getenv('MY_STARTUP_WRITE_RATE', '30/minute'),
+        # Plan E1: each uncached website preflight fetches a homepage and may
+        # try a few close spellings, so it has its own per-account budget.
+        'founder_website_preflight': os.getenv('FOUNDER_WEBSITE_PREFLIGHT_RATE', '20/minute'),
         'community_chat_upcoming_events': os.getenv('COMMUNITY_CHAT_UPCOMING_EVENTS_RATE', '60/minute'),
         'community_chat_challenge': os.getenv('COMMUNITY_CHAT_CHALLENGE_RATE', '20/minute'),
         'community_chat_invite': os.getenv('COMMUNITY_CHAT_INVITE_RATE', '10/minute'),
@@ -2783,6 +2786,12 @@ ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP = max(0, int(os.getenv("ARTICLES_SOURCE_SYNC
 # as published and never consumes the free article. Pairs with Content
 # Factory's CONTENT_FACTORY_SETUP_LADDER.
 ARTICLES_SETUP_LADDER_ENABLED = _env_is_true("ARTICLES_SETUP_LADDER_ENABLED", False)
+# Plan E1: the website preflight (POST founder-tools/website-preflight/) says
+# before a startup exists whether its address resolves, what kind of host it
+# is, what it will be called and whether the founder already added it; the
+# My Startup one-field create re-checks it. Staged rollout, code default off:
+# off, the endpoint answers 404 and clients keep today's website step.
+MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED", False)
 
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort
