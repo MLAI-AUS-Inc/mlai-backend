@@ -192,3 +192,66 @@ class ControlBudgetTests(SimpleTestCase):
         from . import run_execution_control as control
         value = control.initial_control_budget("article_system_setup")
         self.assertEqual((value["max_model_usd"], value["max_model_tokens"]), ("2.50", 400000))
+
+
+class StaffFixingSweepTests(SimpleTestCase):
+    """The sweep's per-row loop, with the model manager and transactions faked (no database)."""
+
+    def test_one_failing_row_does_not_stop_the_others(self):
+        from contextlib import nullcontext
+        from unittest.mock import MagicMock
+        first, second = _operation(), _operation()
+        rows = {1: first, 2: second}
+        updates = []
+
+        def filter_rows(**kwargs):
+            if "pk" in kwargs:
+                return SimpleNamespace(update=lambda **fields: updates.append((kwargs["pk"], fields)))
+            chain = MagicMock()
+            chain.order_by.return_value.values_list.return_value = [1, 2]
+            return chain
+
+        manager = MagicMock()
+        manager.filter.side_effect = filter_rows
+        manager.select_for_update.return_value.select_related.return_value.filter.side_effect = (
+            lambda pk: SimpleNamespace(first=lambda: rows[pk]))
+        first.pk, second.pk = 1, 2
+        with patch("content_factory.website_models.WebsiteConnectionOperation", SimpleNamespace(objects=manager)), \
+                patch.object(staff.transaction, "atomic", lambda: nullcontext()), \
+                patch.object(staff, "active", lambda op: True), \
+                patch.object(staff, "escalate", side_effect=[RuntimeError("notice outbox down"), ["owner_due"]]), \
+                self.assertLogs("content_factory.website_staff_fixing", level="ERROR"):
+            counts = staff.run_staff_fixing_sweep(now=MONDAY)
+        self.assertEqual((counts["failed"], counts["checked"], counts["owner_due"]), (1, 2, 1))
+        self.assertEqual([pk for pk, _ in updates], [2])
+
+
+class StaffLeadTests(SimpleTestCase):
+    """A staff "can't be done yet" lead row is not a not-on-GitHub exit."""
+
+    def _record(self, call):
+        from contextlib import nullcontext
+        from founder_tools import website_leads as leads
+        emit = Mock()
+        user = SimpleNamespace(pk=5, date_joined=None)
+        with patch.object(leads, "_contact_for", lambda user, now: None), \
+                patch.object(leads.transaction, "atomic", lambda: nullcontext()), \
+                patch.object(leads.transaction, "on_commit", lambda callback: callback()), \
+                patch("django.core.cache.cache.add", lambda *args, **kwargs: True), \
+                patch("content_factory.founder_funnel.emit_event", emit), \
+                patch("django.contrib.auth.get_user_model") as users:
+            users.return_value.objects.filter.return_value.first.return_value = user
+            result = call(leads, user)
+        return result, emit
+
+    def test_staff_lead_records_its_own_source_without_the_funnel_event(self):
+        (public, created, stored), emit = self._record(lambda leads, user: leads.record_staff_lead(
+            SimpleNamespace(pk=7, billing_user_id=5), reason=staff.LEAD_REASON, cause="not_fixed_in_time",
+            domain="example.com", now=MONDAY))
+        self.assertEqual((public["reason"], public["hostClass"], created), (staff.LEAD_REASON, "not_fixed_in_time", True))
+        emit.assert_not_called()
+
+    def test_not_on_github_lead_still_emits(self):
+        _, emit = self._record(lambda leads, user: leads.record_lead(
+            user, {"reason": "not_on_github", "domain": "example.com", "hostClass": "unknown", "notify": False}, now=MONDAY))
+        emit.assert_called_once()

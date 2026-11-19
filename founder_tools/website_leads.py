@@ -99,12 +99,16 @@ def _contact_for(user, *, now):
     return contact
 
 
-def record_lead(user, lead: dict, *, now=None):
-    """Upsert one lead for ``user``. Returns (public lead, created, stored)."""
+def record_lead(user, lead: dict, *, now=None, source="my_startup.website_step"):
+    """Upsert one lead for ``user``. Returns (public lead, created, stored).
+
+    Only a not-on-GitHub reason (``REASONS``) emits the funnel's
+    ``not_on_github`` event; other lead kinds share the row, not the event.
+    """
     now = now or timezone.now()
     key = f"{lead['reason']}:{lead['domain']}"
     entry = {"version": 1, "userId": user.pk, "reason": lead["reason"], "domain": lead["domain"] or None,
-             "hostClass": lead["hostClass"], "source": "my_startup.website_step"}
+             "hostClass": lead["hostClass"], "source": source}
     with transaction.atomic():
         contact = _contact_for(user, now=now)
         if contact is None:
@@ -136,7 +140,7 @@ def record_lead(user, lead: dict, *, now=None):
                 contact.user_id = user.pk
                 fields.append("user")
             contact.save(update_fields=fields)
-        if created:
+        if created and lead["reason"] in REASONS:
             from content_factory.founder_funnel import emit_event
             at, signed_up = now, getattr(user, "date_joined", None)
             transaction.on_commit(lambda: _emit(emit_event, user.pk, at, signed_up))
@@ -161,7 +165,7 @@ def record_staff_lead(organization, *, reason, cause, domain="", now=None):
         return None
     host_class = cause if HOST_CLASS.fullmatch(str(cause or "")) else "unknown"
     return record_lead(user, {"reason": reason, "domain": normalise_lead_domain(domain), "hostClass": host_class,
-                              "notify": True}, now=now)
+                              "notify": True}, now=now, source="staff_fixing.cant_be_done_yet")
 
 
 def _emit(emit_event, user_id, at, signed_up):

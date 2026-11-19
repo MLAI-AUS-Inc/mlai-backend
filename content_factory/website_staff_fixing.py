@@ -255,19 +255,26 @@ def run_staff_fixing_sweep(now=None, limit=None) -> dict:
     candidates = list(WebsiteConnectionOperation.objects.filter(action="prepare", state="needs_attention",
         receipt__status=STATUS).order_by("updated_at").values_list("pk", flat=True)[:limit])
     counts = {"checked": 0, "owner_due": 0, "founder_update": 0, "day_7_exit": 0}
+    counts["failed"] = 0
     for pk in candidates:
-        with transaction.atomic():
-            op = WebsiteConnectionOperation.objects.select_for_update().select_related(
-                "connection", "connection__organization").filter(pk=pk).first()
-            if op is None or not active(op):
-                continue
-            counts["checked"] += 1
-            applied = escalate(op, now=now)
-            if applied:
-                WebsiteConnectionOperation.objects.filter(pk=op.pk).update(
-                    state=op.state, receipt=op.receipt, next_attempt_at=op.next_attempt_at, updated_at=now)
-            for name in applied:
-                counts[name] += 1
+        try:
+            with transaction.atomic():
+                op = WebsiteConnectionOperation.objects.select_for_update().select_related(
+                    "connection", "connection__organization").filter(pk=pk).first()
+                if op is None or not active(op):
+                    continue
+                counts["checked"] += 1
+                applied = escalate(op, now=now)
+                if applied:
+                    WebsiteConnectionOperation.objects.filter(pk=op.pk).update(
+                        state=op.state, receipt=op.receipt, next_attempt_at=op.next_attempt_at, updated_at=now)
+        except Exception:  # noqa: BLE001 - one bad row must not hold every other fix past its bounds
+            # The row's changes roll back; the next sweep applies its bounds again.
+            counts["failed"] += 1
+            logger.error("staff_fixing_sweep_row_failed operation=%s", pk, exc_info=True)
+            continue
+        for name in applied:
+            counts[name] += 1
     return counts
 
 
