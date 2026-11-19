@@ -1127,7 +1127,8 @@ class WebsiteServiceBoundaryTests(WebsiteDatabaseFixture, TestCase):
         from .models import ContentFactoryJob
         from .website_connections import dispatch_contract
         job = ContentFactoryJob.objects.create(job_id='saved-job', domain=self.org.domain, status='queued', request_meta=self.binding)
-        transition_connection(self.config, action='pause', expected=self.binding)
+        # A pause keeps the generation (B20); a reset starts a new one.
+        transition_connection(self.config, action='reset', expected=self.binding)
         with self.assertRaises(WebsiteAuthorityError):
             dispatch_contract(self.org.domain, {}, source_run_id=job.job_id)
 
@@ -1343,7 +1344,7 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
         self.assertTrue(self.website.capabilities['publishingReady'])
 
     @patch('content_factory.website_connections.verify_repository_access')
-    def test_reconnecting_a_paused_website_still_starts_a_new_generation(self, verify):
+    def test_resuming_a_paused_website_keeps_its_generation(self, verify):
         verify.return_value = {'repository_id': 123, 'github_repo': 'example/site', 'installation_id': '45', 'branch': 'main'}
         transition_connection(self.config, action='pause', expected=self.binding)
         self.website.refresh_from_db()
@@ -1351,7 +1352,8 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
         bind_website(self.config, user=None, repo='example/site', app_root=self.website.app_root, branch=self.website.branch,
             site_url=self.website.site_url, reconnect=True, expected=contract_for(self.website))
         self.website.refresh_from_db()
-        self.assertEqual((self.website.state, self.website.generation), ('connected', paused_generation + 1))
+        # B20: same repository, installation and owner resume in place.
+        self.assertEqual((self.website.state, self.website.generation), ('connected', paused_generation))
 
     @patch('content_factory.website_connections.verify_repository_access')
     def test_explicit_default_branch_selection_rebinds_custom_branch(self, verify):

@@ -51,7 +51,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import DatabaseError, OperationalError, connection, transaction
-from django.db.models import Count, Max, Prefetch
+from django.db.models import Count, Max, Prefetch, Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils.decorators import method_decorator
@@ -3444,10 +3444,17 @@ def _article_content_only_preview_not_available(run) -> bool:
     )
 
 
+def _system_stop_restartable(run):
+    """B24: a run a connection or operation transition stopped may be restarted; a founder's own cancel may not."""
+    from content_factory.system_stopped_runs import restartable
+    return restartable(run)
+
+
 def _article_restart_available(run):
     if run.workflow not in RESTARTABLE_ARTICLE_WORKFLOWS:
         return False
-    if run.status not in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.DENIED} and not _article_content_only_preview_not_available(run):
+    if (run.status not in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.DENIED}
+            and not _article_content_only_preview_not_available(run) and not _system_stop_restartable(run)):
         return False
     from content_factory.article_publication_evidence import refund_owns_charge
     if refund_owns_charge(run):
@@ -3456,8 +3463,18 @@ def _article_restart_available(run):
     return bool(title or keyword)
 
 
+def _system_stop_notice(run):
+    from content_factory.system_stopped_runs import notice_for
+    return notice_for(run)
+
+
 def _serialize_article_draft(run, *, written_keys):
-    if run.workflow not in ARTICLE_WORKFLOWS or run.status == ContentFactoryRunStatus.CANCELLED:
+    if run.workflow not in ARTICLE_WORKFLOWS:
+        return None
+    notice = _system_stop_notice(run)
+    if run.status == ContentFactoryRunStatus.CANCELLED and notice is None:
+        # A system-stopped run keeps its card with one notice (B24); every
+        # other cancelled run stays hidden.
         return None
     if hidden_by_draft_delete(run.status, run.result):
         # A finished attempt kept when the owner deleted its draft card.
@@ -3489,13 +3506,15 @@ def _serialize_article_draft(run, *, written_keys):
         "restartAvailable": _article_restart_available(run),
         "updatedAt": run.updated_at.isoformat() if run.updated_at else None,
         "createdAt": run.created_at.isoformat() if run.created_at else None,
+        **({"notice": notice} if notice else {}),
     }
 
 
 def _article_draft_run_window(organization, *, scan_limit, loaded_runs=None):
     """Reuse only identical request-owned versions, preserving the whole draft window."""
+    from content_factory.system_stopped_runs import FOLLOWUP_KEY
     rows = ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS).exclude(
-        status=ContentFactoryRunStatus.CANCELLED).order_by("-updated_at")
+        Q(status=ContentFactoryRunStatus.CANCELLED) & ~Q(**{f"result__{FOLLOWUP_KEY}__decision": "notice"})).order_by("-updated_at")
     def full(query):
         # These cards need result/request/acceptance fields, including legacy
         # nested packages; do not replace them with an incomplete JSON allowlist.
@@ -3507,7 +3526,7 @@ def _article_draft_run_window(organization, *, scan_limit, loaded_runs=None):
     versions = dict(identities)
     available = {run.pk: run for run in loaded_runs if getattr(run, "pk", None) in versions
         and run.updated_at == versions[run.pk] and run.domain == organization.domain
-        and run.workflow in ARTICLE_WORKFLOWS and run.status != ContentFactoryRunStatus.CANCELLED}
+        and run.workflow in ARTICLE_WORKFLOWS and (run.status != ContentFactoryRunStatus.CANCELLED or _system_stop_notice(run))}
     missing = [identifier for identifier, _ in identities if identifier not in available]
     owned = full(rows.filter(pk__in=missing)) if missing else []
     available.update({run.pk: run for run in owned})
@@ -8400,7 +8419,8 @@ def _restart_article_run(*, run, context):
             {"detail": "Only article generation drafts can be restarted from the marketing dashboard."},
             status=status.HTTP_409_CONFLICT,
         )
-    if run.status not in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.DENIED} and not _article_content_only_preview_not_available(run):
+    if (run.status not in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.DENIED}
+            and not _article_content_only_preview_not_available(run) and not _system_stop_restartable(run)):
         return None, Response(
             {"detail": "Only failed, blocked, or exact-preview-unavailable article drafts can be restarted."},
             status=status.HTTP_409_CONFLICT,

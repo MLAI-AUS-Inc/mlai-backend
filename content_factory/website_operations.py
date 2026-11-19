@@ -6,6 +6,7 @@ from uuid import UUID
 from django.db import transaction
 from django.utils import timezone
 
+from .system_stopped_runs import raise_site
 from .website_contract import WebsiteAuthorityError, connection_contract, evidence_digest
 from .website_models import WebsiteConnectionOperation
 
@@ -185,7 +186,9 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
             review_replay = processed_setup_review_replay(payload, child_id=run_id)
         publish_continuation = _approved_publish_child_continuation(connection, op, run)
         if not review_replay and not publish_continuation and not same_failure and ((incoming_status and incoming_status != op.state) or (event and event not in terminal_events[op.state])):
-            raise WebsiteAuthorityError("website_operation_terminal", "This operation is terminal. Start a new reviewed attempt.")
+            # B24: a stale-operation protocol fault; see system_stopped_runs.TERMINAL_RAISE_SITES.
+            raise raise_site(WebsiteAuthorityError("website_operation_terminal", "This operation is terminal. Start a new reviewed attempt."),
+                "website_operations.validate_operation")
     if cancellation_receipt:
         if (op.action != "workflow" or op.state not in {"pending", "running", "failed", "blocked", "cancelled"}
                 or op.generation != connection.generation or str(payload.get("connection_generation")) != str(connection.generation)
@@ -404,10 +407,12 @@ def cancel_operation(config, *, data, idempotency_key):
         if attempt != op.payload.get("attempt", 1) or str(data.get("deletion_epoch", 0)) != str(deletion_epoch(connection)):
             raise WebsiteAuthorityError("website_operation_changed", "Refresh this operation before cancelling it.")
         if op.state in {"completed", "failed", "denied", "deleted"} or (op.action == "prepare" and op.state not in {"pending", "running", "needs_user", "needs_attention", "cancelled"}):
-            raise WebsiteAuthorityError("website_operation_terminal", "This operation has finished. Review its recorded effects or prepare a removal proposal.")
+            raise raise_site(WebsiteAuthorityError("website_operation_terminal", "This operation has finished. Review its recorded effects or prepare a removal proposal."),
+                "website_operations.cancel_operation_finished")
         run = ContentFactoryRun.objects.filter(run_id=op.payload.get("run_id"), organization=connection.organization).first()
         if op.action != "prepare" and run and workflow_operation_state(run) in {"completed", "failed", "denied", "blocked"}:
-            raise WebsiteAuthorityError("website_operation_terminal", "The worker has finished this operation. Review its recorded effects.")
+            raise raise_site(WebsiteAuthorityError("website_operation_terminal", "The worker has finished this operation. Review its recorded effects."),
+                "website_operations.cancel_operation_worker_finished")
         effects = list(connection.repository_mutations.filter(run_id=op.payload.get("run_id", "")).values("pr_url", "branch", "head_sha", "status"))
         op.state = "cancelled"
         op.next_attempt_at = None
@@ -539,7 +544,8 @@ def advance_workflow_attempt(run, *, preserve_run_clock=False):
                 fields = {key: run.run_request[key] for key in OPERATION_FIELDS}
                 extend_owner_operation_contract(fields)
                 return fields
-            raise WebsiteAuthorityError("website_operation_terminal", "Completed website work cannot be resumed.")
+            raise raise_site(WebsiteAuthorityError("website_operation_terminal", "Completed website work cannot be resumed."),
+                "website_operations.resume_completed")
         if op.state not in {"failed", "blocked", "running", "pending"}:
             raise WebsiteAuthorityError("website_operation_cancelled", "This operation cannot be resumed.")
         previous_attempt = int(op.payload.get("attempt", 1))

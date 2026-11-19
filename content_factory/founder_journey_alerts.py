@@ -107,6 +107,8 @@ P2_REASON_LABELS = {
     "merge_rejected_twice": "GitHub rejected an MLAI merge twice",
     "join_request_unanswered": "A team join request has waited 72 hours",
     "founder_stuck": "A founder is stuck",
+    # B22: website_connection_invariants, one per broken connection.
+    "connection_invariant": "A website connection is in a state that should never happen",
 }
 P2_ALERT_REASONS = frozenset(P2_REASON_LABELS)
 ALERT_REASONS = ALERT_REASONS | P2_ALERT_REASONS

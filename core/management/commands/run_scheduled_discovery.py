@@ -12,6 +12,8 @@ from core.slack_founder_link_retention import (
 from content_analytics.services.report_scheduler import run_daily_article_report_scheduler
 from content_factory.founder_journey_alerts import run_founder_journey_alert_sweep
 from content_factory.founder_stuck_alerts import run_founder_stuck_alert_sweep
+from content_factory.system_stopped_runs import run_system_stopped_run_sweep
+from content_factory.website_connection_invariants import run_connection_invariant_sweep
 from content_factory.founder_journey_sweeps import scheduled_founder_journey_sweeps
 from content_factory.founder_website_checks import scheduled_founder_website_checks
 from content_factory.self_heal_sweeps import scheduled_self_heal_sweeps
@@ -138,6 +140,15 @@ class Command(BaseCommand):
             # with no next action. On unless ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED
             # is false; at most one bounded pass every 10 minutes.
             ("founder_stuck_alerts", run_founder_stuck_alert_sweep),
+            # B22: one staff alert per website connection in a state that
+            # should never happen (Ready with a scan blocker, an old open
+            # operation on a Ready site, ...). Local reads only, once an hour;
+            # honours ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED.
+            ("connection_invariants", run_connection_invariant_sweep),
+            # B24: an article run a connection or operation transition stopped
+            # is restarted once (connected, consent unchanged) or keeps its
+            # draft card with one Restart notice. A founder's cancel gives nothing.
+            ("system_stopped_runs", run_system_stopped_run_sweep),
             # P1 founder-journey sweeps (first profile, draft-ready outbox).
             # Runs only while MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED is on;
             # each sweep checks its own flag and never raises.
