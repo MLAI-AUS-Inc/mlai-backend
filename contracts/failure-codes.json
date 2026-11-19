@@ -3734,9 +3734,9 @@
       "emitter_scopes": [
         "content_factory"
       ],
-      "failure_class": "transient",
+      "failure_class": "unsupported",
       "fingerprint_profile": "semantic_findings_v1",
-      "founder_copy_id": "working",
+      "founder_copy_id": "stopped",
       "introduced_in": 1,
       "legacy": {
         "code": "PROFILE_DRAFT_UNAVAILABLE",
@@ -3745,7 +3745,7 @@
       },
       "owner": "content_factory",
       "refund": true,
-      "retry_policy": "retry_same_step",
+      "retry_policy": "stop_contract",
       "user_message": "The saved operation cannot safely continue. Review its diagnostics."
     },
     {

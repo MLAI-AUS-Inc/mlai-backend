@@ -107,12 +107,6 @@
     "retry_policy": "await_owner_action",
     "retryable": false
   },
-  "PROFILE_DRAFT_UNAVAILABLE": {
-    "action_id": null,
-    "failure_class": "unsupported",
-    "retry_policy": "stop_contract",
-    "retryable": false
-  },
   "PUBLISH_TARGET_ACTION_REQUIRED": {
     "action_id": "review_setup",
     "failure_class": "needs_user",
