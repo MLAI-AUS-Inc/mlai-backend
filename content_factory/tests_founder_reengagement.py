@@ -7,7 +7,8 @@ go-ahead and is still a dry run with it.
 """
 import json
 import tempfile
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from io import StringIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -18,8 +19,13 @@ from django.core.management import CommandError, call_command
 from django.test import TestCase, override_settings
 
 from crm.models import Contact
-from founder_tools.models import StartupMembership, VibeRaisingCompany, VibeRaisingProfile
+from founder_tools.models import (
+    StartupMembership,
+    VibeRaisingCompany,
+    VibeRaisingProfile,
+)
 from organizations.models import Organization
+from system_email.models import SystemEmailSuppression
 
 from . import founder_journey_cohort as cohorts
 from . import founder_reengagement as reengagement
@@ -206,6 +212,46 @@ class ReengagementReportTests(TestCase):
         self.assertEqual(rows[self.orgs["railway"].pk]["contactBlock"], "undeliverable")
         self.assertEqual(rows[self.orgs["unisub"].pk]["contactBlock"], "opted_out")
 
+    def test_suppression_list_blocks_in_any_case(self):
+        SystemEmailSuppression.objects.create(email="Bo@Example.test", reason="complaint")
+        SystemEmailSuppression.objects.create(email="ED@example.test", reason="hard_bounce")
+        SystemEmailSuppression.objects.create(email="cy@example.test", reason="complaint")
+        SystemEmailSuppression.objects.create(email="hal@example.test", reason="hard_bounce", cleared_at=NOW)
+        rows = self.rows(self.report())
+        self.assertEqual(rows[self.orgs["typo"].pk]["contactBlock"], "opted_out")
+        self.assertEqual(rows[self.orgs["railway"].pk]["contactBlock"], "undeliverable")
+        self.assertEqual(rows[self.orgs["lovable"].pk]["contactBlock"], "opted_out")
+        self.assertIsNone(rows[self.orgs["othersub"].pk]["contactBlock"])  # a cleared suppression no longer blocks
+        recipients = {draft["to"] for draft in reengagement.render_drafts(self.report())["drafts"]}
+        self.assertFalse(recipients & {"bo@example.test", "ed@example.test", "cy@example.test"})
+
+    def test_unreadable_ledger_never_resends(self):
+        ledger = {str(self.orgs["real"].pk): {"first": (NOW - timedelta(days=9)).isoformat(), "follow_up": "yes"},
+                  str(self.orgs["railway"].pk): {"first": "last tuesday"}}
+        rows = self.rows(self.report(ledger=ledger))
+        self.assertEqual(rows[self.orgs["real"].pk]["contact"]["stage"], "stop")
+        self.assertEqual(rows[self.orgs["railway"].pk]["contact"]["stage"], "stop")
+
+    def test_cap_is_per_person_across_startups_and_email_keys(self):
+        # The first email went out recorded under the owner's second startup.
+        ledger = {str(self.orgs["dup"].pk): {"first": (NOW - timedelta(days=2)).isoformat()},
+                  "Kai@Example.test": {"first": (NOW - timedelta(days=10)).isoformat()},
+                  "999999": {"first": (NOW - timedelta(days=10)).isoformat()}}
+        report = self.report(ledger=ledger)
+        rows = self.rows(report)
+        self.assertEqual(rows[self.orgs["real"].pk]["contact"]["stage"], "wait")
+        self.assertEqual(rows[self.orgs["shared"].pk]["contact"]["stage"], "follow_up")
+        self.assertEqual(report["unmatchedLedgerKeys"], ["999999"])
+        drafts = reengagement.render_drafts(report)["drafts"]
+        self.assertNotIn("ada@example.test", [draft["to"] for draft in drafts])
+        self.assertEqual([d["stage"] for d in drafts if d["to"] == "kai@example.test"], ["follow_up"])
+
+    def test_bad_overrides_are_refused(self):
+        with self.assertRaisesMessage(ValueError, "unknown bucket"):
+            self.report(overrides={str(self.orgs["test"].pk): {"bucket": "tset"}})
+        with self.assertRaisesMessage(ValueError, "without a suggestion"):
+            self.report(overrides={str(self.orgs["typo"].pk): {"bucket": "domain_typo"}})
+
     def test_one_follow_up_a_week_later_then_stop(self):
         ledger = {str(self.orgs["real"].pk): {"first": (NOW - timedelta(days=8)).isoformat()},
                   str(self.orgs["railway"].pk): {"first": (NOW - timedelta(days=2)).isoformat()},
@@ -234,6 +280,22 @@ class ReengagementReportTests(TestCase):
         self.assertEqual(calls, [self.orgs["real"].pk])
         self.assertEqual(rows[self.orgs["real"].pk]["bucket"], "no_domain")
         self.assertEqual(rows[self.orgs["real"].pk]["setup"]["source"], "e6")
+
+    def test_unusable_e6_state_falls_back_to_local_facts(self):
+        import sys
+        import types
+        module = types.ModuleType("content_factory.founder_setup_state")
+        module.setup_state = lambda org: ["not", "a", "dict"]
+        previous = sys.modules.get("content_factory.founder_setup_state")
+        sys.modules["content_factory.founder_setup_state"] = module
+        try:
+            step = reengagement.setup_next(self.orgs["norepo"])
+        finally:
+            if previous is None:
+                sys.modules.pop("content_factory.founder_setup_state", None)
+            else:
+                sys.modules["content_factory.founder_setup_state"] = previous
+        self.assertEqual(step, {"current": "github", "ask": "choose_repository", "source": "local"})
 
     def test_classify_host_offline(self):
         self.assertEqual(reengagement.classify_host("https://x.lovable.app/").host_class, "ai_builder")
@@ -304,3 +366,8 @@ class ReengagementCommandTests(TestCase):
             handle.flush()
             with self.assertRaises(CommandError):
                 self.run_command("--sent-ledger", handle.name)
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            handle.write(json.dumps({str(self.org.pk): {"bucket": "tset"}}))
+            handle.flush()
+            with self.assertRaisesMessage(CommandError, "unknown bucket"):
+                self.run_command("--overrides", handle.name)

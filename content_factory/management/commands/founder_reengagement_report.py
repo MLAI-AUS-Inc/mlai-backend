@@ -59,7 +59,8 @@ class Command(BaseCommand):
         parser.add_argument("--overrides", default="",
                             help="JSON {org_id: {bucket, suggestion}} from ops' own checks (typo fix, test org).")
         parser.add_argument("--sent-ledger", default="",
-                            help="JSON {org_id: {first, follow_up}} recording what was already sent by hand.")
+                            help=("JSON {org_id or email: {first, follow_up}} recording what was already sent by hand. "
+                                  "The cap is per person across all their startups."))
         parser.add_argument("--workshop-day", action="append", default=[],
                             help="ISO date of a workshop session; its sign-ups also get the session offer.")
         parser.add_argument("--json", action="store_true", help="Print the report as JSON instead of a table.")
@@ -81,6 +82,10 @@ class Command(BaseCommand):
                                "per founder by hand from the drafts. Nothing was sent.")
         now = _now(options["now"])
         overrides = _read_json(options["overrides"], "overrides")
+        try:
+            overrides = reengagement.validate_overrides(overrides)
+        except ValueError as exc:
+            raise CommandError(f"overrides {options['overrides']!r}: {exc}") from exc
         ledger = _read_json(options["sent_ledger"], "sent ledger")
         using = options["database"]
         with transaction.atomic(using=using):
@@ -125,5 +130,9 @@ class Command(BaseCommand):
                 note = row["contactBlock"]
             self.stdout.write(f"  org {row['organizationId']:<6} {row['bucket']:<22} {stage:<10} "
                               f"{row['domain'] or '-':<36} {row['link'] or '-'} {note}".rstrip())
+        if report["unmatchedLedgerKeys"]:
+            self.stdout.write("")
+            self.stdout.write("Sent-ledger keys that match no row (check before sending): "
+                              + ", ".join(str(key) for key in report["unmatchedLedgerKeys"]))
         self.stdout.write("")
         self.stdout.write(f"{len(drafts['drafts'])} draft(s) due. Nothing is sent by this command.")

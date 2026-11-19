@@ -228,10 +228,13 @@ def e6_setup_next(organization) -> dict | None:
         return None
     try:
         state = setup_state(organization)
-    except Exception:  # noqa: BLE001 - a report row falls back to the local facts
+    except Exception:
         logger.warning("founder_reengagement_setup_state_failed org=%s", organization.pk, exc_info=True)
         return None
-    ask = (state.get("ask") or {}).get("id") if isinstance(state, dict) else None
+    if not isinstance(state, dict):
+        return None
+    ask = state.get("ask")
+    ask = ask.get("id") if isinstance(ask, dict) else None
     return {"current": state.get("current"), "ask": ask, "source": "e6"}
 
 
@@ -327,6 +330,7 @@ def never_connected_organizations(*, using=DEFAULT_DB_ALIAS, organization_ids=No
     """Organisations with a founder startup that never connected a website repository, by id."""
     from founder_tools.models import VibeRaisingCompany
     from organizations.models import Organization
+
     from .models import OrganizationContentConfig
     from .website_models import WebsiteConnection
     with_startup = VibeRaisingCompany.objects.using(using).filter(organization__isnull=False,
@@ -393,18 +397,33 @@ def link_visible_to(link, user, organization, *, using=DEFAULT_DB_ALIAS) -> bool
 
 
 def contact_block(email, *, using=DEFAULT_DB_ALIAS) -> str | None:
-    """``opted_out`` or ``undeliverable`` from the CRM contact, or None when an email may go."""
+    """``opted_out`` or ``undeliverable``, or None when an email may go.
+
+    Reads the CRM contact (unsubscribe, spam complaint, bounce, withdrawn
+    consent) and the system email suppression list (hard bounce or complaint
+    recorded by the email provider's webhook, which stores the address as
+    the provider sent it). Addresses match case-blind.
+    """
     from crm.models import Contact
-    contact = Contact.objects.using(using).filter(email=str(email or "").strip().lower()).first()
-    if contact is None:
+    from system_email.models import SystemEmailSuppression
+    address = str(email or "").strip()
+    if not address:
         return None
-    if contact.email_status in _OPTED_OUT_STATUSES:
+    blocks = set()
+    for contact in Contact.objects.using(using).filter(email__iexact=address):
+        if contact.email_status in _OPTED_OUT_STATUSES:
+            blocks.add("opted_out")
+        elif contact.email_status in _UNDELIVERABLE_STATUSES:
+            blocks.add("undeliverable")
+        if contact.marketing_consent == Contact.MarketingConsent.WITHDRAWN:
+            blocks.add("opted_out")
+    suppressions = SystemEmailSuppression.objects.using(using).filter(email__iexact=address,
+                                                                      cleared_at__isnull=True)
+    for reason in suppressions.values_list("reason", flat=True):
+        blocks.add("opted_out" if reason == "complaint" else "undeliverable")
+    if "opted_out" in blocks:
         return "opted_out"
-    if contact.email_status in _UNDELIVERABLE_STATUSES:
-        return "undeliverable"
-    if contact.marketing_consent == Contact.MarketingConsent.WITHDRAWN:
-        return "opted_out"
-    return None
+    return "undeliverable" if blocks else None
 
 
 # ---------------------------------------------------------------------------
@@ -432,13 +451,16 @@ def contact_stage(ledger_entry, *, now) -> dict:
     ``first`` and ``follow_up`` (ISO times). Nothing writes it here.
     """
     entry = ledger_entry if isinstance(ledger_entry, dict) else {}
-    first, follow_up = _parse_time(entry.get("first")), _parse_time(entry.get("follow_up"))
-    if follow_up is not None or (first is None and entry.get("follow_up")):
+    # Any recorded follow-up, stop or opt-out ends it, readable or not.
+    if entry.get("follow_up") or entry.get("stopped") or entry.get("opted_out"):
         return {"stage": "stop", "after": None}
-    if entry.get("stopped") or entry.get("opted_out"):
-        return {"stage": "stop", "after": None}
-    if first is None:
+    if not entry.get("first"):
         return {"stage": "first", "after": None}
+    first = _parse_time(entry.get("first"))
+    if first is None:
+        # A first email went out but its time is unreadable: never resend it,
+        # and never guess when the follow-up is due.
+        return {"stage": "stop", "after": None}
     due = first + FOLLOW_UP_AFTER
     if now < due:
         return {"stage": "wait", "after": _iso(due)}
@@ -469,6 +491,27 @@ def _bucket(organization, step, override, *, using):
     return CONNECT_GITHUB, facts
 
 
+def validate_overrides(overrides) -> dict:
+    """Ops' overrides by organisation id, refusing anything that would silently be ignored.
+
+    An unknown bucket (a typo such as ``"tset"``) would otherwise fall through
+    to the computed bucket and email a test organisation; a typo bucket with no
+    corrected address has nothing to suggest.
+    """
+    checked = {}
+    for key, value in (overrides or {}).items():
+        if not isinstance(value, dict):
+            raise ValueError(f"Override for organisation {key!r} must be an object.")
+        bucket = value.get("bucket")
+        if bucket not in OVERRIDABLE_BUCKETS:
+            raise ValueError(f"Override for organisation {key!r} has unknown bucket {bucket!r}; "
+                             f"use one of {', '.join(sorted(OVERRIDABLE_BUCKETS))}.")
+        if bucket == DOMAIN_TYPO and not str(value.get("suggestion") or "").strip():
+            raise ValueError(f"Override for organisation {key!r} is domain_typo without a suggestion.")
+        checked[str(key)] = value
+    return checked
+
+
 def _created_on(moment, days) -> bool:
     if moment is None or not days:
         return False
@@ -484,7 +527,7 @@ def build_report(*, now, using=DEFAULT_DB_ALIAS, organization_ids=None, override
     ``ledger`` maps an organisation id to the sender's record of what went out.
     ``workshop_days`` are ISO dates whose sign-ups also get the session offer.
     """
-    overrides = {str(key): value for key, value in (overrides or {}).items() if isinstance(value, dict)}
+    overrides = validate_overrides(overrides)
     ledger = {str(key): value for key, value in (ledger or {}).items()}
     workshop_days = frozenset(str(day) for day in workshop_days)
     next_step = setup_next_fn or SETUP_NEXT
@@ -523,15 +566,64 @@ def build_report(*, now, using=DEFAULT_DB_ALIAS, organization_ids=None, override
         row["bucket"] = bucket
         block = contact_block(owner.email, using=using) if owner is not None else None
         row["contactBlock"] = block
-        row["contact"] = (contact_stage(ledger.get(str(organization.pk)), now=now)
-                          if bucket not in HOLD_REASONS and block is None
-                          else {"stage": "skip", "after": None})
         row["hold"] = HOLD_REASONS.get(bucket)
         rows.append(row)
+    unmatched = _apply_contact_stages(rows, ledger, now=now)
     _mark_duplicates(rows)
     counts = {bucket: sum(1 for row in rows if row["bucket"] == bucket) for bucket in BUCKETS}
     return {"version": REPORT_VERSION, "asOf": _iso(now), "organizations": rows, "buckets": counts,
-            "total": len(rows)}
+            "total": len(rows), "unmatchedLedgerKeys": unmatched}
+
+
+def _merge_ledger_entries(entries) -> dict:
+    """One person's sends across every ledger entry that names them.
+
+    The earliest first email starts the follow-up wait; any follow-up, stop or
+    opt-out ends it; an unreadable first time stays unreadable (and stops).
+    """
+    merged = {}
+    firsts = [entry.get("first") for entry in entries if entry.get("first")]
+    if firsts:
+        times = [_parse_time(value) for value in firsts]
+        merged["first"] = min(times).isoformat() if all(times) else "unreadable"
+    for key in ("follow_up", "stopped", "opted_out"):
+        if any(entry.get(key) for entry in entries):
+            merged[key] = True
+    return merged
+
+
+def _apply_contact_stages(rows, ledger, *, now) -> list:
+    """Set each row's place in the cap. The cap is per person, not per organisation.
+
+    A ledger entry may be keyed by organisation id or by the recipient's email.
+    Every entry for any of the owner's stalled organisations counts, so the
+    email that covered a second startup (``alsoCovers``) is never sent again
+    under the other one. Returns the ledger keys that matched no row, sorted,
+    so ops can see a sent record that no longer lines up.
+    """
+    entries = {str(key): value for key, value in ledger.items() if isinstance(value, dict)}
+    by_email = {}
+    for key, value in entries.items():
+        if "@" in key:
+            by_email.setdefault(key.strip().lower(), []).append(value)
+    org_keys_for = {}
+    for row in rows:
+        email = (row.get("ownerEmail") or "").strip().lower()
+        if email:
+            org_keys_for.setdefault(email, []).append(str(row["organizationId"]))
+    matched = set()
+    for row in rows:
+        email = (row.get("ownerEmail") or "").strip().lower()
+        keys = org_keys_for.get(email, []) if email else [str(row["organizationId"])]
+        person = [entries[key] for key in keys if key in entries] + by_email.get(email, [])
+        matched.update(key for key in keys if key in entries)
+        if email and email in by_email:
+            matched.update(key for key in entries if "@" in key and key.strip().lower() == email)
+        if row["hold"] or row["contactBlock"]:
+            row["contact"] = {"stage": "skip", "after": None}
+        else:
+            row["contact"] = contact_stage(_merge_ledger_entries(person), now=now)
+    return sorted(key for key in ledger if str(key) not in matched)
 
 
 def _mark_duplicates(rows) -> None:
