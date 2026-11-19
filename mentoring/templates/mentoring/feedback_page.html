@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>{{ title }} · MLAI</title>
+<style>
+  :root { color-scheme: light; }
+  body { margin:0; background:#f9fafb; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; color:#111827; }
+  .card { max-width:480px; margin:40px auto; background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:28px 24px; }
+  @media (max-width:540px) { .card { margin:16px; padding:24px 18px; } }
+  .brand { display:flex; align-items:center; gap:8px; color:#6b7280; font-size:16px; margin-bottom:18px; }
+  .brand img { width:24px; height:24px; border-radius:12px; background:#2fd8bf; }
+  h1 { font-size:24px; line-height:30px; margin:0 0 4px; }
+  .sub { color:#6b7280; font-size:15px; margin:0 0 20px; }
+  .row { display:flex; gap:10px; }
+  .tile { flex:1; text-align:center; border:1px solid #e5e7eb; border-radius:12px; padding:14px 4px 10px; text-decoration:none; color:#374151; font-weight:600; font-size:15px; background:#fff; }
+  .tile svg { display:block; margin:0 auto 6px; }
+  .tile.faded { opacity:.55; }
+  .tile.on { border:2px solid #2fd8bf; background:#f0fdfa; opacity:1; }
+  .tile:focus-visible, .btn:focus-visible, textarea:focus-visible { outline:3px solid #0f766e; outline-offset:2px; }
+  label { display:block; font-weight:600; font-size:15px; margin:22px 0 8px; }
+  label span { font-weight:400; color:#9ca3af; }
+  textarea { width:100%; box-sizing:border-box; min-height:96px; border:1px solid #d1d5db; border-radius:10px; padding:10px 12px; font:inherit; font-size:15px; }
+  .btn { display:inline-block; margin-top:14px; background:#2fd8bf; color:#0a0a0a; font:inherit; font-weight:600; padding:12px 22px; border:0; border-radius:8px; text-decoration:none; cursor:pointer; }
+  .btn.grey { background:#f3f4f6; color:#4b5563; margin-left:8px; }
+  .small { color:#6b7280; font-size:14px; margin-top:18px; line-height:20px; }
+  .note { color:#065f46; background:#ecfdf5; border-radius:8px; padding:10px 12px; font-size:15px; margin-top:16px; }
+  .error { color:#991b1b; }
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="brand"><img src="{{ asset_base }}/mlai-roo.png" alt="">MLAI</div>
+  <h1>{{ heading }}</h1>
+  {% if subheading %}<p class="sub">{{ subheading }}</p>{% endif %}
+
+  {% if state == "confirm" %}
+    <form id="mlai-rate" method="post" action="{{ action }}">
+      <input type="hidden" name="rating" value="{{ chosen }}">
+      <input type="hidden" name="src" value="{{ via }}">
+      <div class="row">{% for face in faces %}<span class="tile {% if face.key == chosen %}on{% else %}faded{% endif %}">{{ face.svg }}{{ face.label }}</span>{% endfor %}</div>
+      <noscript><button class="btn" type="submit">Confirm: {{ chosen_label }}</button></noscript>
+    </form>
+    <script nonce="{{ nonce }}">document.getElementById('mlai-rate').submit();</script>
+  {% elif state == "ask" or state == "rated" %}
+    <div class="row">{% for face in faces %}<a class="tile {% if rating %}{% if face.key == rating %}on{% else %}faded{% endif %}{% endif %}" href="{{ face.href }}" aria-label="{{ face.label }}"{% if face.key == rating %} aria-current="true"{% endif %}>{{ face.svg }}{{ face.label }}</a>{% endfor %}</div>
+    {% if state == "rated" %}
+      {% if commented %}<p class="note">Thanks, we&rsquo;ve got your comment.</p>{% endif %}
+      <form method="post" action="{{ comment_action }}">
+        <label for="comment">{{ prompt }} <span>(optional)</span></label>
+        <textarea id="comment" name="comment" maxlength="2000" placeholder="{{ placeholder }}">{{ comment }}</textarea>
+        {% if comment_error %}<p class="error">{{ comment_error }}</p>{% endif %}
+        <button class="btn" type="submit">{% if comment %}Update{% else %}Send{% endif %}</button>{% if book_url %}<a class="btn grey" href="{{ book_url }}">Book another session</a>{% endif %}
+      </form>
+      {% if rating == "no_show" %}<p class="small">The MLAI team will look into it and sort out your Roo Points.</p>{% endif %}
+      <p class="small">Saved. Tap another face to change it. Only the MLAI team sees your answer.{% if rating != "no_show" %} Session didn&rsquo;t happen? <a href="{{ no_show_url }}">Let us know</a>.{% endif %}</p>
+    {% else %}
+      <p class="small">Only the MLAI team sees your answer. Session didn&rsquo;t happen? <a href="{{ no_show_url }}">Let us know</a>.</p>
+    {% endif %}
+  {% elif state == "unsubscribe" %}
+    <form method="post" action="{{ action }}">
+      <p>You&rsquo;ll stop getting emails asking how your mentoring sessions went. Roo may still ask in Slack.</p>
+      <button class="btn" type="submit">Stop feedback emails</button>
+    </form>
+  {% else %}
+    <p>{{ message }}</p>
+  {% endif %}
+</main>
+</body>
+</html>

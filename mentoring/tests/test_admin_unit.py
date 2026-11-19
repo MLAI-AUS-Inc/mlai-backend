@@ -239,7 +239,7 @@ class SessionTests(Fixture):
         sessions.STATUS_CHOICES = MentorSession.STATUS_CHOICES
         for name in ('STATUS_ACCEPTED', 'STATUS_COMPLETED', 'MEETING_FAILED', 'MEETING_PENDING', 'NOTIFY_FAILED'):
             setattr(sessions, name, getattr(MentorSession, name))
-        query = sessions.objects.select_related.return_value
+        query = sessions.objects.select_related.return_value.prefetch_related.return_value
         query.filter.return_value = query
         query.order_by.return_value.__getitem__.return_value = [session()]
         with patch.object(svc, 'MentorSession', sessions):
