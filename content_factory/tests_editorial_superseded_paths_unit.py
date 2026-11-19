@@ -185,6 +185,14 @@ class OpenRunsNoticeTests(unittest.TestCase):
         self.assertEqual((result[0]["written_for_version"], result[0]["current_version"], result[0]["title"]),
                          (1, 2, "Article r1"))
 
+    def test_a_withdrawn_no_offer_permission_asks_the_founder(self):
+        # Review fix: the worker treats a withdrawn no-offer permission as revoked.
+        from .editorial_open_runs import open_runs_for_changed_entries
+        after = resaved(self.before, allow_no_offer=False)
+        with self.runs(self.article("r1", NO_OFFER_BRIEF)):
+            result = open_runs_for_changed_entries(ORG, self.before, after)
+        self.assertEqual([(item["run_id"], item["outcome"]) for item in result], [("r1", "asks_founder")])
+
     def test_no_change_or_an_unavailable_read_never_blocks_the_save(self):
         from .editorial_open_runs import open_runs_for_changed_entries
         self.assertEqual(open_runs_for_changed_entries(ORG, self.after, self.after), [])

@@ -75,7 +75,10 @@ def open_runs_for_changed_entries(organization, before, after) -> list[dict]:
                 if entry is None or type(written_for) is not int or written_for >= entry["version"]:
                     continue
                 offer_brief = brief.get("conversion_intent") == "offer"
+                # Mirrors the worker's rule: only a no-offer article whose
+                # profile is still approved and still allows no offer continues.
                 continues = (not offer_brief and entry["status"] == "approved"
+                             and (kind != "audience" or bool(entry.get("allow_no_offer")))
                              and getattr(settings, "CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK", True))
                 result.append({
                     "run_id": run.run_id, "title": _title(run), "kind": kind, "entry_id": entry["id"],
