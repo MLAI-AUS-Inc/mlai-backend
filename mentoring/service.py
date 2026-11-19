@@ -492,7 +492,27 @@ def serialize_session(session, viewer):
         'calendar_sync': public_status(session),
         'requested_at': session.requested_at.isoformat(),
         'responded_at': session.responded_at.isoformat() if session.responded_at else None,
+        # The founder's own post-session rating; a mentor never sees it.
+        'my_feedback': None if is_mentor else _my_feedback(session, viewer),
+        'can_rate': (not is_mentor) and after_acceptance and _feedback_open(session),
     }
+
+
+def _feedback_open(session):
+    from .feedback import enabled
+    return bool(enabled() and timezone.now() >= session.ends_at)
+
+
+def _my_feedback(session, viewer):
+    from .feedback import serialize_mine
+    try:
+        rows = session.feedback.all()
+    except Exception:
+        return None
+    for row in rows:
+        if row.respondent_id == viewer.pk:
+            return serialize_mine(row)
+    return None
 
 
 # ------------------------------------------------------------------- points
@@ -674,7 +694,7 @@ class MentoringService:
     @classmethod
     def list_sessions(cls, user, role, status=None):
         cls.sweep(user=user)
-        query = MentorSession.objects.select_related('mentor__user', 'founder')
+        query = MentorSession.objects.select_related('mentor__user', 'founder').prefetch_related('feedback')
         query = query.exclude(status=MentorSession.STATUS_PROVISIONING)
         if role == 'all':
             query = query.filter(Q(founder=user) | Q(mentor__user=user))

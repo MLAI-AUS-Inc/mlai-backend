@@ -2,8 +2,9 @@
 
 `GET` and `PATCH /api/v1/community-chat/roo-avatar/` read and save the signed-in
 member's kangaroo outfit across devices. This is the backend source contract,
-not deployment evidence. The new schema requires the specifically approved
-[`0016_roo_avatar` migration](roo-avatar-migration-proposal.md).
+not deployment evidence. The schema requires the specifically approved
+[`0016_roo_avatar` migration](roo-avatar-migration-proposal.md) and, for the
+fur slot, the [`0019_roo_avatar_fur` migration](roo-avatar-fur-migration-proposal.md).
 
 ## Identity and authority
 
@@ -39,22 +40,25 @@ GET and a successful PATCH return the same shape:
   "current_level": null,
   "rank_name": null,
   "history_reconciled": false,
-  "outfit": {"hair": null, "glasses": null, "jacket": null, "shoes": null},
-  "effective_outfit": {"hair": null, "glasses": null, "jacket": null, "shoes": null},
+  "outfit": {"fur": null, "hair": null, "glasses": null, "jacket": null,
+    "shoes": null},
+  "effective_outfit": {"fur": null, "hair": null, "glasses": null,
+    "jacket": null, "shoes": null},
   "updated_at": null,
   "catalog": {
-    "hair": [{"id": "honey_tuft", "name": "Honey tuft", "required_level": 0,
+    "fur": [{"id": "golden_sand", "name": "Golden sand", "required_level": 0,
       "unlocked": true, "unavailable_reason": null}],
-    "glasses": [], "jacket": [], "shoes": []
+    "hair": [], "glasses": [], "jacket": [], "shoes": []
   }
 }
 ```
 
 The example abbreviates the catalog; actual responses always include all five
-items in each slot. `unavailable_reason` is null, `level_required`, or
+items in each slot, and `outfit`, `effective_outfit` and `catalog` always
+include `fur`. `unavailable_reason` is null, `level_required`, or
 `history_unreconciled`. None is always available and represented by JSON null,
 not an extra catalog object. No saved row yields version 0, null `updated_at`
-and four null selections. A saved row's timestamp is an ISO-8601 datetime.
+and five null selections. A saved row's timestamp is an ISO-8601 datetime.
 
 `current_level` and `rank_name` derive from the existing verified Volunteer
 contribution total and rank policy. Spendable balance, purchased Roo, unverified client activity and
@@ -72,11 +76,16 @@ This is current-rank eligibility, not a permanent unlock entitlement.
 
 | Slot | Stable ID | Name | Required level |
 | --- | --- | --- | ---: |
-| hair | honey_tuft | Honey tuft | 0 |
-| hair | cocoa_curls | Cocoa curls | 1 |
-| hair | peach_fringe | Peach fringe | 2 |
-| hair | lilac_bob | Lilac bob | 4 |
-| hair | mint_mohawk | Mint mohawk | 6 |
+| fur | golden_sand | Golden sand | 0 |
+| fur | blue_flier | Blue flier | 0 |
+| fur | ironbark | Ironbark | 0 |
+| fur | snow_gum | Snow gum | 0 |
+| fur | midnight_wallaroo | Midnight wallaroo | 0 |
+| hair | honey_tuft | Tuft | 0 |
+| hair | cocoa_curls | Curls | 1 |
+| hair | peach_fringe | Swept fringe | 2 |
+| hair | lilac_bob | Bob | 4 |
+| hair | mint_mohawk | Mohawk | 6 |
 | glasses | classic_black | Classic black | 0 |
 | glasses | honey_rounds | Honey rounds | 1 |
 | glasses | rose_hearts | Rose hearts | 3 |
@@ -93,6 +102,12 @@ This is current-rank eligibility, not a permanent unlock entitlement.
 | shoes | pink_roller_skates | Pink roller skates | 4 |
 | shoes | teal_runners | Teal runners | 5 |
 
+`fur` is Roo's whole fur colour. Null fur is the default "Outback red", which
+has no catalog object. Every fur colour has required level 0, so all of them
+are available to every member, including while history is unreconciled. Hair
+items are styles only: their stable IDs are unchanged,
+and only the display names dropped the colour.
+
 Existing level names are Curious (0), Connected (1), Contributor (2), Regular
 (3), Collaborator (4), Community Builder (5), and Steward (6). Their thresholds
 remain owned by `community_chat.volunteer.policy`; this catalog adds no second
@@ -101,13 +116,20 @@ array positions.
 
 ## Update
 
-PATCH accepts exactly these fields, including all four outfit slots:
+PATCH accepts exactly these fields:
 
 ```json
 {"version": 0, "outfit": {
-  "hair": "honey_tuft", "glasses": "classic_black", "jacket": null, "shoes": null
+  "fur": "snow_gum", "hair": "honey_tuft", "glasses": "classic_black",
+  "jacket": null, "shoes": null
 }}
 ```
+
+`hair`, `glasses`, `jacket` and `shoes` are all required. `fur` is optional so
+that clients released before the fur slot keep working: when `fur` is absent,
+the saved fur is left unchanged (null for a first save). When present, `fur` is
+validated like any other slot, and null selects the default fur. Any other
+missing or extra slot is rejected.
 
 `version` is the last server version, an integer from 0 through 2147483646;
 booleans, strings and floating-point versions are rejected. The first save
@@ -128,3 +150,7 @@ slots. Authentication/admission errors retain the existing account API format.
 On a conflict, retain the local draft for review and reload; never silently
 retry with a fresh version. On a locked response, reload eligibility before
 saving again. All responses have `Cache-Control: private, no-store`.
+
+`catalog_version` stays `roo-avatar-v1`: released iOS builds refuse any other
+value, and the fur slot is purely additive for them (they ignore the extra
+`fur` keys and keep sending four-slot updates, which preserve the saved fur).

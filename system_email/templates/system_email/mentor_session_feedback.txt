@@ -1,0 +1,17 @@
+{% autoescape off %}Hi {{ founder_first|default:"there" }},
+
+Thanks for meeting {{ mentor_first }} today. How did it go? Tap one:
+
+Not great: {{ url_sad }}
+Okay: {{ url_neutral }}
+Great: {{ url_happy }}
+
+{{ date_long }}, {{ time_range }} Melbourne time · {{ place }}
+
+You can add a comment on the next page. Only the MLAI team sees your answer.
+Session didn't happen? {{ url_no_show }}
+
+You're getting this because you booked a mentoring session in MLAI Chat.
+Stop session feedback emails: {{ unsubscribe_url }}
+MLAI · Suite 350, 585 Little Collins St, Melbourne VIC 3000 · hi@mlai.au
+{% endautoescape %}

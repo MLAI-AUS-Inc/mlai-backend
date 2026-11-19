@@ -39,4 +39,6 @@ def session(data):
     # Provider error text can contain addresses or meeting URLs. Only expose status.
     return {**fields(data, 'id status starts_at ends_at price_roo location_type meeting_status '
                      'notification_status requested_at responded_at cancelled_at flags'),
-            'mentor': person(data.get('mentor')), 'founder': person(data.get('founder'))}
+            'mentor': person(data.get('mentor')), 'founder': person(data.get('founder')),
+            # Read-only staff see the face, never the founder's words.
+            'feedback': fields(data['feedback'], 'rating rated_at suspect_scanner') if data.get('feedback') else None}

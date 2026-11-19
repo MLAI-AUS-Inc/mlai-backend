@@ -45,6 +45,23 @@ of the metrics selected for sharing. Community and public projections never
 include the snapshot. Refreshing historical reporting evidence creates a separate
 private approved update, preserving shared revisions and approval receipts.
 
+## Founder titles, kept introductions and feed order — 19 November 2026
+
+Founder saves accept optional `updateTitle` (at most 120 characters). It is stored
+on the revision as `custom_title`, so a published revision keeps its approved
+title while an edit awaits approval. Reads return it as `updateTitle` (and
+`customTitle` for the editor); blank restores the numbered "<Month> update" title.
+Generation and saves that omit it keep the previous title.
+
+Generation no longer rewrites `startupOverview`. A generated draft keeps, in order:
+the overview frozen on the run (a deliberate blank stays blank), the update's saved
+overview, or the startup's `short_description` from when it was added. Generated
+text is used only when none exists. Own-AI saves follow the same rule.
+
+The community feed orders by reporting month, then `update_date`, then first
+publication, never by the last re-publish. Community payloads include
+`updateDate`, `datePrecision` and `firstPublishedAt`.
+
 ## Plain-language context and own-AI drafts — 25 October 2026
 
 `startupOverview` is optional text of at most 2,000 characters in founder saves,

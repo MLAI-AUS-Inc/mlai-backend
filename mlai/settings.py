@@ -747,6 +747,19 @@ MENTOR_INVITE_EMAIL_ENABLED = _env_is_true('MENTOR_INVITE_EMAIL_ENABLED', False)
 MENTOR_INVITE_EXPLAINER_URL = os.getenv('MENTOR_INVITE_EXPLAINER_URL', 'https://mlai.au/mentors').strip()
 MENTOR_REQUEST_TTL_HOURS = int(os.getenv('MENTOR_REQUEST_TTL_HOURS', '48'))
 MENTOR_AUTO_COMPLETE_HOURS = int(os.getenv('MENTOR_AUTO_COMPLETE_HOURS', '24'))
+# Post-session feedback: an email and a Roo Slack DM to the founder a few minutes
+# after a session's booked end, with three faces. Off by default, and the runner
+# also refuses to run until MENTOR_FEEDBACK_NOT_BEFORE is set (ISO time), so
+# switching it on never asks about older sessions. See docs/mentoring.md.
+MENTOR_FEEDBACK_ENABLED = _env_is_true('MENTOR_FEEDBACK_ENABLED', False)
+MENTOR_FEEDBACK_NOT_BEFORE = os.getenv('MENTOR_FEEDBACK_NOT_BEFORE', '').strip()
+MENTOR_FEEDBACK_CHANNELS = os.getenv('MENTOR_FEEDBACK_CHANNELS', 'email,slack').strip()
+MENTOR_FEEDBACK_DELAY_MINUTES = int(os.getenv('MENTOR_FEEDBACK_DELAY_MINUTES', '5'))
+MENTOR_FEEDBACK_MAX_AGE_HOURS = int(os.getenv('MENTOR_FEEDBACK_MAX_AGE_HOURS', '24'))
+MENTOR_FEEDBACK_MAX_PER_TICK = int(os.getenv('MENTOR_FEEDBACK_MAX_PER_TICK', '20'))
+MENTOR_FEEDBACK_TOKEN_DAYS = int(os.getenv('MENTOR_FEEDBACK_TOKEN_DAYS', '30'))
+# Slack channel id for "Not great" and "Session didn't happen" alerts. Unset: no alerts.
+MENTOR_FEEDBACK_ALERT_CHANNEL = os.getenv('MENTOR_FEEDBACK_ALERT_CHANNEL', '').strip()
 # Google Meet links and free/busy for mentoring, through one MLAI-owned free
 # Google account. Off by default; secrets come only from the environment.
 MENTORING_GOOGLE_ENABLED = _env_is_true('MENTORING_GOOGLE_ENABLED', False)
