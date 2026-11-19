@@ -106,6 +106,13 @@ def _slack_retry_after_seconds(exc: SlackApiError) -> int:
         return 1
 
 
+def _slack_busy_detail(seconds: int) -> str:
+    """A sentence the Chat composer can show as-is for a Slack rate wait."""
+
+    unit = "second" if seconds == 1 else "seconds"
+    return f"Slack is busy right now. Try again in {seconds} {unit}."
+
+
 def _slack_endpoint_error_response(exc: Exception) -> Response:
     """Translate infrastructure failures without exposing provider details."""
 
@@ -120,7 +127,11 @@ def _slack_endpoint_error_response(exc: Exception) -> Response:
     if isinstance(exc, (BudgetDeferred, SlackDmMirrorRateLimited)):
         seconds = max(1, int(getattr(exc, "retry_after", 5) or 5))
         response = Response(
-            {"error": "slack_rate_limited", "retry_after_seconds": seconds},
+            {
+                "error": "slack_rate_limited",
+                "retry_after_seconds": seconds,
+                "detail": _slack_busy_detail(seconds),
+            },
             status=status.HTTP_429_TOO_MANY_REQUESTS,
         )
         response["Retry-After"] = str(seconds)
@@ -148,6 +159,7 @@ def _slack_endpoint_error_response(exc: Exception) -> Response:
                 {
                     "error": "slack_rate_limited",
                     "retry_after_seconds": retry_after,
+                    "detail": _slack_busy_detail(retry_after),
                 },
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
             )
@@ -626,7 +638,7 @@ class SlackUserDirectoryView(SlackDmMirrorApiView):
             return _slack_endpoint_error_response(exc)
         except SlackDmMirrorError as exc:
             raise ValidationError({"slack": str(exc)}) from exc
-        except (SlackClientError, DatabaseError) as exc:
+        except (SlackClientError, DatabaseError, BudgetDeferred) as exc:
             return _slack_endpoint_error_response(exc)
         return Response(payload)
 
@@ -685,9 +697,13 @@ class SlackDmStartView(SlackDmMirrorApiView):
                 {
                     "slack": str(exc),
                     "code": getattr(exc, "code", "slack_dm_mirror_error"),
+                    # Chat shows `detail` as-is; without it members saw the code.
+                    "detail": str(exc),
                 }
             ) from exc
-        except (SlackClientError, DatabaseError) as exc:
+        except (SlackClientError, DatabaseError, BudgetDeferred) as exc:
+            # Our own Slack budget can defer the users.info/conversations.open
+            # calls; answer a retryable 429 instead of an uncaught 500.
             return _slack_endpoint_error_response(exc)
         return Response(payload, status=status.HTTP_200_OK)
 
