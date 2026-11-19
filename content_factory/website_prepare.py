@@ -1233,7 +1233,8 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 prepare_failure(op, step, error, now=now)
                 if classification == "transient" and op.state == "pending":
                     op.receipt["child_resume_pending"] = True
-                elif op.state == "needs_attention":
+                elif op.state == "needs_attention" and op.receipt.get("status") != "staff_fixing":
+                    # B11: a staff fix asks nothing of the founder.
                     op.receipt["user_action"] = {"id": "open_run", "label": "Open setup run", "run_id": child_id}
                 return _finish_prepare(op, now=now)
             if child and child.workflow == "article_system_setup":
