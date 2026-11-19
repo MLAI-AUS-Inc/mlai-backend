@@ -584,6 +584,7 @@ jobs:
           content_factory.tests_article_flags \
           content_factory.tests_cancellation_reason \
           content_factory.tests_founder_funnel_report \
+          content_factory.tests_founder_reengagement \
           content_factory.tests_hosted_articles \
           content_factory.tests_preview_domain_claim \
           content_factory.tests_website_portable \
