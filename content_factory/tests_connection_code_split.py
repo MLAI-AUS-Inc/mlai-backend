@@ -53,6 +53,9 @@ RAISE_SITES = {
     ("website_verification.py", "verify_live_url_deployment"): {"not_connected"},
     ("website_prepare.py", "start_prepare"): {"not_connected"},
     ("website_disconnect.py", "start_disconnect"): {"not_connected", LEGACY_CODE},
+    # Plan E8: a grant without contents or pull request access at repository
+    # selection is a real missing grant: the founder reconnects on GitHub.
+    ("website_repository_selection.py", "permission_check"): {ACCESS_LOST},
 }
 SPLIT = {LEGACY_CODE, NOT_CONNECTED, CONTRACT_MISSING, ACCESS_LOST, "invalid_connection_contract"}
 HELPERS = {"not_connected", "_not_connected", "missing_contract_error"}

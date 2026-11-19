@@ -32,7 +32,7 @@ EVENT_TYPE = "founder_transition"
 LEASE = timedelta(minutes=10)
 RETRY_WINDOW = timedelta(hours=23)
 OWNER_ASKS = {"approve_setup", "authorize_github", "approve_join_request", "agree_terms", "describe_customer",
-              "choose_articles_page"}
+              "choose_articles_page", "send_pr_to_reviewer"}
 REMINDER_HOURS = (24, 72)
 # First-run cap (D14). An ask that was already waiting before this module
 # first saw it, or a reminder rung that was due long before reminders were
@@ -207,6 +207,7 @@ def _copy(event, state, organization):
                 "Get the link"),
             "choose_repository": ("Choose your website's repository", "Pick the GitHub repository that holds your website so we can keep going.",
                 "Choose your repository"),
+            "send_pr_to_reviewer": ("Your change needs a reviewer on GitHub", "Send the pull request to the person who reviews changes to your website.", "Get the link"),
         }
         if ask == "buy_points":
             from .founder_journey import article_price_and_balance
@@ -301,8 +302,17 @@ def item_state(organization, run, *, config, now):
             decision = {"state": "your_turn", "action": {"id": "review_draft"}}
         else:
             decision = {"state": "working", "action": None}
-    return {"state": decision["state"], "ask": mapping(decision.get("action")).get("id"),
+    ask = _reviewer_ask(mapping(decision.get("action")).get("id"), getattr(config, "website_connection", None), run)
+    return {"state": decision["state"], "ask": ask,
         "copyId": decision.get("copyId"), "run_id": run.run_id, "run": run}
+
+
+def _reviewer_ask(ask, connection, run=None):
+    """Plan E8: remind about the reviewer step when the founder cannot merge alone."""
+    if ask != "approve_on_github":
+        return ask
+    from .website_repository_selection import REVIEWER_ACTION, reviewer_needed
+    return REVIEWER_ACTION if reviewer_needed(connection, run) else ask
 
 
 def website_item_state(config, *, now, setup_run=None):
@@ -327,7 +337,7 @@ def website_item_state(config, *, now, setup_run=None):
                 if PAGE_CHOICE_ACTION not in retired_actions(page_policy=_page_policy(operation.receipt)):
                     ask = PAGE_CHOICE_ACTION
             if ask in OWNER_ASKS | {"approve_on_github", "review_draft"}:
-                return {"state": "your_turn", "ask": ask, "run_id": None, "since": getattr(operation, "updated_at", None)}
+                return {"state": "your_turn", "ask": _reviewer_ask(ask, connection), "run_id": None, "since": getattr(operation, "updated_at", None)}
         if (notice and notice["state"] == "done") or cohorts.has_connected_website(organization):
             return {"state": "done", "ask": None, "verified_live": True, "run_id": None}
     if setup_run is None:

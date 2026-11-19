@@ -1,0 +1,33 @@
+{
+  "_recorded": "GET /repos/{repo}/rules/branches/main, /branches/main/protection, /collaborators/{login}/permission",
+  "rules_required_review": [
+    {"type": "pull_request", "ruleset_source_type": "Repository", "ruleset_source": "fixture-agency/site", "ruleset_id": 77,
+     "parameters": {"required_approving_review_count": 1, "dismiss_stale_reviews_on_push": false,
+                    "require_code_owner_review": false, "require_last_push_approval": false,
+                    "required_review_thread_resolution": false}}
+  ],
+  "rules_code_owners": [
+    {"type": "pull_request", "ruleset_source_type": "Organization", "ruleset_source": "fixture-agency", "ruleset_id": 78,
+     "parameters": {"required_approving_review_count": 0, "require_code_owner_review": true,
+                    "require_last_push_approval": false, "dismiss_stale_reviews_on_push": false,
+                    "required_review_thread_resolution": false}}
+  ],
+  "rules_none": [
+    {"type": "deletion", "ruleset_source_type": "Repository", "ruleset_source": "fixture-agency/site", "ruleset_id": 79}
+  ],
+  "protection_required_review": {
+    "url": "https://api.github.com/repos/fixture-agency/site/branches/main/protection",
+    "required_pull_request_reviews": {"dismiss_stale_reviews": false, "require_code_owner_reviews": false,
+                                      "require_last_push_approval": false, "required_approving_review_count": 2},
+    "enforce_admins": {"enabled": false}
+  },
+  "protection_open": {
+    "url": "https://api.github.com/repos/fixture-agency/site/branches/main/protection",
+    "required_status_checks": {"strict": false, "contexts": ["build"]},
+    "enforce_admins": {"enabled": false}
+  },
+  "protection_forbidden": {"message": "Resource not accessible by integration", "status": "403"},
+  "permission_admin": {"permission": "admin", "role_name": "admin", "user": {"login": "fixture-founder"}},
+  "permission_write": {"permission": "write", "role_name": "write", "user": {"login": "fixture-founder"}},
+  "permission_read": {"permission": "read", "role_name": "read", "user": {"login": "fixture-founder"}}
+}

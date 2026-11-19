@@ -129,6 +129,27 @@ unchanged. A callback that wakes preparation before the handoff is saved adopts 
 same saved child, and bounded waiting while dispatch is in flight prevents a second
 setup request. A directly blocked child retains its actual failure prompt.
 
+Repository selection (plan E8). `GET /github/repos` ranks the founder's
+repositories (homepage equals the domain, the domain in `CNAME` or the wrangler,
+Vercel or Netlify config, a name that matches the brand, a web framework
+manifest, a recent push; archived repositories and forks rank last) and returns
+`suggestion={repo,reasons,looksLikeWebsite,warning,nothingVisible,ranked}`. A
+clear winner is only preselected as `selectedRepo`; saving the choice is still
+what binds it. File probes mint a read-only token per candidate inside the
+founder's own installation, read at most the root listing and three host-config
+files of the top five, and are cached for ten minutes. Binding a different
+repository reads the installation's existing grants first: no contents (or pull
+request) access refuses with `github_access_required` and
+`fieldErrors[0].reason=contents_permission_missing` (or
+`pull_requests_permission_missing`, `installation_suspended`). After binding,
+the deploy branch's rules and protection and the founder's own repository
+permission are stored in `WebsiteConnection.capabilities.mergeAbility` for that
+generation and branch. When the founder cannot merge alone (a required review,
+code owners or read-only access), or GitHub refused a merge for a required
+review, the journey's `approve_on_github` ask becomes `send_pr_to_reviewer` with
+the pull request as the share link. Only the ask changes: every merge still
+re-reads the live branch policy and merges the exact validated head.
+
 The `permissions` prerequisite sits between inventory and integration. Read-only
 App JWT grant checks for `workflow_files` and `ci_evidence` cache results for sixty
 seconds without minting a token. Missing grants return `needs_user` with

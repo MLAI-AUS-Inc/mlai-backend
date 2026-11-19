@@ -197,6 +197,13 @@ def _normalize_repo(repo: dict, installation_id: str, account_login: str = "") -
         "installation_id": installation_id,
         "accountLogin": account_login,
         "account_login": account_login,
+        # Plan E8: ranking signals for the picker's suggestion (metadata only).
+        "homepage": str(repo.get("homepage") or "").strip()[:500] or None,
+        "pushedAt": str(repo.get("pushed_at") or "").strip() or None,
+        "archived": repo.get("archived") is True,
+        "fork": repo.get("fork") is True,
+        "language": str(repo.get("language") or "").strip()[:64] or None,
+        "topics": [str(item)[:64] for item in repo.get("topics") or [] if isinstance(item, str)][:20],
     }
 
 

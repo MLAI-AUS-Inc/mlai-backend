@@ -712,7 +712,9 @@ class HelperTests(TestCase):
 
     def test_registry_mapping_covers_only_the_eight_asks(self):
         # Plan E13 added the owner wait and its repository-picker fallback.
-        self.assertEqual(len(journeys.FOUNDER_ASKS), 12)
+        self.assertEqual(len(journeys.FOUNDER_ASKS), 13)
+        # Plan E8: send_pr_to_reviewer is the journey's own ask; no registry row maps to it.
+        self.assertNotIn("send_pr_to_reviewer", journeys.REGISTRY_ASKS.values())
         self.assertTrue(set(journeys.REGISTRY_ASKS.values()) <= set(journeys.FOUNDER_ASKS))
         self.assertIsNone(journeys.founder_ask("choose_articles_page"))
 

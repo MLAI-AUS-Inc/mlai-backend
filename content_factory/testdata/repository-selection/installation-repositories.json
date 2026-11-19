@@ -1,0 +1,24 @@
+{
+  "_recorded": "GET /installation/repositories (shape of the GitHub REST response; synthetic owners, no real accounts)",
+  "total_count": 6,
+  "repositories": [
+    {"id": 910001, "name": "tiger-tutor-n8n", "full_name": "fixture-studio/tiger-tutor-n8n", "owner": {"login": "fixture-studio"},
+     "private": true, "default_branch": "main", "homepage": null, "pushed_at": "2026-11-17T09:00:00Z",
+     "archived": false, "fork": false, "language": "Python", "topics": []},
+    {"id": 910002, "name": "marketing-site", "full_name": "fixture-studio/marketing-site", "owner": {"login": "fixture-studio"},
+     "private": true, "default_branch": "main", "homepage": "https://www.tigertutor.example", "pushed_at": "2026-10-01T09:00:00Z",
+     "archived": false, "fork": false, "language": "TypeScript", "topics": ["nextjs"]},
+    {"id": 910003, "name": "tigertutor", "full_name": "fixture-studio/tigertutor", "owner": {"login": "fixture-studio"},
+     "private": true, "default_branch": "main", "homepage": "", "pushed_at": "2025-01-10T09:00:00Z",
+     "archived": false, "fork": false, "language": "Go", "topics": []},
+    {"id": 910004, "name": "tigertutor-old-site", "full_name": "fixture-studio/tigertutor-old-site", "owner": {"login": "fixture-studio"},
+     "private": false, "default_branch": "gh-pages", "homepage": "https://tigertutor.example", "pushed_at": "2023-03-01T09:00:00Z",
+     "archived": true, "fork": false, "language": "HTML", "topics": []},
+    {"id": 910005, "name": "nextjs-starter", "full_name": "fixture-studio/nextjs-starter", "owner": {"login": "fixture-studio"},
+     "private": false, "default_branch": "main", "homepage": "", "pushed_at": "2026-11-18T09:00:00Z",
+     "archived": false, "fork": true, "language": "TypeScript", "topics": []},
+    {"id": 910006, "name": "infra", "full_name": "fixture-studio/infra", "owner": {"login": "fixture-studio"},
+     "private": true, "default_branch": "main", "homepage": null, "pushed_at": "2026-11-18T10:00:00Z",
+     "archived": false, "fork": false, "language": "HCL", "topics": []}
+  ]
+}

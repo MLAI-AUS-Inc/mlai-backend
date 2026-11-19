@@ -360,7 +360,8 @@
                     "choose_articles_page",
                     "deploy_site",
                     "waiting_github_owner_approval",
-                    "choose_repository"
+                    "choose_repository",
+                    "send_pr_to_reviewer"
                   ]
                 },
                 "label": {

@@ -41,9 +41,11 @@ VERSION = 1
 # ``ARTICLES_LIVE_URL_VERIFICATION_ENABLED``), worded for the founder's host.
 # ``waiting_github_owner_approval`` and its fallback ``choose_repository`` are
 # the founder's GitHub organisation-owner request (plan E13).
+# ``send_pr_to_reviewer`` replaces ``approve_on_github`` when the founder
+# cannot merge alone: a required review or read-only access (plan E8).
 FOUNDER_ASKS = ("review_draft", "describe_customer", "agree_terms", "authorize_github", "approve_setup",
                 "approve_on_github", "buy_points", "approve_join_request", "choose_articles_page", "deploy_site",
-                "waiting_github_owner_approval", "choose_repository")
+                "waiting_github_owner_approval", "choose_repository", "send_pr_to_reviewer")
 NEXT_KINDS = ("add_website", "write_first_article", "write_article", "view_progress", "view_draft", "view_article")
 STAGES = ("website", "first_article", "writing", "review", "setup", "publishing", "done")
 HOLDING_REASONS = ("slow", "website_update", "busy_today")
@@ -68,6 +70,9 @@ PAGE_CHOICE_ACTION = "choose_articles_page"
 # Un-retired while the deploy link is on (plan C14): merging that does not
 # reach the live site is one named ask, worded for the host class.
 DEPLOY_ACTION = "deploy_site"
+# Plan E8: a protected branch or a founder without merge rights gets a share
+# link for their reviewer, never a stuck "approve it on GitHub".
+REVIEWER_ACTION = "send_pr_to_reviewer"
 
 
 def retired_actions(*, page_policy=None) -> frozenset:
@@ -149,6 +154,11 @@ COPY = {
     # Plan C14 fallback; the ask itself carries the host class's copy.
     "deploy_site": ("Your live site hasn't updated yet",
                     "Your change is merged on GitHub, but your website hasn't picked it up.", "How to fix this"),
+    # Plan E8 fallback; the ask itself carries the reviewer's name when known.
+    "send_pr_to_reviewer": ("Send this change to your reviewer",
+                            "Your website's GitHub settings need someone with review rights to approve this pull "
+                            "request before it goes live. Open it and send them the link. If you can review it "
+                            "yourself, approve it on GitHub.", "Open the pull request"),
     "done_copy_ready": ("Your article is ready to post", None, "Open your article"),
     # Plan E13: the founder asked their GitHub organisation owner to approve MLAI.
     "waiting_github_owner_approval": ("Waiting for your GitHub owner to approve MLAI",
@@ -848,11 +858,17 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
         decision = _first_article_decision(organization=organization, company=company, config=config, user=user,
                                            first_article=first_article)
 
+    if _mapping(decision.get("action")).get("id") == "approve_on_github":
+        decided_id = decision.get("runId")
+        decided_run = next((item for item in (run, setup_run)
+                            if item is not None and decided_id and item.run_id == decided_id), setup_run)
+        decision = _reviewer_decision(decision, connection=connection, run=decided_run)
+
     if policy_v2_applies(organization) and not decision.get("copyId"):
         ask = _mapping(decision.get("action")).get("id")
-        if ask == DEPLOY_ACTION or ask in OWNER_REQUEST_ASKS:
-            # The host class's (C14) or the owner request's (E13) exact copy
-            # is the line: no P2 copy id replaces it.
+        if ask in {DEPLOY_ACTION, REVIEWER_ACTION} or ask in OWNER_REQUEST_ASKS:
+            # The host class's (C14), the reviewer's (E8) or the owner
+            # request's (E13) exact copy is the line: no P2 copy id replaces it.
             pass
         elif ask in FOUNDER_ASKS:
             if ask == "buy_points":
@@ -1063,6 +1079,30 @@ def _deploy_decision(connection, *, stage, run_id=None, staff_alerted=False):
     decision.update(headline=ask["headline"], body=ask["body"])
     decision["action"]["label"] = ask["label"]
     return decision
+
+
+def _reviewer_decision(decision, *, connection, run):
+    """``approve_on_github`` becomes ``send_pr_to_reviewer`` when the founder cannot merge alone (plan E8).
+
+    Only the ask changes. Merging still re-reads the live branch policy and
+    merges the exact validated head; GitHub still enforces protection.
+    """
+    from .website_repository_selection import reviewer_ask, reviewer_needed
+    # P2 already worded this as GitHub's required approval (the article merge
+    # worker's BRANCH_PROTECTION_APPROVAL_REQUIRED, possibly on a published
+    # child run that is not ``run``).
+    protected = decision.get("copyId") == "ask_approve_on_github_protected"
+    if not (protected or reviewer_needed(connection, run)):
+        return decision
+    url = _mapping(decision.get("action")).get("url")
+    ask = reviewer_ask(connection, url=url)
+    if not ask["url"]:
+        return decision
+    updated = _decide(decision.get("stage") or "setup", "your_turn", REVIEWER_ACTION, action=REVIEWER_ACTION,
+                      run_id=decision.get("runId"), url=ask["url"])
+    updated.update(headline=ask["headline"], body=ask["body"])
+    updated["action"]["label"] = ask["label"]
+    return updated
 
 
 def _article_not_live(organization, run, now=None):
