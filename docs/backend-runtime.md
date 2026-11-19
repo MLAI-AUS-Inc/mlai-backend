@@ -142,6 +142,34 @@ Tests requiring their own standalone settings should use their documented
 runner, as the editorial unit lane does. Database-backed tests still require
 specific migration approval before local execution.
 
+## CI test databases
+
+Every database lane in `.github/workflows/deploy.yml` sets
+`MLAI_TEST_DATABASE_TEMPLATE`, which selects `mlai/test_runner.py`. The first
+`manage.py test` command in a job applies the whole migration chain and saves a
+copy; each later command starts from that copy and still runs Django's own
+keep-database setup. SQLite keeps the copy as a private file and loads it into
+the in-memory test database. PostgreSQL keeps it as a template database. The
+copy is keyed on the migration files, the installed apps and the Django
+version. Leave the variable unset locally to keep Django's default runner.
+
+The `postgres-search` and `migration-tests` lanes hold the PostgreSQL data
+directory in memory, because emptying every table after each
+`TransactionTestCase` was bound by disk syncs. Their first step checkpoints
+often, since each emptied table leaves an empty file until the next checkpoint
+and an in-memory filesystem holds a limited number of files. The option and the
+step belong together. `p2-performance` keeps a disk-backed database so its
+timed tick is measured as before.
+
+Migration tests that rebuild the schema carry `@tag("postgres-only")`. The
+SQLite lane excludes that tag, and the `migration-tests` lane selects those
+classes by name. Production runs PostgreSQL only.
+
+A newer push to a pull request cancels the run for the commit it replaced. Runs
+on `main` and manual releases are never cancelled. A main push reuses only a
+fully successful run on the pull request's final commit, so a cancelled run is
+never read.
+
 The proposed [26 September disposable-test inventory](refactor-release-test-migrations-2026-09-26.json)
 is enforced by `scripts/test_refactor_database.py`. The harness requires recorded
 approval, an exact file set and SHA-256 match (including the new migrations), and

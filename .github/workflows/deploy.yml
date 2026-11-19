@@ -14,11 +14,13 @@ permissions:
   pull-requests: read
 
 # Main push and manual releases share one concurrency group so they cannot
-# mutate the droplet together. PR checks use their commit SHA so an obsolete
-# run cannot block validation of a newer patch on the same PR.
+# mutate the droplet together, and they are never cancelled. Each pull request
+# has its own group, where a newer push cancels the run for the commit it
+# replaced: only a run on the pull request's final commit is ever reused or
+# required, so the older run's result has no reader.
 concurrency:
-  group: mlai-backend-deploy-${{ github.event_name == 'pull_request' && github.sha || github.ref }}
-  cancel-in-progress: false
+  group: mlai-backend-deploy-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Pull requests run the configured regression lanes and record the exact Git tree that
@@ -48,6 +50,9 @@ jobs:
       DATABASE_URL: sqlite:////tmp/mlai_backend_ci.sqlite3
       CONNECTOR_CREDENTIAL_KEYS: '{"ci-v1":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}'
       CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID: ci-v1
+      # Each `manage.py test` loads one migrated copy of the in-memory test
+      # database instead of re-applying every migration (mlai/test_runner.py).
+      MLAI_TEST_DATABASE_TEMPLATE: "1"
     steps:
     - uses: actions/checkout@v6
 
@@ -115,6 +120,9 @@ jobs:
 
     - name: Validate selected test labels without database access
       run: python scripts/test_without_database.py --collect-ci-selection
+
+    - name: Check migrated test database reuse without database access
+      run: python scripts/test_without_database.py tests.test_database_template_runner_unit
 
     - name: Test private Studio source preparation without database access
       run: python scripts/test_without_database.py integrations.tests_studio_report_source
@@ -772,11 +780,14 @@ jobs:
           POSTGRES_PASSWORD: mlai_test_password
         ports:
           - 5432:5432
+        # This database is disposable, so its files live in memory. Emptying
+        # every table after each TransactionTestCase was bound by disk syncs.
         options: >-
           --health-cmd "pg_isready -U mlai -d mlai_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+          --tmpfs /var/lib/postgresql/data
     env:
       DATABASE_URL: postgresql://mlai:mlai_test_password@127.0.0.1:5432/mlai_test
       CONNECTOR_CREDENTIAL_KEYS: '{"ci-v1":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}'
@@ -788,6 +799,18 @@ jobs:
       # re-applying every migration (mlai/test_runner.py).
       MLAI_TEST_DATABASE_TEMPLATE: "1"
     steps:
+    - name: Keep the in-memory PostgreSQL within its file limit
+      # Each emptied table leaves an empty file until the next checkpoint, and
+      # an in-memory filesystem holds a limited number of files.
+      env:
+        POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+      run: |
+        docker exec "$POSTGRES_CONTAINER" sh -c 'test "$(stat -f -c %T "$PGDATA")" = tmpfs'
+        docker exec "$POSTGRES_CONTAINER" psql -U mlai -d mlai_test -v ON_ERROR_STOP=1 \
+          -c "ALTER SYSTEM SET checkpoint_timeout = '30s'" \
+          -c "ALTER SYSTEM SET max_wal_size = '256MB'" \
+          -c "SELECT pg_reload_conf()"
+
     - uses: actions/checkout@v6
       with:
         fetch-depth: 0
@@ -1007,11 +1030,14 @@ jobs:
           POSTGRES_PASSWORD: mlai_test_password
         ports:
           - 5432:5432
+        # This database is disposable, so its files live in memory. Emptying
+        # every table after each TransactionTestCase was bound by disk syncs.
         options: >-
           --health-cmd "pg_isready -U mlai -d mlai_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+          --tmpfs /var/lib/postgresql/data
     env:
       DATABASE_URL: postgresql://mlai:mlai_test_password@127.0.0.1:5432/mlai_test
       CONNECTOR_CREDENTIAL_KEYS: '{"ci-v1":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}'
@@ -1023,6 +1049,18 @@ jobs:
       # re-applying every migration (mlai/test_runner.py).
       MLAI_TEST_DATABASE_TEMPLATE: "1"
     steps:
+    - name: Keep the in-memory PostgreSQL within its file limit
+      # Each emptied table leaves an empty file until the next checkpoint, and
+      # an in-memory filesystem holds a limited number of files.
+      env:
+        POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+      run: |
+        docker exec "$POSTGRES_CONTAINER" sh -c 'test "$(stat -f -c %T "$PGDATA")" = tmpfs'
+        docker exec "$POSTGRES_CONTAINER" psql -U mlai -d mlai_test -v ON_ERROR_STOP=1 \
+          -c "ALTER SYSTEM SET checkpoint_timeout = '30s'" \
+          -c "ALTER SYSTEM SET max_wal_size = '256MB'" \
+          -c "SELECT pg_reload_conf()"
+
     - uses: actions/checkout@v6
 
     - uses: actions/setup-python@v6

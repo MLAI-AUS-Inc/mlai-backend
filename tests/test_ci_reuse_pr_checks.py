@@ -19,6 +19,7 @@ HEAD_SHA = "b" * 40
 TREE_SHA = "c" * 40
 WORKFLOW_ID = 123
 RUN_ID = 456
+IN_MEMORY_DATA_OPTION = " --tmpfs /var/lib/postgresql/data"
 
 
 def api_fixture(
@@ -129,6 +130,47 @@ class ReusePrChecksTests(TestCase):
 
         self.assertFalse(reuse)
 
+    def test_only_successful_runs_of_the_final_pull_request_commit_are_considered(self):
+        # A newer push cancels the run for the commit it replaced. That is safe
+        # because validation is only ever read from the final commit's runs.
+        fixture = api_fixture()
+        run_queries = []
+
+        def api_get(path, params=None):
+            if path.endswith(f"/actions/workflows/{WORKFLOW_ID}/runs"):
+                run_queries.append(dict(params))
+            return fixture(path, params)
+
+        reuse, _reason = self.route(api_get)
+
+        self.assertTrue(reuse)
+        self.assertEqual(
+            run_queries,
+            [
+                {
+                    "event": "pull_request",
+                    "head_sha": HEAD_SHA,
+                    "per_page": "100",
+                    "status": "success",
+                }
+            ],
+        )
+
+    def test_cancelled_run_is_not_reused_even_with_a_matching_attestation(self):
+        # The checks job can finish and attest before the run is cancelled.
+        fixture = api_fixture()
+
+        def api_get(path, params=None):
+            response = fixture(path, params)
+            if path.endswith(f"/actions/workflows/{WORKFLOW_ID}/runs"):
+                response["workflow_runs"][0]["conclusion"] = "cancelled"
+            return response
+
+        reuse, reason = self.route(api_get)
+
+        self.assertFalse(reuse)
+        self.assertIn("no successful workflow", reason)
+
     def test_direct_push_falls_back_without_querying_workflow_runs(self):
         def api_get(path, params=None):
             self.assertTrue(path.endswith(f"/commits/{COMMIT_SHA}/pulls"))
@@ -157,7 +199,15 @@ class ReusePrChecksTests(TestCase):
         root = Path(__file__).resolve().parents[1]
         jobs = yaml.safe_load((root / '.github/workflows/deploy.yml').read_text())['jobs']
         performance = jobs['p2-performance']
-        self.assertEqual(performance['services'], jobs['postgres-search']['services'])
+        # The timed tick keeps the disk-backed service it was calibrated on. The
+        # other PostgreSQL lanes run the same service with its files in memory.
+        search_service = jobs['postgres-search']['services']['postgres']
+        self.assertTrue(search_service['options'].endswith(IN_MEMORY_DATA_OPTION))
+        self.assertEqual(performance['services'], {'postgres': {
+            **search_service,
+            'options': search_service['options'].removesuffix(IN_MEMORY_DATA_OPTION),
+        }})
+        self.assertNotIn('docker exec', ''.join(step.get('run', '') for step in performance['steps']))
         self.assertEqual(performance['env'], jobs['postgres-search']['env'])
         self.assertIn('p2-performance', jobs['deploy']['needs'])
         self.assertIn("needs.p2-performance.result == 'success'", jobs['deploy']['if'])
@@ -193,9 +243,15 @@ class ReusePrChecksTests(TestCase):
         self.assertIn("  workflow_dispatch:", workflow)
         self.assertIn("github.event_name == 'workflow_dispatch'", workflow)
         self.assertIn("github.ref == 'refs/heads/main'", workflow)
-        self.assertIn(
-            "github.event_name == 'pull_request' && github.sha || github.ref",
-            workflow,
+        # Main pushes and manual releases share one group and are never
+        # cancelled. Each pull request has its own group, where a newer push
+        # cancels the run for the commit it replaced.
+        self.assertEqual(
+            yaml.load(workflow, Loader=yaml.BaseLoader)["concurrency"],
+            {
+                "group": "mlai-backend-deploy-${{ github.ref }}",
+                "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+            },
         )
 
         with TemporaryDirectory() as temporary_directory:
@@ -206,3 +262,28 @@ class ReusePrChecksTests(TestCase):
             ):
                 self.assertEqual(main(), 0)
             self.assertIn("reuse_pr_checks=false", output_path.read_text())
+
+    def test_database_lanes_reuse_one_migrated_database_and_bound_in_memory_files(self):
+        root = Path(__file__).resolve().parents[1]
+        jobs = yaml.safe_load((root / '.github/workflows/deploy.yml').read_text())['jobs']
+        # Without this switch every `manage.py test` call re-applies all migrations.
+        for lane in ('checks', 'postgres-search', 'migration-tests', 'p2-performance'):
+            self.assertEqual(jobs[lane]['env']['MLAI_TEST_DATABASE_TEMPLATE'], '1', lane)
+        self.assertIn(
+            "TEST_RUNNER = 'mlai.test_runner.TemplateDatabaseRunner'",
+            (root / 'mlai/settings.py').read_text(),
+        )
+        # An in-memory data directory holds a limited number of files, and each
+        # emptied table leaves one until the next checkpoint. The two settings
+        # travel together, before any test command runs.
+        for lane in ('postgres-search', 'migration-tests'):
+            self.assertTrue(
+                jobs[lane]['services']['postgres']['options'].endswith(IN_MEMORY_DATA_OPTION),
+                lane,
+            )
+            first_step = jobs[lane]['steps'][0]['run']
+            self.assertIn('= tmpfs', first_step, lane)
+            self.assertIn("ALTER SYSTEM SET checkpoint_timeout = '30s'", first_step, lane)
+            self.assertIn("ALTER SYSTEM SET max_wal_size = '256MB'", first_step, lane)
+            self.assertIn('pg_reload_conf()', first_step, lane)
+
