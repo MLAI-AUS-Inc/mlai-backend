@@ -10,8 +10,14 @@ answers 404 and records nothing.
 Storage: there is no lead model, and this step adds no migration. The lead is
 kept on the founder's CRM ``Contact`` (the existing person record, keyed by the
 account email) under ``attributes[LEADS_KEY]``, keyed by reason and domain.
-Writing it never changes the contact's consent, status or owner. A dedicated
-lead table is the follow-up (E3, E3b).
+Writing it never changes the contact's consent, status or owner.
+
+Plan E3: one not-on-GitHub exit is one lead row. Refining it on the host-class
+screens (another reason from ``REASONS``, the builder the founder picked)
+rewrites that row in place and never emits a second funnel event. The row
+carries the guidance id and the state that guidance was in when the founder
+saw it (``guidanceState``), so the lead reminders (E3b,
+``website_lead_reminders``) can tell the founder when it changes.
 
 Nothing here fetches the domain: it is normalised text only.
 """
@@ -41,6 +47,7 @@ INTEREST_REASONS = frozenset({"cms_content"})
 CMS_MESSAGE = "MLAI can't add articles to a website whose posts live in a content system yet."
 DEFAULT_REASON = "not_on_github"
 HOST_CLASS = re.compile(r"[a-z][a-z0-9_]{0,39}")
+GUIDANCE_ID = HOST_CLASS
 HOSTNAME = re.compile(r"(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
 MESSAGE = "MLAI can only set up articles for websites whose code is on GitHub today."
 NOTIFY_MESSAGE = "Thanks. We'll email you when that changes."
@@ -85,11 +92,20 @@ def parse_lead(data) -> dict:
     host_class = str(_text(data, "hostClass", "host_class") or "unknown").strip().lower()
     if not HOST_CLASS.fullmatch(host_class):
         host_class = "unknown"
+    guidance_id = str(_text(data, "guidanceId", "guidance_id") or "").strip().lower()
+    if not GUIDANCE_ID.fullmatch(guidance_id):
+        guidance_id = ""
     notify = _text(data, "notifyWhenChanged", "notify_when_changed")
     if notify is not None and not isinstance(notify, bool):
         raise ValueError("notifyWhenChanged must be true or false.")
     return {"reason": reason, "domain": normalise_lead_domain(_text(data, "domain", "website")),
-            "hostClass": host_class, "notify": bool(notify)}
+            "hostClass": host_class, "guidanceId": guidance_id or None, "notify": bool(notify)}
+
+
+def _exit_keys(leads, domain):
+    """Keys of the not-on-GitHub exit rows already kept for this domain (plan E3: one row per exit)."""
+    return [name for name, value in leads.items()
+            if isinstance(value, dict) and value.get("reason") in REASONS and (value.get("domain") or "") == domain]
 
 
 def _contact_for(user, *, now):
@@ -112,17 +128,20 @@ def record_lead(user, lead: dict, *, now=None, source="my_startup.website_step")
     Only a not-on-GitHub reason (``REASONS``) emits the funnel's
     ``not_on_github`` event; other lead kinds share the row, not the event.
     """
+    from .website_lead_reminders import guidance_state
     now = now or timezone.now()
     key = f"{lead['reason']}:{lead['domain']}"
+    guidance_id = lead.get("guidanceId") or None
     entry = {"version": 1, "userId": user.pk, "reason": lead["reason"], "domain": lead["domain"] or None,
-             "hostClass": lead["hostClass"], "source": source}
+             "hostClass": lead["hostClass"], "guidanceId": guidance_id, "source": source}
     with transaction.atomic():
         contact = _contact_for(user, now=now)
         if contact is None:
             # Nothing durable to dedupe against: a short-lived marker keeps the
             # funnel event to one per account, reason and domain.
             from django.core.cache import cache
-            created = bool(cache.add(f"founder-website-lead:{user.pk}:{key}", 1, timeout=30 * 86400))
+            marker = f"exit:{lead['domain']}" if lead["reason"] in REASONS else key
+            created = bool(cache.add(f"founder-website-lead:{user.pk}:{marker}", 1, timeout=30 * 86400))
             stored = False
             # No reminder can reach an unstored lead, so none is promised.
             entry.update(createdAt=now.isoformat(), updatedAt=now.isoformat(), notifyWhenChanged=False, remindAt=None)
@@ -130,13 +149,46 @@ def record_lead(user, lead: dict, *, now=None, source="my_startup.website_step")
             attributes = dict(contact.attributes) if isinstance(contact.attributes, dict) else {}
             leads = dict(attributes.get(LEADS_KEY)) if isinstance(attributes.get(LEADS_KEY), dict) else {}
             previous = leads.get(key) if isinstance(leads.get(key), dict) else None
+            if lead["reason"] in REASONS:
+                # Plan E3: the exit's row, whichever reason it was first kept
+                # under. A refined reason moves it; nothing else is lost.
+                family = _exit_keys(leads, lead["domain"])
+                rows = [leads[name] for name in family]
+                if previous is None and rows:
+                    # Rows kept before E3 may be several per domain: prefer
+                    # the one the founder asked to be told about.
+                    previous = next((row for row in rows if row.get("notifyWhenChanged") is True), rows[0])
+                if previous is not None:
+                    previous = dict(previous)
+                    if any(row.get("notifyWhenChanged") is True for row in rows):
+                        previous["notifyWhenChanged"] = True
+                    reminded_rows = [row.get("remindedAt") for row in rows if row.get("remindedAt")]
+                    if reminded_rows and not previous.get("remindedAt"):
+                        previous["remindedAt"] = min(reminded_rows)
+                for name in family:
+                    leads.pop(name, None)
             created, stored = previous is None, True
             # Asking to be told is sticky: a later plain visit, or a later
             # notifyWhenChanged false, never withdraws it.
             notify = bool(lead["notify"] or (previous or {}).get("notifyWhenChanged") is True)
-            entry.update(createdAt=(previous or {}).get("createdAt") or now.isoformat(), updatedAt=now.isoformat(),
+            previous = previous or {}
+            reminded = previous.get("remindedAt")
+            entry.update(createdAt=previous.get("createdAt") or now.isoformat(), updatedAt=now.isoformat(),
                          notifyWhenChanged=notify,
-                         remindAt=((previous or {}).get("remindAt") or (now + REMIND_AFTER).isoformat()) if notify else None)
+                         remindAt=((previous.get("remindAt") or (None if reminded else (now + REMIND_AFTER).isoformat()))
+                                   if notify else None))
+            # What the founder was shown, so a later change is news (E3b).
+            state = guidance_state(entry)
+            same_guidance = (previous.get("guidanceId"), previous.get("hostClass"), previous.get("reason")) == (
+                entry["guidanceId"], entry["hostClass"], entry["reason"])
+            entry["guidanceState"] = previous.get("guidanceState") if same_guidance and previous.get("guidanceState") else state
+            # Reminder bookkeeping and an opt-out survive every refinement.
+            for name in ("remindedAt", "reminder", "notices", "optedOutAt"):
+                if name in previous:
+                    entry[name] = previous[name]
+            if lead["notify"] and entry.get("optedOutAt"):
+                # Pressing "Tell me when this changes" again is a fresh opt-in.
+                entry.pop("optedOutAt", None)
             leads[key] = entry
             if len(leads) > MAX_LEADS:
                 for stale in sorted(leads, key=lambda name: str(leads[name].get("updatedAt") or ""))[:len(leads) - MAX_LEADS]:
@@ -154,7 +206,8 @@ def record_lead(user, lead: dict, *, now=None, source="my_startup.website_step")
             transaction.on_commit(lambda: _emit(emit_event, user.pk, at, signed_up))
     if not stored:
         logger.info("founder_website_lead_not_stored user=%s reason=%s", user.pk, lead["reason"])
-    public = {key: entry[key] for key in ("reason", "domain", "hostClass", "notifyWhenChanged", "remindAt", "createdAt")}
+    public = {key: entry.get(key) for key in ("reason", "domain", "hostClass", "guidanceId", "notifyWhenChanged",
+                                              "remindAt", "createdAt")}
     return public, created, stored
 
 
