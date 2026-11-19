@@ -31,6 +31,7 @@ SWEEPS: tuple[tuple[str, str, str], ...] = (
     ("founder_transitions", "content_factory.founder_transitions", "run_transition_sweep"),         # be-notify
     ("team_requests", "founder_tools.startup_team", "run_team_request_sweep"),                      # be-team (held)
     ("staff_alert_rules", "content_factory.staff_alert_rules", "run_alert_rule_sweep"),             # be-staff
+    ("background_job_digest", "content_factory.background_job_digest", "run_background_job_digest_sweep"),  # B6
     ("self_heal_report", "content_factory.failure_policy_engine", "run_dry_run_report_sweep"),      # be-policy
 )
 MISSING = "missing"

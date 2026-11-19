@@ -328,7 +328,7 @@ def _failure_recorded() -> Q:
 RUN_FIELDS = ("pk", "run_id", "organization_id", "workflow", "status", "updated_at",
               "result__error_code", "result__failure_code", "result__failure__code", "result__authority_denied__code",
               "result__failure__action__id", "result__failure__action_id", "result__action_id",
-              "result__self_heal_v1__next_at", "result__self_heal_v1__capped")
+              "result__self_heal_v1__next_at", "result__self_heal_v1__capped", "result__self_heal_v1__stop__code")
 
 
 def _stopped_runs(*, now, scope) -> list[StuckCondition]:
@@ -345,7 +345,7 @@ def _stopped_runs(*, now, scope) -> list[StuckCondition]:
     conditions = []
     for row in rows:
         code = _run_code(row)
-        if _founder_has_next_action(row, code) or _self_heal_scheduled(row, now=now):
+        if _founder_has_next_action(row, code) or _self_heal_scheduled(row, now=now) or _self_heal_stopped(row):
             continue
         conditions.append(StuckCondition(
             organization_id=row["organization_id"], slot=f"run-{row['pk']}-{row['status']}", kind="run_stopped",
@@ -380,6 +380,12 @@ def _self_heal_scheduled(row, *, now) -> bool:
     """Self-heal has a future retry booked and is not capped, so the run is not stuck yet."""
     moment = alerts._timestamp(row.get("result__self_heal_v1__next_at"))
     return bool(moment and moment > now and not row.get("result__self_heal_v1__capped"))
+
+
+def _self_heal_stopped(row) -> bool:
+    """Self-heal recorded its own capped stop and already raised ``self_heal_capped`` for it (B2)."""
+    value = row.get("result__self_heal_v1__stop__code")
+    return isinstance(value, str) and bool(value)
 
 
 def _registry_entry(code):

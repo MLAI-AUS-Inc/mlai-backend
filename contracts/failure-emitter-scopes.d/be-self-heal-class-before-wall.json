@@ -1,0 +1,18 @@
+{
+  "dynamic_adapters": [],
+  "nonfailure_sites": [
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "control_article_run",
+      "field": "code",
+      "expression": "'run_refunded_start_again'",
+      "site_sha256": "c85b3454b6714092b4dd014de8edaae3f17000e63a49510552ae914e99166164",
+      "adapter": "nonfailure_category",
+      "category": "owner command refusal schema; not a causal Articles run failure",
+      "owner": "backend.website_reconciliation",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "A founder resume of a run whose points were refunded or whose free article was released is refused with this command code (owner decision D16, plan step B1); the run keeps its own failure code and is never resumed on unpaid points.",
+      "test": "content_factory.tests_self_heal_class_before_wall.RefundedRunTests.test_founder_resume_of_a_refunded_run_is_refused"
+    }
+  ]
+}
