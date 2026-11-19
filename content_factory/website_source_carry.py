@@ -116,7 +116,15 @@ def decide(cache: Any, comparison: dict[str, Any], *, owned_merge: bool) -> dict
         return {"carry": False, "reason": "compare_unreadable"}
     total = comparison.get("total_commits")
     if len(files) >= COMPARE_FILE_LIMIT:
-        return {"carry": False, "reason": "compare_truncated"}
+        blobs = comparison.get(SETUP_BLOBS_KEY)
+        if not _blobs_readable(blobs, paths):
+            return {"carry": False, "reason": "compare_truncated"}
+        # GitHub cut the file list short, so read the setup files' own blob
+        # ids at both commits instead (one tree read each). A file missing on
+        # either side counts as changed.
+        hits = sorted(path for path in paths if not blobs["from"].get(path) or blobs["from"].get(path) != blobs["to"].get(path))
+        return _verdict(cache, paths, hits, owned_merge=owned_merge,
+            changed_files=None, total=total, method="setup_blobs")
     changed: dict[str, str] = {}
     for item in files:
         if not isinstance(item, dict):
@@ -125,19 +133,56 @@ def decide(cache: Any, comparison: dict[str, Any], *, owned_merge: bool) -> dict
         if not name:
             return {"carry": False, "reason": "compare_unreadable"}
         changed[name] = _normalize(item.get("previous_filename")) if item.get("status") == "renamed" else ""
-    hits = _touches(changed, paths)
+    return _verdict(cache, paths, _touches(changed, paths), owned_merge=owned_merge,
+        changed_files=len(changed), total=total, method="compare")
+
+
+def _blobs_readable(blobs: Any, paths: Iterable[str]) -> bool:
+    """Whether both commits' setup-file blob ids were read in full."""
+    return bool(isinstance(blobs, dict) and all(isinstance(blobs.get(side), dict) for side in ("from", "to"))
+        and blobs.get("complete") is True and list(paths))
+
+
+def _verdict(cache: Any, paths: list[str], hits: list[str], *, owned_merge: bool,
+             changed_files: int | None, total: Any, method: str) -> dict[str, Any]:
     if hits and owned_merge:
         roots = _article_content_roots(cache, paths)
         hits = [path for path in hits if not any(path == root or path.startswith(root + "/") for root in roots)
                 and path.rsplit("/", 1)[-1] not in _REGISTRY_NAMES]
     if hits:
-        return {"carry": False, "reason": "setup_files_changed", "changed_setup_files": hits[:20]}
-    return {"carry": True, "reason": "setup_files_unchanged", "changed_files": len(changed),
-            "commits": total if isinstance(total, int) else None}
+        return {"carry": False, "reason": "setup_files_changed", "changed_setup_files": hits[:20], "method": method}
+    return {"carry": True, "reason": "setup_files_unchanged", "changed_files": changed_files,
+            "commits": total if isinstance(total, int) else None, "method": method}
 
 
-def compare_sources(website, from_sha: str, to_sha: str) -> dict[str, Any] | None:
-    """Read GitHub's comparison with a short-lived read token; None when it can't be read."""
+# Where ``compare_sources`` attaches the setup files' blob ids when GitHub's
+# compare file list is truncated.
+SETUP_BLOBS_KEY = "mlai_setup_blobs"
+
+
+def _tree_blobs(website, headers, sha: str, paths: list[str]) -> dict[str, str] | None:
+    """The blob id of each of ``paths`` at ``sha`` ("" when absent); None when the tree can't be read in full."""
+    from integrations import http_client
+    response = http_client.get(f"https://api.github.com/repos/{website.github_repo}/git/trees/{sha}?recursive=1",
+        headers=headers, timeout=(3, 20))
+    if response.status_code != 200:
+        return None
+    data = response.json()
+    if not isinstance(data, dict) or data.get("truncated") is not False or not isinstance(data.get("tree"), list):
+        return None
+    wanted = set(paths)
+    found = {str(item.get("path")): str(item.get("sha") or "") for item in data["tree"]
+             if isinstance(item, dict) and item.get("type") == "blob" and item.get("path") in wanted}
+    return {path: found.get(path, "") for path in paths}
+
+
+def compare_sources(website, from_sha: str, to_sha: str, *, setup_files: list[str] | None = None) -> dict[str, Any] | None:
+    """Read GitHub's comparison with a short-lived read token; None when it can't be read.
+
+    When the comparison's file list is truncated and ``setup_files`` is given,
+    the blob ids of those files at both commits are attached under
+    ``SETUP_BLOBS_KEY`` so ``decide`` can still judge the push.
+    """
     from integrations import http_client
     from integrations.services.github_app import create_installation_access_token
 
@@ -156,7 +201,14 @@ def compare_sources(website, from_sha: str, to_sha: str) -> dict[str, Any] | Non
         if response.status_code != 200:
             return None
         data = response.json()
-        return data if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        files = data.get("files")
+        if setup_files and isinstance(files, list) and len(files) >= COMPARE_FILE_LIMIT and data.get("status") in {"ahead", "identical"}:
+            before = _tree_blobs(website, headers, from_sha, setup_files)
+            after = _tree_blobs(website, headers, to_sha, setup_files) if before is not None else None
+            data[SETUP_BLOBS_KEY] = {"from": before or {}, "to": after or {}, "complete": before is not None and after is not None}
+        return data
     except Exception:
         logger.warning("source_carry_compare_unavailable website=%s", website.pk, exc_info=True)
         return None
@@ -181,7 +233,7 @@ def carry_decision(website, config, source_sha: str, *, owned_merge: bool) -> di
     target = _default_target(website, getattr(config, "default_publish_target_id", "") or "")
     if target is None or target.source_sha != from_sha or not carriable(website, target):
         return {"carry": False, "reason": "proof_not_carriable"}
-    comparison = compare_sources(website, from_sha, source_sha)
+    comparison = compare_sources(website, from_sha, source_sha, setup_files=setup_paths(cache))
     if comparison is None:
         return {"carry": False, "reason": "compare_unreadable"}
     return {**decide(cache, comparison, owned_merge=owned_merge), "from_sha": from_sha}
