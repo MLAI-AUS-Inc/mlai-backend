@@ -156,3 +156,72 @@ class SystemStoppedRunTests(TestCase):
             self.assertEqual(stopped.run_system_stopped_run_sweep()["decided"], {})
         run.refresh_from_db()
         self.assertEqual(run.result[stopped.FOLLOWUP_KEY]["decision"], "notice")
+
+    def test_two_passes_never_both_restart_one_run(self):
+        run = self.make_run()
+        transition_connection(self.config, action="reset", expected=contract_for(self.connection), idempotency_key="reset-1")
+        stale = ContentFactoryRun.objects.get(pk=run.pk)
+        calls = []
+
+        def restart(current, context):
+            # A second pass reading the same row before the first recorded anything.
+            calls.append(current.run_id)
+            self.assertIsNone(stopped.follow_up(stale))
+            return "replacement-run"
+
+        with patch.object(stopped, "_owner_context", return_value=SimpleNamespace()), \
+                patch.object(stopped, "_restart", side_effect=restart):
+            self.assertEqual(stopped.follow_up(ContentFactoryRun.objects.get(pk=run.pk)), "restarted")
+        self.assertEqual(calls, ["tala-run"])
+        run.refresh_from_db()
+        self.assertEqual(run.result[stopped.FOLLOWUP_KEY]["decision"], "restarted")
+        self.assertFalse(stopped.restartable(run))
+
+    def test_a_run_the_founder_already_restarted_is_left_alone(self):
+        run = self.make_run(status="failed", result={"topic": "Synthetic topic", "error_code": "website_connection_changed",
+            "restart_child_run_id": "founder-replacement", "restart_receipt": {"state": "completed"}})
+        with patch.object(stopped, "_restart", side_effect=AssertionError("restarted twice")):
+            self.assertIsNone(stopped.follow_up(run))
+            self.assertEqual(stopped.run_system_stopped_run_sweep()["decided"], {})
+
+    def test_a_legacy_stop_with_no_known_transition_is_announced_not_restarted(self):
+        run = self.make_run(status="cancelled", error="Website connection changed.")
+        self.assertEqual(stopped.stop_cause(run)["transition"], "unknown")
+        with patch.object(stopped, "_restart", side_effect=AssertionError("unknown stop restarted")):
+            self.assertEqual(stopped.follow_up(run), "notice")
+
+    def test_a_stop_older_than_the_restart_window_is_announced(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        run = self.make_run()
+        transition_connection(self.config, action="reset", expected=contract_for(self.connection), idempotency_key="reset-1")
+        run.refresh_from_db()
+        later = timezone.now() + stopped.RESTART_WINDOW + timedelta(hours=1)
+        with patch.object(stopped, "_owner_context", return_value=SimpleNamespace()), \
+                patch.object(stopped, "_restart", side_effect=AssertionError("old stop restarted")):
+            self.assertEqual(stopped.follow_up(run, now=later), "notice")
+
+    def test_a_revoke_after_the_stop_blocks_the_automatic_restart(self):
+        run = self.make_run()
+        transition_connection(self.config, action="reset", expected=contract_for(self.connection), idempotency_key="reset-1")
+        self.connection.refresh_from_db()
+        transition_connection(self.config, action="revoke", expected=contract_for(self.connection), idempotency_key="revoke-1")
+        self.connection.refresh_from_db()
+        self.connection.state = "connected"
+        self.connection.save(update_fields=["state"])
+        run.refresh_from_db()
+        with patch.object(stopped, "_owner_context", return_value=SimpleNamespace()), \
+                patch.object(stopped, "_restart", side_effect=AssertionError("consent withdrawn since")):
+            self.assertEqual(stopped.follow_up(run), "notice")
+
+    def test_ordinary_failures_cannot_crowd_a_stop_out_of_the_sweep(self):
+        for index in range(stopped.SWEEP_LIMIT * 5):
+            self.make_run(run_id=f"plain-{index}", status="failed", result={"error_code": "model_timeout"})
+        run = self.make_run(run_id="fenced", status="failed", result={"topic": "Synthetic topic",
+            "error_code": "website_connection_changed", "callback_rejection": {"code": "website_connection_changed"}})
+        from datetime import timedelta
+        ContentFactoryRun.objects.filter(pk=run.pk).update(updated_at=run.updated_at - timedelta(minutes=5))
+        with patch.object(stopped, "_owner_context", return_value=None):
+            self.assertEqual(stopped.run_system_stopped_run_sweep()["decided"], {"notice": 1})
+        run.refresh_from_db()
+        self.assertEqual(run.result[stopped.FOLLOWUP_KEY]["decision"], "notice")

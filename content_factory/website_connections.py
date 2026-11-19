@@ -1293,8 +1293,9 @@ def _resume_paused(config, connection, metadata, *, user):
 
 def _same_owner(connection, metadata, user):
     """Same installation and same consenting owner as the saved connection."""
-    return (str(connection.installation_id or "") == str(metadata.get("installation_id") or "")
-        and connection.authorized_by_id == getattr(user, "pk", None))
+    owner = getattr(user, "pk", None)
+    return (owner is not None and str(connection.installation_id or "") == str(metadata.get("installation_id") or "")
+        and connection.authorized_by_id == owner)
 
 
 def revoked_proof(connection, metadata, user):

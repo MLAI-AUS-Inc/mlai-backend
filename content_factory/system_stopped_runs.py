@@ -7,7 +7,8 @@ just cancelled: the drafts list hides cancelled runs, so the founder saw the
 article vanish (Tala Thrive: six ``confirmed_topic`` runs, 3 to 17 Nov 2026).
 
 Each such run now gets exactly one follow-up, recorded under
-``result["system_stop_followup"]`` and never rewritten:
+``result["system_stop_followup"]``, claimed under the run's lock before any
+restart so two passes can never both restart one run:
 
 - ``restarted``: the website is connected and consent is unchanged (same
   repository id and the same consenting owner, and the stop was not a consent
@@ -40,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 FOLLOWUP_KEY = "system_stop_followup"
 LOOKBACK = timedelta(days=30)
+# Only a recent stop restarts on its own; an older one gets the notice instead.
+RESTART_WINDOW = timedelta(hours=48)
 SWEEP_LIMIT = 25
 
 # Where ``website_operation_terminal`` is raised, and what each site means.
@@ -98,10 +101,16 @@ def _transition_for(run):
     connection_id = saved.get("website_connection_id")
     if not connection_id:
         return None
+    from .website_cancellation_retirement import KEY as CANCEL_WORK_KEY
     rows = (WebsiteConnectionOperation.objects.filter(connection_id=connection_id, action__in=TRANSITION_ACTIONS)
-        .order_by("-created_at").values_list("action", "payload")[:20])
-    for action, payload in rows:
-        if run.run_id in (_mapping(payload).get("cancel_run_ids") or []):
+        .order_by("-created_at").values_list("action", "payload", "receipt")[:20])
+    for action, payload, receipt in rows:
+        # Cancellation retirement moves an unconfirmed id out of the payload,
+        # so the receipt's claimed list counts too.
+        named = [*(_mapping(payload).get("cancel_run_ids") or []),
+            *(_mapping(_mapping(receipt).get(CANCEL_WORK_KEY)).get("run_ids") or []),
+            *(_mapping(receipt).get("unconfirmed_cancel_run_ids") or [])]
+        if run.run_id in named:
             return action
     return None
 
@@ -114,11 +123,15 @@ def stop_cause(run):
     result = _mapping(run.result)
     if run.status == "cancelled":
         transition = result.get("cancellation_transition")
-        if transition or (result.get("cancelled_by") == "system" and str(run.error or "") == SYSTEM_TRANSITION_ERROR):
-            return {"kind": "transition", "transition": transition or "unknown", "stop_code": "authority_revoked"}
-        if str(run.error or "") == SYSTEM_TRANSITION_ERROR and "cancellation_reason" not in result:
-            return {"kind": "transition", "transition": "unknown", "stop_code": "authority_revoked"}
-        transition = _transition_for(run)
+        legacy = str(run.error or "") == SYSTEM_TRANSITION_ERROR and (
+            result.get("cancelled_by") == "system" or "cancellation_reason" not in result)
+        if not transition:
+            # A run cancelled before transitions were recorded (or an
+            # authoritative run cancelled by the operation itself) is matched
+            # to the transition whose cancellation list names it. One that
+            # cannot be matched stays "unknown" and is never restarted on its
+            # own: it may have been a consent withdrawal.
+            transition = _transition_for(run) or ("unknown" if legacy else None)
         if transition:
             return {"kind": "transition", "transition": transition, "stop_code": "authority_revoked"}
         return None
@@ -160,12 +173,27 @@ def _owner_context(run, connection):
         return None
 
 
-def decide(run, cause, connection):
+def _consent_withdrawn_since(run, connection) -> bool:
+    """Whether a disconnect, revoke or purge happened on this connection after the run's own generation."""
+    saved = _mapping(run.run_request)
+    generation = _mapping(run.result).get("cancellation_generation", saved.get("connection_generation"))
+    if type(generation) is not int:
+        return True  # Unknown: never assume consent survived.
+    return connection.operations.filter(action__in=CONSENT_WITHDRAWALS, generation__gt=generation).exists()
+
+
+def decide(run, cause, connection, *, now=None):
     """``"restart"`` when the connection is connected and consent unchanged, else ``"notice"``."""
-    if connection is None or connection.state != "connected" or cause["transition"] in CONSENT_WITHDRAWALS:
+    if (connection is None or connection.state != "connected" or cause["transition"] in CONSENT_WITHDRAWALS
+            or cause["transition"] == "unknown"):
+        return "notice"
+    if run.updated_at and run.updated_at < (now or timezone.now()) - RESTART_WINDOW:
+        # An old stop is announced, not silently restarted weeks later.
         return "notice"
     saved = _mapping(run.run_request)
     if saved.get("repository_id") not in (None, connection.repository_id):
+        return "notice"
+    if _consent_withdrawn_since(run, connection):
         return "notice"
     from .article_publication_evidence import refund_owns_charge
     if refund_owns_charge(run):
@@ -187,20 +215,40 @@ def _record(run, followup) -> bool:
     return True
 
 
+def _replace(run, followup) -> None:
+    """Record the outcome of the restart this pass claimed."""
+    from workflow_runs.models import ContentFactoryRun
+    with transaction.atomic():
+        current = ContentFactoryRun.objects.select_for_update().filter(pk=run.pk).first()
+        if current is None:
+            return
+        current.result = {**_mapping(current.result), FOLLOWUP_KEY: followup}
+        from .website_run_authority import event_owned
+        current.save(update_fields=["result"] if event_owned(current) else ["result", "updated_at"])
+    run.result = current.result
+
+
 def notice_for(run):
     """The founder-facing notice of a system-stopped run, or None (founder cancels never have one)."""
     followup = _mapping(_mapping(run.result).get(FOLLOWUP_KEY))
-    if followup.get("decision") != "notice":
-        return None
+    if followup.get("decision") != "notice" or _mapping(run.result).get("restart_child_run_id"):
+        return None  # Once the founder restarted it, the replacement carries the card.
     from .article_publication_evidence import refund_owns_charge
     refunded = refund_owns_charge(run)
     action = {"id": "start_again", "label": "Start again"} if refunded else {"id": "restart", "label": "Restart"}
     return {"kind": "system_stopped", "message": REFUNDED_NOTICE_MESSAGE if refunded else NOTICE_MESSAGE, "action": action}
 
 
+def already_restarted(run) -> bool:
+    """A replacement already took (or is taking) this run's payment, or its follow-up restarted it."""
+    from .article_publication_evidence import restart_reused_charge
+    followup = _mapping(_mapping(run.result).get(FOLLOWUP_KEY))
+    return restart_reused_charge(run) or followup.get("decision") in {"restarted", "restarting"}
+
+
 def restartable(run) -> bool:
     """Whether the founder's Restart may take this cancelled run: only a system stop, never their own cancel."""
-    return run.status == "cancelled" and stop_cause(run) is not None
+    return run.status == "cancelled" and stop_cause(run) is not None and not already_restarted(run)
 
 
 def follow_up(run, *, now=None) -> str | None:
@@ -212,23 +260,33 @@ def follow_up(run, *, now=None) -> str | None:
     cause = stop_cause(run)
     if cause is None:
         return None
+    if already_restarted(run):
+        return None  # The founder already restarted it; a second replacement would reuse one payment twice.
     config = OrganizationContentConfig.objects.select_related("website_connection__authorized_by").filter(
         organization_id=run.organization_id).first()
     connection = getattr(config, "website_connection", None) if config else None
     if connection is not None and connection.state == "paused":
         return None  # Decided after resume (B20 keeps the run's consent through a pause).
-    decision = decide(run, cause, connection)
+    decision = decide(run, cause, connection, now=now)
     followup = {"decision": decision, "at": now.isoformat(), "cause": cause,
         "connection_generation": getattr(connection, "generation", None)}
-    if decision == "restart":
-        context = _owner_context(run, connection)
-        restarted = _restart(run, context) if context is not None else None
+    context = _owner_context(run, connection) if decision == "restart" else None
+    if context is None:
+        followup["decision"] = "notice"
+        if not _record(run, followup):
+            return None
+    else:
+        # Claim the run before restarting, so two passes can never both restart
+        # it. A pass that dies mid-restart leaves the notice (with Restart), never
+        # a second replacement.
+        if not _record(run, {**followup, "decision": "notice", "restart_attempted": True}):
+            return None
+        restarted = _restart(run, context)
         if restarted is not None:
             followup.update(decision="restarted", restart_run_id=restarted)
+            _replace(run, followup)
         else:
             followup["decision"] = "notice"
-    if not _record(run, followup):
-        return None
     logger.info("system_stopped_run_followup run=%s decision=%s transition=%s code=%s",
         run.run_id, followup["decision"], cause["transition"], cause["stop_code"])
     return followup["decision"]
@@ -251,10 +309,22 @@ def run_system_stopped_run_sweep(now=None, limit=SWEEP_LIMIT) -> dict:
     """Follow up recently system-stopped article runs; one bounded pass per scheduler tick."""
     from workflow_runs.models import ContentFactoryRun
     from .run_state import ARTICLE_WORKFLOWS
+    from django.db.models import Q
     now = now or timezone.now()
+    codes = sorted(TRANSITION_FENCE_CODES | {"website_operation_terminal"})
+    # Only rows that can be a system stop, so ordinary failures and the
+    # founder's own cancels can never crowd real stops out of the window.
+    candidates = (Q(status="cancelled") & ~Q(error=LEGACY_OWNER_MESSAGE)
+        | Q(result__error_code__in=codes) | Q(result__callback_rejection__code__in=codes)
+        | Q(result__failure__callback_denial_code__in=codes))
     rows = (ContentFactoryRun.objects.filter(workflow__in=ARTICLE_WORKFLOWS, status__in=STOPPED_STATUSES,
-            updated_at__gte=now - LOOKBACK, organization__isnull=False)
-        .exclude(result__has_key=FOLLOWUP_KEY).order_by("-updated_at"))
+            updated_at__gte=now - LOOKBACK, organization__isnull=False).filter(candidates)
+        .exclude(result__has_key=FOLLOWUP_KEY)
+        # has_key first: a JSON key comparison on a row without the key is
+        # NULL, and excluding NULL would drop every row that lacks it.
+        .exclude(Q(result__has_key="cancelled_by") & Q(result__cancelled_by="owner"))
+        .exclude(Q(result__has_key="cancellation_reason") & Q(result__cancellation_reason__in=sorted(OWNER_REASONS)))
+        .order_by("-updated_at"))
     examined, decided = 0, {}
     for run in rows[:max(1, limit) * 4]:
         if sum(decided.values()) >= limit:

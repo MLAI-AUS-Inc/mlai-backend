@@ -1345,6 +1345,22 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
 
     @patch('content_factory.website_connections.verify_repository_access')
     def test_resuming_a_paused_website_keeps_its_generation(self, verify):
+        from django.contrib.auth import get_user_model
+        owner = get_user_model().objects.create_user(email='paused-owner@example.test', password='synthetic-password')
+        self.website.authorized_by = owner
+        self.website.save(update_fields=['authorized_by'])
+        verify.return_value = {'repository_id': 123, 'github_repo': 'example/site', 'installation_id': '45', 'branch': 'main'}
+        transition_connection(self.config, action='pause', expected=self.binding)
+        self.website.refresh_from_db()
+        paused_generation = self.website.generation
+        bind_website(self.config, user=owner, repo='example/site', app_root=self.website.app_root, branch=self.website.branch,
+            site_url=self.website.site_url, reconnect=True, expected=contract_for(self.website))
+        self.website.refresh_from_db()
+        # B20: same repository, installation and owner resume in place.
+        self.assertEqual((self.website.state, self.website.generation), ('connected', paused_generation))
+
+    @patch('content_factory.website_connections.verify_repository_access')
+    def test_reconnecting_a_paused_website_without_a_known_owner_starts_a_new_generation(self, verify):
         verify.return_value = {'repository_id': 123, 'github_repo': 'example/site', 'installation_id': '45', 'branch': 'main'}
         transition_connection(self.config, action='pause', expected=self.binding)
         self.website.refresh_from_db()
@@ -1352,8 +1368,7 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
         bind_website(self.config, user=None, repo='example/site', app_root=self.website.app_root, branch=self.website.branch,
             site_url=self.website.site_url, reconnect=True, expected=contract_for(self.website))
         self.website.refresh_from_db()
-        # B20: same repository, installation and owner resume in place.
-        self.assertEqual((self.website.state, self.website.generation), ('connected', paused_generation))
+        self.assertEqual((self.website.state, self.website.generation), ('connected', paused_generation + 1))
 
     @patch('content_factory.website_connections.verify_repository_access')
     def test_explicit_default_branch_selection_rebinds_custom_branch(self, verify):

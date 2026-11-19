@@ -121,7 +121,7 @@ def _operation_code(op):
 def check_connection(connection, config, *, now) -> list[Violation]:
     """Every invariant this connection breaks, in priority order."""
     from workflow_runs.models import ContentFactoryRun
-    from .system_stopped_runs import FOLLOWUP_KEY, stop_cause
+    from .system_stopped_runs import FOLLOWUP_KEY, already_restarted, stop_cause
     from .run_state import ARTICLE_WORKFLOWS
     from .website_connections import observed_source_sha
     found = []
@@ -182,7 +182,8 @@ def check_connection(connection, config, *, now) -> list[Violation]:
             workflow__in=ARTICLE_WORKFLOWS, status="cancelled", updated_at__gte=now - RUN_LOOKBACK,
             updated_at__lte=now - SYSTEM_STOP_GRACE).order_by("-updated_at"))
         for run in stopped[:50]:
-            if FOLLOWUP_KEY not in _mapping(run.result) and stop_cause(run) is not None:
+            if (FOLLOWUP_KEY not in _mapping(run.result) and stop_cause(run) is not None
+                    and not already_restarted(run)):
                 add("system_stopped_run_without_notice", run.run_id)
                 break
     return found
