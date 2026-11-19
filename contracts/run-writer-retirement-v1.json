@@ -5844,7 +5844,7 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "apply",
-      "function_sha256": "e1ca8671498ebe0ca1ddea6a308124253a775ca9e3b67f79645f5456ee55709e",
+      "function_sha256": "699122f4eb2b5834b3a8092c373eead931effdbe96cb3f3a07f32d07aa4b674f",
       "reason": "Private policy metadata writes use the already locked fresh Run, retain event-owner refusal and unrelated result fields, preserve the worker clock, and keep every original authority and decision check in apply. All five apply call sites and the lock-acquiring compatibility wrapper were manually reviewed.",
       "test_refs": [
         "content_factory/tests_p2_policy.py",

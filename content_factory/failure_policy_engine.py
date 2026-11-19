@@ -60,9 +60,15 @@ def run_failed_at(run):
     """
     ended = getattr(run, '_failed_step_at', _UNREAD)
     if ended is _UNREAD:
-        ended = (_failed_step_at().filter(run=run).values_list('completed_at', flat=True).first()
-                 if getattr(run, 'pk', None) is not None else None)
+        ended = run_failed_step_at(run)
     return ended or getattr(run, 'updated_at', None)
+
+
+def run_failed_step_at(run):
+    """The end of the run's latest failed or blocked step, or None (one query)."""
+    if getattr(run, 'pk', None) is None:
+        return None
+    return _failed_step_at().filter(run=run).values_list('completed_at', flat=True).first()
 
 
 _UNREAD = object()
@@ -594,6 +600,10 @@ def apply(subject, decision, *, now=None):
             return {'status': 'refused', 'detail': 'The startup changed.'}
         request = mapping(current.run_request)
         current.organization._state.fields_cache['content_config'] = config
+        # The candidate query already read the run's failure time; reuse it so
+        # decide() and the receipt below do not query the steps again (B1).
+        known = getattr(subject, '_failed_step_at', _UNREAD)
+        current._failed_step_at = known if known is not _UNREAD else run_failed_step_at(current)
         old = mapping(mapping(current.result).get('self_heal_v1'))
         pending = mapping(old.get('pending_action'))
         retransmit = (pending.get('state') in {'reserved', 'uncertain'} and pending.get('attempt') == decision.attempt
