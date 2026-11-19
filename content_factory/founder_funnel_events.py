@@ -144,9 +144,17 @@ def articles_page_verified(sender, instance, created, raw=False, using='default'
     """E10: the articles page is verified when a target first records its verification."""
     if raw or not instance.verified_at or not (created or update_fields is None or 'verified_at' in update_fields):
         return
-    org_id, at = instance.connection.organization_id, instance.verified_at
-    after_commit(lambda: emit_for_organization('articles_page_verified', org_id, at=at,
-        source='website.target_verified', using=using), using=using)
+    connection_id, at = instance.connection_id, instance.verified_at
+
+    def emit():
+        # Resolved after commit, so a save with the journey flag off reads nothing.
+        from .website_models import WebsiteConnection
+        org_id = WebsiteConnection.objects.using(using).filter(pk=connection_id).values_list(
+            'organization_id', flat=True).first()
+        if org_id:
+            emit_for_organization('articles_page_verified', org_id, at=at, source='website.target_verified',
+                                  using=using)
+    after_commit(emit, using=using)
 
 
 @receiver(post_save, sender='content_factory.WebsiteConnection', dispatch_uid='founder_funnel_github')

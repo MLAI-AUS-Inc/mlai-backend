@@ -1,4 +1,5 @@
 """E6: the server-owned setup state for every cohort, and the cohort-marker backfill (D15)."""
+from datetime import timedelta
 from io import StringIO
 import itertools
 from unittest.mock import patch
@@ -348,3 +349,29 @@ class MarkerBackfillTests(TestCase):
         with patch.object(backfill_command, "_has_island_refresh_inputs", return_value=True), \
                 self.assertRaises(CommandError):
             call_command("founder_journey_marker_backfill", "--write", stdout=StringIO())
+
+    def test_a_post_launch_org_with_pre_launch_history_waits_for_the_cohort_decision(self):
+        from content_factory.founder_journey_testing import LAUNCHED_AT
+        from content_factory.website_models import WebsiteConnection
+        built = make_history_free_org(created_at=timezone.now())
+        connection = WebsiteConnection.objects.create(organization=built.organization, github_repo="example/site",
+                                                      installation_id="1", branch="main")
+        WebsiteConnection.objects.filter(pk=connection.pk).update(created_at=LAUNCHED_AT - timedelta(days=3))
+        self.assertEqual(cohorts.cohort(built.organization), cohorts.NEW_JOURNEY)
+        result = backfill_command.backfill(write=True)
+        self.assertEqual([row["action"] for row in result["rows"]], ["needs_cohort_decision"])
+        self.assertEqual(result[backfill_command.METRIC], 1)
+        # Neither frozen new_journey (hiding what the cohort report flags) nor moved to legacy.
+        self.assertIsNone(cohorts.read_marker(built.organization))
+        self.assertEqual(cohorts.cohort(built.organization), cohorts.NEW_JOURNEY)
+
+    @override_settings(MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT="")
+    def test_write_is_refused_while_launched_at_is_unset(self):
+        built = make_history_free_org()
+        dry = backfill_command.backfill()
+        self.assertTrue(dry["launchUnset"])
+        with self.assertRaises(backfill_command.LaunchUnset):
+            backfill_command.backfill(write=True)
+        with self.assertRaises(CommandError):
+            call_command("founder_journey_marker_backfill", "--write", stdout=StringIO())
+        self.assertIsNone(cohorts.read_marker(built.organization))

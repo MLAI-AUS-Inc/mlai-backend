@@ -424,7 +424,7 @@ def organization_facts(organization_ids=None, *, using=DEFAULT_DB_ALIAS):
         connected_at = first_connection.get(org_id)
         article_runs = [run for run in org_runs if run.workflow in ARTICLE_WORKFLOWS]
 
-        def before_connection(run):
+        def before_connection(run, connected_at=connected_at):
             return connected_at is None or run.created_at < connected_at
 
         reached = {

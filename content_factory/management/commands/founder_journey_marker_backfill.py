@@ -14,7 +14,20 @@ so every organisation reaches the one server-owned setup state.
 It never changes a valid marker and is idempotent. An organisation without a
 config row that has keyword research, islands or clusters is left alone and
 reported as ``blocked_island_inputs``: a new config row would enrol it in the
-island refresh, which needs its own decision.
+island refresh, which needs its own decision. An organisation created at or
+after LAUNCHED_AT that is a named legacy domain or has state from before
+LAUNCHED_AT is left alone and reported as ``needs_cohort_decision``: the
+cohort report (``founder_journey_cohort``) counts it as losing an action, so
+freezing its new_journey cohort here would hide that, and freezing it legacy
+would move it.
+
+``--write`` is refused while ``MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT`` is
+unset or unparsable: every unmarked organisation is then legacy only until
+LAUNCHED_AT is set, and a marker written now would keep it legacy afterwards.
+
+Run ``founder_journey_cohort --apply`` first when the owner wants unmarked
+organisations without history moved to the new journey: this backfill only
+freezes the cohort each remaining organisation already has.
 
 The last line is ``startups_without_marker: <n>`` after the run (for a dry
 run: after the writes it would make). The command exits 1 when n > 0.
@@ -27,7 +40,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from content_factory import founder_journey_cohort as cohorts
-from content_factory.management.commands.founder_journey_cohort import _has_island_refresh_inputs
+from content_factory.management.commands.founder_journey_cohort import _has_island_refresh_inputs, prior_state
 from organizations.models import Organization
 
 METRIC = "startups_without_marker"
@@ -59,9 +72,17 @@ def backfill_cohort(organization) -> tuple[str, list[str]]:
     return cohorts.LEGACY, ["backfill:before_launch"]
 
 
+class LaunchUnset(CommandError):
+    """``--write`` without a usable LAUNCHED_AT: a marker would freeze a cohort LAUNCHED_AT has not decided yet."""
+
+
 def backfill(*, write=False, organization_ids=None):
     """Plan or write the markers. Returns ``{"rows": [...], "counts": {...}, METRIC: n}``."""
-    counts = {"has_marker": 0, "new_journey": 0, "legacy": 0, "created_config": 0, "blocked_island_inputs": 0}
+    launch = cohorts.launched_at()
+    if write and launch is None:
+        raise LaunchUnset("MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT is unset or unparsable; nothing was written.")
+    counts = {"has_marker": 0, "new_journey": 0, "legacy": 0, "created_config": 0, "blocked_island_inputs": 0,
+              "needs_cohort_decision": 0}
     rows = []
     remaining = 0
     for org in startup_organizations(organization_ids):
@@ -77,6 +98,12 @@ def backfill(*, write=False, organization_ids=None):
                 rows.append({"id": org.pk, "domain": org.domain, "action": "blocked_island_inputs"})
                 continue
             cohort_value, reasons = backfill_cohort(org)
+            if cohort_value == cohorts.NEW_JOURNEY and prior_state(org, launch):
+                # A named domain or pre-launch history: the cohort report's decision, not ours.
+                counts["needs_cohort_decision"] += 1
+                remaining += 1
+                rows.append({"id": org.pk, "domain": org.domain, "action": "needs_cohort_decision"})
+                continue
             rows.append({"id": org.pk, "domain": org.domain, "action": "write", "cohort": cohort_value,
                          "createConfig": config is None, "reasons": reasons})
             counts[cohort_value] += 1
@@ -90,7 +117,7 @@ def backfill(*, write=False, organization_ids=None):
             cohorts._save_marker(config, {**(existing or {}), **marker})
     if write:
         remaining = len(organizations_without_marker(organization_ids))
-    return {"rows": rows, "counts": counts, METRIC: remaining, "dryRun": not write}
+    return {"rows": rows, "counts": counts, METRIC: remaining, "dryRun": not write, "launchUnset": launch is None}
 
 
 class Command(BaseCommand):
@@ -113,6 +140,8 @@ class Command(BaseCommand):
                 self.stdout.write(f"{mode} org={row['id']} domain={row['domain']} action={row['action']}"
                                   + (f" cohort={row['cohort']} create_config={row['createConfig']}"
                                      if row["action"] == "write" else ""))
+            if result.get("launchUnset"):
+                self.stdout.write("launch_unset: MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT is not set; --write is refused")
             self.stdout.write(" ".join(f"{key}={value}" for key, value in result["counts"].items()))
             self.stdout.write(f"{METRIC}: {result[METRIC]}")
         if result[METRIC] > 0:
