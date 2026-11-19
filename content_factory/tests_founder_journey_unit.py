@@ -729,3 +729,43 @@ class HelperTests(TestCase):
         built = make_new_journey_org()
         body = journeys.project_founder_journey(built.organization, user=built.owner, company=built.company)
         self.assertEqual(body["stage"], "legacy")
+
+
+class FounderAskRegistryTests(TestCase):
+    """Plan E14: the clients' ask registry covers every ask the server sends.
+
+    The desktop, web and mobile fallback tests iterate the desktop
+    ``FOUNDER_ASKS`` and the failure registry's actions and aliases (from the
+    generated contract snapshot). Each ask the journey can emit must be in one
+    of those, so a client test over them covers the server's asks.
+    """
+
+    def _registry(self):
+        import json
+        from pathlib import Path
+        from django.conf import settings
+        path = Path(settings.BASE_DIR) / "contracts" / "failure-codes.json"
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_every_emitted_ask_is_in_the_client_registry(self):
+        from . import founder_journey_p2 as p2
+        registry = self._registry()
+        client_asks = set(journeys.FOUNDER_ASKS) | set(registry["actions"]) | set(registry.get("action_aliases", {}))
+        emitted = set(journeys.FOUNDER_ASKS) | set(journeys.REGISTRY_ASKS.values())
+        emitted |= set(registry.get("action_aliases", {}).values())
+        for copy_id in registry["founder_copy_ids"]:
+            if not copy_id.startswith("ask_"):
+                continue
+            action = p2.line(copy_id, count=1, expected=3)["action"]
+            with self.subTest(copy_id=copy_id):
+                self.assertIsNotNone(action)
+                emitted.add(action["id"])
+        self.assertTrue(emitted, "no asks found")
+        self.assertEqual(emitted - client_asks, set())
+
+    def test_registry_actions_alias_onto_asks_the_clients_know(self):
+        registry = self._registry()
+        known = set(journeys.FOUNDER_ASKS) | set(registry["actions"])
+        for alias, target in registry.get("action_aliases", {}).items():
+            with self.subTest(alias=alias):
+                self.assertIn(target, known)
