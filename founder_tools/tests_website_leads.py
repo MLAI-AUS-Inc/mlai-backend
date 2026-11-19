@@ -204,3 +204,16 @@ class WebsiteLeadTests(TestCase):
     def test_e3_a_malformed_guidance_id_is_dropped(self):
         response, _events = self.post({"reason": "not_on_github", "guidanceId": "<script>"})
         self.assertIsNone(response.data["lead"]["guidanceId"])
+
+    @override_settings(**GATE)
+    def test_e3_rows_kept_before_e3_for_one_domain_fold_into_one_and_keep_tell_me(self):
+        self.post({"reason": "not_on_github", "domain": "acme.example.com", "notifyWhenChanged": True})
+        contact = Contact.objects.get(email=self.user.email)
+        leads = dict(contact.attributes[LEADS_KEY])
+        leads["not_in_git:acme.example.com"] = {**leads["not_on_github:acme.example.com"], "reason": "not_in_git",
+                                                "notifyWhenChanged": False, "remindAt": None}
+        Contact.objects.filter(pk=contact.pk).update(attributes={**contact.attributes, LEADS_KEY: leads})
+        response, events = self.post({"reason": "no_github_account", "domain": "acme.example.com"})
+        self.assertEqual((response.status_code, events), (200, []))
+        self.assertEqual(list(self.leads()), ["no_github_account:acme.example.com"])
+        self.assertTrue(response.data["lead"]["notifyWhenChanged"])

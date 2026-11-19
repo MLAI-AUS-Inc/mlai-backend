@@ -149,8 +149,13 @@ def deep_link(lead) -> str | None:
     return f"{origin}/my-startup/start?{urlencode(query)}"
 
 
+def _email_digest(email) -> str:
+    return hashlib.sha256(str(email or "").encode()).hexdigest()[:24]
+
+
 def opt_out_token(contact) -> str:
-    return signing.dumps({"c": str(contact.pk), "e": contact.email}, salt=OPT_OUT_SALT, compress=True)
+    """Signed, not encrypted: it carries a digest of the address, never the address itself."""
+    return signing.dumps({"c": str(contact.pk), "h": _email_digest(contact.email)}, salt=OPT_OUT_SALT)
 
 
 def opt_out_url(contact) -> str:
@@ -174,8 +179,8 @@ def opt_out(token, *, now=None) -> str:
         return "invalid"
     now = now or timezone.now()
     with transaction.atomic():
-        contact = Contact.objects.select_for_update().filter(pk=claim.get("c"), email=claim.get("e")).first()
-        if contact is None:
+        contact = Contact.objects.select_for_update().filter(pk=claim.get("c")).first()
+        if contact is None or claim.get("h") != _email_digest(contact.email):
             return "invalid"
         attributes = deepcopy(_mapping(contact.attributes))
         leads = _mapping(attributes.get(LEADS_KEY))
@@ -192,17 +197,29 @@ def opt_out(token, *, now=None) -> str:
     return "opted_out"
 
 
+def _wants_email(lead) -> bool:
+    lead = _mapping(lead)
+    return lead.get("version") == 1 and lead.get("notifyWhenChanged") is True and not lead.get("optedOutAt")
+
+
+def _is_exit(lead) -> bool:
+    from .website_leads import REASONS
+    return _mapping(lead).get("reason") in REASONS
+
+
 def _due(lead, *, now):
     """What this lead is owed now: (kind, state) or None."""
     lead = _mapping(lead)
-    if lead.get("version") != 1 or lead.get("notifyWhenChanged") is not True or lead.get("optedOutAt"):
+    if not _wants_email(lead):
         return None
     current = guidance_state(lead)
     seen = lead.get("guidanceState")
     if seen and seen != current and current not in _mapping(lead.get("notices")):
         return "guidance_changed", current
     remind_at = _moment(lead.get("remindAt"))
-    if remind_at is not None and remind_at <= now and not lead.get("remindedAt"):
+    # The "is it on GitHub yet?" reminder belongs to the not-on-GitHub exit
+    # only; a CMS or staff "can't be done yet" lead hears about changes only.
+    if remind_at is not None and remind_at <= now and not lead.get("remindedAt") and _is_exit(lead):
         return "reminder", current
     return None
 
@@ -266,9 +283,12 @@ def _claim(contact_pk, lead_key, *, now):
     pending = _mapping(lead.get("reminder"))
     if pending.get("status") == "sending":
         started = _moment(pending.get("at"))
-        if started is not None and now - started < RETRY_WINDOW:
+        wanted = _wants_email(lead)
+        if wanted and started is not None and now - started < RETRY_WINDOW:
             return contact, lead, dict(pending)
-        pending = {**pending, "status": "failed", "error": "retry_window_closed"}
+        # An opt-out after the claim wins over the retry.
+        pending = {**pending, "status": "failed" if wanted else "skipped",
+                   "error": "retry_window_closed" if wanted else "opted_out"}
         lead["reminder"] = pending
         attributes[LEADS_KEY] = leads
         Contact.objects.filter(pk=contact.pk).update(attributes=attributes)

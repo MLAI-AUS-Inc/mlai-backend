@@ -153,8 +153,18 @@ def record_lead(user, lead: dict, *, now=None, source="my_startup.website_step")
                 # Plan E3: the exit's row, whichever reason it was first kept
                 # under. A refined reason moves it; nothing else is lost.
                 family = _exit_keys(leads, lead["domain"])
-                if previous is None and family:
-                    previous = leads[family[0]]
+                rows = [leads[name] for name in family]
+                if previous is None and rows:
+                    # Rows kept before E3 may be several per domain: prefer
+                    # the one the founder asked to be told about.
+                    previous = next((row for row in rows if row.get("notifyWhenChanged") is True), rows[0])
+                if previous is not None:
+                    previous = dict(previous)
+                    if any(row.get("notifyWhenChanged") is True for row in rows):
+                        previous["notifyWhenChanged"] = True
+                    reminded_rows = [row.get("remindedAt") for row in rows if row.get("remindedAt")]
+                    if reminded_rows and not previous.get("remindedAt"):
+                        previous["remindedAt"] = min(reminded_rows)
                 for name in family:
                     leads.pop(name, None)
             created, stored = previous is None, True

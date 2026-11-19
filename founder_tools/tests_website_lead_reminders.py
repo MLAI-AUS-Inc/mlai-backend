@@ -145,7 +145,7 @@ class LeadReminderTests(TestCase):
         self.record(domain="acme.framer.website", hostClass="no_export", guidanceId="framer",
                     at=self.now - timedelta(days=1))
         with patch.dict(reminders.GUIDANCE_STATES, {"framer": "unverified"}):
-            counts, outbox = self.sweep()
+            _counts, outbox = self.sweep()
         self.assertEqual(len(outbox), 1)
         self.assertIn("Framer", outbox[0]["payload"]["text"])
 
@@ -177,7 +177,7 @@ class LeadReminderTests(TestCase):
         self.record()
         with patch("system_email.transport_resend.send", side_effect=SystemEmailRetryable("resend_503")):
             reminders.run_lead_reminder_sweep(now=self.now)
-        counts, outbox = self.sweep(at=self.now + reminders.RETRY_WINDOW + timedelta(minutes=1))
+        _counts, outbox = self.sweep(at=self.now + reminders.RETRY_WINDOW + timedelta(minutes=1))
         self.assertEqual(outbox, [])
         self.assertEqual(next(iter(self.leads().values()))["reminder"]["status"], "failed")
 
@@ -198,3 +198,52 @@ class LeadReminderTests(TestCase):
         for builder in ("framer", "webflow", "wix", "squarespace", "shopify", "chatgpt_sites"):
             self.assertEqual(reminders.GUIDANCE_STATES[builder], "cant_connect_yet")
         self.assertNotIn("verified", set(reminders.GUIDANCE_STATES.values()))
+
+    def test_a_changed_email_an_inactive_account_or_a_connected_website_is_skipped(self):
+        from content_factory.website_models import WebsiteConnection
+        from organizations.models import Organization
+        self.record()
+        User.objects.filter(pk=self.user.pk).update(is_active=False)
+        counts, outbox = self.sweep()
+        self.assertEqual((counts["skipped"], outbox), (1, []))
+
+        moved = User.objects.create_user(email="moved@reminder.example.test", email_verified_at=self.now)
+        self.record(user=moved)
+        User.objects.filter(pk=moved.pk).update(email="elsewhere@reminder.example.test")
+        counts, outbox = self.sweep()
+        self.assertEqual((counts["skipped"], outbox), (1, []))
+
+        connected = User.objects.create_user(email="connected@reminder.example.test", email_verified_at=self.now)
+        self.record(user=connected)
+        org = Organization.objects.create(domain="acme-connected.example.test", name="Acme", billing_user=connected)
+        WebsiteConnection.objects.create(organization=org, github_repo="example/site")
+        counts, outbox = self.sweep()
+        self.assertEqual((counts["skipped"], outbox), (1, []))
+
+    def test_a_cms_or_staff_lead_hears_only_about_changes_never_the_github_reminder(self):
+        self.record(reason="cms_content", hostClass="wordpress", guidanceId=None, domain="acme.example.test")
+        self.record(reason="setup_cant_be_done_yet", hostClass="unknown", guidanceId=None, domain="beta.example.test")
+        counts, outbox = self.sweep()
+        self.assertEqual((counts["sent"], outbox), (0, []))
+
+    def test_an_opt_out_after_a_retryable_failure_stops_the_retry(self):
+        from system_email.transport_resend import SystemEmailRetryable
+        self.record()
+        with patch("system_email.transport_resend.send", side_effect=SystemEmailRetryable("resend_503")):
+            reminders.run_lead_reminder_sweep(now=self.now)
+        contact = Contact.objects.get(email=self.user.email)
+        self.assertEqual(reminders.opt_out(reminders.opt_out_token(contact)), "opted_out")
+        _counts, outbox = self.sweep(at=self.now + timedelta(hours=1))
+        self.assertEqual(outbox, [])
+        self.assertEqual(next(iter(self.leads().values()))["reminder"]["status"], "skipped")
+
+    def test_the_opt_out_token_carries_no_address_and_dies_with_an_email_change(self):
+        import base64
+        self.record()
+        contact = Contact.objects.get(email=self.user.email)
+        token = reminders.opt_out_token(contact)
+        body = token.split(":")[0]
+        decoded = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
+        self.assertNotIn(b"reminder.example.test", decoded)
+        Contact.objects.filter(pk=contact.pk).update(email="other@reminder.example.test")
+        self.assertEqual(reminders.opt_out(token), "invalid")
