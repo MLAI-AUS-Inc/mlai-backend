@@ -524,7 +524,9 @@ class ExtraCaseTests(JourneyFixture, TestCase):
         self.assertFalse(body["switchTopicAvailable"])
 
     def test_every_retired_registry_action_shows_working(self):
-        for action in sorted(journeys.RETIRED_ACTIONS):
+        # With the deploy link on (plan C14) deploy_site is a founder ask, not retired.
+        self.assertNotIn("deploy_site", journeys.retired_actions())
+        for action in sorted(journeys.retired_actions()):
             with self.subTest(action=action):
                 ContentFactoryRun.objects.filter(organization=self.org).delete()
                 make_run(self.org, status="blocked",
@@ -709,7 +711,7 @@ class HelperTests(TestCase):
         self.assertFalse(journeys.matches_if_none_match("", "abc"))
 
     def test_registry_mapping_covers_only_the_eight_asks(self):
-        self.assertEqual(len(journeys.FOUNDER_ASKS), 9)
+        self.assertEqual(len(journeys.FOUNDER_ASKS), 10)
         self.assertTrue(set(journeys.REGISTRY_ASKS.values()) <= set(journeys.FOUNDER_ASKS))
         self.assertIsNone(journeys.founder_ask("choose_articles_page"))
 
