@@ -135,7 +135,7 @@ class ActivationConnectionTests(TestCase):
                 pass
             head.assert_called_once()
             for kwargs, settings in (({'action': 'preview'}, {}),
-                                     ({'action': 'setup', 'follow_moved_preview': True}, {}),
+                                     ({'action': 'setup', 'follow_moved_preview': True, 'require_current_head': True}, {}),
                                      ({'action': 'preview', 'follow_moved_preview': True},
                                       {'ARTICLES_SOURCE_FOLLOW_ENABLED': False})):
                 with self.subTest(kwargs=kwargs, settings=settings), override_settings(**settings), \
