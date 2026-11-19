@@ -119,6 +119,7 @@ KIND_DESCRIPTIONS = {
     "operation_retrying": "The website step keeps retrying without finishing.",
     "run_stopped": "The latest run stopped and the founder has nothing to press.",
     "operation_retired_ask": "The website step waits on an ask the founder's journey does not show.",
+    "operation_budget": "Automatic website checks reached their budget; nothing more is dispatched until staff look.",
 }
 MAX_NAME_LENGTH = 80
 
@@ -306,6 +307,12 @@ def _stuck_operations(*, now, scope) -> list[StuckCondition]:
     # Any cohort: an operation parked on a retired owner action is shown to no
     # founder on the new journey, so staff hear of it at once (Lilia, 9 Nov 2026).
     retired = Q(state="needs_user") & Q(receipt__user_action__id__in=_retired_actions())
+    # A page choice parked under the founder's "I choose" consent is rendered
+    # (plan A9 follow-up), so it is not a hidden ask.
+    from .website_models import WebsiteConnectionOperation
+    rendered = WebsiteConnectionOperation.objects.filter(state="needs_user", receipt__user_action__id="choose_articles_page",
+                                                         receipt__goal__consent__answers__page_policy="pick")
+    retired &= ~Q(id__in=rendered.values("id"))
     if scope.lookback is not None:
         retired &= Q(updated_at__gte=now - scope.lookback)
     rows = _pages(_current_operations(scope=scope).filter(stopped | retrying | retired).values(*OPERATION_FIELDS), scope,
@@ -431,6 +438,26 @@ def queue_operation_stopped_alert(op, *, code, now=None) -> int:
     condition = _operation_condition({"id": op.pk, "connection__organization_id": organization_id, "action": op.action,
                                       "state": op.state, "attempts": op.attempts, "receipt__reason_code": code},
                                      kind="stopped", stuck_since=now)
+    return _queue([condition], organization_ids={organization_id})
+
+
+def queue_budget_alert(connection, op, *, scope, count, limit, now=None) -> int:
+    """Queue one alert when automatic scans reach their budget (plan B3).
+
+    The slot is the operation for an operation budget, and the website and UTC
+    day for the daily budget, so a loop of pushes raises one alert, not one
+    per push. Honours ``ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED``.
+    """
+    if not getattr(settings, "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED", True):
+        return 0
+    now = now or timezone.now()
+    organization_id = connection.organization_id
+    slot = (f"op-{op.pk}-budget" if scope == "operation"
+            else f"website-{connection.pk}-budget-{now.date().isoformat()}")
+    condition = StuckCondition(organization_id=organization_id, slot=slot, kind="operation_budget",
+                               step=getattr(op, "action", "") or "prepare", code="prepare_no_progress", stuck_since=now,
+                               details={"website_operation_id": str(op.pk), "attempts": int(count),
+                                        "budget_scope": str(scope), "budget_limit": int(limit)})
     return _queue([condition], organization_ids={organization_id})
 
 

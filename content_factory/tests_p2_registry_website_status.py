@@ -189,3 +189,20 @@ class WebsiteStatusP2Tests(TestCase):
                 self.assertEqual("copyId" in result, has_copy)
                 if not has_copy:
                     self.assertEqual(result, self._project(op))
+
+
+@override_settings(**STATUS_FLAGS)
+class PageChoiceP2Tests(WebsiteStatusP2Tests):
+    """Plan A9 follow-up: a P2 org's page ask stays a needs-you action, never Working on it."""
+
+    @override_settings(**ALL_FLAGS_ON)
+    def test_a_p2_org_keeps_the_choose_articles_page_action(self):
+        org = make_p2_org().organization
+        receipt = {"user_action": {"id": "choose_articles_page", "candidates": ["/blog", "/news"]},
+                   "reason_code": "articles_page_choice_required", "failure_class": "needs_user"}
+        today, result = self._status("needs_user", receipt, org)
+        self.assertEqual(today["state"], "needs_you")
+        self.assertEqual(result["state"], "needs_you")
+        self.assertEqual(result["action"]["id"], "choose_articles_page")
+        self.assertEqual(result["action"]["candidates"], ["/blog", "/news"])
+        self.assertNotIn("copyId", result)

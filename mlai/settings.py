@@ -2778,6 +2778,12 @@ ARTICLES_PROOF_CARRY_FORWARD_ENABLED = _env_is_true("ARTICLES_PROOF_CARRY_FORWAR
 # A push to a live-URL website that left preparation finished is re-verified by
 # its own source check (setup scan + live check) instead of reopening preparation.
 ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED = _env_is_true("ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED", True)
+# Kill switch, default on (plan B3): a push re-opens a stopped preparation only
+# when the change can alter its outcome (transient or waiting stop, a change
+# under the stop's relevant paths or articles route, or an owned setup merge);
+# otherwise the push's paid source rescan is settled without a scan. Automatic
+# repository scans also count toward a per-operation and per-day budget.
+ARTICLES_PREPARE_STICKY_STOP_ENABLED = _env_is_true("ARTICLES_PREPARE_STICKY_STOP_ENABLED", True)
 # Kill switch, default on: a worker callback for a bound run that omits its
 # website connection fields is checked against that run's own saved consent
 # instead of being refused as "Reconnect this website" (La Vie, 18 Nov 2026).

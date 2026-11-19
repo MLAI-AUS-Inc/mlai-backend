@@ -165,6 +165,22 @@ class ContractFixtureTests(JourneyFixture, TestCase):
                                                                 "actionId": None, "url": None}}
         self.assertStep(self.journey(), "first_article", None, next_kind="write_first_article")
 
+    def test_06b_page_choice_under_pick_consent_is_asked_on_home(self):
+        # Plan A9 follow-up: the founder's consent says they choose the page, so
+        # Home shows the ask instead of retiring it as Working on it.
+        self.connection(verified=False)
+        operation = {"state": "needs_user", "failureClass": "needs_user", "actionId": "choose_articles_page",
+                     "url": None, "pagePolicy": "pick"}
+        self.website_facts = {**NO_WEBSITE_FACTS, "operation": operation}
+        body = self.journey()
+        self.assertStep(body, "setup", "your_turn", ask="choose_articles_page")
+        self.assertEqual((body["headline"], body["action"]["label"]), ("Choose your articles page", "Choose a page"))
+        for policy in (None, "auto", "explicit"):
+            with self.subTest(policy=policy):
+                self.website_facts = {**NO_WEBSITE_FACTS, "operation": {**operation, "pagePolicy": policy}}
+                body = self.journey()
+                self.assertNotEqual((body["action"] or {}).get("id"), "choose_articles_page")
+
     def test_07_verified_site_without_an_article_keeps_the_free_first_article(self):
         self.connection()
         body = self.journey()
@@ -689,7 +705,7 @@ class HelperTests(TestCase):
         self.assertFalse(journeys.matches_if_none_match("", "abc"))
 
     def test_registry_mapping_covers_only_the_eight_asks(self):
-        self.assertEqual(len(journeys.FOUNDER_ASKS), 8)
+        self.assertEqual(len(journeys.FOUNDER_ASKS), 9)
         self.assertTrue(set(journeys.REGISTRY_ASKS.values()) <= set(journeys.FOUNDER_ASKS))
         self.assertIsNone(journeys.founder_ask("choose_articles_page"))
 

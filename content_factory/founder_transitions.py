@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 EVENT_TYPE = "founder_transition"
 LEASE = timedelta(minutes=10)
 RETRY_WINDOW = timedelta(hours=23)
-OWNER_ASKS = {"approve_setup", "authorize_github", "approve_join_request", "agree_terms", "describe_customer"}
+OWNER_ASKS = {"approve_setup", "authorize_github", "approve_join_request", "agree_terms", "describe_customer",
+              "choose_articles_page"}
 REMINDER_HOURS = (24, 72)
 # First-run cap (D14). An ask that was already waiting before this module
 # first saw it, or a reminder rung that was due long before reminders were
@@ -134,6 +135,7 @@ def _copy(event, state, organization):
             "describe_customer": ("Tell us about your customer", "One short answer and we'll start your article.", "Describe your customer"),
             "agree_terms": ("Please agree to our updated terms", "Our terms were just updated. Please tick to agree again.", "Agree to the terms"),
             "approve_join_request": ("Someone asked to join your team", "Review the request in MLAI.", "Review request"),
+            "choose_articles_page": ("Choose your articles page", "We found more than one page that could hold your articles. Pick the one to use.", "Choose a page"),
         }
         if ask == "buy_points":
             from .founder_journey import article_price_and_balance
@@ -244,6 +246,11 @@ def website_item_state(config, *, now, setup_run=None):
         notice = notice_for(operation, now=now) if operation else None
         if notice and notice["state"] == "needs_you":
             ask = registry_policy.canonical_action_id(notice.get("action"))
+            if ask is None and notice.get("action") == "choose_articles_page":
+                # Asked only under the founder's recorded "I choose" consent (plan A9).
+                from .founder_journey import PAGE_CHOICE_ACTION, _page_policy, retired_actions
+                if PAGE_CHOICE_ACTION not in retired_actions(page_policy=_page_policy(operation.receipt)):
+                    ask = PAGE_CHOICE_ACTION
             if ask in OWNER_ASKS | {"approve_on_github", "review_draft"}:
                 return {"state": "your_turn", "ask": ask, "run_id": None, "since": getattr(operation, "updated_at", None)}
         if (notice and notice["state"] == "done") or cohorts.has_connected_website(organization):

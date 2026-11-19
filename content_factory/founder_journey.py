@@ -34,9 +34,11 @@ logger = logging.getLogger(__name__)
 
 VERSION = 1
 
-# The 8 asks (contract section 3). Nothing else is ever sent as action.id.
+# The asks (contract section 3). Nothing else is ever sent as action.id.
+# ``choose_articles_page`` is sent only when the founder's recorded consent
+# says they choose the page (plan A9, decision D3); otherwise MLAI picks it.
 FOUNDER_ASKS = ("review_draft", "describe_customer", "agree_terms", "authorize_github", "approve_setup",
-                "approve_on_github", "buy_points", "approve_join_request")
+                "approve_on_github", "buy_points", "approve_join_request", "choose_articles_page")
 NEXT_KINDS = ("add_website", "write_first_article", "write_article", "view_progress", "view_draft", "view_article")
 STAGES = ("website", "first_article", "writing", "review", "setup", "publishing", "done")
 HOLDING_REASONS = ("slow", "website_update", "busy_today")
@@ -55,6 +57,14 @@ REGISTRY_ASKS = {
 # Working on it (slow) and log one founder_journey_retired_action line.
 RETIRED_ACTIONS = frozenset({"choose_articles_page", "configure_website", "deploy_site", "remove_setup_example",
                              "provide_credentials"})
+# Retired unless the founder's recorded consent says they choose the page
+# (``page_policy == "pick"``): then Home shows the ask (plan A9, D3).
+PAGE_CHOICE_ACTION = "choose_articles_page"
+
+
+def retired_actions(*, page_policy=None) -> frozenset:
+    """The retired owner actions for an operation whose consent records ``page_policy``."""
+    return RETIRED_ACTIONS - {PAGE_CHOICE_ACTION} if page_policy == "pick" else RETIRED_ACTIONS
 SETUP_ASKS = frozenset({"approve_setup", "authorize_github", "approve_on_github"})
 
 POLL_AFTER_MS = {"working": 5000, "publishing": 15000, "your_turn": 30000, None: 30000, "done": 60000,
@@ -107,6 +117,9 @@ COPY = {
     "review": ("Your draft is ready", "Tap anything to suggest a change, then copy it to your website.",
                "Review your draft"),
     "approve_setup": ("Your blog page is ready", "Take a look, then add it to your website.", "Take a look"),
+    "choose_articles_page": ("Choose your articles page",
+                             "We found more than one page on your website that could hold your articles. Pick the one to use.",
+                             "Choose a page"),
     "authorize_github": ("We need permission to read your website on GitHub", None, "Give access on GitHub"),
     "approve_on_github": ("Your change is waiting on GitHub", "Approve it on GitHub when you're ready.",
                           "Open on GitHub"),
@@ -454,6 +467,13 @@ def _setup_run(organization, run_id=None):
     return runs.order_by("-created_at", "-id").first()
 
 
+def _page_policy(receipt):
+    """The page policy the founder's recorded setup consent names, or None."""
+    answers = _mapping(_mapping(_mapping(_mapping(receipt).get("goal")).get("consent")).get("answers"))
+    policy = answers.get("page_policy")
+    return policy if policy in {"pick", "explicit", "auto"} else None
+
+
 def _website_journey_facts(*, organization, company, config, user, connection, latest_run_at):
     """The few website-journey facts the founder journey needs, cached per org for 15 s.
 
@@ -483,7 +503,8 @@ def _website_journey_facts(*, organization, company, config, user, connection, l
         pull_request = _mapping(journey.get("setupPullRequest"))
         facts = {
             "operation": {"state": operation.get("state"), "failureClass": receipt.get("failure_class"),
-                          "actionId": user_action.get("id"), "url": _https_or_none(user_action.get("url"))}
+                          "actionId": user_action.get("id"), "url": _https_or_none(user_action.get("url")),
+                          "pagePolicy": _page_policy(receipt)}
             if operation else None,
             "setupPullRequest": {"runId": pull_request.get("runId"), "prUrl": _https_or_none(pull_request.get("prUrl"))}
             if pull_request else None,
@@ -922,6 +943,10 @@ def _setup_decision(*, organization, company, config, user, marker, connection, 
             url = operation.get("url") or _mapping(facts.get("setupPullRequest")).get("prUrl")
             if ask != "approve_on_github" or url:
                 return _decide("setup", "your_turn", ask, action=ask, url=url if ask == "approve_on_github" else None)
+        elif (operation.get("actionId") == PAGE_CHOICE_ACTION
+              and PAGE_CHOICE_ACTION not in retired_actions(page_policy=operation.get("pagePolicy"))):
+            # The founder's consent says they choose the page: ask, never hide it.
+            return _decide("setup", "your_turn", PAGE_CHOICE_ACTION, action=PAGE_CHOICE_ACTION)
         elif operation.get("actionId") in RETIRED_ACTIONS:
             logger.info("founder_journey_retired_action org=%s action=%s", organization.pk, operation.get("actionId"))
     return None

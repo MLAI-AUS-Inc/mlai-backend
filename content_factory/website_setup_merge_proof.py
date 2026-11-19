@@ -122,9 +122,63 @@ def carry_setup_merge_proof(op, config, target):
         return locked
 
 
-def worker_publish_targets(config):
-    """Project a carried setup proof from backend-owned build and deployment evidence."""
+def _row_current(website, target):
+    """Whether ``target`` (the current-generation row) is the website's verified, Ready target now."""
+    if target is None or not isinstance(getattr(target, "contract", None), dict) or not website.verified_sha:
+        return False
+    if target.source_sha != website.verified_sha or not mapping(getattr(target, "capabilities", None)).get("publishingReady"):
+        return False
+    if not mapping(getattr(website, "capabilities", None)).get("publishingReady"):
+        return False
+    if any(mapping(item).get("code") == "repository_source_changed" for item in getattr(website, "blockers", None) or []):
+        # A withdrawn carry (or an unverified push) locks the row until a fresh check.
+        return False
+    if target.contract.get("delivery_adapter") == "custom_contract_v1" or sealed.required(website, target):
+        # Custom and sealed targets keep the proof verification itself cached.
+        return False
+    carried = mapping(target.capabilities).get("proofCarriedFrom")
+    return not carried or website_source_carry.carriable(website, target)
+
+
+def project_from_row(config):
+    """The worker's target list, derived from the current-generation target row (plan B13).
+
+    ``config.publish_targets`` is only a cache: verification writes the row and
+    the cache together, but a push that carries the proof forward
+    (``website_source_carry.apply_carry``) moves only the row, so the cache kept
+    the old commit and the worker refused a site the founder was told is Ready.
+    When the selected default's row is verified at the website's current
+    verified commit and Ready (no source lock, not custom or sealed, a carried
+    row only when still carriable), its contract replaces the cached entry;
+    otherwise the cache is returned unchanged.
+    """
     targets = config.publish_targets
+    key = config.default_publish_target_id
+    website = config.website_connection
+    if (not key or website is None or website.state != "connected"
+            or website.organization_id != config.organization_id):
+        return targets
+    rows = list(targets or [])
+    indexes = [index for index, row in enumerate(rows) if mapping(row).get("target_id") == key]
+    if len(indexes) > 1:
+        return targets
+    target = website.targets.filter(generation=website.generation, target_key=key).first()
+    if not _row_current(website, target) or target.contract.get("target_id", key) != key:
+        return targets
+    contract = {**target.contract, "target_id": key}
+    if indexes and rows[indexes[0]] == contract:
+        return targets
+    if indexes:
+        rows[indexes[0]] = contract
+    else:
+        rows.append(contract)
+    return rows
+
+
+def worker_publish_targets(config):
+    """Project the worker's targets from the target row, and a carried setup proof from backend evidence."""
+    cached = config.publish_targets
+    projected = targets = project_from_row(config)
     key = config.default_publish_target_id
     matches = [row for row in targets or [] if mapping(row).get("target_id") == key]
     if not key or len(matches) != 1:
@@ -133,6 +187,9 @@ def worker_publish_targets(config):
     build = mapping(selected.get("verification"))
     if build.get("attestation_origin") != "setup_merge_carry":
         return targets
+    # A setup-merge proof is projected below only with its own evidence; any
+    # refusal serves the cache exactly as before.
+    targets = cached
 
     website = config.website_connection
     if (website.state != "connected" or website.organization_id != config.organization_id
@@ -187,7 +244,7 @@ def worker_publish_targets(config):
     proof = {**build, **scope, "target_id": key, "adapter_id": adapter,
         "operation_id": str(operation.pk), "operation_attempt": 1, "deletion_epoch": deletion_epoch(website),
         "contract_digest": digest, "evidence_digest": evidence_digest(evidence)}
-    return [{**row, "verification": proof} if row is selected else row for row in targets]
+    return [{**row, "verification": proof} if row is selected else row for row in projected]
 
 
 # Pushes a carried setup-merge proof may follow before it needs a fresh setup
