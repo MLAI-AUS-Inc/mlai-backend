@@ -88,8 +88,9 @@ def owner_can_retry(state, receipt) -> bool:
         return True
     if state not in STOPPED_STATES:
         return False
-    if receipt.get("status") in {"staff_fixing", "cant_be_done_yet"}:
+    if receipt.get("status") in {"staff_fixing", "cant_be_done_yet", "delivered_not_live"}:
         # B11/B25: staff hold the fix, or it closed with an honest answer.
+        # C7: delivered as content files; a retry cannot make it live.
         return False
     from . import website_prepare_setup_cap as setup_cap
     from .website_prepare_sticky_stop import budget_hold_active

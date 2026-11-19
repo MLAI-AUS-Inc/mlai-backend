@@ -1220,6 +1220,16 @@ def _advance_claimed_prepare(op, *, now, handlers):
                     # are superseded by this one (La Vie #37 beside #38, 16 Nov 2026).
                     from .website_superseded_setup_prs import close_superseded_setup_prs
                     close_superseded_setup_prs(op, child)
+            from .website_content_files import setup_delivered_not_live
+            content_files = (setup_delivered_not_live(child.result)
+                             if child and child.workflow == "article_system_setup" else None)
+            if content_files is not None:
+                # Plan C7: Content Factory's last setup rung delivered the
+                # articles as files. Never Ready, never merged for the founder
+                # as a setup, never a published article.
+                from .website_content_files import settle_prepare
+                settle_prepare(op, child, content_files, now=now)
+                return _finish_prepare(op, now=now)
             owner_action = _setup_owner_action(child, setup, op.connection) if child and child.workflow == "article_system_setup" else None
             if owner_action:
                 if owns_goal(op) and not any(item["name"] == "previewed" and item["state"] == "passed"

@@ -34,7 +34,12 @@ STATUS = "staff_fixing"
 LIFETIME = timedelta(days=7)
 FOUNDER_UPDATE_AFTER = timedelta(hours=72)
 WORKDAY_TIMEZONE = ZoneInfo("Australia/Melbourne")
-EXITS = frozenset({"ready", "named_ask", "cant_be_done_yet"})
+# Plan C7 adds one exit: Content Factory's last setup rung delivered the
+# articles as files in a pull request (website_content_files). The founder has
+# an honest answer and the pull request; it is not Ready and nothing is refunded
+# because nothing was charged (D7). The caller sets the preparation's state.
+DELIVERED_NOT_LIVE = "delivered_not_live"
+EXITS = frozenset({"ready", "named_ask", "cant_be_done_yet", DELIVERED_NOT_LIVE})
 # The closed list of "can't be done yet" causes (plan 1.1, B25). A staff fix
 # that does not land by day 7 is recorded honestly as ``not_fixed_in_time``.
 CANT_BE_DONE_REASONS = frozenset({
@@ -174,6 +179,7 @@ def close(op, exit, *, now=None, reason=None, user_action=None):
                     "setup is refunded, and we'll tell you when that changes.")
         receipt.pop("hold_owner", None)
     else:
+        # Ready, or delivered not live (the caller wrote its own state).
         receipt.pop("hold_owner", None)
     receipt[KEY] = closed
     op.receipt = receipt

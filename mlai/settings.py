@@ -2776,6 +2776,13 @@ CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK = _env_is_true("CONTENT_FACTORY_EDITORIA
 ARTICLES_SOURCE_SYNC_ENABLED = _env_is_true("ARTICLES_SOURCE_SYNC_ENABLED", False)
 # Service rescans per connection in any 24 hours (default 6, 0 = none).
 ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP = max(0, int(os.getenv("ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP") or "6"))
+# Setup ladder lower rungs (plan steps C6, C7), a staged rollout behind owner
+# decision D4. On: a setup Content Factory delivered as a content-files pull
+# request (tier 4) is shown as "delivered, not yet live" with the pull request.
+# Off: such a setup is staff fixing. Either way it is never Ready, never counts
+# as published and never consumes the free article. Pairs with Content
+# Factory's CONTENT_FACTORY_SETUP_LADDER.
+ARTICLES_SETUP_LADDER_ENABLED = _env_is_true("ARTICLES_SETUP_LADDER_ENABLED", False)
 
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort

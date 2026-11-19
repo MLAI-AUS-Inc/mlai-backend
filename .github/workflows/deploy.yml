@@ -252,7 +252,7 @@ jobs:
       run: python scripts/test_without_database.py content_factory.tests_setup_example_action_unit
 
     - name: Check Articles failure taxonomy without database access
-      run: python scripts/test_without_database.py content_factory.tests_failure_contract_unit content_factory.tests_website_staff_fixing_unit content_factory.tests_run_command_conflicts_unit content_factory.tests_run_terminal_transport_unit content_factory.tests_run_writer_retirement_unit
+      run: python scripts/test_without_database.py content_factory.tests_failure_contract_unit content_factory.tests_website_staff_fixing_unit content_factory.tests_website_content_files_unit content_factory.tests_run_command_conflicts_unit content_factory.tests_run_terminal_transport_unit content_factory.tests_run_writer_retirement_unit
 
     - name: Check generated run-status module without database access
       run: |
@@ -1656,6 +1656,7 @@ jobs:
         ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED: ${{ vars.ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED || '' }}
         ARTICLES_PREPARE_STICKY_STOP_ENABLED: ${{ vars.ARTICLES_PREPARE_STICKY_STOP_ENABLED || '' }}
         ARTICLES_SOURCE_SYNC_ENABLED: ${{ vars.ARTICLES_SOURCE_SYNC_ENABLED || '' }}
+        ARTICLES_SETUP_LADDER_ENABLED: ${{ vars.ARTICLES_SETUP_LADDER_ENABLED || '' }}
         ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP: ${{ vars.ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP || '' }}
         ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED: ${{ vars.ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED || '' }}
         CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK: ${{ vars.CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK || '' }}

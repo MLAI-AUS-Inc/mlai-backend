@@ -77,7 +77,14 @@ def article_bucket(article) -> str:
     status is honoured as published for back-compat until on-main verification
     backfills it.
     """
-    if article.on_main_verified_at or article.publish_status == ArticlePublishStatus.LIVE:
+    if article.publish_status == ArticlePublishStatus.LIVE:
+        return "published"
+    from .website_content_files import is_content_files_article
+    if is_content_files_article(article):
+        # Plan C7: a content file on main is not a page anyone can read; only
+        # the live check of the article's real URL makes it published.
+        return "publishing"
+    if article.on_main_verified_at:
         return "published"
     return "publishing"
 
@@ -224,11 +231,28 @@ def refresh_publish_statuses(organization, config=None, *, limit=6, force=False,
                        if time.monotonic() < deadline else
                        {"state": "unverified", "reason": "capture_budget_deferred", "checked_at": now.isoformat()})
         article._live_observation = observation
+        went_live = False
         if observation.get("state") == "verified":
+            before = article.publish_status
             changed.update(advance_publish_status(article, ArticlePublishStatus.LIVE, live_url=live_url))
+            went_live = before != ArticlePublishStatus.LIVE and article.publish_status == ArticlePublishStatus.LIVE
         article.save(update_fields=sorted(changed))
+        if went_live:
+            _settle_content_files_entitlement(article)
         refreshed.append(article)
     return refreshed
+
+
+def _settle_content_files_entitlement(article):
+    """Plan C7 (D7): a content-files article that went live now settles the free article."""
+    from .website_content_files import is_content_files_article
+    if not is_content_files_article(article):
+        return
+    try:
+        from .first_article_entitlement import settle_entitlement_for_run
+        settle_entitlement_for_run(_source_run_for_article(article))
+    except Exception:  # noqa: BLE001 - the live status stands; the next settle sweep retries
+        logger.error("content_files_entitlement_settle_failed article=%s", article.pk, exc_info=True)
 
 
 def _source_run_for_article(article):
