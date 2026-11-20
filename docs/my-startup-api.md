@@ -84,6 +84,7 @@ workspace because those operations depend on its cookies.
 
 | Endpoint | Contract |
 | --- | --- |
+| `PUT /vibe-marketing/github/repository/` | Verify GitHub access before taking write locks, then recheck membership and the saved selection before committing. If the selection changes during verification, return `website_connection_changed` and let the caller reload. Re-saving the current repository preserves its setup. |
 | `GET/POST /vibe-marketing/website-connection`, `POST /vibe-marketing/website-connection/{pause\|disconnect\|reconnect\|reset\|cleanup}` | Require the owned selected company. Lifecycle mutations require the reviewed website connection tuple and delegate to the canonical handler, including generation changes, durable cancellation, repository projection invalidation and separately approved cleanup. Reset retains company/editorial data and history; cleanup never receives approval from reset. Both trailing-slash forms are accepted. |
 | `POST /connectors/<provider>/connect/` | Initiate Google Search Console, Google Analytics or Slack OAuth as the Chat user; require an owned company and a return URL under the configured Chat `/my-startup` origin. Provider callbacks stay at the existing backend URLs. |
 | `DELETE /integrations/sources/connections/<id>?company_id=<uuid>` | Require an owned selected company, its organization and the user's Google Analytics or Slack connection before disconnecting. |
