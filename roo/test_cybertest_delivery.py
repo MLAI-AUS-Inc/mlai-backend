@@ -51,6 +51,14 @@ class DeliveryPolicyTests(unittest.TestCase):
         self.assertEqual(result, fixture['expected'])
         self.assertRegex(digest, r'^[a-f0-9]{64}$')
 
+    def test_basic_price_follows_the_number_of_source_batches(self):
+        def sized(batches):
+            checks = [{'id': f'basic:source:{i+1}', 'kind': 'source_batch', 'required': True} for i in range(batches)]
+            return {**basic(), 'checks': checks + basic()['checks'][1:]}
+        for batches, points in [(1, 24), (64, 24), (65, 48), (128, 48), (129, 72), (910, 360)]:
+            with self.subTest(batches=batches):
+                self.assertEqual(phase_price(sized(batches)), {'totalPoints': points, 'duePoints': points})
+
     def test_phase_prices_are_incremental(self):
         self.assertTrue(callable(phase_price), 'phase policy is not implemented')
         self.assertEqual(phase_price(basic()), {'totalPoints': 24, 'duePoints': 24})
