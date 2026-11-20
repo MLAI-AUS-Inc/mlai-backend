@@ -17,7 +17,7 @@ from .portable_drafts import explicit_portable_request, original_portable_run
 from .service_views import ContentFactoryOrgConfigView
 from .vibe_marketing_views import VibeMarketingArticleView, VibeMarketingRunControlView, _queue_content_factory_run, _setup_blocked_response_for_generation
 from .vibe_marketing_views import _sync_local_run_from_remote
-from .website_connections import authority_guard, contract_for
+from .website_connections import authority_guard, contract_for, observed_source_sha
 from .website_contract import WebsiteAuthorityError
 from .website_models import WebsiteConnection, WebsiteConnectionTarget, WebsiteScanSnapshot
 from .website_tokens import mint_website_token
@@ -134,6 +134,20 @@ class ActivationConnectionTests(TestCase):
             with authority_guard(binding, action='preview', follow_moved_preview=True):
                 pass
             head.assert_called_once()
+            # The retry's attempt fence (advance_workflow_attempt) reads under
+            # the same pin once GitHub's newer head has been observed. It may
+            # follow too, and must not record the stale pin as GitHub's head.
+            website = self.connection
+            WebsiteScanSnapshot.objects.create(connection=website, generation=website.generation,
+                run_id='head-check:moved', source_sha='c' * 40, detector_version='github_head',
+                fingerprint='synthetic', evidence={})
+            with authority_guard(binding, action='read', follow_moved_preview=True):
+                pass
+            self.assertEqual(observed_source_sha(website), 'c' * 40)
+            with self.assertRaises(WebsiteAuthorityError) as error:
+                with authority_guard(binding, action='read'):
+                    pass
+            self.assertEqual(error.exception.code, 'website_source_changed')
             for kwargs, settings in (({'action': 'preview'}, {}),
                                      ({'action': 'setup', 'follow_moved_preview': True, 'require_current_head': True}, {}),
                                      ({'action': 'preview', 'follow_moved_preview': True},

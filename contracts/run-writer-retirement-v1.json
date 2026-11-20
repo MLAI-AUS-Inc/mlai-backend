@@ -3966,7 +3966,7 @@
       "identity": "content_factory/website_operations.py:advance_workflow_attempt:f0f4db58b1730239a66449bf3f7531a3e24e96686cc337dab5570ec3d0c2e8a7:1",
       "path": "content_factory/website_operations.py",
       "function": "advance_workflow_attempt",
-      "line": 542,
+      "line": 547,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3978,7 +3978,7 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "4655e38b594ce637f56847697200e64be28ba0f56b27474eb4fccfa4ed3d2f44",
+      "function_sha256": "caa245572760f55ca996e5fd9844ce043f064892bcab87916c85024e6b255524",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_r3_source_operation_control.py"
@@ -3991,7 +3991,7 @@
       "identity": "content_factory/website_operations.py:advance_workflow_attempt:3a90e99d2c1f8748f4f48f9375199a6fbfb6723adb0c18534689e18f15cb173a:1",
       "path": "content_factory/website_operations.py",
       "function": "advance_workflow_attempt",
-      "line": 561,
+      "line": 566,
       "kind": "inferred_run_save",
       "fields": [
         "run_request",
@@ -4005,7 +4005,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "4655e38b594ce637f56847697200e64be28ba0f56b27474eb4fccfa4ed3d2f44",
+      "function_sha256": "caa245572760f55ca996e5fd9844ce043f064892bcab87916c85024e6b255524",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_source_operation_control.py"
@@ -4069,7 +4069,7 @@
       "identity": "content_factory/website_operations.py:advance_workflow_attempt:ba478e226c73c65413f78d91902e3238b6de8a0fca58f0c470a44e5625639b1f:1",
       "path": "content_factory/website_operations.py",
       "function": "advance_workflow_attempt",
-      "line": 560,
+      "line": 565,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -4081,7 +4081,7 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "4655e38b594ce637f56847697200e64be28ba0f56b27474eb4fccfa4ed3d2f44",
+      "function_sha256": "caa245572760f55ca996e5fd9844ce043f064892bcab87916c85024e6b255524",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_r3_source_operation_control.py"

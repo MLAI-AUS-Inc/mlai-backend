@@ -519,14 +519,18 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
             require_unlocked_remote_call()
         if needs_native:
             verify_repository_native_target(candidate)
+        followed = False
         if needs_head and reviewed_source is None:
             try:
                 verify_repository_head(candidate, expected or candidate.verified_sha)
             except WebsiteAuthorityError as exc:
                 from .source_repin import follow_enabled as source_follow_enabled
-                if not (follow_moved_preview and action == "preview" and exc.code == "website_source_changed"
+                # "read" covers the retry's own attempt fence (advance_workflow_attempt).
+                if not (follow_moved_preview and action in {"preview", "read"} and exc.code == "website_source_changed"
                         and source_follow_enabled()):
                     raise
+                # The run's pin is now stale: never record it as GitHub's head.
+                followed = True
         with transaction.atomic():
             Organization.objects.select_for_update().get(pk=candidate.organization_id)
             connection = WebsiteConnection.objects.select_for_update().select_related("organization").get(pk=candidate.pk)
@@ -572,12 +576,12 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
                 from .activation import live_deployment_verified
                 if not live_deployment_verified(connection, target):
                     raise WebsiteAuthorityError("deployment_verification_required", "Verify the current public articles integration before publishing.")
-            heads_token = _verified_heads.set(_verified_heads.get() | {(str(connection.pk), connection.generation, expected)} if needs_head else _verified_heads.get())
+            heads_token = _verified_heads.set(_verified_heads.get() | {(str(connection.pk), connection.generation, expected)} if needs_head and not followed else _verified_heads.get())
             native_token = _verified_native_targets.set(_verified_native_targets.get() | {(str(connection.pk), connection.generation)} if needs_native else _verified_native_targets.get())
             depth_token = _authority_depth.set(_authority_depth.get() + 1)
             try:
                 with reviewed_source_scope(payload, connection, reviewed_source):
-                    if needs_head and reviewed_source is None and observed and expected != observed:
+                    if needs_head and not followed and reviewed_source is None and observed and expected != observed:
                         check_source_identity(connection, payload)
                     yield connection
             finally:
