@@ -53,11 +53,17 @@ class CommunityChatProfileUpdateSerializer(serializers.Serializer):
 
 
 class CommunityChatPublicProfileBatchSerializer(serializers.Serializer):
+    include_contributions = serializers.BooleanField(default=False)
     public_keys = serializers.ListField(
         child=serializers.CharField(min_length=64, max_length=64),
         allow_empty=True,
         max_length=COMMUNITY_CHAT_PUBLIC_PROFILE_BATCH_SIZE,
     )
+
+    def validate(self, attrs):
+        if attrs["include_contributions"] and len(attrs["public_keys"]) > 10:
+            raise serializers.ValidationError({"public_keys": "Request at most 10 contribution profiles."})
+        return attrs
 
     def validate_public_keys(self, values):
         normalized = []

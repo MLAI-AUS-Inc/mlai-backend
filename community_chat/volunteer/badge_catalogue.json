@@ -1,0 +1,302 @@
+[
+  {
+    "id": "hello.intro",
+    "name": "Hello World With Legs",
+    "track": "Getting started",
+    "criterion": "First eligible personal introduction"
+  },
+  {
+    "id": "hello.attend",
+    "name": "Actually Turned Up",
+    "track": "Getting started",
+    "criterion": "One held MLAI event with a personal check-in"
+  },
+  {
+    "id": "hello.induct",
+    "name": "Knows Where the Kettle Is",
+    "track": "Getting started",
+    "criterion": "One completed induction"
+  },
+  {
+    "id": "hello.deliver",
+    "name": "Did the Thing",
+    "track": "Getting started",
+    "criterion": "One accepted non-social work outcome"
+  },
+  {
+    "id": "hello.steady",
+    "name": "Still Here Somehow",
+    "track": "Getting started",
+    "criterion": "Qualifying work in six distinct calendar months"
+  },
+  {
+    "id": "event.crew",
+    "name": "Folding Chair Union",
+    "track": "Events",
+    "criterion": "One staffed shift or delivered logistics outcome at a held event"
+  },
+  {
+    "id": "event.lead",
+    "name": "Lanyard Wrangler",
+    "track": "Events",
+    "criterion": "Accountable host or co-lead of one held event"
+  },
+  {
+    "id": "event.speak",
+    "name": "Mic Is On",
+    "track": "Events",
+    "criterion": "One delivered named agenda segment"
+  },
+  {
+    "id": "event.series",
+    "name": "Please Return My Lanyards",
+    "track": "Events",
+    "criterion": "Lead five distinct held events across at least two months"
+  },
+  {
+    "id": "event.handoff",
+    "name": "The Chairs Put Themselves Away",
+    "track": "Events",
+    "criterion": "Two event leads trained by member each run a later event independently"
+  },
+  {
+    "id": "build.bug",
+    "name": "Website Pest Control",
+    "track": "Engineering",
+    "criterion": "One accepted website fix for a distinct defect, merged to the maintained branch"
+  },
+  {
+    "id": "build.report",
+    "name": "Found the Wobble",
+    "track": "Engineering",
+    "criterion": "One report accepted by maintainer with reproduction steps"
+  },
+  {
+    "id": "build.qa",
+    "name": "Professional Button Poker",
+    "track": "Engineering",
+    "criterion": "One completed test pass that the owner accepts"
+  },
+  {
+    "id": "build.ship",
+    "name": "The Button Exists",
+    "track": "Engineering",
+    "criterion": "One accepted change with identified scope, human contributor and merge or release"
+  },
+  {
+    "id": "build.release",
+    "name": "It Worked on Someone Else’s Laptop",
+    "track": "Engineering",
+    "criterion": "One distinct production fault fixed and recovery independently observable"
+  },
+  {
+    "id": "build.durable",
+    "name": "Pest Control Franchise",
+    "track": "Engineering",
+    "criterion": "Ten distinct accepted defects across two products with three regression checks"
+  },
+  {
+    "id": "design.ux",
+    "name": "Rectangle Negotiator",
+    "track": "Product and research",
+    "criterion": "One delivered interface or UX design accepted by its owner"
+  },
+  {
+    "id": "design.discovery",
+    "name": "Asked an Actual Human",
+    "track": "Product and research",
+    "criterion": "One completed research interview with usable notes"
+  },
+  {
+    "id": "design.finding",
+    "name": "Receipts Goblin",
+    "track": "Product and research",
+    "criterion": "One accepted synthesis tracing a product decision to three independent interviews"
+  },
+  {
+    "id": "design.access",
+    "name": "Tiny Font Police",
+    "track": "Product and research",
+    "criterion": "One accepted accessibility fix verified against the original barrier"
+  },
+  {
+    "id": "design.loop",
+    "name": "They Came Back for Round Two",
+    "track": "Product and research",
+    "criterion": "One shipped change informed by research, then tested with three users"
+  },
+  {
+    "id": "community.induct",
+    "name": "Kettle Tour Guide",
+    "track": "Community and mentoring",
+    "criterion": "One delivered founder induction"
+  },
+  {
+    "id": "community.manage",
+    "name": "Human Help Desk",
+    "track": "Community and mentoring",
+    "criterion": "One defined period of community coverage accepted by a lead"
+  },
+  {
+    "id": "community.connect",
+    "name": "Knows a Person",
+    "track": "Community and mentoring",
+    "criterion": "One introduction accepted by both sides, or an approved connector claim naming the work"
+  },
+  {
+    "id": "mentor.session",
+    "name": "Office Hours Possum",
+    "track": "Community and mentoring",
+    "criterion": "One completed mentor session with a distinct mentee"
+  },
+  {
+    "id": "mentor.repeat",
+    "name": "Return of the Possum",
+    "track": "Community and mentoring",
+    "criterion": "Three distinct mentees across at least two months, with two useful-feedback receipts"
+  },
+  {
+    "id": "mentor.successor",
+    "name": "Possum Teaching Possums",
+    "track": "Community and mentoring",
+    "criterion": "Two mentees independently deliver accepted help to other people"
+  },
+  {
+    "id": "content.story",
+    "name": "Camera Goblin",
+    "track": "Communications",
+    "criterion": "One completed, attributed contribution to a video or audio piece"
+  },
+  {
+    "id": "content.recap",
+    "name": "Previously on MLAI",
+    "track": "Communications",
+    "criterion": "One accepted recap of a held event"
+  },
+  {
+    "id": "content.article",
+    "name": "The Newsletter Escaped",
+    "track": "Communications",
+    "criterion": "One newsletter edition carrying the member’s accepted article"
+  },
+  {
+    "id": "content.teach",
+    "name": "Slide Goblin",
+    "track": "Communications",
+    "criterion": "One delivered learning session with an attributed teaching segment"
+  },
+  {
+    "id": "content.reuse",
+    "name": "Somebody Read the Docs",
+    "track": "Communications",
+    "criterion": "Two independent people use the same guide in a later delivery"
+  },
+  {
+    "id": "ops.chair",
+    "name": "Meeting With an Ending",
+    "track": "Operations",
+    "criterion": "One completed governance meeting chaired by the member"
+  },
+  {
+    "id": "ops.money",
+    "name": "Spreadsheet Whisperer",
+    "track": "Operations",
+    "criterion": "One accepted reconciliation, close or budget handover"
+  },
+  {
+    "id": "ops.process",
+    "name": "It’s Written Down Now",
+    "track": "Operations",
+    "criterion": "One runbook executed successfully by a second person"
+  },
+  {
+    "id": "ops.logistics",
+    "name": "Snack Procurement Department",
+    "track": "Operations",
+    "criterion": "One confirmed purchase, delivery or setup for a real activity"
+  },
+  {
+    "id": "ops.continuity",
+    "name": "Can Finally Take Leave",
+    "track": "Operations",
+    "criterion": "Two independent operators complete the same critical process across two cycles"
+  },
+  {
+    "id": "partner.intro",
+    "name": "Professional Third Wheel",
+    "track": "Partnerships and delivery",
+    "criterion": "One two-sided introduction that leads to a recorded meeting"
+  },
+  {
+    "id": "partner.sponsor",
+    "name": "Logo on the Big Screen",
+    "track": "Partnerships and delivery",
+    "criterion": "One agreed partner benefit delivered at a real activity"
+  },
+  {
+    "id": "partner.ship",
+    "name": "Parcel Has Arrived",
+    "track": "Partnerships and delivery",
+    "criterion": "One named project milestone accepted by its owner"
+  },
+  {
+    "id": "partner.repeat",
+    "name": "They Came Back",
+    "track": "Partnerships and delivery",
+    "criterion": "Two partners independently renew after fulfilled commitments"
+  },
+  {
+    "id": "partner.train",
+    "name": "Someone Else Has the Keys",
+    "track": "Partnerships and delivery",
+    "criterion": "Two people lead accepted subsequent deliveries after a documented handover"
+  },
+  {
+    "id": "data.clean",
+    "name": "Spreadsheet Archaeologist",
+    "track": "Data and evaluation",
+    "criterion": "One accepted dataset repair with traceable before/after validation"
+  },
+  {
+    "id": "data.eval",
+    "name": "Actually Ran the Eval",
+    "track": "Data and evaluation",
+    "criterion": "One reproducible comparison used to make a project decision"
+  },
+  {
+    "id": "data.reuse",
+    "name": "Benchmark With Frequent Flyers",
+    "track": "Data and evaluation",
+    "criterion": "Three distinct releases or teams use the member’s evaluation suite"
+  },
+  {
+    "id": "care.access",
+    "name": "Quiet Room Quartermaster",
+    "track": "Community care",
+    "criterion": "One requested accommodation delivered at a held event"
+  },
+  {
+    "id": "care.support",
+    "name": "Behind the Curtains",
+    "track": "Community care",
+    "criterion": "One completed, independently attested support or moderation shift"
+  },
+  {
+    "id": "care.teach",
+    "name": "The Backup Has a Backup",
+    "track": "Community care",
+    "criterion": "Two trained successors cover separate shifts independently"
+  },
+  {
+    "id": "build.finalist",
+    "name": "Demo Survived Contact",
+    "track": "Engineering",
+    "criterion": "One named entrant or team member submits a working project selected as a finalist"
+  },
+  {
+    "id": "content.guide",
+    "name": "Wrote the Missing Manual",
+    "track": "Communications",
+    "criterion": "One practical guide accepted for distribution to members"
+  }
+]
