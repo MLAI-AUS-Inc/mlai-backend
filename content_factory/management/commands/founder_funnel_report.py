@@ -41,17 +41,21 @@ def parse_window_bound(value: str, *, end: bool) -> datetime:
 
 def founder_funnel(*, since: datetime, until: datetime, using: str = DEFAULT_DB_ALIAS) -> dict:
     """Count each funnel step for non-staff users who joined in [since, until)."""
+    from content_factory.founder_test_orgs import test_only_user_ids, test_organization_ids
     users = get_user_model().objects.using(using).filter(date_joined__gte=since, date_joined__lt=until, is_staff=False)
+    # Plan F1: test accounts and marked test organisations are not founders.
+    test_ids = test_organization_ids(using=using)
     user_ids = set(users.values_list("pk", flat=True))
+    user_ids -= test_only_user_ids(user_ids, ids=test_ids, using=using)
     submitted = set(CommunityMemberProfile.objects.using(using)
                     .filter(user_id__in=user_ids, submitted_at__isnull=False).values_list("user_id", flat=True))
     companies = list(VibeRaisingCompany.objects.using(using).filter(profile__user_id__in=user_ids)
-                     .values_list("profile__user_id", "organization_id"))
+                     .exclude(organization_id__in=sorted(test_ids)).values_list("profile__user_id", "organization_id"))
     founders = {user_id for user_id, _ in companies}
     delivered_orgs = organizations_with_delivered_drafts({org_id for _, org_id in companies}, using=using)
     with_article = {user_id for user_id, org_id in companies if org_id in delivered_orgs}
     island_refresh = ContentFactoryRun.objects.using(using).filter(
-        workflow="island_refresh", created_at__gte=since, created_at__lt=until)
+        workflow="island_refresh", created_at__gte=since, created_at__lt=until).exclude(organization_id__in=sorted(test_ids))
     failed = island_refresh.filter(status="failed").count()
     denied = island_refresh.filter(status="denied").count()
     return {

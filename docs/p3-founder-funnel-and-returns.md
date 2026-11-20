@@ -53,3 +53,35 @@ The existing flow1 response remains unchanged when passwords are off.
 Founder website journey display labels/reasons are translated only for new-journey
 organizations. Protocol ids, routes, capabilities, source proof and Advanced/support
 evidence stay byte-for-byte unchanged; legacy display copy is preserved.
+
+## Test organisations and the daily founder-health report (plan F1, F9)
+
+A test organisation is marked in `OrganizationContentConfig.pillar_strategy["test_organization"]`
+by `manage.py mark_test_organization --organization-id <id> --reason "<why>"` (a dry run
+until `--apply`; `--unmark` removes it, `--list` shows every one). The host-only setting
+`FOUNDER_TEST_ORGANIZATION_IDS` adds ids on top. `content_factory.founder_test_orgs.is_test_org`
+is the one check. A marked organisation is in no funnel, health or re-engagement report,
+raises no founder-journey, stuck or staff alert-rule alert (nor counts toward the
+provider error-rate rule), never reaches staff Slack (including the goal-scoped
+operational alerts), is never swept by self-heal or the background-job digest,
+and is left out of the admin usage (revenue and points) numbers. Every guard still applies
+to it: spend ceilings, consent, refunds, Content Factory's fleet `sandbox_repo_owners`,
+refused-domain list and `max_article_points`.
+
+`manage.py founder_health_report [--json]` prints the daily founder-health report
+(read-only): funnel by approved stage, time to first article, setup, article and publish
+success, generic stops, top codes by founders affected, `staff_fixing` count and age by
+stack, founders stuck over 24 hours by name, duplicate organisations, placeholder and
+hosting-builder domains, and the D12 SLOs as PASS/FAIL lines. Staff read the same report at
+`GET /api/community-chat/admin/startups/health/` (shown on Chat's founder funnel page). The
+`founder_health_report` self-heal sweep posts it to `CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID`
+once a Melbourne day after 08:00, only while `ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED` is on
+(default off); a post Slack refuses is retried on a later tick, three tries a day at most.
+Every section reads at most 2,000 rows of scalar columns and says when it reached that
+limit. The funnel reads run documents through `journey_funnel`, so it runs only when a
+scalar count finds at most 500 article and research runs in the 90-day cohort; above that
+the report says "Funnel skipped" and points to `manage.py founder_funnel_report`. The
+first-draft SLO uses the writer's `draft_ready_v1` clock or the completed packaging step,
+never a run's `updated_at`; a request with neither is counted as unknown. The
+authority-refusal ops alert is not filtered: it is a platform-integrity signal, not a
+founder alert.

@@ -532,8 +532,11 @@ def build_report(*, now, using=DEFAULT_DB_ALIAS, organization_ids=None, override
     workshop_days = frozenset(str(day) for day in workshop_days)
     next_step = setup_next_fn or SETUP_NEXT
     from . import founder_journey_cohort as cohorts
+    from .founder_test_orgs import exclude_test_orgs
     rows = []
-    for organization in never_connected_organizations(using=using, organization_ids=organization_ids):
+    # Plan F1: a marked test organisation is in no founder report and never emailed.
+    for organization in exclude_test_orgs(never_connected_organizations(using=using, organization_ids=organization_ids),
+                                          field="pk", using=using):
         override = overrides.get(str(organization.pk), {})
         step = next_step(organization)
         bucket, facts = _bucket(organization, step, override, using=using)

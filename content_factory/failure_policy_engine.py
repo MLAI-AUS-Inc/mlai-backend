@@ -852,6 +852,10 @@ def _candidates(now, limit, organization_id=None):
         status__in=['failed', 'blocked', 'precondition_failed', 'preview_failed']).select_related('organization__content_config')
     if organization_id is not None:
         query = query.filter(organization_id=organization_id)
+    # A marked test organisation (F1) is MLAI's own test traffic: never self-healed,
+    # charged a strategy budget or alerted, so a red fixture stays red.
+    from .founder_test_orgs import exclude_test_orgs
+    query = exclude_test_orgs(query)
     return list(query
         .filter(Q(result__self_heal_v1__next_at__isnull=True) | Q(result__self_heal_v1__next_at__lte=now.isoformat()))
         .filter(Q(result__self_heal_v1__last_action__isnull=True) | ~Q(result__self_heal_v1__last_action__in=['stop', 'none']))

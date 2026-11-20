@@ -222,6 +222,12 @@ def queue_founder_journey_alert(*, organization, alert_reason: str, company_id=N
         logger.info("founder_journey_alert_background_suppressed alert_reason=%s org_id=%s run_pk=%s",
                     alert_reason, organization.pk, getattr(run, "pk", None))
         return alert_id
+    from .founder_test_orgs import is_test_org
+    if is_test_org(organization):
+        # Plan F1: a marked test organisation is MLAI's own traffic, never a founder alert.
+        logger.info("founder_journey_alert_test_organization_suppressed alert_reason=%s org_id=%s",
+                    alert_reason, organization.pk)
+        return alert_id
     queued_at = timezone.now()
     receipt = {
         "alert_id": alert_id, "alert_reason": alert_reason, "state": "pending", "attempts": 0, "sent_at": None,
@@ -255,6 +261,8 @@ def queue_founder_journey_alerts_batch(items, *, now=None) -> dict:
     from .models import OrganizationContentConfig
     queued_at = now or timezone.now()
     prepared, sources = [], {}
+    from .founder_test_orgs import test_organization_ids
+    test_ids = test_organization_ids()
     for item in items:
         organization, reason = item["organization"], item["alert_reason"]
         run = item.get("run")
@@ -264,6 +272,9 @@ def queue_founder_journey_alerts_batch(items, *, now=None) -> dict:
             raise ValueError("An incident run must belong to its organization.")
         if run is not None and is_scheduler_run(run):
             # Background work never reserves a founder-journey receipt (A2).
+            continue
+        if organization.pk in test_ids:
+            # Nor does a marked test organisation (F1).
             continue
         details = _safe_details(item.get("details"))
         company = item.get("company_id")
@@ -710,7 +721,11 @@ def _detect(*, now, since, limit) -> dict:
         counts[reason] += 1
         budget[0] -= 1
 
-    base = ContentFactoryRun.objects.filter(founder_run_q(), created_at__gte=since, organization__isnull=False)
+    from .founder_test_orgs import test_organization_ids
+    test_ids = sorted(test_organization_ids())
+    # A marked test organisation (F1) is never a candidate, so it never uses this tick's budget.
+    base = ContentFactoryRun.objects.filter(founder_run_q(), created_at__gte=since, organization__isnull=False).exclude(
+        organization_id__in=test_ids)
     steps = ContentFactoryRunStep.objects.filter(run=OuterRef("pk"))
     legacy_owner_cancel = (Q(status="cancelled", error="") & ~Q(result__has_key="cancellation_reason") & (
         Q(Exists(steps.filter(message=LEGACY_OWNER_CANCEL_MESSAGE)))
@@ -753,18 +768,19 @@ def _detect(*, now, since, limit) -> dict:
                     continue
                 queue(reason, organization=run.organization, run=run)
     if budget[0] > 0:
-        _detect_companies_without_draft(now=now, since=since, budget=budget, queue=queue, seen=seen)
+        _detect_companies_without_draft(now=now, since=since, budget=budget, queue=queue, seen=seen, test_ids=test_ids)
     if budget[0] > 0:
-        _detect_waiting_website_operations(now=now, since=since, budget=budget, queue=queue, seen=seen)
+        _detect_waiting_website_operations(now=now, since=since, budget=budget, queue=queue, seen=seen, test_ids=test_ids)
     return counts
 
 
-def _detect_companies_without_draft(*, now, since, budget, queue, seen):
+def _detect_companies_without_draft(*, now, since, budget, queue, seen, test_ids=()):
     from founder_tools.models import VibeRaisingCompany
     from organizations.models import Organization
     companies = (VibeRaisingCompany.objects.filter(created_at__gte=since, created_at__lte=now - NO_DRAFT_AFTER,
                                                    organization__isnull=False)
-                 .exclude(profile__user__is_staff=True).order_by("created_at", "pk")
+                 .exclude(profile__user__is_staff=True).exclude(organization_id__in=list(test_ids))
+                 .order_by("created_at", "pk")
                  .values_list("pk", "organization_id"))
     unalerted = [(company_id, organization_id) for company_id, organization_id in companies
                  if not seen(organization_id, founder_journey_alert_id(
@@ -778,10 +794,11 @@ def _detect_companies_without_draft(*, now, since, budget, queue, seen):
         queue("no_draft_24h", organization=organization, company_id=company_id)
 
 
-def _detect_waiting_website_operations(*, now, since, budget, queue, seen):
+def _detect_waiting_website_operations(*, now, since, budget, queue, seen, test_ids=()):
     from .website_models import WebsiteConnectionOperation
     operations = (WebsiteConnectionOperation.objects.filter(state="needs_user", created_at__gte=since,
                                                              updated_at__lte=now - YOUR_TURN_AFTER)
+                  .exclude(connection__organization_id__in=list(test_ids))
                   .select_related("connection__organization").order_by("created_at", "pk"))
     for operation in list(operations):
         if budget[0] <= 0:
@@ -950,9 +967,16 @@ class _Target:
 
 
 def _pending_targets(organization_ids=None, reasons=None) -> list:
-    """Every pending index receipt, oldest queued first, optionally only some orgs and reasons."""
+    """Every pending index receipt, oldest queued first, optionally only some orgs and reasons.
+
+    A receipt queued before its organisation was marked as a test organisation
+    (F1) stays pending and is never posted.
+    """
+    from .founder_test_orgs import test_organization_ids
+    test_ids = test_organization_ids()
     targets = [(_Target(organization_id=organization_id, key=key), receipt)
                for organization_id, receipts in _receipt_index(organization_ids)
+               if organization_id not in test_ids
                for key, receipt in receipts.items()
                if isinstance(receipt, dict) and receipt.get("state") == "pending"
                and (reasons is None or receipt.get("alert_reason") in reasons)]

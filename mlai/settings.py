@@ -2782,6 +2782,18 @@ CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK = _env_is_true("CONTENT_FACTORY_EDITORIA
 # among its admitted scheduler services before this goes on with
 # ARTICLES_RUN_OWNERSHIP_ENABLED.
 ARTICLES_SOURCE_SYNC_ENABLED = _env_is_true("ARTICLES_SOURCE_SYNC_ENABLED", False)
+# Plan F1: test organisations. The marker that every founder report, alert,
+# staff Slack notice, self-heal sweep and revenue number honours is
+# OrganizationContentConfig.pillar_strategy["test_organization"], written only
+# by ``manage.py mark_test_organization`` (dry run unless --apply). This list
+# of organisation ids is an operator override on top of that marker, for the
+# host's .env only (never a deploy variable): comma-separated ids, e.g. "63".
+FOUNDER_TEST_ORGANIZATION_IDS = os.getenv("FOUNDER_TEST_ORGANIZATION_IDS", "").strip()
+# Plan F9, decision D12: the daily founder-health report and its SLO lines.
+# Staged rollout, default off. Off, the scheduler posts nothing; the read-only
+# ``manage.py founder_health_report`` and the staff console view still work.
+# On, one report a Melbourne day goes to CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID.
+ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED = _env_is_true("ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED", False)
 # Service rescans per connection in any 24 hours (default 6, 0 = none).
 ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP = max(0, int(os.getenv("ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP") or "6"))
 # Setup ladder lower rungs (plan steps C6, C7), a staged rollout behind owner

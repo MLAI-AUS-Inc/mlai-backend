@@ -181,11 +181,17 @@ class Scope:
     run_stuck_after: timedelta = RUN_STUCK_AFTER
     lookback: timedelta | None = LOOKBACK
     limit: int | None = QUERY_LIMIT
+    # Plan F1: marked test organisations, never read as stuck founders.
+    excluded_organization_ids: frozenset = frozenset()
+    # False reads the newest page only and never moves the alert sweep's cursor
+    # (the daily founder-health report, F9).
+    cursor: bool = True
 
 
 def find_stuck_conditions(*, now) -> list[StuckCondition]:
     """The stuck conditions in this pass's bounded pages: the newest rows plus the cursor's next page, per kind."""
-    return _find(now=now, scope=Scope())
+    from .founder_test_orgs import test_organization_ids
+    return _find(now=now, scope=Scope(excluded_organization_ids=test_organization_ids()))
 
 
 def stuck_conditions_by_organization(organization_ids, *, now) -> dict[int, list[StuckCondition]]:
@@ -219,6 +225,8 @@ def _pages(queryset, scope, *, kind, pk_field) -> list[dict]:
     if scope.limit is None:
         return list(queryset.order_by("-updated_at", pk_field))
     head = list(queryset.order_by("-updated_at", f"-{pk_field}")[:scope.limit])
+    if not scope.cursor:
+        return head
     key = CURSOR_KEY.format(kind=kind)
     cursor = _cursor(cache.get(key))
     tail = queryset
@@ -270,6 +278,8 @@ def _current_operations(*, scope):
     rows = WebsiteConnectionOperation.objects.filter(action__in=FOUNDER_OPERATION_ACTIONS, generation=F("connection__generation"))
     if scope.organization_ids is not None:
         rows = rows.filter(connection__organization_id__in=scope.organization_ids)
+    if scope.excluded_organization_ids:
+        rows = rows.exclude(connection__organization_id__in=sorted(scope.excluded_organization_ids))
     return rows.exclude(connection__state="disconnected").exclude(Exists(newer))
 
 
@@ -349,6 +359,8 @@ def _stopped_runs(*, now, scope) -> list[StuckCondition]:
         rows = rows.filter(updated_at__gte=now - scope.lookback)
     if scope.organization_ids is not None:
         rows = rows.filter(organization_id__in=scope.organization_ids)
+    if scope.excluded_organization_ids:
+        rows = rows.exclude(organization_id__in=sorted(scope.excluded_organization_ids))
     rows = _pages(rows.filter(alerts.founder_run_q())
                   .exclude(Exists(newer)).values(*RUN_FIELDS), scope, kind="runs", pk_field="pk")
     conditions = []

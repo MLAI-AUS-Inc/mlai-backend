@@ -68,7 +68,8 @@ def warnings() -> list[str]:
     channel = str(getattr(settings, "CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID", "") or "").strip()
     if SLACK_CHANNEL_PATTERN.fullmatch(channel):
         return []
-    on = [name for name in ("ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED", "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED")
+    on = [name for name in ("ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED", "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED",
+                            "ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED")
           if getattr(settings, name, name == "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED")]
     if not on:
         return []

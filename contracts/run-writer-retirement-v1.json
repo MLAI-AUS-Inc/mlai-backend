@@ -541,14 +541,14 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "56cc5f1cce3851dfceeed174da194743f5dc9c16c21030b2db93dc79064d711d",
+      "function_sha256": "c2177b8cedf585cc1b466db6aff04dd54f1c80aa489aa0c71f6b01e0844dc7d4",
       "classification": "owned_backend_observation",
       "test_refs": [
         "content_factory/tests_founder_journey_alerts.py",
         "content_factory/tests_background_alert_audience.py",
         "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Bulk target writes only ops-alert result receipts on fresh locked Run rows, never status/approval/request/clocks; scheduler runs are skipped and get no receipt (A2). run_terminal and self_heal_capped default to the run incident slot (B5); the written fields are unchanged.",
+      "reason": "Bulk target writes only ops-alert result receipts on fresh locked Run rows, never status/approval/request/clocks; scheduler runs are skipped and get no receipt (A2). run_terminal and self_heal_capped default to the run incident slot (B5); the written fields are unchanged. F1 review: a marked test organisation is skipped before any receipt or Run mirror write, so the change only removes writes and adds no ContentFactoryRun state.",
       "guard": "Independent backend alert receipt namespace; bulk_update fields exactly result.",
       "pending_owner": null
     },
@@ -5912,8 +5912,8 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_candidates",
-      "function_sha256": "4c15e6bb6493716af7bde5cb4a9f1dd1ca0697f28e51bccc8e114473b85cca59",
-      "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
+      "function_sha256": "a84065199cccbb99c447a836bdc17ac9f619cba46b49fb336623b661f77106e0",
+      "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch. F1 review: the selector also excludes marked test organisations; it stays read-only and writes no ContentFactoryRun state.",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
         "content_factory/tests_background_alert_audience.py",
