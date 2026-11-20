@@ -1,4 +1,5 @@
 """Settings, repository, and logo effects with explicit fake I/O boundaries."""
+from contextlib import contextmanager
 from io import BytesIO
 from types import SimpleNamespace as Obj
 from unittest.mock import Mock, patch
@@ -14,21 +15,27 @@ from content_factory import vibe_marketing_views as views
 
 class RepositorySelectionTests(SimpleTestCase):
     def setUp(self):
-        self.config = type("Config", (), {"objects": Mock()})()
+        self.config = Obj()
         self.config.pk = 1
+        self.config.organization_id = 2
         self.config.website_connection_id = None
+        self.config.website_connection = None
+        self.config.github_installation_id = ''
         self.config.github_repo = "old/site"
         self.config.article_system = {"scan": {"ready": True}}
         self.config.daily_discovery_enabled = True
         self.config.save = Mock()
         self.config._meta = Mock()
         self.config._meta.get_field.return_value.get_default.return_value = None
-        self.config.objects.select_for_update.return_value.get.return_value = self.config
-        self.context = Obj(organization=Obj(pk=2))
+        self.context = Obj(organization=Obj(pk=2, domain="site.example"))
+        model = self.enterContext(patch.object(repositories, "OrganizationContentConfig"))
+        model.objects.select_related.return_value.filter.return_value.first.return_value = self.config
+        model.objects.select_for_update.return_value.get.return_value = self.config
         patcher = patch.object(repositories.Organization.objects, "select_for_update")
         self.organization_lock = patcher.start()
         self.addCleanup(patcher.stop)
-        for name in ("bind_website", "transition_connection", "contract_for"):
+        self.organization_lock.return_value.filter.return_value.first.return_value = self.context.organization
+        for name in ("prepare_website_binding", "bind_verified_website", "transition_connection", "contract_for"):
             patcher = patch.object(repositories, name)
             setattr(self, name, patcher.start())
             self.addCleanup(patcher.stop)
@@ -44,11 +51,22 @@ class RepositorySelectionTests(SimpleTestCase):
         patcher = patch.object(repositories.ResearchAutomation.objects, "filter")
         self.automation = patcher.start()
         self.addCleanup(patcher.stop)
+        self.atomic_blocks = []
+        self.enterContext(patch.object(repositories.transaction, "get_connection",
+            return_value=Obj(atomic_blocks=self.atomic_blocks)))
+        self.enterContext(patch.object(repositories.transaction, "atomic", self.atomic))
+
+    @contextmanager
+    def atomic(self):
+        self.atomic_blocks.append(object())
+        try:
+            yield
+        finally:
+            self.atomic_blocks.pop()
 
     def call(self, repo, *, company=True):
         request = Obj(user=Obj(id=7), data={"githubRepo": repo, **({"companyId": "company"} if company else {})}, query_params={})
-        return repositories.VibeMarketingGitHubRepositoryView.put.__wrapped__(
-            repositories.VibeMarketingGitHubRepositoryView(), request)
+        return repositories.VibeMarketingGitHubRepositoryView().put(request)
 
     def test_new_selection_binds_through_founder_installations_and_invalidates_readiness(self):
         response = self.call("new/site")
@@ -60,7 +78,11 @@ class RepositorySelectionTests(SimpleTestCase):
         self.assertNotIn("scan", self.config.article_system)
         self.assertFalse(self.config.daily_discovery_enabled)
         self.reset.assert_called_once_with(self.config, github_repo="new/site")
-        self.bind_website.assert_called_once_with(self.config, user=self.bind_website.call_args.kwargs["user"], repo="new/site", expected={"githubRepo": "new/site", "companyId": "company"})
+        self.prepare_website_binding.assert_called_once_with(self.config,
+            user=self.bind_verified_website.call_args.kwargs["user"], repo="new/site")
+        self.bind_verified_website.assert_called_once_with(self.config, self.prepare_website_binding.return_value,
+            user=self.prepare_website_binding.call_args.kwargs["user"],
+            expected={"githubRepo": "new/site", "companyId": "company"})
         self.assertTrue(response.data["requiresVerification"])
         self.automation.return_value.update.assert_called_once_with(status=repositories.ResearchAutomationStatus.PAUSED)
 
@@ -68,18 +90,17 @@ class RepositorySelectionTests(SimpleTestCase):
         self.config.website_connection_id = 42
         self.assertEqual(self.call("new/site").status_code, 200)
         self._verify_github_repository_access.assert_not_called()
-        self.bind_website.assert_called_once()
+        self.bind_verified_website.assert_called_once()
 
     def test_inaccessible_or_malformed_repo_never_changes_selection(self):
-        self.bind_website.side_effect = repositories.WebsiteAuthorityError(
+        self.prepare_website_binding.side_effect = repositories.WebsiteAuthorityError(
             "github_authorization_required", "Authorize the GitHub App for this repository first.")
-        with patch.object(repositories.transaction, "set_rollback") as rollback, \
-                self.assertLogs(repositories.logger, level="WARNING") as logs:
+        with self.assertLogs(repositories.logger, level="WARNING") as logs:
             response = self.call("new/site")
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data["code"], "github_authorization_required")
         self.assertEqual(response.data["detail"], "Authorize the GitHub App for this repository first.")
-        rollback.assert_called_once_with(True)
+        self.organization_lock.assert_not_called()
         self.assertIn("repo=new/site stage=bind code=github_authorization_required", logs.output[0])
         self.assertEqual(self.call("https://github.com/new/site").status_code, 400)
         self.assertEqual(self.call("new/site", company=False).status_code, 400)
@@ -100,7 +121,7 @@ class RepositorySelectionTests(SimpleTestCase):
         with self.assertLogs(repositories.logger, level="WARNING"):
             response = self.call("old/site")
         self.assertEqual(response.data["detail"], "GitHub access to old/site could not be verified. Check the connection and try again.")
-        self.bind_website.assert_not_called()
+        self.bind_verified_website.assert_not_called()
         self.config.save.assert_not_called()
 
     def test_unlink_does_not_require_oauth_and_invalidates_old_ready_state(self):
@@ -121,8 +142,8 @@ class RepositorySelectionTests(SimpleTestCase):
         # A GitHub callback can save the repo without a connection; saving it again must bind.
         response = self.call("old/site")
         self._verify_github_repository_access.assert_not_called()
-        self.bind_website.assert_called_once()
-        self.organization_lock.return_value.get.assert_called_once_with(pk=2)
+        self.bind_verified_website.assert_called_once()
+        self.organization_lock.return_value.filter.assert_called_once_with(pk=2)
         self.assertTrue(response.data["requiresVerification"])
 
     def test_unlink_revokes_existing_connection_generation(self):
@@ -132,15 +153,54 @@ class RepositorySelectionTests(SimpleTestCase):
         self.contract_for.assert_called_once_with(self.config.website_connection)
         self.transition_connection.assert_called_once_with(self.config, action="disconnect",
             expected=self.contract_for.return_value)
-        self.bind_website.assert_not_called()
+        self.bind_verified_website.assert_not_called()
 
     def test_stale_connection_rejection_rolls_back_without_resetting_setup(self):
-        self.bind_website.side_effect = repositories.WebsiteAuthorityError("website_connection_changed", "Refresh and retry.")
-        with patch.object(repositories.transaction, "set_rollback") as rollback:
+        self.bind_verified_website.side_effect = repositories.WebsiteAuthorityError("website_connection_changed", "Refresh and retry.")
+        with self.assertLogs(repositories.logger, level="WARNING"):
             response = self.call("new/site")
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data["code"], "website_connection_changed")
-        rollback.assert_called_once_with(True)
+        self.reset.assert_not_called()
+        self.config.save.assert_not_called()
+
+
+    def test_provider_checks_precede_the_write_transaction(self):
+        from content_factory.website_connections import require_unlocked_remote_call
+
+        def verify_new(*args, **kwargs):
+            require_unlocked_remote_call()
+            return Obj()
+
+        def persist(*args, **kwargs):
+            self.assertTrue(self.atomic_blocks)
+
+        def verify_saved(*args, **kwargs):
+            require_unlocked_remote_call()
+            return {"verified": True}
+
+        self.prepare_website_binding.side_effect = verify_new
+        self.bind_verified_website.side_effect = persist
+        self._verify_github_repository_access.side_effect = verify_saved
+        self.assertEqual(self.call("new/site").status_code, 200)
+        self.config.website_connection_id = 42
+        self.assertEqual(self.call("new/site").status_code, 200)
+        self.bind_verified_website.assert_called_once()
+
+    def test_concurrent_disconnect_refuses_to_use_old_verification(self):
+        self.config.website_connection_id = 42
+        self.config.website_connection = Obj(pk=42, state="connected", generation=1)
+
+        def verify(*args, **kwargs):
+            self.config.website_connection.state = "disconnected"
+            self.config.website_connection.generation += 1
+            return {"verified": True}
+
+        self._verify_github_repository_access.side_effect = verify
+        with self.assertLogs(repositories.logger, level="WARNING"):
+            response = self.call("old/site")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "website_connection_changed")
         self.reset.assert_not_called()
         self.config.save.assert_not_called()
 
