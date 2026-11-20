@@ -22,12 +22,18 @@ cannot override them. Legacy receipts without a purchase retain their policy.
 
 | Purchase | Total points | Points due now |
 | --- | ---: | ---: |
-| Basic | 24 | 24 |
+| Basic | 24 per block | 24 per block |
 | Standard upgrade | 48 | 24 |
 | Large upgrade | 124 | 100 |
 
 An upgrade requires a delivered, settled basic purchase by the same payer for
 the same company, workspace, repository, selected scope and immutable source.
+A basic block is 64 `source_batch` checks: a basic purchase costs 24 points
+for each started block (`basic_points` in `roo/cybertest_delivery.py`), so a
+repository with 910 source batches costs 360 points. The scan service applies
+the same rule to the same contract. Basic execution plans may be up to 1.5 MB.
+Upgrade prices are unchanged.
+
 There can be one active or delivered upgrade per basic purchase. A fully
 refunded failed upgrade may be explicitly purchased again. There is no second
 48-to-124 upgrade step. Expired unpaid offers can be replaced.
@@ -46,7 +52,7 @@ boundary, not a browser-provided completion checkbox.
 All required substantive checks plus a saved report meet minimum delivery.
 Finding count is irrelevant. Optional omissions produce partial coverage and
 do not force refunds. Below-minimum basic delivery retains only verified model
-usage using the receipt's conversion snapshot, capped at 24 points. Unknown
+usage using the receipt's conversion snapshot, capped at the basic price paid. Unknown
 usage leaves settlement pending rather than guessing. Below-minimum upgrades
 refund the full 24 or 100 point difference even if usage is unknown; the parent
 receipt is untouched. Replaying identical settlement is safe; contradictory
