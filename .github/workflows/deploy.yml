@@ -387,7 +387,7 @@ jobs:
       run: python manage.py validate_prod_urls
 
     - name: Run founder journey API tests
-      run: python manage.py test content_factory.tests_content_first_article content_factory.tests_founder_journey_api content_factory.tests_founder_journey_integration content_factory.tests_founder_journey_unit --noinput --verbosity 2
+      run: python manage.py test content_factory.tests_content_first_article content_factory.tests_founder_journey_api content_factory.tests_founder_journey_integration content_factory.tests_founder_journey_unit content_factory.tests_startup_onboarding --noinput --verbosity 2
 
     - name: Verify private Slack delivery payloads without database access
       run: python -m unittest integrations.tests_slack_dm_payload_contract integrations.tests_slack_catalog_queries integrations.tests_slack_history_scheduling integrations.tests_slack_recent_activity -v
@@ -1672,6 +1672,7 @@ jobs:
         COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED: ${{ vars.COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED || '' }}
         MY_STARTUP_ONE_FIELD_START_ENABLED: ${{ vars.MY_STARTUP_ONE_FIELD_START_ENABLED || '' }}
         MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED: ${{ vars.MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED || '' }}
+        MY_STARTUP_ONBOARDING_V3_ENABLED: ${{ vars.MY_STARTUP_ONBOARDING_V3_ENABLED || '' }}
         ARTICLES_FIRST_ARTICLE_CARD_ENABLED: ${{ vars.ARTICLES_FIRST_ARTICLE_CARD_ENABLED || '' }}
         ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED: ${{ vars.ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED || '' }}
         ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED: ${{ vars.ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED || '' }}
@@ -1757,6 +1758,7 @@ jobs:
         COMMUNITY_CHAT_INVITE_TOKEN_MAX_TTL_HOURS: ${{ vars.COMMUNITY_CHAT_INVITE_TOKEN_MAX_TTL_HOURS || '' }}
         COMMUNITY_CHAT_DEVICE_AUTH_MAX_LIFETIME_SECONDS: ${{ vars.COMMUNITY_CHAT_DEVICE_AUTH_MAX_LIFETIME_SECONDS || '' }}
         MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT: ${{ vars.MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT || '' }}
+        MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT: ${{ vars.MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT || '' }}
         MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS: ${{ vars.MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS || '' }}
         COMMUNITY_CHAT_INVITE_RESOLVE_RATE: ${{ vars.COMMUNITY_CHAT_INVITE_RESOLVE_RATE || '' }}
         MLAI_MCP_ENABLED: ${{ vars.MLAI_MCP_ENABLED || 'false' }}

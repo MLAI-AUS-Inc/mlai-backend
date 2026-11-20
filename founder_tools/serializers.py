@@ -196,6 +196,9 @@ class FounderCompanyUpsertSerializer(AliasInputSerializer):
     # Acknowledges a domain change that re-points the company to a different
     # Organization, stranding the old org's data (structured 409 otherwise).
     confirmDomainChange = serializers.BooleanField(required=False, default=False)
+    # Onboarding v3 "Looks right": the owner confirms the name and one-liner, so
+    # a late website read can no longer change them. Ignored while the setting is off.
+    confirmProfile = serializers.BooleanField(required=False, default=False)
     name = serializers.CharField()
     domain = serializers.CharField(allow_blank=True, allow_null=True, required=False)
     abn = serializers.CharField(allow_blank=True, allow_null=True, required=False)

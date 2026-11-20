@@ -767,6 +767,9 @@ def _final_apply(run, company, organization, autofill, *, stale) -> dict:
         outcome["filled"] = _fill_fields(company, organization, config, candidates, state)
         outcome["candidates"] = candidates
         outcome["seeded"] = _ensure_seed_keywords(organization, autofill, candidates)
+        if outcome["seeded"]:
+            # The Dashboard shows researched search terms only, never name-derived guesses.
+            state["seedKeywordsSource"] = "research" if _seed_list(autofill.get("seedKeywords")) else "fallback"
         state["appliedRunId"] = str(run.run_id)
         state["appliedAt"] = timezone.now().isoformat()
         outcome["state"] = state

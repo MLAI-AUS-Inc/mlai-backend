@@ -2722,6 +2722,12 @@ COMMUNITY_CHAT_REVIEW_CLEARED_EMAIL_ENABLED = _env_is_true("COMMUNITY_CHAT_REVIE
 COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED = _env_is_true("COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED", False)
 MY_STARTUP_ONE_FIELD_START_ENABLED = _env_is_true("MY_STARTUP_ONE_FIELD_START_ENABLED", False)
 MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED = _env_is_true("MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False)
+# New startup onboarding (v3): a "Check your details" step and the journey's
+# ``onboarding`` block, sent only to clients that ask with ``?onboarding=3``.
+MY_STARTUP_ONBOARDING_V3_ENABLED = _env_is_true("MY_STARTUP_ONBOARDING_V3_ENABLED", False)
+# Startups created at or after this ISO time (with an offset) are asked to
+# confirm their details; older ones only when they have no one-liner.
+MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT = os.getenv("MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT", "").strip()
 ARTICLES_FIRST_ARTICLE_CARD_ENABLED = _env_is_true("ARTICLES_FIRST_ARTICLE_CARD_ENABLED", False)
 # Guided GitHub-first onboarding: a new-journey startup writes its first article
 # only once its website is connected through GitHub with a verified articles page.
