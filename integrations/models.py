@@ -2104,6 +2104,52 @@ class XeroStatementPosting(models.Model):
         ]
 
 
+class StudioTreasuryLedger(models.Model):
+    """One lock domain for every builder drawing on an organisation's pools."""
+
+    organization = models.OneToOneField("organizations.Organization", on_delete=models.PROTECT)
+    workspace_id = models.CharField(max_length=100, unique=True)
+    configuration = models.JSONField(default=dict)
+    reservations = models.JSONField(default=dict)
+    opening_verified_at = models.DateTimeField(null=True, blank=True)
+    opening_evidence = models.TextField(blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class StudioPaymentReview(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ledger = models.ForeignKey(StudioTreasuryLedger, on_delete=models.PROTECT)
+    requester = models.CharField(max_length=100)
+    request_key = models.CharField(max_length=64)
+    claims = models.JSONField(default=dict)
+    result = models.JSONField(default=dict)
+    source_hash = models.CharField(max_length=64)
+    status = models.CharField(max_length=24, default="preview")
+    bank_receipt = models.JSONField(default=dict)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["ledger", "request_key"], name="studio_review_request_uniq")]
+
+
+class StudioMeetingOccurrence(models.Model):
+    ledger = models.ForeignKey(StudioTreasuryLedger, on_delete=models.PROTECT)
+    occurrence_key = models.CharField(max_length=64)
+    project_id = models.CharField(max_length=100)
+    starts_at = models.DateTimeField()
+    ends_at = models.DateTimeField()
+    cancelled = models.BooleanField(default=False)
+    calendar_evidence = models.JSONField(default=dict)
+    linear_issue = models.JSONField(default=dict)
+    participation = models.JSONField(default=dict)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["ledger", "occurrence_key"], name="studio_meeting_occurrence_uniq")]
+
+
 class LinearIssueCreationReceipt(models.Model):
     """Durable idempotency receipt for Roo-created Linear issues."""
 
