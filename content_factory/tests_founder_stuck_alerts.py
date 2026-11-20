@@ -232,8 +232,13 @@ class FounderStuckBoundTests(FounderStuckFixture):
             self.make_run(org=org, result={"error_code": STRATEGY_CODE, "verification_summary": "x" * 1000})
         with CaptureQueriesContext(connection) as queries:
             conditions = stuck.find_stuck_conditions(now=self.now)
-        # Two pages per kind: the newest rows and the cursor's next page.
-        self.assertEqual(len(queries), 4)
+        # One scalar read of the marked test organisations (plan F1), then two pages
+        # per kind: the newest rows and the cursor's next page.
+        self.assertEqual(len(queries), 5)
+        marker = queries[0]["sql"]
+        self.assertIn('"content_factory_org_config"."organization_id"', marker.split(" FROM ", 1)[0])
+        self.assertNotIn('"pillar_strategy" FROM', marker)
+        queries = queries[1:]
         self.assertLessEqual(len(conditions), 4 * stuck.QUERY_LIMIT)
         for query in queries:
             sql = query["sql"]
@@ -254,7 +259,8 @@ class FounderStuckBoundTests(FounderStuckFixture):
         self.assertEqual(outcome["queued"], stuck.MAX_ALERTS_PER_SWEEP)
         self.assertLessEqual(len(texts), stuck.MAX_ALERTS_PER_SWEEP)
         # Fixed work per alert; nothing grows with the number of startups or receipts.
-        self.assertLessEqual(len(queries), 16 * stuck.MAX_ALERTS_PER_SWEEP)
+        # (One of the 17 is the queue's test-organisation check, plan F1.)
+        self.assertLessEqual(len(queries), 17 * stuck.MAX_ALERTS_PER_SWEEP)
 
     def test_already_alerted_rows_never_hide_a_new_stuck_founder(self):
         # 60 newer stops are already alerted; one older stop is new. A plain

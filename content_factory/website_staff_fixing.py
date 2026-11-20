@@ -284,20 +284,43 @@ def run_staff_fixing_sweep(now=None, limit=None) -> dict:
     return counts
 
 
-def report(now=None) -> dict:
-    """Count and age of open staff_fixing items, by stack, for the daily report (F9)."""
+REPORT_LIMIT = 500
+
+
+def report(now=None, *, limit=REPORT_LIMIT, excluded_organization_ids=()) -> dict:
+    """Count and age of open staff_fixing items, by stack, for the daily report (F9).
+
+    One bounded query over scalar columns and single JSON keys (the 10 Nov
+    scheduler OOM): never a whole receipt or capabilities document. Also counts,
+    for the B25 SLO lines, items past their one-working-day owner bound with no
+    named owner and items open past day 7. ``excluded_organization_ids`` are the
+    marked test organisations (F1).
+    """
     from .website_models import WebsiteConnectionOperation
     now = now or timezone.now()
-    rows = WebsiteConnectionOperation.objects.filter(action="prepare", receipt__status=STATUS).select_related("connection")
+    rows = (WebsiteConnectionOperation.objects.filter(action="prepare", receipt__status=STATUS)
+            .exclude(connection__organization_id__in=sorted(excluded_organization_ids))
+            .order_by("created_at", "pk")
+            .values_list(f"receipt__{KEY}__since", f"receipt__{KEY}__exit", f"receipt__{KEY}__owner__user_id",
+                         "connection__capabilities__framework", "connection__capabilities__stack")[:limit + 1])
+    rows = list(rows)
+    truncated = len(rows) > limit
     stacks = {}
-    for op in rows:
-        value = record(op)
-        if value is None or value.get("exit") is not None:
+    owner_overdue = over_lifetime = owned = 0
+    for since_value, exit_value, owner_id, framework, stack_value in rows[:limit]:
+        since = _stamp(since_value)
+        if since is None or exit_value is not None:
             continue
-        capabilities = op.connection.capabilities if isinstance(op.connection.capabilities, dict) else {}
-        stack = str(capabilities.get("framework") or capabilities.get("stack") or "unknown")[:40]
-        age = (now - _stamp(value["since"])).total_seconds() / 3600
+        stack = str(framework or stack_value or "unknown")[:40]
+        age = (now - since).total_seconds() / 3600
         entry = stacks.setdefault(stack, {"count": 0, "oldest_hours": 0.0})
         entry["count"] += 1
         entry["oldest_hours"] = max(entry["oldest_hours"], round(age, 1))
-    return {"stacks": stacks, "total": sum(item["count"] for item in stacks.values())}
+        if owner_id:
+            owned += 1
+        elif now >= next_working_day(since):
+            owner_overdue += 1
+        if now >= since + LIFETIME:
+            over_lifetime += 1
+    return {"stacks": dict(sorted(stacks.items())), "total": sum(item["count"] for item in stacks.values()),
+            "owned": owned, "ownerOverdue": owner_overdue, "overLifetime": over_lifetime, "truncated": truncated}

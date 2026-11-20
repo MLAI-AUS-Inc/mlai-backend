@@ -151,7 +151,11 @@ def run_alert_rule_sweep(now=None, limit=None):
     # A cursor rotates batches so later startups cannot starve behind the first 500.
     cursor_key = "staff_alert_rules:organization_cursor"
     cursor = cache.get(cursor_key, 0)
-    qs = OrganizationContentConfig.objects.select_related("organization").order_by("organization_id")
+    # Plan F1: a marked test organisation is MLAI's own traffic and raises no staff alert.
+    from .founder_test_orgs import test_organization_ids
+    test_ids = sorted(test_organization_ids())
+    qs = (OrganizationContentConfig.objects.select_related("organization").exclude(organization_id__in=test_ids)
+          .order_by("organization_id"))
     configs = list(qs.filter(organization_id__gt=cursor)[:limit])
     if not configs:
         configs = list(qs[:limit])
@@ -205,7 +209,9 @@ def run_alert_rule_sweep(now=None, limit=None):
     # Rate rules are global, independent of the rotating organization batch.
     provider_filter = Q(result__error_code__icontains="PROVIDER") | Q(result__error_code__icontains="TEMPORARILY_UNAVAILABLE") | Q(result__error_code__icontains="RATE_LIMIT") | Q(result__error_code__icontains="GATEWAY")
     # Background runs are judged by the nightly digest only (B1, B6).
-    counts = ContentFactoryRun.objects.filter(founder_run_q(), updated_at__gte=now-timedelta(minutes=10)).aggregate(
+    # Nor do marked test organisations' runs (F1): a red fixture is reported by its own job, never as a rate spike.
+    counts = ContentFactoryRun.objects.filter(founder_run_q(), updated_at__gte=now-timedelta(minutes=10)).exclude(
+        organization_id__in=test_ids).aggregate(
         total=Count("pk"), errors=Count("pk", filter=provider_filter))
     hour = timedelta(hours=1)
     refresh = staff_signals.total(staff_signals.REFRESH_FAILED, window=hour, now=now)

@@ -51,7 +51,10 @@ def _nights(now):
     """{(organization_id, workflow): {night: {"failed": bool, "completed": bool, "last_code": str}}}."""
     from .founder_journey_alerts import SAFE_CODE, founder_run_q
     start = datetime.combine(_night(now) - timedelta(days=LOOKBACK_NIGHTS), time.min, tzinfo=LOCAL)
-    rows = (ContentFactoryRun.objects.exclude(founder_run_q()).filter(organization__isnull=False, created_at__gte=start)
+    from .founder_test_orgs import exclude_test_orgs
+    # A marked test organisation's nightly jobs (F1) neither alert nor count toward a spike.
+    rows = (exclude_test_orgs(ContentFactoryRun.objects.exclude(founder_run_q()).filter(
+                organization__isnull=False, created_at__gte=start))
             .order_by("created_at", "pk")
             .values_list("organization_id", "workflow", "status", "created_at", "result__error_code"))
     table = defaultdict(lambda: defaultdict(lambda: {"failed": False, "completed": False, "last_code": ""}))

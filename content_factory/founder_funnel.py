@@ -227,6 +227,12 @@ def journey_funnel(*, since, until, using=DEFAULT_DB_ALIAS):
         date_joined__gte=since, date_joined__lt=until, is_staff=False).values('pk', 'date_joined')[:MAX_COHORT+1])
     if len(users) > MAX_COHORT:
         raise ValueError('Choose a smaller signup window (maximum 20,000 accounts).')
+    # Plan F1: a test account (every startup it has is a marked test
+    # organisation) is not a founder, and a test organisation's facts never count.
+    from .founder_test_orgs import test_only_user_ids, test_organization_ids
+    test_ids = test_organization_ids(using=using)
+    test_users = test_only_user_ids([row['pk'] for row in users], ids=test_ids, using=using)
+    users = [row for row in users if row['pk'] not in test_users]
     facts = {row['pk']: {} for row in users}
     signups = {row['pk']: row['date_joined'] for row in users}
 
@@ -264,6 +270,8 @@ def journey_funnel(*, since, until, using=DEFAULT_DB_ALIAS):
     owners = defaultdict(set)
     for row in VibeRaisingCompany.objects.using(using).filter(profile__user_id__in=facts).values(
             'profile__user_id', 'organization_id', 'created_at'):
+        if row['organization_id'] in test_ids:
+            continue
         mark(row['profile__user_id'], 'startup_created', row['created_at'])
         if row['organization_id']:
             owners[row['organization_id']].add(row['profile__user_id'])
@@ -383,7 +391,9 @@ def organization_facts(organization_ids=None, *, using=DEFAULT_DB_ALIAS):
     from .founder_setup_state import authors_saved, readers_approved
     from .models import ArticlePublishStatus
     from .website_models import WebsiteConnectionTarget, WebsiteScanSnapshot
-    companies = VibeRaisingCompany.objects.using(using).filter(organization__isnull=False)
+    from .founder_test_orgs import exclude_test_orgs
+    # Plan F1: a marked test organisation is never a founder's startup.
+    companies = exclude_test_orgs(VibeRaisingCompany.objects.using(using).filter(organization__isnull=False), using=using)
     if organization_ids is not None:
         companies = companies.filter(organization_id__in=list(organization_ids))
     owners = defaultdict(set)

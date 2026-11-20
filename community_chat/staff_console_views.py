@@ -60,6 +60,21 @@ class FounderFunnelView(StaffConsoleView):
         return Response(report, headers={'Cache-Control': 'private, no-store'})
 
 
+class FounderHealthView(StaffConsoleView):
+    """Plan F9: the daily founder-health report and its SLO lines, read-only (test organisations excluded)."""
+
+    def get(self, request):
+        from django.db import connection, transaction
+        from content_factory.founder_health_report import build_report
+        with transaction.atomic():
+            if connection.vendor == 'postgresql':
+                with connection.cursor() as cursor:
+                    cursor.execute('SET TRANSACTION READ ONLY')
+            report = build_report()
+            transaction.set_rollback(True)
+        return Response(report, headers={'Cache-Control': 'private, no-store'})
+
+
 class StartupDetailView(StaffConsoleView):
     """Resolve a startup's ten recent runs and website support evidence."""
     def get(self, request, organization_id):

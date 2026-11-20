@@ -605,6 +605,8 @@ jobs:
           content_factory.tests_cancellation_reason \
           content_factory.tests_founder_funnel_report \
           content_factory.tests_founder_reengagement \
+          content_factory.tests_founder_test_orgs \
+          content_factory.tests_founder_health_report \
           content_factory.tests_hosted_articles \
           content_factory.tests_preview_domain_claim \
           content_factory.tests_website_portable \
@@ -1737,6 +1739,7 @@ jobs:
         ARTICLES_PREPARE_STICKY_STOP_ENABLED: ${{ vars.ARTICLES_PREPARE_STICKY_STOP_ENABLED || '' }}
         ARTICLES_SOURCE_SYNC_ENABLED: ${{ vars.ARTICLES_SOURCE_SYNC_ENABLED || '' }}
         ARTICLES_SETUP_LADDER_ENABLED: ${{ vars.ARTICLES_SETUP_LADDER_ENABLED || '' }}
+        ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED: ${{ vars.ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED || '' }}
         MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED: ${{ vars.MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED || '' }}
         ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP: ${{ vars.ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP || '' }}
         ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED: ${{ vars.ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED || '' }}

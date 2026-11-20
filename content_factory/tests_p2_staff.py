@@ -294,7 +294,8 @@ class StaffTests(TestCase):
             result = rules.run_alert_rule_sweep(limit=500)
         self.assertEqual(result["organizations"], 500)
         self.assertLess(monotonic()-start, 2)
-        self.assertLessEqual(len(queries), 4)
+        # One of the five is the scalar read of marked test organisations (plan F1).
+        self.assertLessEqual(len(queries), 5)
 
     def test_retry_now_rechecks_a_held_article_quality_check(self):
         run = self.new_run(result={"article_preview_quality": {
