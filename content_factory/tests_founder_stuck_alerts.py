@@ -97,7 +97,7 @@ class FounderStuckAlertTests(FounderStuckFixture):
         self.assertEqual(self.sweep()[0]["queued"], 0)
 
     def test_condition_change_alerts_again(self):
-        op = self.operation(action="reconnect", state="pending", attempts=21, age=timedelta(days=3))
+        op = self.operation(action="reconnect", state="pending", attempts=21, age=timedelta(hours=30))
         outcome, texts = self.sweep()
         self.assertEqual(outcome["queued"], 1)
         self.assertIn("Step: Reconnecting GitHub.", texts[0])
@@ -106,6 +106,19 @@ class FounderStuckAlertTests(FounderStuckFixture):
         WebsiteConnectionOperation.objects.filter(pk=op.pk).update(state="needs_attention")
         self.assertEqual(self.sweep()[0]["queued"], 1)
         self.assertEqual(len(self.receipts()), 2)
+
+    def test_a_stop_still_waiting_after_48_hours_escalates_to_the_owner_once(self):
+        # Plan 7.6 / F10: same channel and kill switch, one extra receipt, never for old history.
+        self.operation(age=timedelta(hours=50))
+        outcome, texts = self.sweep()
+        self.assertEqual(outcome["queued"], 2)
+        self.assertEqual(sorted(r["details"].get("escalation", "") for r in self.receipts()), ["", "owner"])
+        self.assertTrue(any(text.startswith("Escalated to the owner after 48 hours.") for text in texts))
+        self.assertEqual(self.sweep(now=self.now + timedelta(minutes=11))[0]["queued"], 0)
+
+    def test_a_failed_run_alerts_after_two_hours(self):
+        self.make_run(result={"error_code": STRATEGY_CODE}, age=timedelta(hours=3))
+        self.assertEqual(self.sweep()[0]["queued"], 1)
 
     def test_young_or_settled_operations_do_not_alert(self):
         self.operation(state="pending", attempts=3)                     # retrying, but not long
@@ -156,7 +169,7 @@ class FounderStuckAlertTests(FounderStuckFixture):
 
     @override_settings(ARTICLES_STAFF_ALERT_RULES_ENABLED=True)
     def test_staff_rule_enrichment_keeps_the_alerts_own_attempts_and_item(self):
-        self.operation(action="reconnect", state="pending", attempts=21, age=timedelta(days=3))
+        self.operation(action="reconnect", state="pending", attempts=21, age=timedelta(hours=30))
         outcome, texts = self.sweep()
         self.assertEqual(outcome["queued"], 1)
         self.assertIn("Attempts 21.", texts[0])
@@ -188,7 +201,7 @@ class FounderStuckAlertTests(FounderStuckFixture):
         self.assertEqual(self.sweep()[0]["candidates"], 0)
         self.make_run(result={"self_heal_v1": {"next_at": (self.now + timedelta(hours=1)).isoformat()}})
         self.assertEqual(self.sweep()[0]["candidates"], 0)
-        self.make_run(age=timedelta(hours=2))                                       # stopped, but recently
+        self.make_run(age=timedelta(hours=1))                                       # stopped, but recently (under 2 h)
         self.assertEqual(self.sweep()[0]["candidates"], 0)
         older = self.make_run(age=timedelta(hours=30))
         self.make_run(status="running", age=timedelta(hours=7))                     # a newer run replaced it
@@ -267,7 +280,8 @@ class FounderStuckBoundTests(FounderStuckFixture):
         self.assertEqual(sum(len(self.receipts(org)) for org in Organization.objects.exclude(pk=self.org.pk)),
                          stuck.QUERY_LIMIT + 10)
         older, site = self.startup("Older", "older.example.test", "Older", "Founder")
-        self.operation(website=site, age=timedelta(days=5))
+        # Past the owner-escalation horizon (plan F10), so it holds one receipt.
+        self.operation(website=site, age=timedelta(days=20))
         middle, site = self.startup("Middle", "middle.example.test", "Middle", "Founder")
         self.operation(website=site, age=timedelta(hours=1, minutes=55))
         for _ in range(3):

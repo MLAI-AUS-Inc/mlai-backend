@@ -564,6 +564,7 @@ jobs:
           content_factory.tests_background_alert_audience \
           content_factory.tests_self_heal_class_before_wall \
           content_factory.tests_self_heal_history_commands \
+          content_factory.tests_staff_operation_actions \
           content_factory.tests_founder_stuck_alerts \
           content_factory.tests_stand_in_preview_approval_unit \
           content_factory.tests_website_live_status \

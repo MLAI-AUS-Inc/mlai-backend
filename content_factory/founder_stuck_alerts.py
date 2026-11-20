@@ -8,8 +8,8 @@ A founder can be stuck in three ways that the cohort-gated alerts miss:
   (La Vie's reconnect sat pending after 21 attempts); a deployment or policy wait
   is left out, because it has its own 24-hour deadline that ends in a stop;
 * the founder's latest article or setup run stopped (failed, blocked, stopped or
-  denied) more than six hours ago with no founder action and no scheduled
-  self-heal retry.
+  denied) more than two hours ago with no founder action and no scheduled
+  self-heal retry (two hours, the plan 7.6 escalation ladder).
 
 Each condition queues one ``founder_stuck`` receipt through the shared
 founder-journey alert store, keyed by the operation or run and the kind of stop,
@@ -67,7 +67,8 @@ OPERATION_RETRY_ATTEMPTS = 10
 # A setup that keeps progressing can legitimately be pending for a day (steps,
 # then a deployment wait of up to 24 hours), so only twice that reads as stuck.
 OPERATION_PENDING_AFTER = timedelta(hours=48)
-RUN_STUCK_AFTER = timedelta(hours=6)
+# Plan 7.6 escalation ladder: a failed run reaches staff within two hours.
+RUN_STUCK_AFTER = timedelta(hours=2)
 CURSOR_KEY = "founder_stuck_alerts:cursor:{kind}"
 PENDING_ORGS_KEY = "founder_stuck_alerts:pending_organizations"
 CURSOR_TIMEOUT_SECONDS = 7 * 24 * 3600
@@ -147,6 +148,9 @@ def run_founder_stuck_alert_sweep(now=None) -> dict:
     if not cache.add(THROTTLE_KEY, now.isoformat(), SWEEP_INTERVAL_SECONDS):
         return {"status": "throttled"}
     conditions = find_stuck_conditions(now=now)
+    # Plan 7.6: anything still waiting on us after 48 hours escalates to the owner once, on this channel.
+    from .staff_escalation import owner_escalations
+    conditions = [*conditions, *owner_escalations(conditions, now=now)]
     organization_ids = {condition.organization_id for condition in conditions}
     queued = _queue(conditions, organization_ids=organization_ids)
     delivered = _deliver_pending(now=now, organization_ids=organization_ids)
@@ -255,7 +259,8 @@ def stuck_alert_id(condition: StuckCondition) -> str:
 
 OPERATION_FIELDS = ("id", "connection__organization_id", "action", "state", "attempts", "created_at", "updated_at",
                     "receipt__reason_code", "receipt__error_code", "receipt__failure__code", "receipt__code",
-                    "receipt__last_error", "receipt__user_action__id")
+                    "receipt__last_error", "receipt__user_action__id", "receipt__status",
+                    "receipt__staff_fixing__since", "receipt__staff_fixing__owner__user_id")
 # Prepare records its code as reason_code (sometimes error_code or failure.code);
 # other operations use code or last_error. The first safe code wins.
 OPERATION_CODE_FIELDS = ("receipt__reason_code", "receipt__error_code", "receipt__failure__code", "receipt__code",
@@ -285,6 +290,11 @@ def _operation_condition(row, *, kind, stuck_since) -> StuckCondition:
     action = row.get("receipt__user_action__id")
     if kind == "retired_ask" and isinstance(action, str) and alerts.SAFE_CODE.fullmatch(action):
         details["action"] = action
+    if row.get("receipt__status") == "staff_fixing" and isinstance(row.get("receipt__staff_fixing__since"), str):
+        # B25's bounded life; the escalation ladder reads it (plan F10).
+        details["staff_fixing_since"] = row["receipt__staff_fixing__since"][:40]
+        if row.get("receipt__staff_fixing__owner__user_id") is not None:
+            details["staff_fixing_owner"] = True
     return StuckCondition(
         organization_id=row["connection__organization_id"], slot=f"op-{row['id']}-{kind}", kind=f"operation_{kind}",
         step=row["action"], code=_operation_code(row), stuck_since=stuck_since, details=details)
@@ -543,7 +553,8 @@ def stuck_alert_text(receipt, context) -> str:
     entry = _registry_entry(code)
     description = (entry or {}).get("user_message") or KIND_DESCRIPTIONS.get(str(details.get("kind")), "")
     step = STEP_LABELS.get(str(details.get("step") or ""), str(details.get("step") or "Unknown step"))
-    parts = [f"Founder stuck: {founder} at {startup}" + (f" ({context['domain']})." if context.get("domain") else ".")]
+    parts = [("Escalated to the owner after 48 hours. " if details.get("escalation") == "owner" else "")
+             + f"Founder stuck: {founder} at {startup}" + (f" ({context['domain']})." if context.get("domain") else ".")]
     parts.append(f"Step: {step}.")
     parts.append(f"Reason: {code + ': ' if code else ''}{description or 'No failure code was reported.'}")
     since = alerts._timestamp(details.get("stuck_since_at"))
