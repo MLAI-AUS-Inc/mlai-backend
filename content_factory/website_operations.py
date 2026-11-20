@@ -493,14 +493,19 @@ def observe_workflow_status(run, payload=None):
         wake_prepare_after_commit(op.connection_id)
 
 
-def advance_workflow_attempt(run, *, preserve_run_clock=False):
-    """Fence a resumed attempt; policy commands keep the original activity clock."""
+def advance_workflow_attempt(run, *, preserve_run_clock=False, follow_moved_preview=False):
+    """Fence a resumed attempt; policy commands keep the original activity clock.
+
+    ``follow_moved_preview`` is only for the owner's preview retry, which
+    Content Factory re-pins to a moved site commit (see authority_guard).
+    """
     from .website_connections import authority_guard, scoped_run_contract, contract_for, extend_owner_operation_contract
     binding = scoped_run_contract(run)
     from .run_ownership import owner_receipt
     owned = (owner_receipt(run) or {}).get("authority", {}).get("event_protocol") == 1
     original_run = run
-    with authority_guard(binding, action="read") as website:
+    follow = {"follow_moved_preview": True} if follow_moved_preview else {}
+    with authority_guard(binding, action="read", **follow) as website:
         if owned:
             from workflow_runs.models import ContentFactoryRun
             from .run_ownership import current_execution_ticket, RunOwnershipConflict
