@@ -201,16 +201,27 @@ def _restart(op, founder, *, reset_cap, now, by_user):
                 receipt.pop(key, None)
             current.receipt = receipt
             reset_scan_budget(current)
-            current.receipt[CAP_RESET_KEY] = [*cap_resets(op), reset]
+            current.receipt[CAP_RESET_KEY] = [*cap_resets(current), reset]
             WebsiteConnectionOperation.objects.filter(pk=current.pk).update(receipt=current.receipt)
         # The founder's own Try again, under the founder who authorised the website.
         reopened = start_prepare(founder["config"], company_id=founder["company"].pk, user=founder["user"],
                                  retry=True, target=founder["target"])
         reopened.refresh_from_db()
-        if reopened.pk != op.pk or reopened.state in STOPPED_STATES:
+        if reopened.state in STOPPED_STATES or not _same_preparation(op, reopened):
             # Nothing re-opened: keep the cap and the earlier state.
             raise OperationActionRefused("not_reopened")
     return reopened
+
+
+def _same_preparation(op, reopened) -> bool:
+    """``reopened`` is ``op`` itself or the successor the founder's Try again made for it.
+
+    On the goal runner a stopped preparation is terminal, so the founder's Try
+    again opens a successor on the same connection and generation (the A16
+    replay accepts it the same way).
+    """
+    return reopened.pk == op.pk or (reopened.connection_id == op.connection_id and reopened.generation == op.generation
+                                    and reopened.action == "prepare" and reopened.created_at >= op.created_at)
 
 
 def _rescan(op, founder, *, now):
@@ -237,7 +248,7 @@ def _reset_setup(op, founder, *, now, by_user):
         receipt["current_step"] = "scan"
         payload = {**mapping(current.payload), "source_reverify": True}
         WebsiteConnectionOperation.objects.filter(pk=current.pk).update(receipt=receipt, payload=payload)
-    return WebsiteConnectionOperation.objects.get(pk=op.pk)
+    return WebsiteConnectionOperation.objects.get(pk=reopened.pk)
 
 
 def _replay(op, *, now):
@@ -246,8 +257,11 @@ def _replay(op, *, now):
     code = _code(op)
     outcome, _ = replay_operation(op, stop_code=code, key=build_key(code), apply=True, now=now)
     if outcome != "replayed":
-        raise OperationActionRefused(outcome.split(":", 1)[-1])
-    return WebsiteConnectionOperation.objects.get(pk=op.pk)
+        raise OperationActionRefused(outcome.split(":", 1)[-1] if outcome.startswith("skipped:") else outcome)
+    # The replay stamps the operation it re-opened (a successor on the goal runner).
+    stamped = (WebsiteConnectionOperation.objects.filter(connection_id=op.connection_id, generation=op.generation,
+               action="prepare").order_by("-created_at", "-pk").first())
+    return stamped or WebsiteConnectionOperation.objects.get(pk=op.pk)
 
 
 def _audit(op_pk, entry):
@@ -301,10 +315,15 @@ def _execute(op, action, *, data, by_user, now, key):
         return response
     after.refresh_from_db()
     result = snapshot(after)
-    _audit(op.pk, {**entry, "outcome": "done", "after": result})
+    done = {**entry, "outcome": "done", "after": result,
+            **({"successor_operation_id": str(after.pk)} if after.pk != op.pk else {})}
+    _audit(op.pk, done)
+    if after.pk != op.pk:
+        # The console shows the newest preparation, so its trail carries the row too.
+        _audit(after.pk, {**done, "predecessor_operation_id": str(op.pk)})
     logger.info("staff_operation_action action=%s operation=%s by_user=%s from=%s to=%s", action, op.pk, by_user.pk,
                 before["state"], result["state"])
-    return {"status": "done", "detail": "Done.", "receipt": {"operationId": str(op.pk), "before": before,
+    return {"status": "done", "detail": "Done.", "receipt": {"operationId": str(after.pk), "before": before,
                                                              "after": result}}
 
 

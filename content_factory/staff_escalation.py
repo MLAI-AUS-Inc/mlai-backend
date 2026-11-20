@@ -5,12 +5,14 @@ Nothing here sends. Each rung names the existing sender that acts on it:
 - a generic or internal stop: a staff alert at once (``no_generic_stop`` and
   the stuck sweep's stopped-operation alert);
 - a failed run: a staff alert after :data:`FAILED_RUN_AFTER` (the stuck sweep,
-  ``founder_stuck_alerts.RUN_STUCK_AFTER``);
+  ``founder_stuck_alerts.run_stuck_after()``; six hours until
+  ``ARTICLES_STAFF_ESCALATION_LADDER_ENABLED`` is on);
 - an unanswered ask: founder reminders at 24 and 72 hours and one staff alert
   at the ask's threshold, all from E7's ladder (``founder_transitions``); no
   second sender;
 - anything still waiting on us after :data:`OWNER_AFTER`: one owner escalation
-  through the stuck sweep (same channel, same kill switch);
+  through the stuck sweep (same channel, same kill switch), sent only with
+  ``ARTICLES_STAFF_ESCALATION_LADDER_ENABLED`` (shadow until then);
 - ``staff_fixing`` (B25): a named staff owner within one working day, a
   founder update at 72 hours, and an end by day 7 (``website_staff_fixing``).
 """
@@ -77,11 +79,14 @@ def _staff_fixing_rungs(condition, *, now):
 
 
 def _stop_rungs(condition, kind, *, now):
+    from .founder_stuck_alerts import escalation_ladder_enabled, run_stuck_after
     since = condition.stuck_since
-    first = FAILED_RUN_AFTER if kind == "failed_run" else GENERIC_OR_INTERNAL_AFTER
+    # The wait the stuck sweep really uses (two hours once the ladder is on, six in shadow).
+    first = run_stuck_after() if kind == "failed_run" else GENERIC_OR_INTERNAL_AFTER
     sender = "generic_stop_alert" if kind == "generic_or_internal_stop" and condition.kind == "run_stopped" else "founder_stuck"
     return since, [_rung("staff_alert", since + first, now=now, sender=sender),
-                   _rung("owner", since + OWNER_AFTER, now=now, sender="founder_stuck")]
+                   _rung("owner", since + OWNER_AFTER, now=now,
+                         sender="founder_stuck" if escalation_ladder_enabled() else "shadow_not_sent")]
 
 
 def _ask_rungs(ask, since, *, now):

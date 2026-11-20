@@ -150,6 +150,56 @@ class OperationActionTests(TestCase):
         with override_settings(APP_RELEASE="build-f10b"):
             self.assertIn("replay_current_build", actions.offered(op)["actions"])
 
+    def test_every_action_replays_its_first_answer_for_the_same_key(self):
+        for action in ("rescan", "reset_setup", "replay_current_build"):
+            with self.subTest(action=action):
+                WebsiteConnectionOperation.objects.filter(connection=self.connection).delete()
+                op = self.stopped()
+                key = uuid4().hex
+                first = self.act(op, action, key=key)
+                self.assertEqual(first[1]["status"], "done", first)
+                op.refresh_from_db()
+                before = (op.state, op.receipt, op.payload, op.updated_at)
+                again = self.act(op, action, key=key)
+                self.assertEqual(again, (first[0], first[1], True))
+                op.refresh_from_db()
+                self.assertEqual((op.state, op.receipt, op.payload, op.updated_at), before)
+                self.assertEqual(len(self.trail(op)), 1)
+
+    def test_a_successor_preparation_counts_as_reopened_and_carries_the_audit(self):
+        # On the goal runner a stopped preparation is terminal: the founder's Try
+        # again opens a successor on the same connection and generation.
+        op = self.stopped()
+        successor = {}
+
+        def try_again(*args, **kwargs):
+            WebsiteConnectionOperation.objects.filter(pk=op.pk).update(state="cancelled")
+            successor["op"] = WebsiteConnectionOperation.objects.create(
+                connection=self.connection, generation=self.connection.generation, action="prepare", state="pending",
+                idempotency_key=f"{self.connection.pk}:prepare:goal:{uuid4().hex}",
+                payload={"company_id": str(self.built.company.pk), "attempt": 1, "user_clicks": 1},
+                receipt={"status": "working", "current_step": "verify-access"})
+            return successor["op"]
+
+        with patch("content_factory.website_prepare.start_prepare", side_effect=try_again):
+            _, body, _ = self.act(op, "restart_prepare")
+        self.assertEqual(body["status"], "done", body)
+        self.assertEqual(body["receipt"]["operationId"], str(successor["op"].pk))
+        self.assertEqual(body["receipt"]["after"]["state"], "pending")
+        self.assertEqual(self.trail(op)[-1]["successor_operation_id"], str(successor["op"].pk))
+        self.assertEqual(self.trail(successor["op"])[-1]["predecessor_operation_id"], str(op.pk))
+
+    def test_a_reopen_onto_another_connection_is_refused(self):
+        op = self.stopped()
+        other = make_history_free_org()
+        foreign, _ = _connect(other.organization, other.config, repo="example-staff/other")
+        stray = WebsiteConnectionOperation.objects.create(
+            connection=foreign, generation=foreign.generation, action="prepare", state="pending",
+            idempotency_key=uuid4().hex, payload={}, receipt={})
+        with patch("content_factory.website_prepare.start_prepare", return_value=stray):
+            _, body, _ = self.act(op, "restart_prepare")
+        self.assertEqual((body["status"], body["reason"]), ("refused", "not_reopened"))
+
     # -- Inside consent ---------------------------------------------------------------
 
     def test_never_approves_or_merges_a_setup_pull_request(self):
@@ -253,6 +303,7 @@ class OperationActionTests(TestCase):
         self.assertIn("escalation", detail)
 
 
+@override_settings(ARTICLES_STAFF_ESCALATION_LADDER_ENABLED=True)
 class EscalationLadderTests(SimpleTestCase):
     def setUp(self):
         self.now = timezone.now()
@@ -276,6 +327,14 @@ class EscalationLadderTests(SimpleTestCase):
         self.assertEqual(late["rung"], "staff_alert")
         from .founder_stuck_alerts import RUN_STUCK_AFTER
         self.assertEqual(RUN_STUCK_AFTER, escalation.FAILED_RUN_AFTER)
+
+    @override_settings(ARTICLES_STAFF_ESCALATION_LADDER_ENABLED=False)
+    def test_shadow_ladder_shows_the_wait_the_sweep_really_uses(self):
+        with patch("content_factory.no_generic_stop.generic_stop_reason", return_value=None):
+            state = escalation.ladder(now=self.now, stuck=[self.condition(kind="run_stopped", age=timedelta(hours=3))])
+        rungs = {rung["id"]: rung for rung in state["rungs"]}
+        self.assertFalse(rungs["staff_alert"]["reached"])  # six hours while the ladder is in shadow
+        self.assertEqual(rungs["owner"]["sender"], "shadow_not_sent")
 
     def test_unanswered_ask_rides_the_e7_ladder(self):
         state = escalation.ladder(now=self.now, ask="describe_customer", ask_since=self.now - timedelta(hours=25))

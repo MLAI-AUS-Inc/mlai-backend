@@ -8,8 +8,9 @@ A founder can be stuck in three ways that the cohort-gated alerts miss:
   (La Vie's reconnect sat pending after 21 attempts); a deployment or policy wait
   is left out, because it has its own 24-hour deadline that ends in a stop;
 * the founder's latest article or setup run stopped (failed, blocked, stopped or
-  denied) more than two hours ago with no founder action and no scheduled
-  self-heal retry (two hours, the plan 7.6 escalation ladder).
+  denied) more than six hours ago (two hours with
+  ``ARTICLES_STAFF_ESCALATION_LADDER_ENABLED``, the plan 7.6 escalation
+  ladder) with no founder action and no scheduled self-heal retry.
 
 Each condition queues one ``founder_stuck`` receipt through the shared
 founder-journey alert store, keyed by the operation or run and the kind of stop,
@@ -67,8 +68,26 @@ OPERATION_RETRY_ATTEMPTS = 10
 # A setup that keeps progressing can legitimately be pending for a day (steps,
 # then a deployment wait of up to 24 hours), so only twice that reads as stuck.
 OPERATION_PENDING_AFTER = timedelta(hours=48)
-# Plan 7.6 escalation ladder: a failed run reaches staff within two hours.
+# Plan 7.6 escalation ladder: a failed run reaches staff within two hours once
+# ARTICLES_STAFF_ESCALATION_LADDER_ENABLED is on. Until then (shadow, plan 7.5
+# rule 7) the earlier six-hour wait holds; see run_stuck_after().
 RUN_STUCK_AFTER = timedelta(hours=2)
+SHADOW_RUN_STUCK_AFTER = timedelta(hours=6)
+
+
+def escalation_ladder_enabled() -> bool:
+    """``ARTICLES_STAFF_ESCALATION_LADDER_ENABLED`` (plan F10, default off: shadow).
+
+    Off, the sweep keeps the six-hour failed-run wait and only logs the owner
+    escalations it would queue. On, a failed run alerts after two hours and a
+    stop still waiting on us after 48 hours queues one owner escalation.
+    """
+    return bool(getattr(settings, "ARTICLES_STAFF_ESCALATION_LADDER_ENABLED", False))
+
+
+def run_stuck_after() -> timedelta:
+    """How long a stopped run waits before its stuck alert, under the current switch."""
+    return RUN_STUCK_AFTER if escalation_ladder_enabled() else SHADOW_RUN_STUCK_AFTER
 CURSOR_KEY = "founder_stuck_alerts:cursor:{kind}"
 PENDING_ORGS_KEY = "founder_stuck_alerts:pending_organizations"
 CURSOR_TIMEOUT_SECONDS = 7 * 24 * 3600
@@ -150,11 +169,19 @@ def run_founder_stuck_alert_sweep(now=None) -> dict:
     conditions = find_stuck_conditions(now=now)
     # Plan 7.6: anything still waiting on us after 48 hours escalates to the owner once, on this channel.
     from .staff_escalation import owner_escalations
-    conditions = [*conditions, *owner_escalations(conditions, now=now)]
+    owner = owner_escalations(conditions, now=now)
+    shadow = {}
+    if escalation_ladder_enabled():
+        conditions = [*conditions, *owner]
+    else:
+        # Shadow (plan 7.5 rule 7): count what would be sent; queue nothing new.
+        shadow = {"owner_escalations_shadow": len(owner)}
+        if owner:
+            logger.info("founder_stuck_owner_escalation_shadow count=%s", len(owner))
     organization_ids = {condition.organization_id for condition in conditions}
     queued = _queue(conditions, organization_ids=organization_ids)
     delivered = _deliver_pending(now=now, organization_ids=organization_ids)
-    return {"status": "completed", "candidates": len(conditions), "queued": queued, **delivered}
+    return {"status": "completed", "candidates": len(conditions), "queued": queued, **shadow, **delivered}
 
 
 def _deliver_pending(*, now, organization_ids) -> dict:
@@ -182,7 +209,8 @@ class Scope:
     """How far detection looks. Alerts wait and page through 90 days; the staff console sees every stop now."""
 
     organization_ids: frozenset | None = None
-    run_stuck_after: timedelta = RUN_STUCK_AFTER
+    # None: the switch decides (run_stuck_after()); the console passes zero.
+    run_stuck_after: timedelta | None = None
     lookback: timedelta | None = LOOKBACK
     limit: int | None = QUERY_LIMIT
 
@@ -353,8 +381,9 @@ RUN_FIELDS = ("pk", "run_id", "organization_id", "workflow", "status", "updated_
 def _stopped_runs(*, now, scope) -> list[StuckCondition]:
     newer = ContentFactoryRun.objects.filter(organization_id=OuterRef("organization_id"), workflow__in=RUN_WORKFLOWS,
                                              created_at__gt=OuterRef("created_at"))
+    wait = run_stuck_after() if scope.run_stuck_after is None else scope.run_stuck_after
     rows = ContentFactoryRun.objects.filter(workflow__in=RUN_WORKFLOWS, status__in=RUN_STOP_STATUSES,
-                                            organization__isnull=False, updated_at__lte=now - scope.run_stuck_after)
+                                            organization__isnull=False, updated_at__lte=now - wait)
     if scope.lookback is not None:
         rows = rows.filter(updated_at__gte=now - scope.lookback)
     if scope.organization_ids is not None:

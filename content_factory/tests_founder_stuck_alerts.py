@@ -107,6 +107,7 @@ class FounderStuckAlertTests(FounderStuckFixture):
         self.assertEqual(self.sweep()[0]["queued"], 1)
         self.assertEqual(len(self.receipts()), 2)
 
+    @override_settings(ARTICLES_STAFF_ESCALATION_LADDER_ENABLED=True)
     def test_a_stop_still_waiting_after_48_hours_escalates_to_the_owner_once(self):
         # Plan 7.6 / F10: same channel and kill switch, one extra receipt, never for old history.
         self.operation(age=timedelta(hours=50))
@@ -116,9 +117,20 @@ class FounderStuckAlertTests(FounderStuckFixture):
         self.assertTrue(any(text.startswith("Escalated to the owner after 48 hours.") for text in texts))
         self.assertEqual(self.sweep(now=self.now + timedelta(minutes=11))[0]["queued"], 0)
 
+    @override_settings(ARTICLES_STAFF_ESCALATION_LADDER_ENABLED=True)
     def test_a_failed_run_alerts_after_two_hours(self):
         self.make_run(result={"error_code": STRATEGY_CODE}, age=timedelta(hours=3))
         self.assertEqual(self.sweep()[0]["queued"], 1)
+
+    @override_settings(ARTICLES_STAFF_ESCALATION_LADDER_ENABLED=False)
+    def test_the_ladder_is_shadow_until_switched_on(self):
+        # Plan 7.5 rule 7: a new alert rule ships in shadow. The six-hour run wait
+        # holds and the owner escalation is only counted.
+        self.make_run(result={"error_code": STRATEGY_CODE}, age=timedelta(hours=3))
+        self.operation(age=timedelta(hours=50))
+        outcome, _ = self.sweep()
+        self.assertEqual((outcome["queued"], outcome["owner_escalations_shadow"]), (1, 1))
+        self.assertEqual([r["details"].get("escalation") for r in self.receipts()], [None])
 
     def test_young_or_settled_operations_do_not_alert(self):
         self.operation(state="pending", attempts=3)                     # retrying, but not long
