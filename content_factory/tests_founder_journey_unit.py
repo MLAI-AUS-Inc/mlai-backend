@@ -671,7 +671,10 @@ class HelperTests(TestCase):
         self.assertFalse(journeys.matches_if_none_match("", "abc"))
 
     def test_registry_mapping_covers_only_the_eight_asks(self):
-        self.assertEqual(len(journeys.FOUNDER_ASKS), 8)
+        # Eight asks every client knows, plus the opt-in onboarding ask (?onboarding=3).
+        self.assertEqual(len(set(journeys.FOUNDER_ASKS) - journeys.ONBOARDING_ASKS), 8)
+        self.assertEqual(journeys.ONBOARDING_ASKS, {"confirm_profile"})
+        self.assertFalse(set(journeys.REGISTRY_ASKS.values()) & journeys.ONBOARDING_ASKS)
         self.assertTrue(set(journeys.REGISTRY_ASKS.values()) <= set(journeys.FOUNDER_ASKS))
         self.assertIsNone(journeys.founder_ask("choose_articles_page"))
 

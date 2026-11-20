@@ -130,6 +130,11 @@ class FounderToolsProfileView(APIView):
         return Response(FounderProfileSerializer(profile).data, status=status.HTTP_200_OK)
 
 
+CONFIRM_OWNER_ONLY = {"detail": "Only the startup owner can confirm these details.", "reason": "owner_only"}
+CONFIRM_DESCRIPTION_REQUIRED = {"detail": "Add a sentence about what you do.", "reason": "description_required",
+                                "field": "shortDescription"}
+
+
 class FounderToolsCompanyView(APIView):
     def get(self, request):
         from .profile_fields import visible_companies
@@ -189,6 +194,10 @@ class FounderToolsCompanyView(APIView):
                     record_create(company.organization, derived_name=derived_name)
                     seed_no_website_keywords(company.organization, name=company.name,
                                              description=body.get("shortDescription"))
+                    from content_factory import startup_onboarding
+                    if startup_onboarding.enabled() and not body.get("domain") and body.get("shortDescription"):
+                        # Nothing to read: what the founder typed is already confirmed.
+                        startup_onboarding.confirm(company.organization)
                 if key_sha and (read_marker(company.organization) or {}).get("createKeySha256") != key_sha:
                     # No marker holds this key (the create bound to an older,
                     # legacy organisation), so remember it for the replay. A
@@ -219,6 +228,8 @@ class FounderToolsCompanyView(APIView):
         company_id = data.pop("companyId", None)
         create_new = bool(data.pop("createNew", False))
         confirm_domain_change = bool(data.pop("confirmDomainChange", False))
+        from content_factory import startup_onboarding
+        confirm_profile = bool(data.pop("confirmProfile", False)) and startup_onboarding.enabled()
         plain_fields = {
             key: data[key]
             for key in ("name", "domain", "location")
@@ -257,6 +268,11 @@ class FounderToolsCompanyView(APIView):
             # whose organisation belongs to another founder.
             if company.organization_id and not user_may_use_organization(request.user, company.organization):
                 raise CompanyDomainClaimedError(company.organization)
+            if confirm_profile and company.organization_id and not first_save:
+                from .services import organization_owner_user_id
+                if organization_owner_user_id(company.organization) != request.user.pk:
+                    transaction.set_rollback(True)
+                    return Response(CONFIRM_OWNER_ONLY, status=status.HTTP_403_FORBIDDEN)
 
             if "domain" in plain_fields:
                 assert_company_domain_available(
@@ -325,6 +341,12 @@ class FounderToolsCompanyView(APIView):
             membership.activate_new_company(company, request.user)
         if first_save and profile.active_company_id is None:
             set_active_company(profile, company)
+        if confirm_profile:
+            from content_factory.founder_journey import _one_liner
+            if len(_one_liner(company.organization)) < 3:
+                transaction.set_rollback(True)
+                return Response(CONFIRM_DESCRIPTION_REQUIRED, status=status.HTTP_400_BAD_REQUEST)
+            startup_onboarding.confirm(company.organization)
         company.refresh_from_db()
 
         return Response(FounderCompanySerializer(company).data, status=status.HTTP_200_OK)
