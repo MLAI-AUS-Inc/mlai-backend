@@ -4,8 +4,8 @@ Each scenario rebuilds, on fresh synthetic rows, the shape the 18 Nov 2026
 founder catalogue recorded for one organisation, then drives the real alert
 code: the queue functions, the self-heal policy sweep, the system-stopped run
 sweep (B24), the hosted quality queue, the staff alert rules, the nightly
-digest (B6), the founder stuck sweep and the founder-journey sweep (detect and
-deliver). It asserts the exact alerts that come out: how many receipts, which
+digest (B6), the founder stuck sweep, the connection invariant sweep (B22) and
+the founder-journey sweep (detect and deliver). It asserts the exact alerts that come out: how many receipts, which
 reason, and the title staff see in Slack. Nothing leaves the process: Slack is
 a test double, Content Factory calls are recorded doubles, and any other HTTP
 request fails the test.
@@ -42,6 +42,7 @@ from . import founder_journey_alerts as alerts
 from . import founder_stuck_alerts as stuck
 from . import staff_alert_rules as rules
 from . import system_stopped_runs as stopped
+from . import website_connection_invariants as invariants
 from .hosted_quality_alerts import queue_hosted_quality_review_alert
 from .models import OrganizationContentConfig
 from .self_heal_testing import ALL_FLAGS_ON, make_p2_org
@@ -72,10 +73,6 @@ class NetworkRefused(AssertionError):
     """A golden scenario tried to reach the network."""
 
 
-def _refuse_network(*args, **kwargs):
-    raise NetworkRefused("A golden alert scenario must not make an HTTP request.")
-
-
 class GoldenFixture(TestCase):
     """Fresh state per scenario, the alert switches on, and every outside seam doubled."""
 
@@ -98,6 +95,11 @@ class GoldenFixture(TestCase):
         self.texts = []
         self.cf_actions = []
         self.channel_switches = []
+        self.network_calls = []
+
+    def _refuse_network(self, *args, **kwargs):
+        self.network_calls.append((args, kwargs))
+        raise NetworkRefused("A golden alert scenario must not make an HTTP request.")
 
     # --- builders ---------------------------------------------------------
 
@@ -146,8 +148,34 @@ class GoldenFixture(TestCase):
 
     # --- the producers ----------------------------------------------------
 
+    def tick(self, now):
+        """One tick of every alert producer.
+
+        ``run_scheduled_discovery`` runs the founder-journey, stuck, invariant
+        and B24 sweeps before ``scheduled_self_heal_sweeps``. The fixtures are
+        days old the moment they exist, so this tick runs the producers that
+        act on a stop within minutes (self-heal, B24, the hosted quality hold)
+        first: in production they have long run before the stuck sweep's six
+        hours or the invariant sweep's one hour of grace is reached.
+        """
+        engine.run_policy_sweep(now=now)
+        stopped.run_system_stopped_run_sweep(now=now)
+        # The hosted quality alert is queued from the callback that holds the run.
+        for run in ContentFactoryRun.objects.filter(workflow__in=alerts.ARTICLE_WORKFLOWS):
+            with self.captureOnCommitCallbacks(execute=True):
+                queue_hosted_quality_review_alert(run)
+        rules.run_alert_rule_sweep(now=now)
+        digest.run_background_job_digest_sweep(now=now)
+        # The two throttled sweeps run on every golden tick, so a second pass
+        # proves dedupe by receipt, never by throttle.
+        cache.delete(stuck.THROTTLE_KEY)
+        stuck.run_founder_stuck_alert_sweep(now=now)
+        cache.delete(invariants.THROTTLE_KEY)
+        invariants.run_connection_invariant_sweep(now=now)
+        alerts.run_founder_journey_alert_sweep(now=now)
+
     def sweep_all(self, now=None):
-        """One tick of every alert producer, in scheduler order; returns this pass's Slack texts."""
+        """Two ticks a minute apart (the second must add nothing new); returns the Slack texts posted."""
         now = now or self.now
         posted = []
         with ExitStack() as stack:
@@ -156,19 +184,12 @@ class GoldenFixture(TestCase):
             stack.enter_context(patch(CF_ACTION, side_effect=lambda **kwargs: self.cf_actions.append(kwargs) or {}))
             stack.enter_context(patch(CHANNEL_SWITCH, side_effect=lambda **kwargs: self.channel_switches.append(kwargs)
                                       or {"status": "refused"}))
-            stack.enter_context(patch("requests.sessions.Session.request", side_effect=_refuse_network))
-            # Self-heal first, then B24, as the scheduler orders them.
-            engine.run_policy_sweep(now=now)
-            stopped.run_system_stopped_run_sweep(now=now)
-            for run in ContentFactoryRun.objects.filter(workflow__in=alerts.ARTICLE_WORKFLOWS):
-                with self.captureOnCommitCallbacks(execute=True):
-                    queue_hosted_quality_review_alert(run)
-            rules.run_alert_rule_sweep(now=now)
-            digest.run_background_job_digest_sweep(now=now)
-            cache.delete(stuck.THROTTLE_KEY)
-            stuck.run_founder_stuck_alert_sweep(now=now)
-            alerts.run_founder_journey_alert_sweep(now=now)
+            stack.enter_context(patch("requests.sessions.Session.request", side_effect=self._refuse_network))
+            self.tick(now)
+            self.tick(now + timedelta(minutes=1))
             posted = [call.kwargs["text"] for call in client.return_value.chat_postMessage.call_args_list]
+        # Recorded as well as raised: a producer that swallows the error must still fail the scenario.
+        self.assertEqual(self.network_calls, [])
         self.texts.extend(posted)
         return posted
 
@@ -362,6 +383,7 @@ QUALITY = ("article_quality_review_required", alerts.REASON_LABELS["article_qual
 TEAM_ITEM = ("our_team_item", alerts.REASON_LABELS["our_team_item"])
 YOUR_TURN = ("your_turn_72h", alerts.REASON_LABELS["your_turn_72h"])
 CODELESS = ("codeless_terminal", alerts.REASON_LABELS["codeless_terminal"])
+INVARIANT = ("connection_invariant", alerts.REASON_LABELS["connection_invariant"])
 
 
 class GoldenScenarioTests(GoldenFixture):
@@ -429,8 +451,11 @@ class GoldenScenarioTests(GoldenFixture):
         self.build_124()
         texts = self.sweep_all()
         # self_heal_capped and run_terminal share one receipt per (workflow, code) (B5); run_blocked is per run.
-        self.assertEqual(self.produced(), sorted([CAPPED, CAPPED, STOPPED, BLOCKED, BLOCKED, STUCK]))
-        self.assertEqual(len(texts), 6)
+        self.assertEqual(self.produced(), sorted([CAPPED, CAPPED, STOPPED, BLOCKED, BLOCKED, STUCK, INVARIANT]))
+        self.assertEqual(len(texts), 7)
+        # B22: a source blocker on a site that was never verified (the catalogue's Pawshare fault).
+        (invariant,) = self.by_reason("connection_invariant")
+        self.assertEqual(invariant["details"]["invariant"], "source_blocker_never_verified")
         self.assertEqual(sorted(receipt["details"]["original_code"] for receipt in self.by_reason("self_heal_capped")),
                          ["ARTICLE_DIRECTORY_ROUTE_AUDIT_BLOCKED", "DIRECTORY_DEPENDENCY_VALIDATION_FAILED"])
         self.assertEqual(sorted(receipt["run_id"] for receipt in self.by_reason("run_blocked")),
@@ -466,6 +491,7 @@ class GoldenScenarioTests(GoldenFixture):
     def test_org_30_tala_one_notice_for_the_system_stop_and_nothing_for_founder_cancels(self):
         self.build_30()
         texts = self.sweep_all()
+        # B24 gave the system stop its notice, so the B22 "stopped without a notice" invariant stays quiet.
         self.assertEqual(self.produced(), sorted([STOPPED, STOPPED, CODELESS]))
         self.assertEqual(len(texts), 3)
         self.assertEqual(sorted(receipt["run_id"] for receipt in self.receipts().values()),
