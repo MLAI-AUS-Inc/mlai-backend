@@ -538,6 +538,9 @@ def _refund_charge(session, *, actor_slack_id):
 
 def _charge_founder(session):
     """Spend the price snapshot from the founder when the mentor accepts."""
+    if session.price_roo <= 0:
+        # Free session: nothing to charge, and spend() refuses a zero delta.
+        return
     _lock_users(session.founder_id)
     account = PointsAccount.objects.select_for_update().filter(user=session.founder).first()
     if account is not None:
@@ -563,6 +566,11 @@ def _charge_founder(session):
 
 
 def _pay_mentor(session):
+    # A free session (price 0) has nothing to pay. PointsService.award refuses a
+    # zero delta, and raising here made every scheduler tick fail on the same
+    # due session, so settle it without a ledger row.
+    if session.price_roo <= 0:
+        return
     ledger, _ = PointsService.award(
         user=session.mentor.user,
         delta=session.price_roo,
