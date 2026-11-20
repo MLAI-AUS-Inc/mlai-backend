@@ -2794,6 +2794,10 @@ FOUNDER_TEST_ORGANIZATION_IDS = os.getenv("FOUNDER_TEST_ORGANIZATION_IDS", "").s
 # ``manage.py founder_health_report`` and the staff console view still work.
 # On, one report a Melbourne day goes to CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID.
 ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED = _env_is_true("ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED", False)
+# Plan F10 escalation ladder in the stuck-founder sweep: a failed run alerts after
+# two hours (six while off) and a stop still waiting on us after 48 hours queues one
+# owner escalation. Default off: shadow, the sweep only counts and logs (plan 7.5 rule 7).
+ARTICLES_STAFF_ESCALATION_LADDER_ENABLED = _env_is_true("ARTICLES_STAFF_ESCALATION_LADDER_ENABLED", False)
 # Service rescans per connection in any 24 hours (default 6, 0 = none).
 ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP = max(0, int(os.getenv("ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP") or "6"))
 # Setup ladder lower rungs (plan steps C6, C7), a staged rollout behind owner
@@ -2881,10 +2885,6 @@ ARTICLES_REGISTRY_REFUNDS_ENABLED = _env_is_true("ARTICLES_REGISTRY_REFUNDS_ENAB
 MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED = _env_is_true("MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED", False)
 MY_STARTUP_STAFF_CONSOLE_ENABLED = _env_is_true("MY_STARTUP_STAFF_CONSOLE_ENABLED", False)
 ARTICLES_STAFF_ALERT_RULES_ENABLED = _env_is_true("ARTICLES_STAFF_ALERT_RULES_ENABLED", False)
-# Plan F10 escalation ladder in the stuck-founder sweep: a failed run alerts after
-# two hours (six while off) and a stop still waiting on us after 48 hours queues one
-# owner escalation. Default off: shadow, the sweep only counts and logs (plan 7.5 rule 7).
-ARTICLES_STAFF_ESCALATION_LADDER_ENABLED = _env_is_true("ARTICLES_STAFF_ESCALATION_LADDER_ENABLED", False)
 ARTICLES_MERGE_WORKER_ENABLED = _env_is_true("ARTICLES_MERGE_WORKER_ENABLED", False)
 ARTICLES_MERGE_WORKER_LIMIT = int(os.getenv("ARTICLES_MERGE_WORKER_LIMIT", "20"))
 ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED = _env_is_true("ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED", False)
