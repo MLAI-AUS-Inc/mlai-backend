@@ -45,7 +45,9 @@ VERSION = 1
 # cannot merge alone: a required review or read-only access (plan E8).
 FOUNDER_ASKS = ("review_draft", "describe_customer", "agree_terms", "authorize_github", "approve_setup",
                 "approve_on_github", "buy_points", "approve_join_request", "choose_articles_page", "deploy_site",
-                "waiting_github_owner_approval", "choose_repository", "send_pr_to_reviewer")
+                "waiting_github_owner_approval", "choose_repository", "send_pr_to_reviewer", "confirm_profile")
+# Asks sent only to clients that opt in with ?onboarding=3 (startup_onboarding).
+ONBOARDING_ASKS = frozenset({"confirm_profile"})
 NEXT_KINDS = ("add_website", "write_first_article", "write_article", "view_progress", "view_draft", "view_article")
 STAGES = ("website", "first_article", "writing", "review", "setup", "publishing", "done")
 HOLDING_REASONS = ("slow", "website_update", "busy_today")
@@ -134,6 +136,8 @@ COPY = {
                           "Describe your customer"),
     "buy_points": ("This article uses {price} points. You have {balance}.", None, "Get {shortfall} more points"),
     "agree_terms": ("Our terms were just updated", "Please tick to agree again.", "Review the terms"),
+    "confirm_profile": ("Confirm your startup's name and what you do",
+                        "We've filled in what we could from your website. It takes about a minute.", "Check details"),
     "writing_queued": ("Working on it", "You're {ordinal} in line · about {minutes} minutes.", "See progress"),
     "writing_queued_no_eta": ("Working on it", "You're {ordinal} in line.", "See progress"),
     "writing_running": ("Working on it", "Usually about {minutes} minutes.", "See progress"),
@@ -668,8 +672,13 @@ def _audience_known(organization, config, facts) -> bool:
     return audience_for(organization, config, facts) is not None
 
 
-def project_founder_journey(organization, *, user, company, now=None, run_id=None, include_setup=False) -> dict:
+def project_founder_journey(organization, *, user, company, now=None, run_id=None, include_setup=False,
+                            onboarding=False) -> dict:
     """The IF-P1-03 journey body for this company, with its ``etag``.
+
+    ``onboarding`` (the client sent ``?onboarding=3``) adds the v3 onboarding
+    block and the ``confirm_profile`` ask while ``MY_STARTUP_ONBOARDING_V3_ENABLED``
+    is on; otherwise the body is unchanged.
 
     A legacy organisation (``is_new_journey`` false) returns the legacy body
     before any read beyond the cohort marker. With ``include_setup`` (the
@@ -753,6 +762,17 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
 
     if decision is None and terms_out_of_date(user):
         decision = _decide("first_article", "your_turn", "agree_terms", action="agree_terms")
+
+    from . import startup_onboarding
+    onboarding = bool(onboarding and startup_onboarding.enabled())
+    unconfirmed = bool(onboarding and startup_onboarding.is_unconfirmed(
+        organization, config=config, run=run, setup_run=setup_run, connection=connection,
+        one_liner=_one_liner(organization)))
+    # Members never confirm the owner's details.
+    unconfirmed = unconfirmed and _viewer_is_owner(user, organization)
+    if decision is None and unconfirmed:
+        decision = _decide("website", "your_turn", "confirm_profile", action="confirm_profile",
+                           url=f"/my-startup/start?company_id={company_id}")
 
     if decision is None and run is not None and failure_class(run) == "needs_user" \
             and run.status not in DELIVERED_STATUSES | ACTIVE_STATUSES:
@@ -870,7 +890,7 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
             # The host class's (C14), the reviewer's (E8) or the owner
             # request's (E13) exact copy is the line: no P2 copy id replaces it.
             pass
-        elif ask in FOUNDER_ASKS:
+        elif ask in FOUNDER_ASKS and ask not in ONBOARDING_ASKS:
             if ask == "buy_points":
                 decision["copyId"] = "ask_buy_points"
             else:
@@ -946,6 +966,9 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
         from .founder_setup_state import setup_state
         payload["setup"] = setup_state(organization, company=company, config=config, user=user, marker=marker,
                                        connection=connection, setup_run=_setup_run(organization), read_runs=False)
+    if onboarding:
+        payload["onboarding"] = startup_onboarding.block(organization, config=config, user=user,
+                                                         has_website=has_website, unconfirmed=unconfirmed)
     action_id = (payload["action"] or {}).get("id")
     logger.info("founder_journey_projection org=%s stage=%s state=%s action=%s", organization.pk,
                 payload["stage"], payload["state"], action_id or "")
@@ -992,6 +1015,11 @@ def _pull_request_url(run):
         if url and url.startswith("https://github.com/"):
             return url
     return None
+
+
+def _viewer_is_owner(user, organization) -> bool:
+    from founder_tools.services import organization_owner_user_id
+    return bool(getattr(user, "pk", None)) and organization_owner_user_id(organization) == user.pk
 
 
 def _one_liner(organization) -> str:

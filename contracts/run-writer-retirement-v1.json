@@ -6531,11 +6531,12 @@
     {
       "path": "content_factory/editorial_views.py",
       "function": "mutate_catalog_response",
-      "function_sha256": "2ef6033aa924ef350f452f27ac136ced3ede2f341a526be0efe74b26520ea588",
-      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "function_sha256": "d95f4f525112ad6d941f5167c4dacda79086140bb48f79487db220bc4f30ba12",
+      "reason": "Under the organisation lock, require current active membership of the canonical shared startup or current legacy founder ownership before reading or writing the catalogue. Validate the revision and bind any keyed receipt to the authorized company, caller and exact body. The service path remains draft-only. The transaction grants no Run, Job or billing authority. Plan B9 (any-founder branch, merged with #1382) only adds an advisory read of in-flight article runs after the save commits; it writes no ContentFactoryRun state.",
       "test_refs": [
         "content_factory/tests_catalog_commands.py",
-        "content_factory/tests_catalog_brief_commands.py"
+        "content_factory/tests_catalog_brief_commands.py",
+        "content_factory/tests_editorial_catalog_api_unit.py"
       ]
     },
     {
@@ -6581,11 +6582,12 @@
     {
       "path": "content_factory/editorial_first_audience.py",
       "function": "_keyed_first_audience_response",
-      "function_sha256": "6d708ec8fc986a6b9752c6de0127fa172ecaa0668ce53928996515a72e54974b",
-      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "function_sha256": "8d7cd906975b024bcb217e079c21aec412ba0033a94e8de5e925687d30f297b0",
+      "reason": "Recheck active shared membership or legacy founder ownership under the organisation lock and lock the catalogue configuration. Commit the local approval and exact actor-bound command receipt together. Replay validates the saved audience version and content hash. This path grants no Run, Job or billing authority.",
       "test_refs": [
         "content_factory/tests_catalog_commands.py",
-        "content_factory/tests_catalog_brief_commands.py"
+        "content_factory/tests_catalog_brief_commands.py",
+        "content_factory/tests_editorial_first_audience.py"
       ]
     },
     {
@@ -6640,9 +6642,9 @@
     },
     {
       "path": "content_factory/catalog_commands.py",
-      "function": "_require_current_owner",
-      "function_sha256": "9aabe9b0d9f16870ab3bb27dab100405bed9a3f71f4486a1a23ffd18f134df04",
-      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "function": "_require_command_actor",
+      "function_sha256": "77971c4159c2b9ff2b950d1da654b4f5be8ea5a2fef1e9633ceacc4293062ad3",
+      "reason": "Callers supply the company authorized under the organisation lock. Shared startups use their current canonical membership check. Legacy commands also require the current active owner and reject a frozen or malformed legacy roster. This check grants no Run, Job or billing authority.",
       "test_refs": [
         "content_factory/tests_catalog_commands.py",
         "content_factory/tests_catalog_brief_commands.py"
@@ -6651,11 +6653,12 @@
     {
       "path": "content_factory/catalog_commands.py",
       "function": "prepare_command",
-      "function_sha256": "b433e69bad5562a72e9dbfa265a5603922346283006a9fee1f16bf616492a020",
-      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "function_sha256": "3f47171273968183afdcc462dcf2c470fc3d60ff014d8d195afd8a40fe25c6bb",
+      "reason": "Bind the command to the startup company authorized under the organisation lock, the current caller, action, exact key and request body. Replay requires that same actor and verifies the retained catalogue revision. Retained namespaces reject unseen keys when admission is disabled. Command preparation grants no Run, Job or billing authority.",
       "test_refs": [
         "content_factory/tests_catalog_commands.py",
-        "content_factory/tests_catalog_brief_commands.py"
+        "content_factory/tests_catalog_brief_commands.py",
+        "content_factory/tests_editorial_catalog_api_unit.py"
       ]
     },
     {
@@ -6701,8 +6704,8 @@
     {
       "path": "content_factory/catalog_brief_commands.py",
       "function": "_locked",
-      "function_sha256": "2f808fb62b243d032f24f436f577b69cef01d85dafcd47e77c92395c8bb36093",
-      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "function_sha256": "3078d65a5770d8641c5be6ceeac5294e4ee042086b40b5c59dc812574e448b66",
+      "reason": "Lock the organisation, recheck canonical shared membership or legacy ownership, then lock the current configuration and apply the command actor guard. The caller repeats this check after remote suggestion work before accepting the retained actor-bound claim. No HTTP, Run, Job or billing effect occurs inside this helper.",
       "test_refs": [
         "content_factory/tests_catalog_commands.py",
         "content_factory/tests_catalog_brief_commands.py"

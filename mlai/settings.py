@@ -608,6 +608,9 @@ COMMUNITY_CHAT_VOLUNTEER_ATTENDANCE_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUN
 # One record per contribution: labelled wallet credits, opening entries and a
 # stored level (volunteer build step 2). Off until the back-fill is ready.
 COMMUNITY_CHAT_VOLUNTEER_ONE_RECORD_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ONE_RECORD_ENABLED', False)
+COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED = _env_is_true(
+    'COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED', True
+)
 COMMUNITY_CHAT_VOLUNTEER_COMMUNITY = os.getenv('COMMUNITY_CHAT_VOLUNTEER_COMMUNITY', '')
 COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM = os.getenv('COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM', '')
 COMMUNITY_CHAT_VOLUNTEER_RECEIPT_TOKEN = os.getenv('COMMUNITY_CHAT_VOLUNTEER_RECEIPT_TOKEN', '')
@@ -2727,6 +2730,12 @@ COMMUNITY_CHAT_REVIEW_CLEARED_EMAIL_ENABLED = _env_is_true("COMMUNITY_CHAT_REVIE
 COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED = _env_is_true("COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED", False)
 MY_STARTUP_ONE_FIELD_START_ENABLED = _env_is_true("MY_STARTUP_ONE_FIELD_START_ENABLED", False)
 MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED = _env_is_true("MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False)
+# New startup onboarding (v3): a "Check your details" step and the journey's
+# ``onboarding`` block, sent only to clients that ask with ``?onboarding=3``.
+MY_STARTUP_ONBOARDING_V3_ENABLED = _env_is_true("MY_STARTUP_ONBOARDING_V3_ENABLED", False)
+# Startups created at or after this ISO time (with an offset) are asked to
+# confirm their details; older ones only when they have no one-liner.
+MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT = os.getenv("MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT", "").strip()
 ARTICLES_FIRST_ARTICLE_CARD_ENABLED = _env_is_true("ARTICLES_FIRST_ARTICLE_CARD_ENABLED", False)
 # Guided GitHub-first onboarding: a new-journey startup writes its first article
 # only once its website is connected through GitHub with a verified articles page.

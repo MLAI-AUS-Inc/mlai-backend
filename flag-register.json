@@ -953,6 +953,12 @@
       "expiry": "2027-02-28"
     },
     {
+      "name": "COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
       "name": "COMMUNITY_CHAT_VOLUNTEER_RECOGNITION_ENABLED",
       "default": "false",
       "owner": "platform",
@@ -1601,6 +1607,18 @@
     {
       "name": "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED",
       "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_ONBOARDING_V3_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT",
+      "default": "",
       "owner": "platform",
       "expiry": "2027-02-28"
     },

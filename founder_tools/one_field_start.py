@@ -12,7 +12,8 @@ On this path:
   24 h returns 200 with the same company, a first create returns 201;
 - the name may be omitted (derived from the website) and the website may be
   omitted (no website: ``shortDescription`` is then required while
-  ``MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED`` is on);
+  ``MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED`` or ``MY_STARTUP_ONBOARDING_V3_ENABLED``
+  is on, and onboarding v3 marks such a startup's details confirmed);
 - ``timezone`` is stored when it is a valid IANA zone and ignored otherwise;
 - website and LinkedIn input is normalised, never rejected;
 - plan E4: while the GitHub-first gate
@@ -163,7 +164,8 @@ def prepare_body(data, preflight=None):
     alias = body.pop("short_description", None)
     description = body.get("shortDescription") if body.get("shortDescription") is not None else alias
     description = " ".join(str(description or "").split())
-    if (not domain and getattr(settings, "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False)
+    if (not domain and (getattr(settings, "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False)
+                        or getattr(settings, "MY_STARTUP_ONBOARDING_V3_ENABLED", False))
             and not DESCRIPTION_MIN <= len(description) <= DESCRIPTION_MAX):
         # IF-P1-08: a no-website startup needs its one sentence. With that
         # flag off this is today's name-only create.

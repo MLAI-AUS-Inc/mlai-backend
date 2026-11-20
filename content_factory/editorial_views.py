@@ -8,6 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from founder_tools import membership
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
 from founder_tools.services import get_founder_company_context
 from organizations.models import Organization
@@ -19,13 +20,22 @@ from .editorial_catalog_save import activate_saved_entries
 from .offer_page_checks import offer_page_check_payload, prepare_offer_page_checks, start_offer_page_checks
 
 
-def _lock_catalog_owner(context, user_id, organization):
-    """Recheck mutable ownership after the organisation lock, before policy IO.
+def _lock_catalog_actor(context, user_id, organization):
+    """Check current catalogue access under the organisation lock.
 
-    Keep the profile and company rows locked through the catalogue write. The
-    earlier product-context lookup may have completed before a role change,
-    company transfer/deletion or tenant relink committed.
+    Shared membership changes use this same lock. Legacy ownership also
+    requires the profile and company locks through the write.
     """
+    if (context.organization.pk != organization.pk
+            or context.organization.domain != organization.domain):
+        raise CatalogConflict("Company configuration changed; reload the catalog before saving or approving")
+    workspace = membership.shared_workspace(organization)
+    if workspace is not None:
+        if (workspace.pk != context.company.pk
+                or not membership.active_memberships(workspace).filter(user_id=user_id).exists()):
+            raise VibeRaisingCompany.DoesNotExist
+        return workspace
+
     profile = VibeRaisingProfile.objects.select_for_update().get(
         pk=context.profile.pk, user_id=user_id,
     )
@@ -34,12 +44,11 @@ def _lock_catalog_owner(context, user_id, organization):
     company = VibeRaisingCompany.objects.select_for_update().get(
         pk=context.company.pk, profile_id=profile.pk,
     )
-    if (
-        company.organization_id != organization.pk
-        or context.organization.pk != organization.pk
-        or context.organization.domain != organization.domain
-    ):
+    if company.organization_id != organization.pk:
         raise CatalogConflict("Company configuration changed; reload the catalog before saving or approving")
+    if company.membership_policy != VibeRaisingCompany.LEGACY_ACCESS or company.closed_at is not None:
+        raise VibeRaisingCompany.DoesNotExist
+    return company
 
 
 def mutate_catalog_response(
@@ -52,15 +61,16 @@ def mutate_catalog_response(
             raise ValueError("An authenticated company owner is required for owner catalog operations")
         with transaction.atomic():
             org = Organization.objects.select_for_update().get(**organization_lookup)
+            authorized_company = None
             if owner_context is not None:
-                _lock_catalog_owner(owner_context, owner_user_id, org)
+                authorized_company = _lock_catalog_actor(owner_context, owner_user_id, org)
             configs = OrganizationContentConfig.objects
             if owner_context is not None and command_key is not None:
                 configs = configs.select_for_update()
             config = configs.filter(organization=org).first()
             strategy = config.pillar_strategy if config else {}
             from .catalog_commands import prepare_command, record_command
-            command = prepare_command(strategy=strategy, organization=org, context=owner_context,
+            command = prepare_command(strategy=strategy, organization=org, company=authorized_company,
                 user_id=owner_user_id, key=command_key, body=command_body,
                 action="approve" if approving else "edit")
             if command is not None and command.replay:

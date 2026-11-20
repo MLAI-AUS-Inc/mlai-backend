@@ -361,7 +361,8 @@
                     "deploy_site",
                     "waiting_github_owner_approval",
                     "choose_repository",
-                    "send_pr_to_reviewer"
+                    "send_pr_to_reviewer",
+                    "confirm_profile"
                   ]
                 },
                 "label": {
@@ -1144,6 +1145,108 @@
         },
         "setup": {
           "$ref": "#/$defs/FounderSetupState"
+        },
+        "onboarding": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "profile": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "confirmed": {
+                  "type": "boolean"
+                },
+                "read": {
+                  "enum": [
+                    "none",
+                    "running",
+                    "done"
+                  ]
+                }
+              },
+              "required": [
+                "confirmed",
+                "read"
+              ]
+            },
+            "website": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "githubLikely": {
+                  "enum": [
+                    "likely",
+                    "unlikely",
+                    "unknown"
+                  ]
+                },
+                "platformLabel": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "githubLikely",
+                "platformLabel"
+              ]
+            },
+            "searchTerms": {
+              "type": "array",
+              "maxItems": 4,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              }
+            },
+            "ideas": {
+              "type": "array",
+              "maxItems": 3,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              }
+            },
+            "articleCost": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "balance": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "profile",
+            "website",
+            "searchTerms",
+            "ideas",
+            "articleCost",
+            "balance"
+          ]
         }
       },
       "required": [
