@@ -225,3 +225,22 @@ class InspectView(EntryErrors, ServiceView):
         if not isinstance(request.data, dict) or set(request.data) != {'grant'}:
             raise EntryError('INVALID_ENTRY', 'Invalid session check.')
         return Response(authority().inspect(request.data['grant']))
+
+
+class GitHubView(EntryErrors, ServiceView):
+    """The founder's existing GitHub connection, for the scanner.
+
+    ``{grant}`` returns who the founder is on GitHub and their repositories;
+    ``{grant, repository_id, repository}`` returns a read-only token for one.
+    """
+    throttle_classes = [EntryInspectServiceThrottle, EntryInspectGrantThrottle]
+
+    def post(self, request):
+        from . import cybertest_github
+        data = request.data if isinstance(request.data, dict) else None
+        if data is None or set(data) not in ({'grant'}, {'grant', 'repository_id', 'repository'}):
+            raise EntryError('INVALID_ENTRY', 'Invalid GitHub request.')
+        identity = authority().inspect(data['grant'])
+        if 'repository_id' in data:
+            return Response(cybertest_github.read_token(identity, data['repository_id'], data['repository']))
+        return Response(cybertest_github.connection(identity))
