@@ -6,6 +6,7 @@ from unittest.mock import patch
 from django.test import override_settings
 from rest_framework.test import APIRequestFactory, force_authenticate
 
+from community_chat import admin_views
 from community_chat import mentoring_views as views
 from mentoring.service import MentoringError
 
@@ -93,6 +94,43 @@ class AdminViewTests(unittest.TestCase):
             self.role.return_value = 'admin'
             self.assertEqual(self.call(views.MentoringAdminAccessView, user=make_user()).data,
                              {'is_admin': True, 'features': off})
+
+    @override_settings(MENTOR_BOOKING_ENABLED=True)
+    def test_admin_workspace_preserves_mentoring_only_authority(self):
+        cases = (
+            ('member', make_user(), True, False, []),
+            ('moderator', make_user(), True, False, []),
+            ('owner', make_user(), True, False, ['mentoring']),
+            ('admin', make_user(), True, False, ['mentoring']),
+            ('member', make_user(is_staff=True), True, False, ['mentoring']),
+            ('member', make_user(is_superuser=True), True, True, ['team', 'mentoring']),
+            ('member', make_user(), True, True, ['team']),
+            ('member', make_user(is_staff=True, is_active=False), True, False, []),
+            ('member', make_user(is_staff=True), False, False, []),
+        )
+        for role, user, chat_session, is_admin, expected in cases:
+            with (
+                self.subTest(role=role, user=user, chat_session=chat_session, is_admin=is_admin),
+                patch.object(admin_views, 'is_mlai_admin_request', return_value=is_admin),
+                patch.object(admin_views, 'admin_sections', return_value=['team']),
+            ):
+                request = self.factory.get('/admin/access/')
+                if chat_session:
+                    request.community_chat_account_session = object()
+                force_authenticate(request, user=user)
+                self.role.return_value = role
+                response = admin_views.AdminAccessView.as_view(throttle_classes=[])(request)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.data, {'is_admin': is_admin, 'sections': expected})
+
+    @override_settings(MENTOR_BOOKING_ENABLED=False)
+    def test_admin_workspace_hides_mentoring_when_its_flag_is_off(self):
+        request = self.factory.get('/admin/access/')
+        request.community_chat_account_session = object()
+        force_authenticate(request, user=make_user(is_staff=True))
+        with patch.object(admin_views, 'is_mlai_admin_request', return_value=False):
+            response = admin_views.AdminAccessView.as_view(throttle_classes=[])(request)
+        self.assertEqual(response.data, {'is_admin': False, 'sections': []})
 
     @override_settings(MENTOR_BOOKING_ENABLED=True)
     def test_staff_calls_pass_the_session_user_and_ids_from_the_url(self):

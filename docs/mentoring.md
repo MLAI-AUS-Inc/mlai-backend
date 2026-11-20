@@ -66,6 +66,12 @@ Everything returns 404 `mentor_booking_disabled` while the flag is off.
 
 ### Staff-only Mentoring admin
 
+In MLAI Chat, open **Admin → Mentoring** for invites, applications, mentors and
+sessions. A Chat account session with existing mentoring access receives the
+`mentoring` section in `GET /api/v1/community-chat/admin/access/` while
+`MENTOR_BOOKING_ENABLED` is on. This section is independent of the response's
+`is_admin` flag, which represents the general MLAI administrator role.
+
 Under `mentor/admin/`, same flag, authentication and throttles. Allowed callers are a
 Chat owner or admin on a verified device, or an active Django staff or superuser
 account; anyone else gets 403 `mentoring_admin_required`. `mentor/admin/access/` is

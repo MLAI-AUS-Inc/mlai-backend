@@ -48,15 +48,24 @@ class MlaiAdminView(APIView):
 class AdminAccessView(MlaiAdminView):
     """Always 200 for a signed-in account, so the client can hide the Admin tab quietly.
 
-    Non-admins learn nothing: no flags and no sections.
+    The general administrator role is separate from permission to use a
+    specific section such as Mentoring.
     """
 
     admin_only = False
 
     def get(self, request):
-        if not is_mlai_admin_request(request):
-            return Response({"is_admin": False, "sections": []})
-        return Response({"is_admin": True, "sections": admin_sections(request)})
+        from .mentoring_views import is_mentoring_admin, mentor_booking_enabled
+
+        is_admin = is_mlai_admin_request(request)
+        sections = admin_sections(request) if is_admin else []
+        if (
+            mentor_booking_enabled()
+            and getattr(request, "community_chat_account_session", None) is not None
+            and is_mentoring_admin(request)
+        ):
+            sections.append("mentoring")
+        return Response({"is_admin": is_admin, "sections": sections})
 
 
 class AdminTeamView(MlaiAdminView):
