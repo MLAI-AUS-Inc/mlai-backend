@@ -46,7 +46,7 @@ def settle_delivery(checkout_id, audit_id, evidence, costs):
                                  row.pricing_snapshot, costs, existing=row.settlement)
     if row.settlement is not None:
         return checkout.receipt_status(row)
-    if not row.test_mode and result['refund_microroo']:
+    if not row.test_mode and not checkout.is_sponsored(row) and result['refund_microroo']:
         if row.user_id is None:
             raise CheckoutError('SETTLEMENT_REVIEW_REQUIRED', 'The payer account is unavailable.')
         row.refund_ledger, _ = checkout.PointsService.refund(
