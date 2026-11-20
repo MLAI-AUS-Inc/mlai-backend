@@ -265,7 +265,7 @@ def _keyed_first_audience_response(context, owner_user_id, data, *, command_key=
     from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
     from .catalog_commands import KEY, CatalogCommandConflict, prepare_command, record_command
     from .editorial_catalog import content_hash
-    from .editorial_views import _lock_catalog_owner
+    from .editorial_views import _lock_catalog_actor
     from .p2_foundation import p2_applies
     original_body = data if command_body is None else command_body
     stored = OrganizationContentConfig.objects.filter(organization=context.organization).first()
@@ -277,10 +277,10 @@ def _keyed_first_audience_response(context, owner_user_id, data, *, command_key=
     try:
         with transaction.atomic():
             organization = Organization.objects.select_for_update().get(pk=context.organization.pk)
-            _lock_catalog_owner(context, owner_user_id, organization)
+            company = _lock_catalog_actor(context, owner_user_id, organization)
             config = OrganizationContentConfig.objects.select_for_update().filter(organization=organization).first()
             strategy = config.pillar_strategy if config else {}
-            command = prepare_command(strategy=strategy, organization=organization, context=context,
+            command = prepare_command(strategy=strategy, organization=organization, company=company,
                 user_id=owner_user_id, key=command_key, body=original_body, action="first_audience")
             if command is None:
                 return first_audience_response(context, owner_user_id, data)

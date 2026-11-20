@@ -13,7 +13,9 @@ import sys
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from uuid import uuid4
 
+import founder_tools
 from django.conf import settings
 
 if not settings.configured:
@@ -35,7 +37,8 @@ class EditorialCatalogAPIUnitTests(unittest.TestCase):
         self.user = SimpleNamespace(pk="owner-1", is_authenticated=True)
         self.org = SimpleNamespace(pk="org-1", domain="example.com")
         self.profile = SimpleNamespace(pk="profile-1", user_id="owner-1", role="founder")
-        self.company = SimpleNamespace(pk="company-1", profile_id="profile-1", organization_id="org-1")
+        self.company = SimpleNamespace(pk="company-1", profile_id="profile-1", organization_id="org-1",
+                                       membership_policy=0, closed_at=None)
         self.before_transaction = None
         self.in_transaction = False
         class OrgMissing(Exception):
@@ -47,7 +50,7 @@ class EditorialCatalogAPIUnitTests(unittest.TestCase):
         self.missing = CompanyMissing
         self.org_model = SimpleNamespace(DoesNotExist=OrgMissing, objects=Mock())
         self.config_model = SimpleNamespace(objects=Mock())
-        self.company_model = SimpleNamespace(DoesNotExist=CompanyMissing, objects=Mock())
+        self.company_model = SimpleNamespace(DoesNotExist=CompanyMissing, LEGACY_ACCESS=0, SHARED_ACCESS=1, objects=Mock())
         self.profile_model = SimpleNamespace(DoesNotExist=ProfileMissing, ROLE_FOUNDER="founder", objects=Mock())
         self.resolve = Mock(side_effect=self.resolve_company)
         modules = {}
@@ -63,13 +66,22 @@ class EditorialCatalogAPIUnitTests(unittest.TestCase):
         self.modules = patch.dict(sys.modules, modules)
         self.modules.start()
         self.addCleanup(self.modules.stop)
+        self.workspace = None
+        self.member_exists = False
+        self.membership_query = Mock()
+        self.membership_query.filter.return_value.exists.side_effect = lambda: self.member_exists
+        membership = SimpleNamespace(
+            shared_workspace=self.shared_workspace, active_memberships=self.active_memberships,
+        )
         spec = importlib.util.spec_from_file_location("content_factory._catalog_views_under_test", Path(__file__).with_name("editorial_views.py"))
         self.views = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.views)
+        with patch.object(founder_tools, "membership", membership, create=True):
+            spec.loader.exec_module(self.views)
         self.org_model.objects.select_for_update.return_value.get.side_effect = self.lock_org
         self.profile_model.objects.select_for_update.return_value.get.side_effect = self.lock_profile
         self.company_model.objects.select_for_update.return_value.get.side_effect = self.lock_company
         self.config_model.objects.filter.return_value.first.side_effect = self.read_config
+        self.config_model.objects.select_for_update.return_value.filter.return_value.first.side_effect = self.read_config
         self.config_model.objects.update_or_create.side_effect = self.save_config
         atomic = patch.object(self.views.transaction, "atomic", self.atomic)
         atomic.start()
@@ -92,7 +104,7 @@ class EditorialCatalogAPIUnitTests(unittest.TestCase):
             self.in_transaction = False
 
     def resolve_company(self, user, *, company_id):
-        if company_id != "company-1" or user.pk != "owner-1":
+        if company_id != self.company.pk or user.pk != self.user.pk:
             raise self.missing()
         return deepcopy(SimpleNamespace(organization=self.org, profile=self.profile, company=self.company))
 
@@ -117,6 +129,15 @@ class EditorialCatalogAPIUnitTests(unittest.TestCase):
             raise self.company_model.DoesNotExist()
         return self.company
 
+    def shared_workspace(self, organization):
+        self.assertTrue(self.in_transaction)
+        self.assertEqual(self.calls[-1], ("lock", {"pk": organization.pk}))
+        return self.workspace
+
+    def active_memberships(self, company):
+        self.assertIs(company, self.workspace)
+        return self.membership_query
+
     def read_config(self):
         self.calls.append("read")
         return SimpleNamespace(pillar_strategy=deepcopy(self.state))
@@ -129,11 +150,12 @@ class EditorialCatalogAPIUnitTests(unittest.TestCase):
         self.state = deepcopy(defaults["pillar_strategy"])
         return SimpleNamespace(pillar_strategy=self.state), False
 
-    def request(self, method, payload=None, *, company="company-1", authenticated=True, approving=False):
+    def request(self, method, payload=None, *, company="company-1", authenticated=True, approving=False, key=None):
         url = "/editorial-catalog/" + ("approve/" if approving else "")
         if company is not None:
             url += "?company_id=" + company
-        request = getattr(self.factory, method)(url, data=payload, format="json")
+        headers = {"HTTP_IDEMPOTENCY_KEY": key} if key is not None else {}
+        request = getattr(self.factory, method)(url, data=payload, format="json", **headers)
         if authenticated:
             force_authenticate(request, user=self.user)
         view = self.views.EditorialCatalogApprovalView if approving else self.views.EditorialCatalogView
@@ -227,6 +249,41 @@ class EditorialCatalogAPIUnitTests(unittest.TestCase):
 
     def test_company_transfer_after_initial_scope_cannot_save_or_approve(self):
         self.assert_changed_authority_denied(lambda: setattr(self.company, "profile_id", "other-profile"), 404)
+
+    def set_shared_teammate(self):
+        self.profile.role = "investor"
+        self.company.profile_id = "creator-profile"
+        self.company.membership_policy = self.company_model.SHARED_ACCESS
+        self.workspace = self.company
+        self.member_exists = True
+
+    def test_shared_teammate_can_save_an_approved_audience(self):
+        self.set_shared_teammate()
+        self.user.pk = 7
+        self.company.pk = str(uuid4())
+        self.org.pk = self.company.organization_id = 1
+        edit = edit_payload(self.state)
+        edit["activate_entries"] = [{"kind": "audience", "id": "BUILDER", "version": 1}]
+        with patch("content_factory.p2_foundation.p2_applies", return_value=True):
+            saved = self.request("put", edit, company=self.company.pk, key="save-audience")
+        self.assertEqual(saved.status_code, 200, saved.data)
+        refreshed = self.request("get", company=self.company.pk)
+        audience = refreshed.data["audience_options"][0]
+        self.assertEqual((audience["status"], audience["approved_by"]), ("approved", "user:7"))
+        receipt = next(iter(self.state["editorial_catalog_commands_v1"].values()))
+        self.assertEqual((receipt["user_id"], receipt["company_id"]), (self.user.pk, self.company.pk))
+        self.membership_query.filter.assert_called_once_with(user_id=self.user.pk)
+        self.profile_model.objects.select_for_update.assert_not_called()
+        self.config_model.objects.update_or_create.assert_called_once()
+
+    def test_removed_shared_teammate_cannot_save_after_initial_scope(self):
+        self.set_shared_teammate()
+        self.assert_changed_authority_denied(lambda: setattr(self, "member_exists", False), 404)
+
+    def test_legacy_company_cannot_write_to_an_organization_with_canonical_shared_workspace(self):
+        self.workspace = SimpleNamespace(pk="canonical-company")
+        self.assert_changed_authority_denied(lambda: None, 404)
+        self.membership_query.filter.assert_not_called()
 
     def test_founder_role_revoked_after_initial_scope_cannot_save_or_approve(self):
         self.assert_changed_authority_denied(lambda: setattr(self.profile, "role", "investor"), 403)
