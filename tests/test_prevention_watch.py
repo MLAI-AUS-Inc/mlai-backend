@@ -64,6 +64,15 @@ class PreventionWatchTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             watch.page("slack", "title", "text", webhook="", summary_path=None)
 
+    def test_informational_entry_is_reported_but_never_alerts(self):
+        entry = {"id": "x", "workflow": "x.yml", "events": ["workflow_dispatch"], "cadence_days": None,
+                 "informational": True}
+        failed = [{"event": "workflow_dispatch", "status": "completed", "conclusion": "failure",
+                   "created_at": "2026-11-01T10:00:00Z"}]
+        row = watch.evaluate_entry(entry, failed, NOW)
+        self.assertFalse(row["alert"])
+        self.assertEqual(row["state"], "red_informational")
+
     def test_workflow_is_scheduled_read_only_and_report_only_by_default(self):
         text = (ROOT / ".github/workflows/prevention-watch.yml").read_text()
         self.assertIn("schedule:", text)

@@ -114,6 +114,11 @@ def evaluate_entry(entry, runs, now, stale_after_days=DEFAULT_STALE_DAYS):
     state = 'skipped' if outcomes == {'skipped'} else ('stuck' if outcomes == {'stuck'} else 'red')
     bad_for = now - since
     alert = bad_for >= stale_after
+    if entry.get('informational'):
+        # Dispatch-only jobs (for example the fleet while its gate is off) are shown, never alerted.
+        return {**base, 'state': state + '_informational', 'bad_since': since.isoformat(),
+                'bad_days': _days(bad_for), 'bad_runs': len(streak),
+                'detail': f'{state.capitalize()} for {_days(bad_for)} days (informational, never alerts)'}
     words = {'skipped': 'skipped', 'stuck': 'stuck', 'red': 'red'}[state]
     detail = (f'{words.capitalize()} for {_days(bad_for)} days across {len(streak)} run(s)'
               + ('' if alert else f' (alerts at {stale_after_days} days)'))
