@@ -582,6 +582,7 @@ jobs:
           content_factory.tests_activation_connections \
           content_factory.tests_founder_journey_alerts \
           content_factory.tests_background_alert_audience \
+          content_factory.tests_golden_alert_scenarios \
           content_factory.tests_self_heal_class_before_wall \
           content_factory.tests_self_heal_history_commands \
           content_factory.tests_founder_stuck_alerts \
@@ -914,6 +915,7 @@ jobs:
           content_factory.tests_p2_staff \
           content_factory.tests_founder_stuck_alerts \
           content_factory.tests_background_alert_audience \
+          content_factory.tests_golden_alert_scenarios \
           content_factory.tests_self_heal_class_before_wall \
           founder_tools.tests_shared_startup_membership \
           founder_tools.tests_startup_email_invitations \

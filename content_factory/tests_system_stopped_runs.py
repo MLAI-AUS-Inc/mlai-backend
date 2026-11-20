@@ -31,6 +31,18 @@ class StopCauseTests(SimpleTestCase):
             "cancelled_by": "system", "cancellation_transition": "reset"})
         self.assertEqual(stopped.stop_cause(run)["transition"], "reset")
 
+    def test_a_scheduler_run_is_never_a_system_stop(self):
+        # Background work never restarts on its own or gives a founder notice (found by F14).
+        system = {"cancellation_reason": "system_stop", "cancelled_by": "system", "cancellation_transition": "reset"}
+        for run in (_run(error="Website connection changed.", result=system,
+                         run_request={"request_source": "mlai_backend_scheduler"}),
+                    _run(error="Website connection changed.", result={**system, "run_owner_v1": {
+                        "identity": {"principal": {"kind": "scheduler"}}}})):
+            with self.subTest(run=run.run_request or run.result):
+                self.assertIsNone(stopped.stop_cause(run))
+        self.assertIsNotNone(stopped.stop_cause(_run(error="Website connection changed.", result=system,
+                                                     run_request={"request_source": "roo_slackbot"})))
+
     def test_operation_terminal_is_decided_by_its_raise_site(self):
         sites = {"website_operations.validate_operation": True, "setup_delivery_receiver.check_current_scope": True,
             "website_operations.cancel_operation_finished": False, "website_operations.cancel_operation_worker_finished": False,

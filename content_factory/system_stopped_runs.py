@@ -20,7 +20,9 @@ restart so two passes can never both restart one run:
   again) action.
 
 A founder's own cancel (``cancelled_by`` owner, an owner cancellation reason
-or the legacy "Cancelled by user." stop) gives nothing.
+or the legacy "Cancelled by user." stop) gives nothing, and so does a run the
+scheduler started (``founder_journey_alerts.is_scheduler_run``): background
+work never produces a founder notice or restart.
 
 ``website_operation_terminal`` is decided per raise site
 (``TERMINAL_RAISE_SITES``), never by its code alone: only the two sites where
@@ -117,8 +119,13 @@ def _transition_for(run):
 
 def stop_cause(run):
     """``{"kind": ..., "transition": ..., "stop_code": ...}`` for a system stop, else None."""
+    from .founder_journey_alerts import is_scheduler_run
     from .run_state import ARTICLE_WORKFLOWS
     if run.workflow not in ARTICLE_WORKFLOWS or run.status not in STOPPED_STATUSES or founder_cancelled(run):
+        return None
+    if is_scheduler_run(run):
+        # Background work is not founder work: a scheduler run never restarts on
+        # its own or gives the founder a notice (plan 1.2; found by F14).
         return None
     result = _mapping(run.result)
     if run.status == "cancelled":
