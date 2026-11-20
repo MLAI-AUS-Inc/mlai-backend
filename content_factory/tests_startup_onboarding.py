@@ -101,7 +101,7 @@ class OnboardingJourneyTests(JourneyFixture, TestCase):
         self.assertTrue(body["onboarding"]["profile"]["confirmed"])
 
     def test_a_legacy_startup_is_unchanged(self):
-        legacy = make_named_legacy_org("Legacy onboarding")
+        legacy = make_named_legacy_org("pawshare", domain="pawshare-onboarding.example.test")
         body = journeys.project_founder_journey(legacy.organization, user=legacy.owner, company=legacy.company,
                                                 onboarding=True)
         self.assertNotIn("onboarding", body)
