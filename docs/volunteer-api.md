@@ -360,3 +360,25 @@ The questioner marks a native MLAI answer in the advice thread useful with a che
 `COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED=true` enables this award independently of other Volunteer awards and bonuses. Configure the verified advice UUID as `COMMUNITY_CHAT_VOLUNTEER_CHANNELS["help"]`, a prospective `COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM` UTC boundary, and a separate `COMMUNITY_CHAT_VOLUNTEER_RECEIPT_TOKEN` shared only with the trusted collector. The Chat collector activation timestamp must match that boundary. Keep existing unrelated flags unchanged. There is no backend schema change or historical award backfill.
 
 Question, answer and reaction invalidations block deferred awards. Existing credits preserve their audit trail and use the established correction mechanism. Member locks are acquired in canonical account order, and recognition plus wallet credit remain atomic and idempotent.
+
+## 200-level contribution profiles
+
+Authenticated MLAI Chat clients can set `include_contributions: true` on
+`POST /community-chat/profiles/batch/` for up to ten verified profile keys.
+The response includes `contributions` only for published, reconciled profiles.
+It contains qualifying Roo, the `mlai-volunteer-v6` ladder position, and reviewed
+badges with member-safe descriptions and optional public event links.
+
+Preview the reviewed batch with
+`manage.py import_volunteer_badges <manifest> --reviewer-id <account>`.
+The private manifest contains `community`, `evidence_sha256`, an explicit
+`members` list of reconciled account IDs, and `grants` with `member_id`,
+`badge_id`, `reason`, `evidence_ref` and optional `public_url`. Members can
+receive a rank with an empty badge collection. Run the same command with
+`--apply` to publish the profiles and badges in one transaction. Identical
+retries reuse the existing receipts.
+
+To hide a profile, mark its publication receipt withdrawn. To hide a single
+badge, mark its grant revoked. To hide all contribution profiles, set
+`COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED=false`. This requires
+no database migration.

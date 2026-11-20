@@ -1136,9 +1136,17 @@ class PublicProfileBatchView(APIView):
         devices_by_key = {}
         for device in devices:
             devices_by_key.setdefault(device.public_key, device)
+        if serializer.validated_data["include_contributions"]:
+            from .volunteer.profile_progression import profile_progressions
+
+            progression = profile_progressions({device.user_id: device.user for device in devices_by_key.values()})
+        else:
+            progression = {}
         profiles = {
             public_key: {
                 **public_chat_profile(devices_by_key[public_key].user),
+                **({"contributions": progression[devices_by_key[public_key].user_id]}
+                   if devices_by_key[public_key].user_id in progression else {}),
                 # Historical keys retain attribution but must not be offered
                 # as current notification targets by mention autocomplete.
                 "mentionable": (
