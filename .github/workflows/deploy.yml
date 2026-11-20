@@ -108,6 +108,9 @@ jobs:
     - name: Test Pulse source selection and cached-account boundaries
       run: python scripts/test_without_database.py startup_updates.tests_generation_reliability.SelectionMatrixTests startup_updates.tests_generation_reliability.CachedAccountScopeTests
 
+    - name: Check Roo Linear meeting write safety without database access
+      run: python scripts/test_without_database.py tests.test_linear_meeting_issue_guard integrations.tests_linear_project_update_receipts
+
     - name: Check Roo avatar unlock policy without database access
       run: python -m unittest community_chat.roo_avatar.tests_policy -v
 

@@ -970,6 +970,7 @@ class LinearMeetingIssueCreateView(APIView):
         try:
             payload = create_linear_meeting_issue(request.data)
         except (
+            LinearMeetingActionConflictError,
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,
@@ -1179,6 +1180,8 @@ class LinearMeetingProjectUpdateCreateView(APIView):
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,
+            LinearMeetingIdempotencyConflictError,
+            LinearChannelIssueWriteUncertainError,
             ValueError,
         ) as exc:
             return _linear_meeting_error_response(exc)

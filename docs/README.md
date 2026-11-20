@@ -177,6 +177,19 @@ approved work to the existing idempotent Linear issue writer. Deploy migration
 `integrations.0042_linear_meeting_action_batches` and these endpoints before
 the Roo release that renders durable review buttons.
 
+For meeting proposals, Roo sends `recheck_project_work` with the analysed
+snapshot and proposed outcome. Approval re-reads the project issue inventory
+before creating work. An existing match returns `alreadyTracked`. Review
+responses break approved items down into `counts.created` and
+`counts.alreadyTracked`.
+
+`POST /api/v1/integrations/linear/project-updates` requires an explicit
+`health` value of `onTrack`, `atRisk`, or `offTrack`. Roo supplies a compatible
+64-character hex `idempotency_key`. A repeat returns the original update when
+verified. Uncertain writes are checked against project update history before
+any retry. These changes use the existing receipt table. Deploy the backend
+before Roo sends the new guarded requests.
+
 ## Document status
 
 Documents in this directory are subsystem references, not a replacement for
