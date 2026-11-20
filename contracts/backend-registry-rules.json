@@ -1,0 +1,107 @@
+{
+  "about": "F4 (plan 7.5) baseline for this repo's scripts/check_failure_contract.py: rule 3 (one founder state per code; every ask rendered in both journeys; render_gaps lists the reviewed exceptions), rule 5 (operator_only_codes are never a founder ask in either view), rule 6 (stop codes) and rule 7 (sweeps: every scheduled sweep and global alert rule; a new one names a shadow_flag and a history_horizon the deploy config validator installs). Ratchets may only fall (CI passes --ratchet-base). Content Factory's checker owns rules 1, 2 and 4.",
+  "operator_only_codes": [
+    "CORPUS_CAPABILITY_UNSUPPORTED",
+    "CORPUS_INCOMPLETE"
+  ],
+  "ratchets": {
+    "grandfathered_sweeps": 20,
+    "render_gaps": 2,
+    "stop_codes": 312
+  },
+  "render_gaps": [
+    {
+      "action": "buy_points",
+      "journey": "legacy_journey",
+      "reason": "Legacy Articles status (website_status OWNER_ACTIONS) has no buy_points action, so a legacy founder short of points sees View details; the points card elsewhere is the only prompt. Plan D15 moves legacy orgs onto the server-owned journey."
+    },
+    {
+      "action": "add_seed_topics",
+      "journey": "new_journey",
+      "reason": "B23: the ask travels without an action id for old desktop builds and founder_journey FOUNDER_ASKS has no add_seed_topics; only the P2 card (ask_add_seed_topics) renders it, so the P1 path shows the fallback card."
+    }
+  ],
+  "schema_version": 1,
+  "sweeps": {
+    "alert_rule:background_job_failure_spike": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_STAFF_ALERT_RULES_ENABLED (one receipt per Melbourne night, B6)."
+    },
+    "alert_rule:github_callback_failures": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_STAFF_ALERT_RULES_ENABLED."
+    },
+    "alert_rule:provider_error_rate": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_STAFF_ALERT_RULES_ENABLED."
+    },
+    "alert_rule:refresh_failure_spike": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_STAFF_ALERT_RULES_ENABLED."
+    },
+    "alert_rule:throttle_spike": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_STAFF_ALERT_RULES_ENABLED."
+    },
+    "founder_journey:content_factory.founder_notification_outbox:drain": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED."
+    },
+    "founder_journey:content_factory.founder_notification_outbox:enqueue_ready_drafts": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED."
+    },
+    "founder_journey:content_factory.startup_first_profile:sweep": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by MY_STARTUP_ONE_FIELD_START_ENABLED."
+    },
+    "self_heal:background_job_digest": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_STAFF_ALERT_RULES_ENABLED."
+    },
+    "self_heal:capability_record": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by its own C10 flag."
+    },
+    "self_heal:deployment_watch": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED."
+    },
+    "self_heal:failure_policy": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_SELF_HEAL_POLICY_ENABLED, with the ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE horizon (B1)."
+    },
+    "self_heal:founder_transitions": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED and MY_STARTUP_TURN_REMINDERS_ENABLED."
+    },
+    "self_heal:merge_worker": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_MERGE_WORKER_ENABLED."
+    },
+    "self_heal:no_delivery_refunds": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_REGISTRY_REFUNDS_ENABLED."
+    },
+    "self_heal:self_heal_report": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_SELF_HEAL_REPORT_ENABLED."
+    },
+    "self_heal:staff_alert_rules": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_STAFF_ALERT_RULES_ENABLED, with the ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE horizon."
+    },
+    "self_heal:staff_fixing": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by its own B25 flag."
+    },
+    "self_heal:team_requests": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by MY_STARTUP_TEAM_ENABLED (held)."
+    },
+    "self_heal:website_lead_reminders": {
+      "grandfathered": true,
+      "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED."
+    }
+  }
+}

@@ -89,8 +89,15 @@ jobs:
         # Dedicated read-only Contents access to the private canonical CF repo.
         # Missing access fails closed; never replace the immutable lock with main.
         CONTENT_FACTORY_CONTRACT_READ_TOKEN: ${{ secrets.CONTENT_FACTORY_CONTRACT_READ_TOKEN }}
+        # F4: on a pull request the registry ratchets may not rise above the base.
+        RATCHET_BASE_REF: ${{ github.event_name == 'pull_request' && github.base_ref || '' }}
       run: |
-        python scripts/check_failure_contract.py --remote
+        if [ -n "$RATCHET_BASE_REF" ]; then
+          git fetch --no-tags --depth=1 origin "refs/heads/$RATCHET_BASE_REF"
+          python scripts/check_failure_contract.py --remote --ratchet-base FETCH_HEAD
+        else
+          python scripts/check_failure_contract.py --remote
+        fi
         python scripts/check_site_fingerprint_contract.py --remote
         python scripts/check_staff_safety_recheck_contract.py --remote
         python scripts/check_publishing_inputs_contract.py --remote
@@ -252,7 +259,7 @@ jobs:
       run: python scripts/test_without_database.py content_factory.tests_setup_example_action_unit
 
     - name: Check Articles failure taxonomy without database access
-      run: python scripts/test_without_database.py content_factory.tests_failure_contract_unit content_factory.tests_website_staff_fixing_unit content_factory.tests_website_content_files_unit content_factory.tests_website_cms_content_unit content_factory.tests_website_capability_record_unit content_factory.tests_run_command_conflicts_unit content_factory.tests_run_terminal_transport_unit content_factory.tests_run_writer_retirement_unit
+      run: python scripts/test_without_database.py content_factory.tests_failure_contract_unit content_factory.tests_failure_registry_rules_unit content_factory.tests_website_staff_fixing_unit content_factory.tests_website_content_files_unit content_factory.tests_website_cms_content_unit content_factory.tests_website_capability_record_unit content_factory.tests_run_command_conflicts_unit content_factory.tests_run_terminal_transport_unit content_factory.tests_run_writer_retirement_unit
 
     - name: Check generated run-status module without database access
       run: |

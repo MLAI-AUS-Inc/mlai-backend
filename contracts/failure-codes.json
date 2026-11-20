@@ -6995,7 +6995,7 @@
       ],
       "failure_class": "unsupported",
       "fingerprint_profile": "semantic_findings_v1",
-      "founder_copy_id": "working_website_update",
+      "founder_copy_id": "fixing",
       "introduced_in": 1,
       "legacy": {
         "code": "deployment_body_oversized",
@@ -7058,7 +7058,7 @@
       ],
       "failure_class": "unsupported",
       "fingerprint_profile": "semantic_findings_v1",
-      "founder_copy_id": "working_website_update",
+      "founder_copy_id": "fixing",
       "introduced_in": 1,
       "legacy": {
         "code": "deployment_origin_invalid",
@@ -7205,7 +7205,7 @@
       ],
       "failure_class": "unsupported",
       "fingerprint_profile": "semantic_findings_v1",
-      "founder_copy_id": "working_website_update",
+      "founder_copy_id": "fixing",
       "introduced_in": 1,
       "legacy": {
         "code": "live_route_unavailable",
@@ -7226,7 +7226,7 @@
       ],
       "failure_class": "unsupported",
       "fingerprint_profile": "semantic_findings_v1",
-      "founder_copy_id": "working_website_update",
+      "founder_copy_id": "fixing",
       "introduced_in": 1,
       "legacy": {
         "code": "deployment_verification_required",
