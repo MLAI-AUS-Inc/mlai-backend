@@ -578,6 +578,8 @@ jobs:
           content_factory.tests_website_connection_lifecycle \
           content_factory.tests_website_connection_invariants \
           content_factory.tests_system_stopped_runs \
+          content_factory.tests_replay_corpus \
+          content_factory.tests_replay_export \
           content_factory.tests_prepare_setup_cap \
           content_factory.tests_prepare_sticky_stop \
           content_factory.tests_worker_target_projection \

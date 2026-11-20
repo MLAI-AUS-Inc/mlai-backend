@@ -1,0 +1,33 @@
+{
+  "schema": "replay-record-v1",
+  "id": "be-30-system-cancelled-article-run",
+  "source": {
+    "run_pk": null,
+    "org_id": 30,
+    "catalogue": "founder issues catalogue 2026-11-18, section 4.6",
+    "synthetic": true
+  },
+  "workflow": "confirmed_topic",
+  "step": "draft_section",
+  "code": "authority_revoked",
+  "framework_fingerprint": null,
+  "http": [],
+  "inputs": {
+    "domain": "founder-30.example",
+    "stopped_hours_ago": 72,
+    "run": {
+      "status": "cancelled",
+      "current_step": "draft_section",
+      "error": "Website connection changed.",
+      "result": {
+        "topic": "Synthetic topic"
+      }
+    }
+  },
+  "replay": {
+    "repo": "be",
+    "handler": "system_stopped.follow_up"
+  },
+  "expected": "ask:restart",
+  "notes": "Six confirmed_topic runs were cancelled when the website connection changed, before transitions were recorded. An unmatched system cancel is never restarted on its own; the founder gets one notice with Restart."
+}
