@@ -27,9 +27,9 @@ ROOT = Path(__file__).resolve().parents[1]
 # the B10 codes and RUN_BUDGET_NOT_CONFIGURED (B14),
 # the research rows (B16 research_scope_invalid, B23 add_seed_topics), and
 # PROFILE_DRAFT_UNAVAILABLE back on its pre-P2 stop in both views (E12) ahead of
-# the CF pin bump.
+# the CF pin bump, and the four deployment_* stops on "fixing" copy (F4 rule 3).
 VENDORED_SHA256 = {
-    "contracts/failure-codes.json": "5ee1ef81d22892ff565f91f3ef004348d285eb27eed470f1cda34debffe3ec65",
+    "contracts/failure-codes.json": "a1b8216d7921c207299f95088dbbd97b4681f9f96ea99ee18f1064779246761f",
     "contracts/failure-envelope-v1.schema.json": "ccea15565eae9506b5f9d22f7af258edc4f1c073263b56805fbe27fef2cec97b",
     "contracts/setup-delivery-v1.schema.json": "6a604e610716ba45c6c1e8491daae94cc51ece99e8e3d6c693ac378674581069",
     "content_factory/failure_registry_pre_p2.json": "b13710a9e61383e259226187c6a8b1a23af1b922d85d2369b830eab599b1934e",
