@@ -34,6 +34,13 @@ repository with 910 source batches costs 360 points. The scan service applies
 the same rule to the same contract. Basic execution plans may be up to 1.5 MB.
 Upgrade prices are unchanged.
 
+Checks for a company in `CYBERTEST_FREE_COMPANY_IDS` (MLAI's own company by
+default) are free. The quote still records the normal price, so the scan
+service's price check is unchanged, but `pricing_snapshot.sponsored` is set,
+the receipt reports `sponsored: true` and `due_points: 0`, no balance is
+required, and charge, refund and settlement write no ledger rows. A quote is
+only sponsored when the payer currently owns that company.
+
 There can be one active or delivered upgrade per basic purchase. A fully
 refunded failed upgrade may be explicitly purchased again. There is no second
 48-to-124 upgrade step. Expired unpaid offers can be replaced.

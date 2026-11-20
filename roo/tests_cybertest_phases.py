@@ -322,3 +322,64 @@ class PhaseSyntheticLedgerTests(TestCase):
         self.assertEqual(self.account.earned_balance_microroo, 820_000_000)
         self.assertEqual(Ledger.objects.filter(user=self.user, kind='REFUND').count(), 1)
         self.assertEqual(Ledger.objects.filter(user=self.user, kind='SPEND').count(), 2)
+
+
+MLAI_COMPANY = '0d0c20f3-65f4-4f33-bab5-6e771d473475'
+
+
+@override_settings(CYBERTEST_BILLING_MODE='live', CYBERTEST_LIVE_BILLING_ENABLED=True,
+                   CYBERTEST_ENTRY_STAGING_ENABLED=False, CYBERTEST_PHASED_SCANS_ENABLED=True,
+                   CYBERTEST_USD_PER_AUD='0.5', CYBERTEST_AUD_PER_POINT='2',
+                   CYBERTEST_FREE_COMPANY_IDS=[MLAI_COMPANY])
+class FreeCompanyCheckTests(TestCase):
+    """MLAI's own checks keep their price on the receipt but never touch the ledger."""
+    purchase = PhaseCheckoutTests.purchase
+    start = PhaseCheckoutTests.start
+    result = PhaseCheckoutTests.result
+
+    def setUp(self):
+        PhaseCheckoutTests.setUp(self)
+        self.intent['mlai_company_id'] = MLAI_COMPANY
+        # An empty account: a paid check would fail with INSUFFICIENT_ROO_POINTS.
+        self.account = PointsAccount.objects.create(user=self.user, microroo_initialized=True)
+        owned = patch('founder_tools.models.VibeRaisingCompany.objects.filter')
+        self.owns = owned.start(); self.addCleanup(owned.stop)
+        self.owns.return_value.exists.return_value = True
+
+    def test_mlai_basic_and_upgrade_cost_nothing_and_settle_without_ledger_rows(self):
+        quote, audit, _ = self.start(basic(), 24)
+        receipt = checkout.status(quote)
+        self.assertTrue(receipt['sponsored'])
+        self.assertEqual((receipt['points'], receipt['due_points']), (24, 0))
+        self.owns.assert_called_with(pk=MLAI_COMPANY, profile__user_id=str(self.user.pk))
+        checkout.settle_delivery(quote, audit, self.result(audit, basic()), None)
+        contract = {**upgrade('large'), 'parentCheckoutId': str(quote)}
+        upgrade_quote, upgrade_audit, _ = self.start(contract, 100)
+        checkout.settle_delivery(upgrade_quote, upgrade_audit,
+                                 self.result(upgrade_audit, contract, missing_required=True), None)
+        self.assertFalse(Ledger.objects.filter(user=self.user).exists())
+        self.assertIsNone(CybertestCheckout.objects.get(pk=quote).spend_ledger_id)
+        self.assertEqual(checkout.balance(self.user, test_mode=False), 0)
+
+    def test_mlai_start_failure_refund_writes_no_ledger_row(self):
+        quote, audit, token = uuid.uuid4(), uuid.uuid4(), secrets.token_urlsafe(32)
+        intent = self.purchase(basic())
+        checkout.create_quote(quote, token, intent)
+        checkout.confirm(quote, token, self.user, expected_points=24)
+        checkout.charge(quote, audit, intent)
+        self.assertEqual(checkout.refund_start_failure(quote, audit, 'PREPARATION_FAILED')['status'], 'refunded')
+        self.assertFalse(Ledger.objects.filter(user=self.user).exists())
+
+    def test_a_payer_who_does_not_own_the_mlai_company_pays_as_usual(self):
+        self.owns.return_value.exists.return_value = False
+        quote, token = uuid.uuid4(), secrets.token_urlsafe(32)
+        self.assertFalse(checkout.create_quote(quote, token, self.purchase(basic()))['sponsored'])
+        with self.assertRaises(CheckoutError) as raised:
+            checkout.confirm(quote, token, self.user, expected_points=24)
+        self.assertEqual(raised.exception.code, 'INSUFFICIENT_ROO_POINTS')
+
+    def test_other_companies_are_not_free(self):
+        self.intent['mlai_company_id'] = str(uuid.uuid4())
+        quote, token = uuid.uuid4(), secrets.token_urlsafe(32)
+        self.assertFalse(checkout.create_quote(quote, token, self.purchase(basic()))['sponsored'])
+        self.owns.assert_not_called()

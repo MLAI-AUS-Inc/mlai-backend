@@ -58,6 +58,24 @@ def _payer(row,user):
         raise CheckoutError('WRONG_ACCOUNT','This checkout belongs to another account.',403)
 
 
+def free_company_ids():
+    values=getattr(settings,'CYBERTEST_FREE_COMPANY_IDS',())
+    try:return {str(UUID(str(value))) for value in values}
+    except (ValueError,TypeError,AttributeError):return set()
+
+
+def _sponsored(normalized):
+    """MLAI's own company is checked for free; it must still own that company."""
+    company=normalized.get('mlai_company_id');user_id=normalized.get('mlai_user_id')
+    if not company or not user_id or company not in free_company_ids():return False
+    from founder_tools.models import VibeRaisingCompany
+    return VibeRaisingCompany.objects.filter(pk=company,profile__user_id=user_id).exists()
+
+
+def is_sponsored(row):
+    return (row.pricing_snapshot or {}).get('sponsored') is True
+
+
 def _unexpired(row):
     if row.expires_at<=timezone.now():
         raise CheckoutError('QUOTE_EXPIRED','The price confirmation expired. Request a new quote.')
@@ -66,7 +84,7 @@ def _unexpired(row):
 def receipt_status(row, *, include_plan=False):
     from .cybertest_plan import public_purchase_scope
     return {'checkout_id':str(row.id),'status':row.status,'points':row.points,
-        'test_mode':row.test_mode,'pricing_snapshot':row.pricing_snapshot,'settlement':row.settlement,'binding':row.binding,'binding_sha256':row.binding_sha256,
+        'test_mode':row.test_mode,'sponsored':is_sponsored(row),'due_points':0 if is_sponsored(row) else row.points,'pricing_snapshot':row.pricing_snapshot,'settlement':row.settlement,'binding':row.binding,'binding_sha256':row.binding_sha256,
         'expires_at':row.expires_at.isoformat(),'audit_id':str(row.audit_id) if row.audit_id else None,
         'phase_contract':purchase_contract(row.phase_contract) if row.phase_contract else {},
         'purchase_scope':public_purchase_scope(row.phase_contract),
@@ -94,7 +112,7 @@ def balance(user, *, test_mode):
         if isinstance(initial,bool) or not isinstance(initial,int) or initial<0:
             raise CheckoutError('BILLING_UNAVAILABLE','Test balance is not configured.',503)
         rows=Receipt.objects.filter(user=user,test_mode=True,status__in=['charged','started'])
-        used=sum(row.settlement['charge_microroo'] if row.settlement else row.points*1_000_000 for row in rows)
+        used=sum(row.settlement['charge_microroo'] if row.settlement else row.points*1_000_000 for row in rows if not is_sponsored(row))
         return max(0,initial*1_000_000-used)//1_000_000
     total=PointsService.get_balance(user)['digital_service_balance_microroo']
     return max(0,total-PointsService._reserved_microroo(user))//1_000_000
@@ -155,7 +173,8 @@ def create_quote(checkout_id, token, intent, *, execution_plan=None):
         'binding':normalized,'binding_sha256':digest,'handoff_hash':secret_hash,
         'points':phase_price(contract)['duePoints'] if contract else price_points(getattr(settings,'CYBERTEST_AUDIT_POINTS',10)),
         'phase_contract':{**contract,**({'executionPlan':stored_plan} if stored_plan else {})},'parent_checkout':parent,
-        'pricing_snapshot':{'usd_per_aud':str(getattr(settings,'CYBERTEST_USD_PER_AUD','0.697')), 'aud_per_point':str(getattr(settings,'CYBERTEST_AUD_PER_POINT','1.2798'))},
+        'pricing_snapshot':{'usd_per_aud':str(getattr(settings,'CYBERTEST_USD_PER_AUD','0.697')), 'aud_per_point':str(getattr(settings,'CYBERTEST_AUD_PER_POINT','1.2798')),
+            **({'sponsored':True} if _sponsored(normalized) else {})},
         'test_mode':test_mode,'expires_at':timezone.now()+timedelta(minutes=30)})
     if not hmac.compare_digest(row.binding_sha256,digest) or not hmac.compare_digest(row.handoff_hash,secret_hash) or row.test_mode!=test_mode:
         raise CheckoutError('CHECKOUT_CONFLICT','This checkout ID is already bound to another request.')
@@ -179,7 +198,7 @@ def confirm(checkout_id, token, user, *, expected_points):
     if row.status not in ('quoted','authorized'):
         raise CheckoutError('CHECKOUT_CLOSED','This checkout can no longer start an audit.')
     _unexpired(row)
-    if balance(user,test_mode=row.test_mode)<row.points:
+    if not is_sponsored(row) and balance(user,test_mode=row.test_mode)<row.points:
         raise CheckoutError('INSUFFICIENT_ROO_POINTS','There are not enough Roo points.',402)
     row.user=user;row.status='authorized';row.save(update_fields=['user','status','updated_at'])
     return receipt_status(row)
@@ -206,7 +225,9 @@ def charge(checkout_id, audit_id, intent):
     # Serialize different test receipts for one payer, just like real points.
     user=get_user_model().objects.select_for_update().get(pk=row.user_id)
     _payer(row,user)
-    if row.test_mode:
+    if is_sponsored(row):
+        pass  # MLAI's own checks: nothing is spent, so nothing is refunded later.
+    elif row.test_mode:
         if balance(user,test_mode=True)<row.points:
             raise CheckoutError('INSUFFICIENT_ROO_POINTS','There are not enough Roo points.',402)
     else:
@@ -240,7 +261,7 @@ def refund_start_failure(checkout_id, audit_id, failure_code):
         raise CheckoutError('REFUND_REVIEW_REQUIRED','Paid work may have started; this charge needs review.')
     if failure_code not in ('PREPARATION_FAILED','CANCELLED_BEFORE_START','QUEUE_START_FAILED'):
         raise CheckoutError('INVALID_FAILURE','A known startup failure is required.',400)
-    if not row.test_mode:
+    if not row.test_mode and not is_sponsored(row):
         if row.user_id is None:raise CheckoutError('REFUND_REVIEW_REQUIRED','The payer account is unavailable.')
         row.refund_ledger,_=PointsService.refund(user=row.user,delta=row.points,source='TOOLS',
             description='Cybertest audit failed before paid work started',created_by_slack_id=row.user.slack_id or '',
@@ -266,7 +287,7 @@ def settle_failed_review(checkout_id, audit_id, failure_code, costs):
     result = failure_settlement(row.points, row.pricing_snapshot, costs, existing=row.settlement)
     if row.settlement is not None:
         return receipt_status(row)
-    if not row.test_mode and result['refund_microroo']:
+    if not row.test_mode and not is_sponsored(row) and result['refund_microroo']:
         if row.user_id is None:
             raise CheckoutError('SETTLEMENT_REVIEW_REQUIRED', 'The payer account is unavailable.')
         # The shared digital refund only reverses a whole original spend. Reverse
