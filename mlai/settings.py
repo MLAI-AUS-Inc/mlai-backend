@@ -405,8 +405,8 @@ DATABASES = {
     'default': default_config
 }
 
-# PostgreSQL CI jobs clone one migrated template per run instead of applying
-# the whole migration chain for every `manage.py test` call. See
+# CI jobs reuse one migrated test database per job instead of applying the
+# whole migration chain for every `manage.py test` call. See
 # mlai/test_runner.py; unset keeps Django's default runner.
 if os.getenv('MLAI_TEST_DATABASE_TEMPLATE'):
     TEST_RUNNER = 'mlai.test_runner.TemplateDatabaseRunner'

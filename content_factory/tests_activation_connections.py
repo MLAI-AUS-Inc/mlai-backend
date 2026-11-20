@@ -121,6 +121,37 @@ class ActivationConnectionTests(TestCase):
             with authority_guard(binding, action='read'):
                 pass
 
+    def test_owner_preview_retry_follows_a_moved_site_commit(self):
+        # La Vie run 30c8dadc (20 Nov 2026): the site was fixed after the run's
+        # build failed, and the owner's preview retry was refused because the
+        # branch had a newer commit. Only that retry may pass a moved head,
+        # only with the follow switch on; Content Factory re-pins before building.
+        binding = {**contract_for(self.website()), 'expected_source_sha': SHA}
+        moved = WebsiteAuthorityError('website_source_changed', 'The repository changed since this verification.')
+        with patch('content_factory.website_connections.verify_repository_native_target'), \
+                patch('content_factory.website_rollout.require_repository_write_policy'), \
+                patch('content_factory.website_connections.verify_repository_head', side_effect=moved) as head:
+            with authority_guard(binding, action='preview', follow_moved_preview=True):
+                pass
+            head.assert_called_once()
+            for kwargs, settings in (({'action': 'preview'}, {}),
+                                     ({'action': 'setup', 'follow_moved_preview': True, 'require_current_head': True}, {}),
+                                     ({'action': 'preview', 'follow_moved_preview': True},
+                                      {'ARTICLES_SOURCE_FOLLOW_ENABLED': False})):
+                with self.subTest(kwargs=kwargs, settings=settings), override_settings(**settings), \
+                        self.assertRaises(WebsiteAuthorityError) as error:
+                    with authority_guard(binding, **kwargs):
+                        pass
+                self.assertEqual(error.exception.code, 'website_source_changed')
+        other = WebsiteAuthorityError('github_source_unavailable', 'GitHub could not verify the source.', retryable=True)
+        with patch('content_factory.website_connections.verify_repository_native_target'), \
+                patch('content_factory.website_rollout.require_repository_write_policy'), \
+                patch('content_factory.website_connections.verify_repository_head', side_effect=other), \
+                self.assertRaises(WebsiteAuthorityError) as error:
+            with authority_guard(binding, action='preview', follow_moved_preview=True):
+                pass
+        self.assertEqual(error.exception.code, 'github_source_unavailable')
+
     def test_current_durable_target_replaces_legacy_scan_authority(self):
         website = self.website()
         # No legacy ready scan is needed once a durable target is verified.

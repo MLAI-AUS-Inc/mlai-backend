@@ -5580,13 +5580,16 @@ def _portable_article_preview_run(run):
     )
 
 
-def _live_preview_github_token_payload(run):
+def _live_preview_github_token_payload(run, *, follow_moved_preview=False):
     if _portable_article_preview_run(run):
         # The portable renderer uses only this run's reviewed saved artifacts.
         # Never mint repository credentials or grant website authority here.
         return {}
     # Workers obtain ephemeral credentials from the broker using saved consent.
-    with authority_guard(scoped_run_contract(run), action="preview"):
+    # ``follow_moved_preview``: the owner's retry, which Content Factory
+    # re-pins to a moved site commit (see authority_guard).
+    follow = {"follow_moved_preview": True} if follow_moved_preview else {}
+    with authority_guard(scoped_run_contract(run), action="preview", **follow):
         return scoped_run_contract(run)
 
 
@@ -20192,7 +20195,7 @@ class VibeMarketingRunLivePreviewView(APIView):
                 # An explicit preview retry is a new reviewed attempt, without
                 # replaying drafting, changing the source or charging again.
                 advance_workflow_attempt(run)
-        payload.update(_live_preview_github_token_payload(run))
+        payload.update(_live_preview_github_token_payload(run, follow_moved_preview=True))
         remote_data = _call_content_factory_live_preview(run_id=run_id, method="POST", payload=payload)
         run = self._persist_preview(run, remote_data)
         return Response(_serialize_run(run, context=context), status=status.HTTP_200_OK)
