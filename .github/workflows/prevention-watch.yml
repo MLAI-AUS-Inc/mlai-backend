@@ -1,0 +1,42 @@
+name: Prevention watch
+# Plan step F3: alert when a prevention job is red, skipped, stuck or silent for
+# N days. Watch list: .github/prevention-watch.json. Decision logic:
+# scripts/prevention_watch.py (tested offline by tests.test_prevention_watch).
+#
+# Report-only by default: the job summary and a red run. Set the repository
+# variable PREVENTION_WATCH_ALERT_MODE to "slack" and the secret
+# PREVENTION_WATCH_SLACK_WEBHOOK only after an owner go-ahead.
+# PREVENTION_WATCH_STALE_DAYS overrides N (default 2).
+on:
+  schedule:
+    - cron: '53 21 * * *'
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: prevention-watch
+  cancel-in-progress: false
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Check the prevention jobs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREVENTION_WATCH_ALERT_MODE: ${{ vars.PREVENTION_WATCH_ALERT_MODE || 'report-only' }}
+          PREVENTION_WATCH_STALE_DAYS: ${{ vars.PREVENTION_WATCH_STALE_DAYS }}
+          PREVENTION_WATCH_SLACK_WEBHOOK: ${{ secrets.PREVENTION_WATCH_SLACK_WEBHOOK }}
+        run: python scripts/prevention_watch.py check --config .github/prevention-watch.json --output prevention-watch.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prevention-watch
+          path: prevention-watch.json
+          if-no-files-found: warn
+          retention-days: 30
