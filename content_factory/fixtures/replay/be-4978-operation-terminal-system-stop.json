@@ -1,0 +1,38 @@
+{
+  "schema": "replay-record-v1",
+  "id": "be-4978-operation-terminal-system-stop",
+  "source": {
+    "run_pk": 4978,
+    "org_id": 30,
+    "catalogue": "founder issues catalogue 2026-11-18, section 4.6",
+    "synthetic": true
+  },
+  "workflow": "confirmed_topic",
+  "step": "package_content_delivery",
+  "code": "website_operation_terminal",
+  "framework_fingerprint": null,
+  "http": [],
+  "inputs": {
+    "domain": "founder-30.example",
+    "stopped_hours_ago": 72,
+    "run": {
+      "status": "failed",
+      "current_step": "package_content_delivery",
+      "error": "",
+      "result": {
+        "topic": "Synthetic topic",
+        "error_code": "website_operation_terminal",
+        "callback_rejection": {
+          "code": "website_operation_terminal",
+          "raise_site": "website_operations.validate_operation"
+        }
+      }
+    }
+  },
+  "replay": {
+    "repo": "be",
+    "handler": "system_stopped.follow_up"
+  },
+  "expected": "ask:restart",
+  "notes": "A worker report for an operation that was already closed stopped the article (stale-operation fence). Which raise site fired for pk 4978 is not traced yet (A1); this record assumes validate_operation. A stop older than the restart window gets one notice with Restart."
+}
