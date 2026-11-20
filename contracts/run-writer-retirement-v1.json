@@ -3977,7 +3977,7 @@
       "identity": "content_factory/website_operations.py:advance_workflow_attempt:f0f4db58b1730239a66449bf3f7531a3e24e96686cc337dab5570ec3d0c2e8a7:1",
       "path": "content_factory/website_operations.py",
       "function": "advance_workflow_attempt",
-      "line": 569,
+      "line": 578,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3989,12 +3989,12 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5350777afe64213f8bf4d7fa4761d4557a7d318ec7164817cb595cf56323ec81",
+      "function_sha256": "0a3e076e324f02f7032b1015d7dab1829424bc1f3a33e522c1693abe8300cb9b",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_r3_source_operation_control.py"
       ],
-      "reason": "This save is the website Operation ledger, not canonical Run.",
+      "reason": "This save is the website Operation ledger, not canonical Run. Re-pinned when #1383 (moved-preview fence) merged into the any-founder branch; neither side adds a ContentFactoryRun write here.",
       "guard": "WebsiteConnectionOperation query/argument.",
       "pending_owner": null
     },
@@ -4002,7 +4002,7 @@
       "identity": "content_factory/website_operations.py:advance_workflow_attempt:3a90e99d2c1f8748f4f48f9375199a6fbfb6723adb0c18534689e18f15cb173a:1",
       "path": "content_factory/website_operations.py",
       "function": "advance_workflow_attempt",
-      "line": 588,
+      "line": 597,
       "kind": "inferred_run_save",
       "fields": [
         "run_request",
@@ -4016,12 +4016,12 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5350777afe64213f8bf4d7fa4761d4557a7d318ec7164817cb595cf56323ec81",
+      "function_sha256": "0a3e076e324f02f7032b1015d7dab1829424bc1f3a33e522c1693abe8300cb9b",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_source_operation_control.py"
       ],
-      "reason": "Owned resume issues exact current backend execution ticket and returns before original request save. Other inferred aliases are Operation rows.",
+      "reason": "Owned resume issues exact current backend execution ticket and returns before original request save. Other inferred aliases are Operation rows. Re-pinned when #1383 (moved-preview fence) merged into the any-founder branch; neither side adds a ContentFactoryRun write here.",
       "guard": "Typed owner.event_protocol1 branch with current ticket/fresh principal; legacy request path only else.",
       "pending_owner": null
     },
@@ -4080,7 +4080,7 @@
       "identity": "content_factory/website_operations.py:advance_workflow_attempt:ba478e226c73c65413f78d91902e3238b6de8a0fca58f0c470a44e5625639b1f:1",
       "path": "content_factory/website_operations.py",
       "function": "advance_workflow_attempt",
-      "line": 587,
+      "line": 596,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -4092,12 +4092,12 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "5350777afe64213f8bf4d7fa4761d4557a7d318ec7164817cb595cf56323ec81",
+      "function_sha256": "0a3e076e324f02f7032b1015d7dab1829424bc1f3a33e522c1693abe8300cb9b",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_r3_source_operation_control.py"
       ],
-      "reason": "This save is the website Operation ledger, not canonical Run.",
+      "reason": "This save is the website Operation ledger, not canonical Run. Re-pinned when #1383 (moved-preview fence) merged into the any-founder branch; neither side adds a ContentFactoryRun write here.",
       "guard": "WebsiteConnectionOperation query/argument.",
       "pending_owner": null
     },

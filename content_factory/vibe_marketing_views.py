@@ -20194,7 +20194,7 @@ class VibeMarketingRunLivePreviewView(APIView):
             ).exists():
                 # An explicit preview retry is a new reviewed attempt, without
                 # replaying drafting, changing the source or charging again.
-                advance_workflow_attempt(run)
+                advance_workflow_attempt(run, follow_moved_preview=True)
         payload.update(_live_preview_github_token_payload(run, follow_moved_preview=True))
         remote_data = _call_content_factory_live_preview(run_id=run_id, method="POST", payload=payload)
         run = self._persist_preview(run, remote_data)
