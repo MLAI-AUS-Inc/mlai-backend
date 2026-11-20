@@ -41,7 +41,8 @@ RAISE_SITES = {
     # A run without saved consent on a connected site: not a disconnect.
     ("website_connections.py", "setup_merge_observation_guard"): {"invalid_connection_contract"},
     ("website_connections.py", "authority_guard"): {"missing_contract_error"},
-    ("website_connections.py", "bind_website"): {LEGACY_CODE},
+    # Main #1379 split bind_website: the persisting half raises it now.
+    ("website_connections.py", "bind_verified_website"): {LEGACY_CODE},
     ("website_connections.py", "transition_connection"): {"not_connected", LEGACY_CODE},
     ("website_connections.py", "dispatch_contract"): {"not_connected"},
     ("website_cleanup_verification.py", "verify_cleanup_deployment"): {"not_connected"},
