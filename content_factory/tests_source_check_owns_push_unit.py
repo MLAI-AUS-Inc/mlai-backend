@@ -58,6 +58,8 @@ class SourceCheckOwnsPushTests(SimpleTestCase):
 
 
 class SourceWakeLeavesCheckTests(SourceWakeTests):
+    # Sticky stops (plan B3) hold this push earlier; this is #1365's own rule.
+    @override_settings(ARTICLES_PREPARE_STICKY_STOP_ENABLED=False)
     def test_customer_push_does_not_reopen_or_adopt(self):
         self.op.state = "needs_attention"
         with patch.object(prepare, "_source_check_owns_push", return_value=True), \

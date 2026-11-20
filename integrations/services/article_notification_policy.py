@@ -20,6 +20,8 @@ def should_deliver_automation_event(event_type: str, channel_type: str) -> bool:
         if event_type == "topic_selection":
             # Founders can choose email for the daily research shortlist.
             return _email_topics_enabled()
-        return event_type in {"review_ready", "content_ready"}
+        # B23: the one notice after several empty research nights.
+        # B18: the one notice that research paused for points.
+        return event_type in {"review_ready", "content_ready", "research_empty", "automation_paused_points"}
     # Preserve opted-in WhatsApp/Slack research topic selection.
     return True

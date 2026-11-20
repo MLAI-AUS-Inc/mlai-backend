@@ -12,6 +12,8 @@ from core.slack_founder_link_retention import (
 from content_analytics.services.report_scheduler import run_daily_article_report_scheduler
 from content_factory.founder_journey_alerts import run_founder_journey_alert_sweep
 from content_factory.founder_stuck_alerts import run_founder_stuck_alert_sweep
+from content_factory.system_stopped_runs import run_system_stopped_run_sweep
+from content_factory.website_connection_invariants import run_connection_invariant_sweep
 from content_factory.founder_journey_sweeps import scheduled_founder_journey_sweeps
 from content_factory.founder_website_checks import scheduled_founder_website_checks
 from content_factory.self_heal_sweeps import scheduled_self_heal_sweeps
@@ -20,6 +22,7 @@ from content_factory.run_reconciliation import run_authoritative_reconciliation_
 from content_factory.run_terminal_settlement import run_terminal_settlement_sweep
 from content_factory.website_reconciliation import process_website_connection_operations
 from content_factory.website_live_status import run_live_status_sweep
+from content_factory.website_deploy_link import run_article_live_sweep
 from content_factory.dispatch_outbox import process_dispatch_outbox
 from content_factory.services.island_refresh_scheduler import run_island_refresh_scheduler
 from crm.blasts import run_blast_dispatch_scheduler
@@ -139,6 +142,15 @@ class Command(BaseCommand):
             # with no next action. On unless ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED
             # is false; at most one bounded pass every 10 minutes.
             ("founder_stuck_alerts", run_founder_stuck_alert_sweep),
+            # B22: one staff alert per website connection in a state that
+            # should never happen (Ready with a scan blocker, an old open
+            # operation on a Ready site, ...). Local reads only, once an hour;
+            # honours ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED.
+            ("connection_invariants", run_connection_invariant_sweep),
+            # B24: an article run a connection or operation transition stopped
+            # is restarted once (connected, consent unchanged) or keeps its
+            # draft card with one Restart notice. A founder's cancel gives nothing.
+            ("system_stopped_runs", run_system_stopped_run_sweep),
             # P1 founder-journey sweeps (first profile, draft-ready outbox).
             # Runs only while MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED is on;
             # each sweep checks its own flag and never raises.
@@ -155,6 +167,11 @@ class Command(BaseCommand):
             # Off only with ARTICLES_READY_ON_MERGE_ENABLED=false; one bounded
             # pass every 5 minutes.
             ("website_live_status", run_live_status_sweep),
+            # Plan C14: merged articles not yet on the live site are re-checked
+            # and alert staff once past the bound; never a gate on a draft.
+            # Off unless ARTICLES_LIVE_URL_VERIFICATION_ENABLED; one bounded
+            # pass every 10 minutes.
+            ("article_live_checks", run_article_live_sweep),
             ("website_consistency", run_website_consistency_sweep),
             ("article_dispatch_outbox", process_dispatch_outbox),
             # P2 self-heal sweeps (policy, refunds, merge worker, notifications,

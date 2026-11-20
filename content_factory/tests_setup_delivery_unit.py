@@ -61,6 +61,9 @@ class MemoryQuery:
     def select_related(self, *args):
         return self
 
+    def only(self, *fields):
+        return self
+
     def update(self, **values):
         for row in self.rows:
             for key, value in values.items():

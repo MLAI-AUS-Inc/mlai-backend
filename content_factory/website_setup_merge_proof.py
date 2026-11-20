@@ -122,9 +122,63 @@ def carry_setup_merge_proof(op, config, target):
         return locked
 
 
-def worker_publish_targets(config):
-    """Project a carried setup proof from backend-owned build and deployment evidence."""
+def _row_current(website, target):
+    """Whether ``target`` (the current-generation row) is the website's verified, Ready target now."""
+    if target is None or not isinstance(getattr(target, "contract", None), dict) or not website.verified_sha:
+        return False
+    if target.source_sha != website.verified_sha or not mapping(getattr(target, "capabilities", None)).get("publishingReady"):
+        return False
+    if not mapping(getattr(website, "capabilities", None)).get("publishingReady"):
+        return False
+    if any(mapping(item).get("code") == "repository_source_changed" for item in getattr(website, "blockers", None) or []):
+        # A withdrawn carry (or an unverified push) locks the row until a fresh check.
+        return False
+    if target.contract.get("delivery_adapter") == "custom_contract_v1" or sealed.required(website, target):
+        # Custom and sealed targets keep the proof verification itself cached.
+        return False
+    carried = mapping(target.capabilities).get("proofCarriedFrom")
+    return not carried or website_source_carry.carriable(website, target)
+
+
+def project_from_row(config):
+    """The worker's target list, derived from the current-generation target row (plan B13).
+
+    ``config.publish_targets`` is only a cache: verification writes the row and
+    the cache together, but a push that carries the proof forward
+    (``website_source_carry.apply_carry``) moves only the row, so the cache kept
+    the old commit and the worker refused a site the founder was told is Ready.
+    When the selected default's row is verified at the website's current
+    verified commit and Ready (no source lock, not custom or sealed, a carried
+    row only when still carriable), its contract replaces the cached entry;
+    otherwise the cache is returned unchanged.
+    """
     targets = config.publish_targets
+    key = config.default_publish_target_id
+    website = config.website_connection
+    if (not key or website is None or website.state != "connected"
+            or website.organization_id != config.organization_id):
+        return targets
+    rows = list(targets or [])
+    indexes = [index for index, row in enumerate(rows) if mapping(row).get("target_id") == key]
+    if len(indexes) > 1:
+        return targets
+    target = website.targets.filter(generation=website.generation, target_key=key).first()
+    if not _row_current(website, target) or target.contract.get("target_id", key) != key:
+        return targets
+    contract = {**target.contract, "target_id": key}
+    if indexes and rows[indexes[0]] == contract:
+        return targets
+    if indexes:
+        rows[indexes[0]] = contract
+    else:
+        rows.append(contract)
+    return rows
+
+
+def worker_publish_targets(config):
+    """Project the worker's targets from the target row, and a carried setup proof from backend evidence."""
+    cached = config.publish_targets
+    projected = targets = project_from_row(config)
     key = config.default_publish_target_id
     matches = [row for row in targets or [] if mapping(row).get("target_id") == key]
     if not key or len(matches) != 1:
@@ -133,6 +187,9 @@ def worker_publish_targets(config):
     build = mapping(selected.get("verification"))
     if build.get("attestation_origin") != "setup_merge_carry":
         return targets
+    # A setup-merge proof is projected below only with its own evidence; any
+    # refusal serves the cache exactly as before.
+    targets = cached
 
     website = config.website_connection
     if (website.state != "connected" or website.organization_id != config.organization_id
@@ -150,7 +207,15 @@ def worker_publish_targets(config):
     source = target.source_sha
     digest = selected.get("contract_digest")
     adapter = selected.get("delivery_adapter")
-    if (not reviewed or reviewed[:2] != (build.get("carried_from"), source)
+    carried = None
+    if reviewed and reviewed[:2] != (build.get("carried_from"), source):
+        # A founder push that left the setup files alone carried this proof
+        # forward (website_source_carry.apply_carry). Accept it only for a
+        # carriable target, along a chain of carries the backend recorded.
+        carried = _carried_chain(website, target, merge_sha=reviewed[1], build=build)
+        if carried is None:
+            return targets
+    if (not reviewed
             or not SHA_PATTERN.fullmatch(str(build.get("source_tree_sha") or ""))
             or adapter != target.adapter
             or any(selected.get(field) != value for field, value in reviewed[2].items()
@@ -173,8 +238,76 @@ def worker_publish_targets(config):
         return targets
 
     # This completed synchronous observation has a single execution attempt.
+    evidence = {"binding": binding, "build": build, "deployment": receipt}
+    if carried is not None:
+        evidence["carried"] = carried
     proof = {**build, **scope, "target_id": key, "adapter_id": adapter,
         "operation_id": str(operation.pk), "operation_attempt": 1, "deletion_epoch": deletion_epoch(website),
-        "contract_digest": digest,
-        "evidence_digest": evidence_digest({"binding": binding, "build": build, "deployment": receipt})}
-    return [{**row, "verification": proof} if row is selected else row for row in targets]
+        "contract_digest": digest, "evidence_digest": evidence_digest(evidence)}
+    return [{**row, "verification": proof} if row is selected else row for row in projected]
+
+
+# Pushes a carried setup-merge proof may follow before it needs a fresh setup
+# proof. Read in one bounded query, so a busy repository does not fall off its
+# projection after a handful of pushes.
+MAX_CARRIED_PUSHES = 500
+# A carry link whose own re-check never ran to the end because a newer push
+# moved the branch on (``_process_source_reverification`` cancels it as
+# superseded with the ``website_source_changed`` code).
+SUPERSEDED_LINK = ("cancelled", "superseded", "website_source_changed")
+
+
+def _carried_chain(website, target, *, merge_sha, build):
+    """The backend-recorded carries from the reviewed setup merge to ``target``'s head, or None.
+
+    Publish safety (plan A13): this loosens the setup-merge proof from the exact
+    merge commit to a later head, so it holds only when all of these do:
+
+    - the target is carriable (MLAI's own build proof and Ready-on-merge; never a
+      target that needs sealed version-3 proof, ``website_source_carry.carriable``);
+    - the connection holds no source-changed lock (a withdrawn carry sets it);
+    - every step from the head back to the merge is a push this backend carried
+      itself (a founder push, or MLAI's own article merge): the source-reverify
+      operation of this generation for that head records ``carried_from``. The
+      current head's own re-check passed; an older step either passed or was
+      superseded by the next push. A re-check that failed (``needs_attention``)
+      breaks the chain, as the 72-hour withdrawal does.
+
+    The caller still requires the live-URL proof and its deployment receipt at the
+    current head, so the worker's proof stays bound to an operation at that source.
+    """
+    from .website_models import WebsiteConnectionOperation
+    source = str(target.source_sha or "")
+    if (not website_source_carry.carriable(website, target) or sealed.required(website, target)
+            or not SHA_PATTERN.fullmatch(source) or source == merge_sha
+            or any(mapping(item).get("code") == "repository_source_changed" for item in website.blockers or [])
+            or build.get("source_sha") != source
+            or mapping(target.capabilities).get("proofCarriedFrom") != build.get("carried_from")):
+        return None
+    prefix = f"{website.pk}:source-reverify:{website.generation}:"
+    links = {}
+    for link in (WebsiteConnectionOperation.objects.filter(connection_id=website.pk, generation=website.generation,
+            action="source-reverify", idempotency_key__startswith=prefix).order_by("-created_at", "-pk")
+            .only("pk", "idempotency_key", "state", "payload", "receipt")[:MAX_CARRIED_PUSHES + 1]):
+        sha = link.idempotency_key[len(prefix):]
+        if SHA_PATTERN.fullmatch(sha):
+            links.setdefault(sha, link)
+    chain, current, seen = [], source, {source}
+    for _ in range(MAX_CARRIED_PUSHES):
+        link = links.get(current)
+        payload, receipt = mapping(link.payload) if link else {}, mapping(link.receipt) if link else {}
+        previous = str(payload.get("carried_from") or "")
+        passed = link is not None and link.state == "completed" and receipt.get("status") == "verified"
+        superseded = (link is not None and current != source
+            and (link.state, receipt.get("status"), receipt.get("code")) == SUPERSEDED_LINK)
+        if (not (passed or superseded) or payload.get("source_sha") != current
+                or not SHA_PATTERN.fullmatch(previous) or previous in seen and previous != merge_sha):
+            return None
+        if current == source and previous != build.get("carried_from"):
+            return None
+        chain.append({"source_sha": current, "carried_from": previous, "operation_id": str(link.pk)})
+        if previous == merge_sha:
+            return chain
+        seen.add(previous)
+        current = previous
+    return None

@@ -66,6 +66,32 @@ class FailurePolicyTests(SimpleTestCase):
                 self.assertEqual(op.receipt["retryable"], classification == "transient")
                 self.assertEqual(op.next_attempt_at is not None, classification in {"transient", "waiting"})
 
+    def test_sdk_and_sandbox_fault_codes_are_registered_refunded_and_never_generic(self):
+        """A5: Content Factory's SDK and sandbox faults reach the backend as registered codes."""
+        from .incident_guards import NO_DELIVERY_REFUND_CODES
+        from .website_failure_contract import load_registry
+        rows = (("sdk_controller_failed", "transient", "pending"),
+                ("sdk_model_request_refused", "transient", "pending"),
+                ("sandbox_unavailable", "transient", "pending"),
+                ("sandbox_authority_changed", "unsupported", "needs_attention"),
+                ("sandbox_integrity_violation", "unsupported", "needs_attention"))
+        registry = load_registry()["by_code_v2"]
+        for code, classification, state in rows:
+            with self.subTest(code=code):
+                entry = registry[code]
+                self.assertIs(entry["refund"], True)
+                self.assertIn(code.upper(), NO_DELIVERY_REFUND_CODES)
+                self.assertEqual(entry["founder_copy_id"], "working" if classification == "transient" else "stopped")
+                self.assertEqual(entry["retry_policy"], "retry_same_step" if classification == "transient" else "stop_contract")
+                op = self.operation()
+                prepare.prepare_failure(op, "setup", WebsiteAuthorityError(code, "Fixture", retryable=True))
+                self.assertEqual(op.state, state)
+                self.assertEqual(op.receipt["failure"]["code"], code)
+                self.assertEqual(op.receipt["failure"]["failure_class"], classification)
+                # Authority and integrity faults are never retried automatically.
+                self.assertEqual(op.receipt["retryable"], classification == "transient")
+                self.assertEqual(op.next_attempt_at is not None, classification == "transient")
+
     def test_versioned_mismatch_cannot_take_transient_legacy_fallback(self):
         from .website_failure_contract import classify_failure
         failure = classify_failure("DIRECTORY_STYLE_REVIEW_FAILED", "directory_style")

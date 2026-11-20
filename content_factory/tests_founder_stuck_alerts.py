@@ -97,7 +97,7 @@ class FounderStuckAlertTests(FounderStuckFixture):
         self.assertEqual(self.sweep()[0]["queued"], 0)
 
     def test_condition_change_alerts_again(self):
-        op = self.operation(action="reconnect", state="pending", attempts=21, age=timedelta(days=3))
+        op = self.operation(action="reconnect", state="pending", attempts=21, age=timedelta(hours=30))
         outcome, texts = self.sweep()
         self.assertEqual(outcome["queued"], 1)
         self.assertIn("Step: Reconnecting GitHub.", texts[0])
@@ -106,6 +106,31 @@ class FounderStuckAlertTests(FounderStuckFixture):
         WebsiteConnectionOperation.objects.filter(pk=op.pk).update(state="needs_attention")
         self.assertEqual(self.sweep()[0]["queued"], 1)
         self.assertEqual(len(self.receipts()), 2)
+
+    @override_settings(ARTICLES_STAFF_ESCALATION_LADDER_ENABLED=True)
+    def test_a_stop_still_waiting_after_48_hours_escalates_to_the_owner_once(self):
+        # Plan 7.6 / F10: same channel and kill switch, one extra receipt, never for old history.
+        self.operation(age=timedelta(hours=50))
+        outcome, texts = self.sweep()
+        self.assertEqual(outcome["queued"], 2)
+        self.assertEqual(sorted(r["details"].get("escalation", "") for r in self.receipts()), ["", "owner"])
+        self.assertTrue(any(text.startswith("Escalated to the owner after 48 hours.") for text in texts))
+        self.assertEqual(self.sweep(now=self.now + timedelta(minutes=11))[0]["queued"], 0)
+
+    @override_settings(ARTICLES_STAFF_ESCALATION_LADDER_ENABLED=True)
+    def test_a_failed_run_alerts_after_two_hours(self):
+        self.make_run(result={"error_code": STRATEGY_CODE}, age=timedelta(hours=3))
+        self.assertEqual(self.sweep()[0]["queued"], 1)
+
+    @override_settings(ARTICLES_STAFF_ESCALATION_LADDER_ENABLED=False)
+    def test_the_ladder_is_shadow_until_switched_on(self):
+        # Plan 7.5 rule 7: a new alert rule ships in shadow. The six-hour run wait
+        # holds and the owner escalation is only counted.
+        self.make_run(result={"error_code": STRATEGY_CODE}, age=timedelta(hours=3))
+        self.operation(age=timedelta(hours=50))
+        outcome, _ = self.sweep()
+        self.assertEqual((outcome["queued"], outcome["owner_escalations_shadow"]), (1, 1))
+        self.assertEqual([r["details"].get("escalation") for r in self.receipts()], [None])
 
     def test_young_or_settled_operations_do_not_alert(self):
         self.operation(state="pending", attempts=3)                     # retrying, but not long
@@ -156,7 +181,7 @@ class FounderStuckAlertTests(FounderStuckFixture):
 
     @override_settings(ARTICLES_STAFF_ALERT_RULES_ENABLED=True)
     def test_staff_rule_enrichment_keeps_the_alerts_own_attempts_and_item(self):
-        self.operation(action="reconnect", state="pending", attempts=21, age=timedelta(days=3))
+        self.operation(action="reconnect", state="pending", attempts=21, age=timedelta(hours=30))
         outcome, texts = self.sweep()
         self.assertEqual(outcome["queued"], 1)
         self.assertIn("Attempts 21.", texts[0])
@@ -188,7 +213,7 @@ class FounderStuckAlertTests(FounderStuckFixture):
         self.assertEqual(self.sweep()[0]["candidates"], 0)
         self.make_run(result={"self_heal_v1": {"next_at": (self.now + timedelta(hours=1)).isoformat()}})
         self.assertEqual(self.sweep()[0]["candidates"], 0)
-        self.make_run(age=timedelta(hours=2))                                       # stopped, but recently
+        self.make_run(age=timedelta(hours=1))                                       # stopped, but recently (under 2 h)
         self.assertEqual(self.sweep()[0]["candidates"], 0)
         older = self.make_run(age=timedelta(hours=30))
         self.make_run(status="running", age=timedelta(hours=7))                     # a newer run replaced it
@@ -232,8 +257,13 @@ class FounderStuckBoundTests(FounderStuckFixture):
             self.make_run(org=org, result={"error_code": STRATEGY_CODE, "verification_summary": "x" * 1000})
         with CaptureQueriesContext(connection) as queries:
             conditions = stuck.find_stuck_conditions(now=self.now)
-        # Two pages per kind: the newest rows and the cursor's next page.
-        self.assertEqual(len(queries), 4)
+        # One scalar read of the marked test organisations (plan F1), then two pages
+        # per kind: the newest rows and the cursor's next page.
+        self.assertEqual(len(queries), 5)
+        marker = queries[0]["sql"]
+        self.assertIn('"content_factory_org_config"."organization_id"', marker.split(" FROM ", 1)[0])
+        self.assertNotIn('"pillar_strategy" FROM', marker)
+        queries = queries[1:]
         self.assertLessEqual(len(conditions), 4 * stuck.QUERY_LIMIT)
         for query in queries:
             sql = query["sql"]
@@ -254,7 +284,8 @@ class FounderStuckBoundTests(FounderStuckFixture):
         self.assertEqual(outcome["queued"], stuck.MAX_ALERTS_PER_SWEEP)
         self.assertLessEqual(len(texts), stuck.MAX_ALERTS_PER_SWEEP)
         # Fixed work per alert; nothing grows with the number of startups or receipts.
-        self.assertLessEqual(len(queries), 16 * stuck.MAX_ALERTS_PER_SWEEP)
+        # (One of the 17 is the queue's test-organisation check, plan F1.)
+        self.assertLessEqual(len(queries), 17 * stuck.MAX_ALERTS_PER_SWEEP)
 
     def test_already_alerted_rows_never_hide_a_new_stuck_founder(self):
         # 60 newer stops are already alerted; one older stop is new. A plain
@@ -267,7 +298,8 @@ class FounderStuckBoundTests(FounderStuckFixture):
         self.assertEqual(sum(len(self.receipts(org)) for org in Organization.objects.exclude(pk=self.org.pk)),
                          stuck.QUERY_LIMIT + 10)
         older, site = self.startup("Older", "older.example.test", "Older", "Founder")
-        self.operation(website=site, age=timedelta(days=5))
+        # Past the owner-escalation horizon (plan F10), so it holds one receipt.
+        self.operation(website=site, age=timedelta(days=20))
         middle, site = self.startup("Middle", "middle.example.test", "Middle", "Founder")
         self.operation(website=site, age=timedelta(hours=1, minutes=55))
         for _ in range(3):
@@ -313,3 +345,43 @@ class StaffConsoleStuckStateTests(FounderStuckFixture):
             self.make_run(result={"error_code": "LEGACY_ONLY_FOUNDER_STOP"})
             self.assertEqual(console.startup_detail(self.org.pk, now=self.now)["state"], "your_turn")
             self.assertEqual(self.sweep()[0]["candidates"], 0)
+
+
+class RetiredAskAlertTests(FounderStuckFixture):
+    """A9: any operation resting in needs_user on a retired owner action alerts staff, once."""
+
+    def test_every_retired_action_alerts_staff_once(self):
+        from .founder_journey import RETIRED_ACTIONS
+        for action in sorted(RETIRED_ACTIONS):
+            with self.subTest(action=action):
+                cache.clear()
+                org, site = self.startup(f"Retired {action}", f"{action.replace('_', '-')}.example.test", "Sophia", "Lee")
+                op = self.operation(website=site, state="needs_user", age=timedelta(minutes=5),
+                    receipt={"status": "needs_you", "reason_code": "articles_page_choice_required",
+                             "user_action": {"id": action, "candidates": ["/blog", "/news"]}})
+                conditions = [c for c in stuck.find_stuck_conditions(now=self.now) if c.organization_id == org.pk]
+                self.assertEqual([(c.kind, c.details.get("action")) for c in conditions], [("operation_retired_ask", action)])
+                self.assertEqual(conditions[0].details["website_operation_id"], str(op.pk))
+        outcome, texts = self.sweep()
+        self.assertEqual(outcome["queued"], len(RETIRED_ACTIONS))
+        self.assertTrue(any("Waiting on the retired ask choose_articles_page." in text for text in texts))
+        self.assertEqual(self.sweep()[0]["queued"], 0)
+
+    def test_a_page_ask_under_pick_consent_is_rendered_not_an_alert(self):
+        # Plan A9 follow-up: Home shows choose_articles_page when consent says "pick".
+        receipt = {"status": "needs_you", "reason_code": "articles_page_choice_required",
+                   "user_action": {"id": "choose_articles_page", "candidates": ["/blog", "/news"]},
+                   "goal": {"consent": {"answers": {"page_policy": "pick"}}}}
+        self.operation(state="needs_user", age=timedelta(minutes=5), receipt=receipt)
+        self.assertEqual(self.sweep()[0]["candidates"], 0)
+        cache.clear()
+        org, site = self.startup("Auto page", "auto-page.example.test", "Sam", "Lee")
+        self.operation(website=site, state="needs_user", age=timedelta(minutes=5),
+                       receipt={**receipt, "goal": {"consent": {"answers": {"page_policy": "auto"}}}})
+        kinds = [c.kind for c in stuck.find_stuck_conditions(now=self.now) if c.organization_id == org.pk]
+        self.assertEqual(kinds, ["operation_retired_ask"])
+
+    def test_a_rendered_owner_ask_is_your_turn_not_an_alert(self):
+        for action in ("merge_pr", "review_setup", "authorize_github"):
+            self.operation(state="needs_user", receipt={"status": "needs_you", "user_action": {"id": action}})
+        self.assertEqual(self.sweep()[0]["candidates"], 0)

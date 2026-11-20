@@ -117,6 +117,14 @@ def mutate_catalog_response(
                     partial(start_offer_page_checks, org.pk, org.domain, pending_checks), robust=True,
                 )
         response[OFFER_PAGE_CHECKS_KEY] = offer_page_check_payload(updated)
+        if owner_context is not None:
+            # Plan B9: say which in-flight articles keep the earlier wording.
+            # Advisory only: the save has committed and is never blocked.
+            from .editorial_open_runs import open_runs_for_changed_entries
+            # Only when there is something to say, so a replay keeps the same shape.
+            open_runs = open_runs_for_changed_entries(org, strategy, updated)
+            if open_runs:
+                response["open_runs"] = open_runs
         return Response(response)
     except (PermissionError, VibeRaisingProfile.DoesNotExist):
         return Response({"error": "Only company founders can review this catalog"}, status=403)

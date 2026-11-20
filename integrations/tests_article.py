@@ -569,7 +569,8 @@ class ArticleGenerationServiceTest(TestCase):
             github_repo=self.repo_name,
             scan_summary="scan complete",
         )
-        self.user.points_account.balance = 6
+        # Four points for the topics, and Content Factory's 6-point floor left after the charge.
+        self.user.points_account.balance = 10
         self.user.points_account.save(update_fields=["balance"])
         mock_response = MagicMock()
         mock_response.status_code = 202
@@ -590,12 +591,12 @@ class ArticleGenerationServiceTest(TestCase):
         payload = mock_post.call_args.kwargs["json"]
         self.assertEqual(payload["roo_points_cost"], 4)
         self.assertEqual(payload["roo_points_required"], 4)
-        self.assertEqual(payload["roo_points_balance"], 2)
+        self.assertEqual(payload["roo_points_balance"], 6)
         job = ContentFactoryJob.objects.get(job_id="job_discovery_paid_123")
         self.assertEqual(job.billing_status, "charged")
         self.assertEqual(job.billing_amount, 4)
         self.user.points_account.refresh_from_db()
-        self.assertEqual(self.user.points_account.balance, 2)
+        self.assertEqual(self.user.points_account.balance, 6)
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_discovery_rejects_balance_below_four_topic_quote(self, mock_post):
@@ -616,9 +617,34 @@ class ArticleGenerationServiceTest(TestCase):
                 trigger_article_generation(self.slack_user_id, article_request)
 
         self.assertEqual(exc.exception.payload["error_code"], "INSUFFICIENT_ROO_POINTS")
-        self.assertEqual(exc.exception.payload["required_points"], 4)
+        # The 4-point quote plus the 6 points Content Factory needs left after it.
+        self.assertEqual(exc.exception.payload["required_points"], 10)
+        self.assertEqual(exc.exception.payload["cost_points"], 4)
         self.assertEqual(exc.exception.payload["current_balance"], 3)
         mock_post.assert_not_called()
+
+    @patch("integrations.services.article_generation.http_requests.post")
+    def test_trigger_discovery_refuses_a_charge_that_would_leave_less_than_the_floor(self, mock_post):
+        paid_org = Organization.objects.create(domain="example.com", name="Paid Org")
+        OrganizationContentConfig.objects.create(organization=paid_org, github_repo=self.repo_name)
+        self.user.points_account.balance = 6
+        self.user.points_account.save(update_fields=["balance"])
+
+        article_request = self._article_request(
+            domain="example.com",
+            topic=None,
+            target_keyword="",
+            client_request_id="content-factory-paid-discovery-under-floor",
+        )
+
+        with self.settings(CONTENT_FACTORY_API_KEY="test-key"):
+            with self.assertRaises(InsufficientRooPointsError) as exc:
+                trigger_article_generation(self.slack_user_id, article_request)
+
+        self.assertEqual((exc.exception.payload["required_points"], exc.exception.payload["shortfall_points"]), (10, 4))
+        mock_post.assert_not_called()
+        self.user.points_account.refresh_from_db()
+        self.assertEqual(self.user.points_account.balance, 6)
 
     @patch("integrations.services.article_generation.http_requests.post")
     def test_trigger_generation_stores_thread_context_without_forwarding_it(self, mock_post):

@@ -356,6 +356,304 @@ def check_emitters(root=ROOT):
     return errors, rows
 
 
+# F4 (plan 7.5): registry rules and ratchets for the backend's side of the
+# contract. Content Factory's checker owns rules 1, 2 and 4 (its emitters, its
+# exception classes, the canonical registry's owners); this one checks what the
+# backend renders and schedules: rule 3 (one founder state; every ask rendered in
+# both journeys), rule 5 (operator-only remedies), rule 6 (stop codes) and
+# rule 7 (new sweeps and alert rules ship with a shadow flag and a history horizon).
+RULES_PATH = "contracts/backend-registry-rules.json"
+RULES_KEYS = frozenset({"schema_version", "about", "ratchets", "render_gaps", "operator_only_codes", "sweeps"})
+RATCHET_KEYS = frozenset({"stop_codes", "render_gaps", "grandfathered_sweeps"})
+STOP_COPY_IDS = frozenset({"stopped", "fixing"})
+WORKING_COPY_PREFIXES = ("working", "done_copy_ready")
+JOURNEY_PATH = "content_factory/founder_journey.py"
+JOURNEY_P2_PATH = "content_factory/founder_journey_p2.py"
+LEGACY_STATUS_PATH = "content_factory/website_status.py"
+REGISTRY_POLICY_PATH = "content_factory/registry_policy.py"
+DEPLOY_VALIDATOR_PATH = "scripts/validate_articles_deploy_config.py"
+SETTINGS_PATH = "mlai/settings.py"
+SWEEP_SOURCES = {"self_heal": "content_factory/self_heal_sweeps.py", "founder_journey": "content_factory/founder_journey_sweeps.py",
+                 "alert_rule": "content_factory/staff_alert_rules.py"}
+HORIZON_READERS = {"ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE": "alerts_since("}
+
+
+def _literal(tree, name, *, function=None):
+    """A module-level (or one function's) literal assignment, or the keys of a non-literal dict."""
+    scope = tree
+    if function is not None:
+        scope = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == function), None)
+        if scope is None:
+            return None
+    for node in ast.walk(scope):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
+        if any(isinstance(target, ast.Name) and target.id == name for target in targets) and node.value is not None:
+            value = node.value.args[0] if isinstance(node.value, ast.Call) and node.value.args else node.value
+            try:
+                return ast.literal_eval(value)
+            except ValueError:
+                if isinstance(value, ast.Dict):
+                    return {key.value: None for key in value.keys if isinstance(key, ast.Constant)}
+                return None
+    return None
+
+
+def _dict_keys_with(tree, member):
+    """Keys of the first dict literal in ``tree`` that has ``member`` as a key."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict) and any(isinstance(key, ast.Constant) and key.value == member for key in node.keys):
+            return {key.value for key in node.keys if isinstance(key, ast.Constant)}
+    return set()
+
+
+def _string_constants(tree):
+    return {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+
+
+def _policy_stops(registry, policy):
+    value = registry.get("policies", {}).get(policy)
+    return isinstance(value, dict) and value.get("mode") == "stop"
+
+
+def founder_state(registry, entry):
+    """Rule 3: ``ask``, ``working`` or ``fixing`` for one registry entry, or (None, reason)."""
+    copy_id = entry.get("founder_copy_id")
+    if entry.get("failure_class") == "needs_user":
+        return ("ask", None) if isinstance(copy_id, str) and copy_id.startswith("ask_") else (None, "an ask needs an ask copy id")
+    if _policy_stops(registry, entry.get("retry_policy")):
+        if copy_id in STOP_COPY_IDS:
+            return "fixing", None
+        return None, ("working copy paired with a non-retryable stop" if isinstance(copy_id, str)
+                      and copy_id.startswith(WORKING_COPY_PREFIXES) else f"stop with copy {copy_id}")
+    if isinstance(copy_id, str) and (copy_id.startswith(WORKING_COPY_PREFIXES) or copy_id == "fixing"):
+        return ("fixing" if copy_id == "fixing" else "working"), None
+    return None, f"copy {copy_id} on a code the engine still acts on"
+
+
+def journey_facts(root):
+    """What each journey renders, read statically from the backend's own modules."""
+    def tree(path):
+        return ast.parse((root / path).read_text(), filename=path)
+    journey, journey_p2, legacy, policy = (tree(path) for path in (JOURNEY_PATH, JOURNEY_P2_PATH, LEGACY_STATUS_PATH,
+                                                                    REGISTRY_POLICY_PATH))
+    legacy_actions = _literal(legacy, "OWNER_ACTIONS") or set()
+    legacy_labels = _literal(legacy, "labels", function="_action") or {}
+    return {"founder_asks": set(_literal(journey, "FOUNDER_ASKS") or ()),
+            "retired": set(_literal(journey, "RETIRED_ACTIONS") or ()),
+            "ask_copy": _dict_keys_with(journey_p2, "ask_review_draft"),
+            # An ask's copy row is in founder_journey_p2's ask table or, for the
+            # P1 path, founder_journey's COPY under the bare action id.
+            "copy_strings": _string_constants(journey_p2) | {f"ask_{key}" for key in _literal(journey, "COPY") or {}},
+            "legacy_wire": _literal(policy, "LEGACY_WIRE_ACTION_IDS") or {},
+            "legacy_rendered": set(legacy_actions) & set(legacy_labels)}
+
+
+def ask_actions(registry, overlay):
+    """Every action a founder can be asked for in either registry view, aliases resolved."""
+    aliases = registry.get("action_aliases", {})
+    actions = {}
+    for entry in registry.get("codes", []):
+        if entry.get("failure_class") == "needs_user" and entry.get("action_id"):
+            actions.setdefault(aliases.get(entry["action_id"], entry["action_id"]), set()).add(entry["code"])
+    for code, values in (overlay or {}).items():
+        if isinstance(values, dict) and values.get("failure_class") == "needs_user" and values.get("action_id"):
+            actions.setdefault(aliases.get(values["action_id"], values["action_id"]), set()).add(code)
+    return actions
+
+
+def render_gaps(registry, overlay, facts):
+    """Rule 3: (journey, action) pairs where a founder ask has no rendered action."""
+    gaps = set()
+    for action in ask_actions(registry, overlay):
+        if action not in facts["founder_asks"] and action not in facts["retired"]:
+            gaps.add(("new_journey", action))
+        elif (action in facts["founder_asks"] and action not in facts["retired"]
+              and f"ask_{action}" not in facts["ask_copy"] | facts["copy_strings"]):
+            gaps.add(("new_journey_copy", action))
+        wire = facts["legacy_wire"].get(action, action)
+        # A None wire id travels without an id: old builds and mobile render the fallback card.
+        if wire is not None and wire not in facts["legacy_rendered"]:
+            gaps.add(("legacy_journey", action))
+    return gaps
+
+
+def founder_state_errors(registry, facts):
+    errors = []
+    for entry in registry.get("codes", []):
+        state, problem = founder_state(registry, entry)
+        if state is None:
+            errors.append(f"{entry.get('code')}: no single founder state ({problem})")
+        copy_id = entry.get("founder_copy_id")
+        if isinstance(copy_id, str) and copy_id not in facts["copy_strings"]:
+            errors.append(f"{entry.get('code')}: founder copy {copy_id} is not rendered by {JOURNEY_P2_PATH}")
+    return errors
+
+
+def render_gap_errors(registry, overlay, facts, declared, ratchet):
+    errors = []
+    found = render_gaps(registry, overlay, facts)
+    listed = set()
+    for entry in declared if isinstance(declared, list) else []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("reason"), str) or len(entry["reason"].strip()) < 20:
+            errors.append(f"{RULES_PATH}: a render_gaps entry needs journey, action and a reason"); continue
+        key = (entry.get("journey"), entry.get("action"))
+        listed.add(key)
+        if key not in found:
+            errors.append(f"{RULES_PATH}: stale render gap {key[0]} {key[1]} (it is rendered now)")
+    for journey, action in sorted(found - listed):
+        errors.append(f"ask {action}: not rendered in the {journey.replace('_', ' ')} (founder_journey FOUNDER_ASKS, "
+                      f"founder_journey_p2 ask copy, website_status OWNER_ACTIONS and labels)")
+    errors.extend(ratchet_count_errors("render_gaps", len(found & listed), ratchet))
+    return errors
+
+
+def operator_only_errors(registry, overlay, codes):
+    """Rule 5: a code only staff can repair is never a founder ask in either view."""
+    errors = []
+    by_code = {entry["code"]: entry for entry in registry.get("codes", [])}
+    for code in codes if isinstance(codes, list) else []:
+        if code not in by_code:
+            errors.append(f"{RULES_PATH}: stale operator-only code {code}"); continue
+        for view, values in (("v2", by_code[code]), ("pre_p2", (overlay or {}).get(code))):
+            if isinstance(values, dict) and values.get("failure_class") == "needs_user":
+                errors.append(f"{code}: an operator-only remedy is a founder ask in the {view} view")
+    return errors
+
+
+def stop_code_count(registry):
+    """Rule 6: codes whose policy stops."""
+    return sum(1 for entry in registry.get("codes", []) if _policy_stops(registry, entry.get("retry_policy")))
+
+
+def ratchet_count_errors(name, current, ratchet):
+    if type(ratchet) is not int or ratchet < 0:
+        return [f"{RULES_PATH}: ratchets.{name} must be a non-negative integer"]
+    if current > ratchet:
+        return [f"{name}: {current} exceeds the ratchet of {ratchet}; it may only fall"]
+    if current < ratchet:
+        return [f"{name} ratchet: only {current} remain; lower ratchets.{name} from {ratchet} to {current}"]
+    return []
+
+
+def scheduled_sweeps(root):
+    """Rule 7: every scheduled sweep and global alert rule, by registry name."""
+    names = set()
+    for kind, path in SWEEP_SOURCES.items():
+        tree = ast.parse((root / path).read_text(), filename=path)
+        if kind == "self_heal":
+            names |= {f"self_heal:{row[0]}" for row in _literal(tree, "SWEEPS") or ()}
+        elif kind == "founder_journey":
+            names |= {f"founder_journey:{row}" for row in _literal(tree, "SWEEPS") or ()}
+        else:
+            names |= {f"alert_rule:{name}" for name in _literal(tree, "GLOBAL_RULES") or {}}
+    return names
+
+
+def _sweep_module(root, name):
+    kind, _, rest = name.partition(":")
+    if kind == "self_heal":
+        tree = ast.parse((root / SWEEP_SOURCES["self_heal"]).read_text())
+        module = next((row[1] for row in _literal(tree, "SWEEPS") or () if row[0] == rest), None)
+    elif kind == "founder_journey":
+        module = rest.partition(":")[0]
+    else:
+        return root / SWEEP_SOURCES["alert_rule"]
+    return root / (module.replace(".", "/") + ".py") if module else None
+
+
+def sweep_errors(root, declared, ratchet):
+    """Rule 7: a sweep or alert rule not grandfathered names a shadow flag and a history horizon.
+
+    Both must be settings a release can install (the deploy config validator's
+    keys) and defined in mlai/settings.py, and the sweep's module must read them.
+    A read-only digest (``"digest": true``, one bounded summary per period, no
+    per-row alerts) names its shadow flag but no history horizon.
+    """
+    errors = []
+    if not isinstance(declared, dict):
+        return [f"{RULES_PATH}: sweeps must be an object"]
+    validator = ast.parse((root / DEPLOY_VALIDATOR_PATH).read_text())
+    flag_keys = set(_literal(validator, "FLAG_KEYS") or ())
+    release_keys = flag_keys | {node.value for node in ast.walk(validator) if isinstance(node, ast.Constant)
+                                and isinstance(node.value, str) and node.value.endswith("_SINCE")}
+    settings_text = (root / SETTINGS_PATH).read_text()
+    found = scheduled_sweeps(root)
+    grandfathered = 0
+    for name in sorted(found - set(declared)):
+        errors.append(f"{name}: a new sweep or alert rule must ship with a shadow flag and a history horizon "
+                      f"({RULES_PATH} sweeps)")
+    for name, entry in sorted(declared.items()):
+        if name not in found:
+            errors.append(f"{RULES_PATH}: stale sweep {name}"); continue
+        if not isinstance(entry, dict) or not isinstance(entry.get("reason"), str) or len(entry["reason"].strip()) < 20:
+            errors.append(f"{name}: a sweep entry needs a reason"); continue
+        if entry.get("grandfathered") is True:
+            grandfathered += 1
+            continue
+        flag, horizon = entry.get("shadow_flag"), entry.get("history_horizon")
+        module = _sweep_module(root, name)
+        source = module.read_text() if module is not None and module.is_file() else ""
+        if not isinstance(flag, str) or flag not in flag_keys or f"{flag} = " not in settings_text:
+            errors.append(f"{name}: shadow_flag must be a release-installable flag ({DEPLOY_VALIDATOR_PATH} FLAG_KEYS) "
+                          f"defined in {SETTINGS_PATH}")
+        elif flag not in source:
+            errors.append(f"{name}: the sweep's module does not read its shadow flag {flag}")
+        if entry.get("digest") is True and horizon is None:
+            # A read-only digest posts one bounded summary per period, never one
+            # alert per historical row, so it has no history to hold back; it still
+            # needs its shadow flag (above).
+            continue
+        if not isinstance(horizon, str) or horizon not in release_keys or f"{horizon} = " not in settings_text:
+            errors.append(f"{name}: history_horizon must be a release-installable *_SINCE setting defined in {SETTINGS_PATH}")
+        elif horizon not in source and HORIZON_READERS.get(horizon, "\0") not in source:
+            errors.append(f"{name}: the sweep's module does not read its history horizon {horizon}")
+    errors.extend(ratchet_count_errors("grandfathered_sweeps", grandfathered, ratchet))
+    return errors
+
+
+def ratchet_regressions(current, base):
+    """Ratchets only fall: a value above the base revision's value is an error."""
+    return [f"ratchet {name} rose from {base[name]} to {value}; ratchets may only fall"
+            for name, value in sorted(current.items())
+            if type(value) is int and type(base.get(name)) is int and value > base[name]]
+
+
+def base_ratchets(root, ref):
+    """``ratchets`` of the rules file at git revision ``ref``; an unknown revision is an error."""
+    import subprocess
+    verify = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                            capture_output=True, text=True)
+    if verify.returncode:
+        raise ContractCheckError("ratchet_base_unknown_revision")
+    shown = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{RULES_PATH}"], capture_output=True, text=True)
+    if shown.returncode:
+        return {}
+    value = json.loads(shown.stdout).get("ratchets")
+    return value if isinstance(value, dict) else {}
+
+
+def registry_rule_errors(root=ROOT, registry=None):
+    """F4 rules 3, 5, 6 and 7 over ``root``."""
+    rules_path = root / RULES_PATH
+    if not rules_path.is_file():
+        return [f"{RULES_PATH}: missing; the F4 registry rules need it"]
+    rules = json.loads(rules_path.read_text())
+    if not isinstance(rules, dict) or set(rules) != RULES_KEYS:
+        return [f"{RULES_PATH}: must hold exactly {', '.join(sorted(RULES_KEYS))}"]
+    ratchets = rules["ratchets"]
+    if not isinstance(ratchets, dict) or set(ratchets) != RATCHET_KEYS:
+        return [f"{RULES_PATH}: ratchets must hold exactly {', '.join(sorted(RATCHET_KEYS))}"]
+    registry = registry if registry is not None else json.loads((root / ARTIFACTS[0]).read_text())
+    overlay = json.loads((root / OVERLAY_PATH).read_text())
+    facts = journey_facts(root)
+    errors = founder_state_errors(registry, facts)
+    errors.extend(render_gap_errors(registry, overlay, facts, rules["render_gaps"], ratchets["render_gaps"]))
+    errors.extend(operator_only_errors(registry, overlay, rules["operator_only_codes"]))
+    errors.extend(ratchet_count_errors("stop_codes", stop_code_count(registry), ratchets["stop_codes"]))
+    errors.extend(sweep_errors(root, rules["sweeps"], ratchets["grandfathered_sweeps"]))
+    return errors
+
+
 def describe_drift(path, local, peer):
     """Report how the vendored copy differs from the pinned Content Factory copy."""
     if path != ARTIFACTS[0]:
@@ -424,11 +722,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--inventory", action="store_true")
     parser.add_argument("--remote", action="store_true")
+    parser.add_argument("--ratchet-base", help="git revision whose F4 ratchets this tree may not exceed")
     args = parser.parse_args()
     if args.inventory:
         print(json.dumps(inventory(), sort_keys=True, indent=2)); return 0
     try:
         errors, rows = check_emitters()
+        errors.extend(registry_rule_errors())
+        if args.ratchet_base:
+            rules = json.loads((ROOT / RULES_PATH).read_text())
+            errors.extend(ratchet_regressions(rules.get("ratchets", {}), base_ratchets(ROOT, args.ratchet_base)))
         drift = verify_vendor(remote=args.remote, token=os.getenv("CONTENT_FACTORY_CONTRACT_READ_TOKEN"))
         if errors:
             print("\n".join(errors)); return 1

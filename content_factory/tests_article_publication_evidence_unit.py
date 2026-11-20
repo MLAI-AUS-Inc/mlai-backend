@@ -1265,13 +1265,27 @@ class UnrecoverableFailureRefundTests(SimpleTestCase):
             with self.subTest(label), self.assertRaises(ValueError):
                 cancellation_receipt(self.run, {"article_cancellation_v1": self.worker_receipt(scope=scope)})
 
+    def test_operator_only_remedy_still_owes_the_charge_back(self):
+        """F4 rule 5: CF stops marking an operator-only remedy ``requires_user_action``; the refund stays owed."""
+        from .article_publication_evidence import OPERATOR_ONLY_NEXT_ACTIONS, unrecoverable_refund_code
+        self.assertEqual(OPERATOR_ONLY_NEXT_ACTIONS, {"repair_corpus_adapter", "restore_complete_production_corpus"})
+        self.run.result.update({"requires_user_action": False,
+            "failure": {**self.run.result["failure"], "requires_user_action": False}})
+        self.assertEqual(unrecoverable_refund_code(self.run), "CORPUS_INCOMPLETE")
+        self.assertEqual(self.queue().queued, 1)
+        with self.subTest("another_remedy_without_user_action_keeps_charge"):
+            self.setUp()
+            self.run.result.update({"requires_user_action": False, "failure": {**self.run.result["failure"],
+                "requires_user_action": False, "next_action": "monitor_repair"}})
+            self.assertIsNone(unrecoverable_refund_code(self.run))
+
     def test_recoverable_delivered_reused_or_unpaid_failure_keeps_charge(self):
         from .article_publication_evidence import unrecoverable_refund_code
         cases = (
             ("resumable", {}, {}, {"resume_available": True}),
             ("retryable", {"retryable": True, "failure": {**self.run.result["failure"], "retryable": True}}, {}, {}),
-            ("no_user_action", {"requires_user_action": False,
-                "failure": {**self.run.result["failure"], "requires_user_action": False}}, {}, {}),
+            ("no_user_action", {"requires_user_action": False, "failure": {**self.run.result["failure"],
+                "requires_user_action": False, "next_action": "monitor_repair"}}, {}, {}),
             ("retry_offered", {"retry_available": True}, {}, {}),
             ("recovery_scheduled", {"recovery": {"state": "pending", "step": "plan_article"}}, {}, {}),
             ("recovery_intent", {"recovery_intents": {"plan_article": {"state": "pending"}}}, {}, {}),

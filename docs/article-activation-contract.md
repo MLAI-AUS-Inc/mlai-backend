@@ -128,6 +128,25 @@ requirements. Once the current target verifies, the founder's connection summary
 clears the historical data-removal notice. The stored deletion epoch continues
 to fence callbacks from before removal.
 
+The worker's publish targets are projected from the current-generation target
+row, not only from the `publish_targets` cache, so a push that carries the
+proof forward cannot leave the worker on the old commit while the summary says
+Ready. Sealed, custom, unverified or withdrawn rows keep the cache.
+
+With `ARTICLES_PREPARE_STICKY_STOP_ENABLED` (default on), a stopped
+preparation records what it stopped on (code, class, source, setup paths and
+routes). A later push re-opens it only when that push changes a setup path,
+the articles route or a build manifest, or the stop was transient. Otherwise
+the push's paid source rescan is settled without a scan, from both the push
+handler and the source-reverify worker. An owned setup merge still re-opens.
+Repository scans are budgeted per operation and per organisation per day; at
+the budget the operation is held and staff get one alert. A daily hold lapses
+after a day; the per-operation count starts again once preparation reaches
+Ready, so only a loop that never finishes waits for staff. Preparation
+receipts carry never-reset counters (`tries`, `failures_total`, `child_runs`,
+`stop_streak`) and `owner_can_retry`, which is false while staff hold the
+operation and once the same failure stopped three times.
+
 Article history, a public Stories listing, `articles_scaffolded`, and a merged
 setup PR alone cannot grant permission. Old stored scans lacking this proof
 require a new verification. A changed repository invalidates old drafts;

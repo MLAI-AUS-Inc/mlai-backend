@@ -1,0 +1,28 @@
+{
+  "dynamic_adapters": [
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "_run_result_from_remote",
+      "field": "error_code",
+      "expression": "code",
+      "site_sha256": "da5b5385a5cfdc3a6c8b45db4458fd52561abc4f926c88bb1310b77fc52d1ff1",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.research_minimum_balance",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "A Content Factory run result stored with an error object keeps that object's own error_code (content_factory_refusal_code, a bounded string); it fills only an empty error_code and never replaces one. Strict B1 metadata still goes through validate_failure/resolve_failure before policy.",
+      "test": "content_factory.tests_research_minimum_balance.RefusalCodeTests.test_stored_error_object_lifts_its_code_without_replacing_one"
+    },
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "_queue_content_factory_run_authorized",
+      "field": "error_code",
+      "expression": "refusal_code",
+      "site_sha256": "9a7205bb9f73bac5699068fecea97e863e10ead56827e4712fccf8b1516091e8",
+      "adapter": "audited_v0_observation",
+      "owner": "backend.research_minimum_balance",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "A Content Factory 4xx refusal that is not an explicit dispatch_rejected records the refusal's own error_code (content_factory_refusal_code, a bounded string) so the registry and journey can map it (A18). Strict B1 metadata still goes through validate_failure/resolve_failure before policy.",
+      "test": "content_factory.tests_research_minimum_balance.ResearchMinimumBalanceTests.test_cf_refusal_code_is_the_run_code_for_registry_and_journey"
+    }
+  ]
+}

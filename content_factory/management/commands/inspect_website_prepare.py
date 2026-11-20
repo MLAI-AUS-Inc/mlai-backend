@@ -10,6 +10,7 @@ from content_factory.website_failure_redaction import redact_secret_text
 from content_factory.website_discovery import discovery_snapshot
 
 from content_factory.website_doctor import safe_identifier, safe_code, sha, stamp, number, read_doctor
+from content_factory.website_operations import staff_visible_blockers
 from content_factory import website_goal as goals
 
 
@@ -37,7 +38,7 @@ def inspection_report(connection, config, operations, snapshot, targets, *, scop
         "connection": {"id": safe_identifier(str(connection.pk)), "generation": connection.generation, "state": safe_code(connection.state),
             "repository_id": safe_identifier(str(connection.repository_id)), "installation_id": safe_identifier(str(connection.installation_id)),
             "verified_sha": sha(connection.verified_sha), "observed_sha": sha(observed_sha),
-            "blocker_codes": [code for item in (connection.blockers if isinstance(connection.blockers, list) else [])[:32]
+            "blocker_codes": [code for item in staff_visible_blockers(connection.blockers)[:32]
                 if (code := safe_code(mapping(item).get("code") if isinstance(item, dict) else item))],
             "capabilities": sorted(key for key, value in mapping(connection.capabilities).items() if value is True and safe_code(key))[:32]},
         "operations": reports,

@@ -27,9 +27,23 @@ from .run_state import ARTICLE_WORKFLOWS
 from .website_models import WebsiteConnection
 
 logger = logging.getLogger(__name__)
-STAGES = ('signed_up', 'joined', 'intent', 'startup_created', 'research_done',
+STAGES = ('signed_up', 'joined', 'intent', 'not_on_github', 'startup_created', 'research_done',
           'first_article_started', 'queued', 'draft_ready', 'copied', 'published', 'github_upgraded')
 RESEARCH_WORKFLOWS = ('startup_autofill', 'website_scan', 'repo_scan')
+# E10: the approved onboarding order (plan section 6.8), GitHub first. The
+# per-organisation funnel locates every startup at the first stage it has not
+# reached. ``exited_not_on_github`` is a side exit, counted where it happened.
+APPROVED_STAGES = ('signed_up', 'website_entered', 'exited_not_on_github', 'startup_created', 'github_authorised',
+                   'repo_selected', 'scan_complete', 'readers_approved', 'author_saved', 'articles_page_verified',
+                   'first_article_started', 'draft_ready', 'published', 'article_live')
+# Work that happens before any website is connected (decision D6 keeps the free
+# website check startable then), and lead rows, emitted as their own events so
+# they are visible rather than invisible.
+PRE_CONNECTION_EVENTS = ('website_check_started', 'content_only_article_started')
+LEAD_EVENTS = ('cms_content_lead',)
+EVENT_KINDS = tuple(dict.fromkeys(STAGES + APPROVED_STAGES + PRE_CONNECTION_EVENTS + LEAD_EVENTS))
+SCAN_WORKFLOWS = ('repo_scan', 'content_factory_scan')
+BASELINE_WORKFLOWS = ('website_baseline',)
 MAX_COHORT = 20_000
 
 
@@ -192,7 +206,7 @@ def emit_event(kind, *, user_id=None, organization_id=None, run_id=None, at=None
     Replays have the same event id. Consumers count distinct event ids, while
     funnel conversion counts are reconstructed from the durable source rows.
     """
-    if kind not in STAGES:
+    if kind not in EVENT_KINDS:
         raise ValueError('Unknown founder journey stage.')
     if not getattr(settings, 'MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED', False):
         return
@@ -213,6 +227,12 @@ def journey_funnel(*, since, until, using=DEFAULT_DB_ALIAS):
         date_joined__gte=since, date_joined__lt=until, is_staff=False).values('pk', 'date_joined')[:MAX_COHORT+1])
     if len(users) > MAX_COHORT:
         raise ValueError('Choose a smaller signup window (maximum 20,000 accounts).')
+    # Plan F1: a test account (every startup it has is a marked test
+    # organisation) is not a founder, and a test organisation's facts never count.
+    from .founder_test_orgs import test_only_user_ids, test_organization_ids
+    test_ids = test_organization_ids(using=using)
+    test_users = test_only_user_ids([row['pk'] for row in users], ids=test_ids, using=using)
+    users = [row for row in users if row['pk'] not in test_users]
     facts = {row['pk']: {} for row in users}
     signups = {row['pk']: row['date_joined'] for row in users}
 
@@ -236,9 +256,22 @@ def journey_funnel(*, since, until, using=DEFAULT_DB_ALIAS):
                 # Interests can change after joining. Its original selection time
                 # is available in new event logs, not historic profile rows.
                 mark(profile['user_id'], 'intent')
+    # A21: the not-on-GitHub exit, from its durable lead row (founder_tools.website_leads).
+    from crm.models import Contact
+    from founder_tools.website_leads import LEADS_KEY, REASONS as NOT_ON_GITHUB_REASONS
+    for attributes in Contact.objects.using(using).filter(user_id__in=facts).exclude(attributes={}).values_list(
+            'attributes', flat=True):
+        for lead in mapping(mapping(attributes).get(LEADS_KEY)).values():
+            lead = mapping(lead)
+            # B25 staff "can't be done yet" leads share the row but are not this exit.
+            if (lead.get('version') == 1 and lead.get('userId') in facts
+                    and lead.get('reason', 'not_on_github') in NOT_ON_GITHUB_REASONS):
+                mark(lead['userId'], 'not_on_github', lead.get('createdAt'))
     owners = defaultdict(set)
     for row in VibeRaisingCompany.objects.using(using).filter(profile__user_id__in=facts).values(
             'profile__user_id', 'organization_id', 'created_at'):
+        if row['organization_id'] in test_ids:
+            continue
         mark(row['profile__user_id'], 'startup_created', row['created_at'])
         if row['organization_id']:
             owners[row['organization_id']].add(row['profile__user_id'])
@@ -318,9 +351,160 @@ def journey_funnel(*, since, until, using=DEFAULT_DB_ALIAS):
         return durations[max(0, math.ceil(len(durations)*fraction)-1)] if durations else None
     return {'version': 1, 'since': since.isoformat(), 'until': until.isoformat(),
         'observedAt': timezone.now().isoformat(), 'stages': counts,
+        'approved': organization_funnel(organization_ids=list(owners), using=using),
         'timeToFirstDraft': {'p50Seconds': percentile(.5), 'p90Seconds': percentile(.9),
             'sampleSize': len(durations), 'unknownTimingUsers': counts['draft_ready']['users']-len(durations)},
         'methodology': {'cohort': 'Non-staff accounts signed up in [since, until); conversions observed through now.',
             'attribution': 'Startup facts are attributed to its recorded founder accounts; team members are not inferred.',
             'percentile': 'Nearest rank from proved readiness timestamps; mutable run updated_at is never used.',
             'unknowns': 'Historic intent selections and legacy draft/research completion clocks can be unknown. No workshop exclusion is inferred.'}}
+
+
+def _owner_leads(owner_ids, *, using):
+    """Lead reasons per owner account, from the durable lead rows (A21, C15)."""
+    from crm.models import Contact
+    from founder_tools.website_leads import LEADS_KEY
+    reasons = defaultdict(set)
+    for attributes in Contact.objects.using(using).filter(user_id__in=owner_ids).exclude(attributes={}).values_list(
+            'attributes', flat=True):
+        for lead in mapping(mapping(attributes).get(LEADS_KEY)).values():
+            lead = mapping(lead)
+            if lead.get('version') == 1 and lead.get('userId') in owner_ids:
+                reasons[lead['userId']].add(str(lead.get('reason') or 'not_on_github'))
+    return reasons
+
+
+def _host_class(config):
+    profile = mapping(mapping(mapping(getattr(config, 'pillar_strategy', None)).get('founder_first_profile')).get('siteProfile'))
+    value = str(profile.get('hostClass') or profile.get('platform') or '').strip().lower()
+    return value[:40] if value else 'unknown'
+
+
+def organization_facts(organization_ids=None, *, using=DEFAULT_DB_ALIAS):
+    """Per-organisation approved-stage facts for every organisation with a startup. Read-only.
+
+    Derived from current rows; a fact with no recorded time stays without one.
+    """
+    from organizations.models import Organization
+    from founder_tools.website_leads import REASONS as NOT_ON_GITHUB_REASONS
+    from .founder_journey_cohort import organization_has_website
+    from .founder_setup_state import authors_saved, readers_approved
+    from .models import ArticlePublishStatus
+    from .website_models import WebsiteConnectionTarget, WebsiteScanSnapshot
+    from .founder_test_orgs import exclude_test_orgs
+    # Plan F1: a marked test organisation is never a founder's startup.
+    companies = exclude_test_orgs(VibeRaisingCompany.objects.using(using).filter(organization__isnull=False), using=using)
+    if organization_ids is not None:
+        companies = companies.filter(organization_id__in=list(organization_ids))
+    owners = defaultdict(set)
+    for org_id, user_id, is_staff in companies.values_list('organization_id', 'profile__user_id', 'profile__user__is_staff'):
+        owners[org_id]
+        if user_id and not is_staff:
+            owners[org_id].add(user_id)
+    orgs = {org.pk: org for org in Organization.objects.using(using).filter(pk__in=list(owners))}
+    configs = {config.organization_id: config for config in
+               OrganizationContentConfig.objects.using(using).filter(organization_id__in=list(orgs))}
+    leads = _owner_leads({user for users in owners.values() for user in users}, using=using)
+    connections = defaultdict(list)
+    for row in WebsiteConnection.objects.using(using).filter(organization_id__in=list(orgs)).values(
+            'organization_id', 'github_repo', 'created_at'):
+        connections[row['organization_id']].append(row)
+    first_connection = {org_id: min(row['created_at'] for row in rows) for org_id, rows in connections.items()}
+    scanned = set(WebsiteScanSnapshot.objects.using(using).filter(connection__organization_id__in=list(orgs))
+                  .values_list('connection__organization_id', flat=True))
+    verified = set(WebsiteConnectionTarget.objects.using(using).filter(
+        connection__organization_id__in=list(orgs), verified_at__isnull=False).values_list(
+        'connection__organization_id', flat=True))
+    runs = defaultdict(list)
+    for run in ContentFactoryRun.objects.using(using).filter(organization_id__in=list(orgs), workflow__in=(
+            tuple(ARTICLE_WORKFLOWS) + SCAN_WORKFLOWS + BASELINE_WORKFLOWS)).only(
+            'organization_id', 'workflow', 'status', 'created_at', 'run_request', 'result'):
+        runs[run.organization_id].append(run)
+    published = set(WrittenArticle.objects.using(using).filter(organization_id__in=list(orgs)).filter(
+        publish_status__in=[ArticlePublishStatus.MERGED, ArticlePublishStatus.LIVE]).values_list('organization_id', flat=True))
+    published |= set(WrittenArticle.objects.using(using).filter(organization_id__in=list(orgs), published_at__isnull=False)
+                     .values_list('organization_id', flat=True))
+    live = set(WrittenArticle.objects.using(using).filter(organization_id__in=list(orgs), live_verified_at__isnull=False)
+               .values_list('organization_id', flat=True))
+    facts = {}
+    for org_id, org in orgs.items():
+        config = configs.get(org_id)
+        reasons = set().union(*(leads.get(user, set()) for user in owners[org_id])) if owners[org_id] else set()
+        org_runs = runs.get(org_id, [])
+        connected_at = first_connection.get(org_id)
+        article_runs = [run for run in org_runs if run.workflow in ARTICLE_WORKFLOWS]
+
+        def before_connection(run, connected_at=connected_at):
+            return connected_at is None or run.created_at < connected_at
+
+        reached = {
+            'signed_up': bool(owners[org_id]),
+            'website_entered': organization_has_website(org),
+            'exited_not_on_github': bool(reasons & set(NOT_ON_GITHUB_REASONS)),
+            'startup_created': True,
+            'github_authorised': bool(connections.get(org_id)),
+            'repo_selected': any(str(row['github_repo'] or '').strip() for row in connections.get(org_id, ())),
+            'scan_complete': org_id in scanned or any(
+                run.workflow in SCAN_WORKFLOWS and run.status == 'completed' for run in org_runs),
+            'readers_approved': readers_approved(config),
+            'author_saved': authors_saved(org, config),
+            'articles_page_verified': org_id in verified,
+            'first_article_started': bool(article_runs),
+            'draft_ready': has_first_draft(org),
+            'published': org_id in published or org_id in live,
+            'article_live': org_id in live,
+        }
+        facts[org_id] = {
+            'reached': reached,
+            'hostClass': _host_class(config),
+            'preConnection': {
+                'website_check_started': any(run.workflow in BASELINE_WORKFLOWS and before_connection(run)
+                                             for run in org_runs),
+                'content_only_article_started': any(
+                    before_connection(run) and str(mapping(run.run_request).get('delivery_mode')
+                                                   or mapping(run.result).get('delivery_mode') or '') == 'content_only'
+                    for run in article_runs),
+            },
+            'leads': {'not_on_github': reached['exited_not_on_github'], 'cms_content': 'cms_content' in reasons},
+        }
+    return facts
+
+
+def stuck_at(reached):
+    """The first approved stage this organisation has not reached, or ``None`` when it reached them all.
+
+    ``exited_not_on_github`` is a side exit: an organisation that took it and
+    never connected is located there; it is never a stage anyone must reach.
+    """
+    if reached.get('exited_not_on_github') and not reached.get('repo_selected'):
+        return 'exited_not_on_github'
+    return next((stage for stage in APPROVED_STAGES
+                 if stage != 'exited_not_on_github' and not reached.get(stage)), None)
+
+
+def organization_funnel(organization_ids=None, *, using=DEFAULT_DB_ALIAS):
+    """E10: organisations per approved stage, where the unconnected ones stopped, and pre-connection work."""
+    facts = organization_facts(organization_ids, using=using)
+    stages = {stage: {'organizations': sum(bool(row['reached'][stage]) for row in facts.values())}
+              for stage in APPROVED_STAGES}
+    stuck = {stage: 0 for stage in APPROVED_STAGES}
+    not_connected = {stage: 0 for stage in APPROVED_STAGES}
+    host_classes = defaultdict(int)
+    for row in facts.values():
+        where = stuck_at(row['reached'])
+        if where is not None:
+            stuck[where] += 1
+            if not row['reached']['repo_selected']:
+                not_connected[where] += 1
+        if row['reached']['website_entered']:
+            host_classes[row['hostClass']] += 1
+    return {
+        'version': 1, 'order': list(APPROVED_STAGES), 'organizations': len(facts), 'stages': stages,
+        'stuckAt': stuck,
+        'notConnected': {'organizations': sum(not row['reached']['repo_selected'] for row in facts.values()),
+                         'stuckAt': not_connected},
+        'websiteHostClasses': dict(sorted(host_classes.items())),
+        'preConnection': {kind: sum(bool(row['preConnection'][kind]) for row in facts.values())
+                          for kind in PRE_CONNECTION_EVENTS},
+        'leads': {kind: sum(bool(row['leads'][kind]) for row in facts.values()) for kind in ('not_on_github', 'cms_content')},
+    }

@@ -37,6 +37,8 @@ class ArticlesDeployConfigTests(unittest.TestCase):
                   **{key: "600" for key in POSITIVE_KEYS},
                   "ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE": "2026-10-30",
                   "ARTICLES_WORKSHOP_WINDOWS": WINDOWS,
+                  "ARTICLES_RUN_CONTROL_MODEL_USD": "2.50",
+                  "ARTICLES_RUN_CONTROL_MODEL_TOKENS": "400000",
                   **JOURNEY_VALUES})
         validate({"MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT": "2026-11-07T22:00Z",
                   "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE": "disabled",
@@ -49,6 +51,23 @@ class ArticlesDeployConfigTests(unittest.TestCase):
         validate({"ARTICLES_WORKSHOP_WINDOWS":
                   '[{"start":"2026-11-08T09:00+11:00","end":"2026-11-08T14:00+11:00"},'
                   '{"start":"2026-11-15T09:00:00+11:00","end":"2026-11-15T14:00:00+11:00"}]'})
+
+    def test_sdk_control_needs_a_positive_allowance_in_the_same_release(self):
+        # Plan B14: the switch never ships without the backend's model allowance.
+        for allowance in ({}, {"ARTICLES_RUN_CONTROL_MODEL_USD": "2.50"},
+                          {"ARTICLES_RUN_CONTROL_MODEL_TOKENS": "400000"}):
+            with self.subTest(allowance=allowance), self.assertRaisesRegex(ValueError, "needs positive"):
+                validate({"ARTICLES_RUN_SDK_CONTROL_ENABLED": "true", **allowance})
+        for key, value in (("ARTICLES_RUN_CONTROL_MODEL_USD", "0"), ("ARTICLES_RUN_CONTROL_MODEL_USD", "0.0"),
+                           ("ARTICLES_RUN_CONTROL_MODEL_USD", "-1"), ("ARTICLES_RUN_CONTROL_MODEL_USD", "1e3"),
+                           ("ARTICLES_RUN_CONTROL_MODEL_TOKENS", "0"), ("ARTICLES_RUN_CONTROL_MODEL_TOKENS", "20000001")):
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError) as caught:
+                validate({"ARTICLES_RUN_SDK_CONTROL_ENABLED": "true", "ARTICLES_RUN_CONTROL_MODEL_USD": "2.50",
+                          "ARTICLES_RUN_CONTROL_MODEL_TOKENS": "400000", key: value})
+            self.assertTrue(str(caught.exception).startswith(key + " must be"))
+        validate({"ARTICLES_RUN_SDK_CONTROL_ENABLED": "false"})
+        validate({"ARTICLES_RUN_SDK_CONTROL_ENABLED": "true", "ARTICLES_RUN_CONTROL_MODEL_USD": "0.75",
+                  "ARTICLES_RUN_CONTROL_MODEL_TOKENS": "1"})
 
     def test_malformed_settings_fail_without_echoing_them(self):
         for key, value in (("ARTICLES_FREE_FIRST_ARTICLE_ENABLED", "yes-sensitive"),

@@ -119,6 +119,20 @@ class LiveUrlVerificationTests(LiveUrlFixture, TestCase):
             self.assertTrue(durable_integration_evidence(built.config, connection)["verified"])
             self.assertTrue(live_deployment_verified(connection, target))
 
+    def test_live_verification_clears_a_stale_scan_prompt(self):
+        """Tala Thrive (org 30, 18 Nov 2026): verified and Ready but still listing scan_required."""
+        built, connection, target = self.new_journey_site()
+        connection.blockers = [{"code": "scan_required", "message": "Scan the current repository.", "retryable": False},
+                               {"code": "website_data_deleted", "deletion_epoch": 4}]
+        connection.save(update_fields=["blockers"])
+        with self.fetch({"https://banksia.studio/blog": LISTING}):
+            verify_live_url(built.config, target, setup_run_id="setup-1")
+        connection.refresh_from_db()
+        self.assertEqual([row["code"] for row in connection.blockers], ["website_data_deleted"])
+        from .website_operations import deletion_epoch, staff_visible_blockers
+        self.assertEqual(deletion_epoch(connection), 4)
+        self.assertEqual(staff_visible_blockers(connection.blockers), [])
+
     def test_one_live_article_is_compared_with_its_saved_body(self):
         built, connection, target = self.new_journey_site()
         url = "https://banksia.studio/blog/first-post"

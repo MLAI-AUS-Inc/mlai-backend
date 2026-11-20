@@ -1,0 +1,1859 @@
+{
+  "schema_version": 1,
+  "description": "Feature-flag register (plan step F15), checked in CI by scripts/check_flag_register.py. One row per flag-shaped setting the code reads (see scan.pattern): the default as the code declares it ((unset) when the read has no literal default, (varies) when read sites disagree), an owning team or role (\"platform\" when unknown), and an expiry: an ISO date by which the owner removes the flag or moves the date with a reason, or \"permanent\" with a reason for operational settings. Remove a flag and its row together. not_flags lists flag-shaped names that are not settings.",
+  "scan": {
+    "pattern": "^(?:(?:ARTICLES|CONTENT_FACTORY|MY_STARTUP|FOUNDER|FLEET|WEBSITE)_[A-Z0-9_]*[A-Z0-9]|[A-Z][A-Z0-9_]*_(?:ENABLED|ENFORCED|DISABLED|KILL_SWITCH))$",
+    "roots": [
+      ""
+    ],
+    "exclude": [
+      "*/migrations/*",
+      "*/tests/*",
+      "tests/*",
+      "*/test_*.py",
+      "test_*.py",
+      "*/tests_*.py",
+      "scripts/test_*.py",
+      "plans/*",
+      "docs/*",
+      "*/fixtures/*",
+      "scripts/check_flag_register.py"
+    ],
+    "settings_classes": [],
+    "settings_modules": [
+      "mlai/settings.py"
+    ]
+  },
+  "not_flags": [
+    {
+      "name": "CONTENT_FACTORY_ARTICLES_COST_ACCOUNTING_ENABLED",
+      "reason": "Content Factory setting named in the BE rollout inspection matrix; registered in content-factory's flag-register.json, not read here."
+    },
+    {
+      "name": "CONTENT_FACTORY_ARTICLES_DEPENDENCY_CACHE_ENABLED",
+      "reason": "Content Factory setting named in the BE rollout inspection matrix; registered in content-factory's flag-register.json, not read here."
+    },
+    {
+      "name": "CONTENT_FACTORY_ARTICLES_EXISTING_INVENTORY_ENABLED",
+      "reason": "Content Factory setting named in the BE rollout inspection matrix; registered in content-factory's flag-register.json, not read here."
+    },
+    {
+      "name": "CONTENT_FACTORY_ARTICLES_FAILURE_TAXONOMY_EMIT_ENABLED",
+      "reason": "Content Factory setting named in the BE rollout inspection matrix; registered in content-factory's flag-register.json, not read here."
+    },
+    {
+      "name": "CONTENT_FACTORY_ARTICLES_GOAL_USAGE_ENABLED",
+      "reason": "Content Factory setting named in the BE rollout inspection matrix; registered in content-factory's flag-register.json, not read here."
+    },
+    {
+      "name": "CONTENT_FACTORY_ARTICLES_HOSTED_VERIFICATION_ENABLED",
+      "reason": "Content Factory setting named in the BE rollout inspection matrix; registered in content-factory's flag-register.json, not read here."
+    },
+    {
+      "name": "CONTENT_FACTORY_ARTICLES_REPRODUCIBLE_BUILDS_ENABLED",
+      "reason": "Content Factory setting named in the BE rollout inspection matrix; registered in content-factory's flag-register.json, not read here."
+    },
+    {
+      "name": "CONTENT_FACTORY_ARTICLES_SITE_FINGERPRINT_ENABLED",
+      "reason": "Content Factory setting named in the BE rollout inspection matrix; registered in content-factory's flag-register.json, not read here."
+    },
+    {
+      "name": "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_ENABLED",
+      "reason": "Content Factory setting named in the BE rollout inspection matrix; registered in content-factory's flag-register.json, not read here."
+    },
+    {
+      "name": "CONTENT_FACTORY_IMAGE",
+      "reason": "Ledger reference type for article image charges, not a setting."
+    },
+    {
+      "name": "CONTENT_FACTORY_SETUP_DELIVERY_V1_ENABLED",
+      "reason": "Content Factory setting named in the BE rollout inspection matrix; registered in content-factory's flag-register.json, not read here."
+    },
+    {
+      "name": "CONTENT_FACTORY_SETUP_DELIVERY_V1_SEND_ENABLED",
+      "reason": "Content Factory setting named in the BE rollout inspection matrix; registered in content-factory's flag-register.json, not read here."
+    },
+    {
+      "name": "CONTENT_FACTORY_UNAVAILABLE",
+      "reason": "Failure code, not a setting."
+    },
+    {
+      "name": "FOUNDER_ASKS",
+      "reason": "Module constant in content_factory/founder_journey.py that the failure-contract checker reads by AST (F4 rule 3); not a setting."
+    },
+    {
+      "name": "PYTHON_DOTENV_DISABLED",
+      "reason": "Written into a child process environment, not a setting."
+    },
+    {
+      "name": "WEBSITE_SOURCE_CHANGED",
+      "reason": "Failure code, not a setting."
+    }
+  ],
+  "flags": [
+    {
+      "name": "AGENT_RUNTIME_ACTIONS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_COMMUNITY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_DOT_MEMBERS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_DOT_MESSAGING_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_MCP_EVENTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_NATIVE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_NATIVE_GUEST_REPLY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_NATIVE_RENEWAL_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_NATIVE_REPLIES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_PERSONAL_CONTEXT_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_PUBLIC_WEB_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "AGENT_RUNTIME_SLACK_READ_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "APPLE_IAP_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_ARTICLE_RECOVERY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_AUTO_PAGE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_BOOTSTRAP_MEMORY_CI",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_CHANNEL_SWITCH_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_COST_ACCOUNTING_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_DEPLOYMENT_DETECTION_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_DISPATCH_RELIABILITY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_DRAFT_TOOLS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_EXISTING_INVENTORY_DISPLAY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FAILURE_POLICY_V2_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FAILURE_TAXONOMY_ENROLLED_ORGANIZATIONS",
+      "default": "",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FAILURE_TAXONOMY_OBSERVE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FAILURE_TAXONOMY_POLICY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FIRST_ARTICLE_CARD_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FIRST_ARTICLE_GOAL_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK",
+      "default": "20",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Spend or volume ceiling; a guard the plan keeps, not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE",
+      "default": "2026-09-29",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FREE_FIRST_ARTICLE_DAILY_CAP",
+      "default": "0",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Spend or volume ceiling; a guard the plan keeps, not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_FREE_FIRST_ARTICLE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FREE_FIRST_ARTICLE_SPIKE_THRESHOLD",
+      "default": "25",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_FREE_SETUP_AUTOFILL_DAILY_CAP",
+      "default": "5",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Spend or volume ceiling; a guard the plan keeps, not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_FREE_SETUP_BASELINE_DAILY_CAP",
+      "default": "2",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Spend or volume ceiling; a guard the plan keeps, not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_FREE_SETUP_RESEARCH_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_GITHUB_INSTALLATION_WAKES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_GOAL_ACTIVE_SECONDS",
+      "default": "7200",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_GOAL_MODEL_USD",
+      "default": "25",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Spend or volume ceiling; a guard the plan keeps, not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_GOAL_NOTIFICATIONS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY",
+      "default": "",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_GOAL_REPAIRABLE_ATTEMPTS",
+      "default": "6",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_GOAL_TRANSIENT_ATTEMPTS",
+      "default": "20",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_GOAL_WALL_SECONDS",
+      "default": "172800",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_HOSTED_ATTESTATION_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_HOSTED_ENVIRONMENT_RECOVERY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_HOSTED_VERIFICATION_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_LIVE_URL_VERIFICATION_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_MERGE_WORKER_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_MERGE_WORKER_LIMIT",
+      "default": "20",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_NO_CODELESS_TERMINAL_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_NO_GENERIC_STOP_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_OPERATIONAL_ALERTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_PAGE_CONFIDENCE_MARGIN",
+      "default": "0.15",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_PREPARE_STICKY_STOP_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_PROOF_CARRY_FORWARD_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_PUBLISHING_INPUTS_V3_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_READY_ON_MERGE_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_REGISTRY_REFUNDS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_RUN_CONTROL_MODEL_TOKENS",
+      "default": "0",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Spend or volume ceiling; a guard the plan keeps, not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_RUN_CONTROL_MODEL_USD",
+      "default": "0",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Spend or volume ceiling; a guard the plan keeps, not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_RUN_EVENTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_RUN_EVENT_AUTHORITY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_RUN_FACT_AUTHORITY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_RUN_JOB_DUAL_WRITE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_RUN_JOB_READ_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_RUN_JOB_SHADOW_READ_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_RUN_OWNERSHIP_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_RUN_SDK_CONTROL_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SELF_HEAL_LEGACY_ORGANIZATIONS",
+      "default": "",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SELF_HEAL_POLICY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SELF_HEAL_REPORT_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SELF_HEAL_SWEEP_LIMIT",
+      "default": "50",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_SETUP_CONSENT_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SETUP_LADDER_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SITE_FINGERPRINT_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SNAPSHOT_MERGE_BY_MEANING_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SOURCE_FOLLOW_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SOURCE_REPIN_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Spend or volume ceiling; a guard the plan keeps, not a rollout switch."
+    },
+    {
+      "name": "ARTICLES_SOURCE_SYNC_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_STAFF_ALERT_RULES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_STAFF_ESCALATION_LADDER_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_WEBSITE_CONSISTENCY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_WEBSITE_DOCTOR_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_WEBSITE_EVENT_WAKES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_WEBSITE_GOAL_BUDGETS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_WEBSITE_GOAL_ENROLLED_ORGANIZATIONS",
+      "default": "",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_WEBSITE_GOAL_RUNNER_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_WEBSITE_STATUS_V1_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_WEBSITE_STRATEGY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_WORKSHOP_WINDOWS",
+      "default": "[]",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_BRIDGE_PRODUCTION_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_COWORKING_ANNOUNCE_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_CRM_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_DEVICE_AUTH_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_INBOX_ERASURE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_INTRO_WELCOME_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_INVITE_TOKENS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_MEMBER_ACCOUNTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_ONE_STEP_JOIN_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_PASSWORD_AUTH_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_REVIEW_CLEARED_EMAIL_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_ROO_GROUP_DMS_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_SIGNUP_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_STARTUP_UPDATES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_VOLUNTEER_ATTENDANCE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_VOLUNTEER_BOOST_REWARDS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_VOLUNTEER_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_VOLUNTEER_ONE_RECORD_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_VOLUNTEER_RECOGNITION_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_ANALYTICS_FIRST_PARTY_PROXY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_ANALYTICS_REPORTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_ANALYTICS_REPORT_NOTIFICATIONS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_ANALYTICS_SYNC_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_FACTORY_API_KEY",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_ARTICLE_DELIVERY_V1_APPLY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_FACTORY_CALLBACK_CLAIM_TTL_SECONDS",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_CONTRACT_READ_TOKEN",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_DEFAULT_ARTICLE_DELIVERY_MODE",
+      "default": "review_draft",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE",
+      "default": "",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_FACTORY_FRONTEND_URL",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_IMAGE_REGENERATION_COST_POINTS",
+      "default": "",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS",
+      "default": "0",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_LIVE_PREVIEW_START_READ_TIMEOUT_SECONDS",
+      "default": "20",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE",
+      "default": "",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID",
+      "default": "",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_PORTABLE_PREVIEW_REARM",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_FACTORY_PREVIEW_BASE_URL",
+      "default": "",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_PREVIEW_LINK_TTL_SECONDS",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_RECONCILIATION_BATCH_LIMIT",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_RECONCILIATION_PROBE_INTERVAL_MINUTES",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_RECONCILIATION_STALE_MINUTES",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_REDRIVE_AFTER",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_SETUP_DELIVERY_ENROLLED_ORGANIZATIONS",
+      "default": "",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_FACTORY_SETUP_DELIVERY_RECONCILIATION_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_FACTORY_SETUP_DELIVERY_V1_APPLY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_FACTORY_URL",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "CONTENT_FACTORY_WORKFLOW_ORDER_FORMATTING_ADMISSION_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_ISLANDS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CONTENT_ISLANDS_SCHEDULER_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_AUTO_REMINDERS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_DELIVERABILITY_EMAIL_ALERTS_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_ENGAGEMENT_REFRESH_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_GUARDIAN_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_LEGACY_MAILBOX_PATH_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_LIFECYCLE_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_LUMA_SYNC_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_MONITORS_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_PREFLIGHT_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_ROO_DRAFT_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_SEED_HEARTBEAT_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_SEGMENT_BUILDER_V2_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_SENDING_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_SMS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_SUBSTACK_ACTIVITY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_SURBL_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_TRANSACTIONAL_MONITOR_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_URIBL_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_WARMUP_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_WAVES_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CRM_WHATSAPP_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CYBERTEST_ENTRY_LOCAL_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CYBERTEST_ENTRY_PRODUCTION_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CYBERTEST_ENTRY_STAGING_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CYBERTEST_LIVE_BILLING_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CYBERTEST_PERSISTENT_BINDINGS_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "CYBERTEST_PHASED_SCANS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "DAILY_RESEARCH_BILL_WITHOUT_SLACK_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "DAILY_RESEARCH_EMAIL_TOPICS_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "DAILY_RESEARCH_GENERATION_READY_GATE_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "FOUNDER_REENGAGEMENT_SEND_APPROVED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "FOUNDER_RESEARCH_WORKSPACE_CLAIM_HOLD_HOURS",
+      "default": "24",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "FOUNDER_TEST_ORGANIZATION_IDS",
+      "default": "",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (host-only list of marked test organisations, F1), not a rollout switch."
+    },
+    {
+      "name": "FOUNDER_TOOLS_URL",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "FOUNDER_WEBSITE_PREFLIGHT_RATE",
+      "default": "20/minute",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "GUNICORN_MEMORY_PROFILE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "HEALTH_HACK_AI_KILL_SWITCH",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "JOBS_LLM_JUDGE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "JOBS_LLM_LOCATION_CHECK_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "JOBS_SCHEDULER_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "LINEAR_CHANNEL_ISSUE_WRITES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MEETING_ROOM_BOOKING_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MENTORING_GOOGLE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MENTOR_BOOKING_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MENTOR_CALENDAR_GOOGLE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MENTOR_FEEDBACK_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MENTOR_INSTANT_BOOKING_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MENTOR_INVITE_EMAIL_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MESSAGE_SYNC_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MESSAGE_SYNC_OPEN_PRIORITY_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MESSAGE_SYNC_QUIET_HEAD_BACKOFF_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MESSAGE_SYNC_RECENT_HISTORY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MESSAGE_SYNC_UNREAD_PREFETCH_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MLAI_MCP_COMMUNITY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MLAI_MCP_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MLAI_MCP_NATIVE_AGENTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MONTHLY_UPDATE_REMINDERS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MONTHLY_UPDATE_ROO_REMINDERS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_BOOTSTRAP_RATE",
+      "default": "120/minute",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "MY_STARTUP_CANONICAL_ACTION_IDS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_DELIVERY_LINKS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_EMAIL_INVITES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_FOUNDER_JOURNEY_API_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_FOUNDER_JOURNEY_OPT_IN_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS",
+      "default": "",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_FOUNDER_JOURNEY_V2_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT",
+      "default": "",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_GITHUB_CALLBACK_REDIRECTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_ONBOARDING_V3_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT",
+      "default": "",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_ONE_FIELD_START_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_POLL_RATE",
+      "default": "120/minute",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "MY_STARTUP_READ_RATE",
+      "default": "120/minute",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "MY_STARTUP_SHARED_ACCESS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_STAFF_CONSOLE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_TEAM_DOMAIN_DENYLIST",
+      "default": "",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "MY_STARTUP_TEAM_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_TURN_REMINDERS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "MY_STARTUP_WRITE_RATE",
+      "default": "30/minute",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "OFFER_PAGE_CHECK_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ORG_MEMORY_ACTIONS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ORG_MEMORY_ACTION_LINEAR_EXECUTION_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ORG_MEMORY_PUBLICATION_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ORG_MEMORY_QUERY_API_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ORG_MEMORY_QUERY_VECTOR_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ORG_MEMORY_SELECTOR_EXPORT_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "RECONCILIATION_SCHEDULER_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ROO_EVENT_DISCOUNTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ROO_EVENT_DISCOUNT_WORKER_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ROO_FOUNDER_LINK_CHAT_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "SENTRY_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "SLACK_AGENT_BOTS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "SLACK_OWNER_INVENTORY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "STARTUP_PROGRESS_ENABLED",
+      "default": "0",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "STUDIO_REPORT_SOURCE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "TOKENMAXER_FEDERATION_ENABLED",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "VALLEY_MCP_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "VALLEY_MCP_UNIFIED_ALIAS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "WEBSITE_CONNECTION_CANARY_DOMAINS",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "WEBSITE_CONNECTION_WRITE_MODE",
+      "default": "(unset)",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "WEBSITE_VERIFICATION_PAGE_REFRESH_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "XERO_STATEMENT_AUTO_POST_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    }
+  ]
+}

@@ -1,0 +1,439 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mlai.au/contracts/site-capability-record-v1.schema.json",
+  "title": "Site capability record (plan C10): the setup tier a website connection generation reached, why each higher tier was left, and the stored facts behind it. Tier ids are the setup ladder's plus cannot_yet and not_checked; never 'unsupported'.",
+  "version": 1,
+  "$ref": "#/$defs/SiteCapabilityRecord",
+  "$defs": {
+    "SiteTierId": {
+      "type": "string",
+      "enum": [
+        "native",
+        "agentic",
+        "static_dropin",
+        "content_files",
+        "cannot_yet",
+        "not_checked"
+      ]
+    },
+    "SiteTier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "rank",
+        "label",
+        "reason",
+        "source"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/SiteTierId"
+        },
+        "rank": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "proven",
+            "predicted",
+            "none"
+          ]
+        }
+      }
+    },
+    "SiteTierLeft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tier",
+        "reason"
+      ],
+      "properties": {
+        "tier": {
+          "type": "string",
+          "enum": [
+            "native",
+            "agentic",
+            "static_dropin",
+            "content_files"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        }
+      }
+    },
+    "SiteToolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "framework",
+        "runtime",
+        "packageManager"
+      ],
+      "properties": {
+        "framework": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "packageManager": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "SiteHostConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "buildCommand",
+        "baseDirectory",
+        "publishDirectory",
+        "productionBranch"
+      ],
+      "properties": {
+        "buildCommand": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 300
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseDirectory": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 300
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "publishDirectory": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 300
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "productionBranch": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 300
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "SiteDeployLink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "checkedAt"
+      ],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "proven",
+            "unproven",
+            "ask_raised"
+          ]
+        },
+        "checkedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "SiteContentSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "cms"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "cms",
+            "repository",
+            "unknown",
+            "not_checked"
+          ]
+        },
+        "cms": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "wordpress",
+                "drupal",
+                "ghost",
+                "headless_cms"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "SiteAcceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "buildVerified",
+        "adapter",
+        "verifiedAt"
+      ],
+      "properties": {
+        "buildVerified": {
+          "type": "boolean"
+        },
+        "adapter": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 100
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verifiedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "SiteCapabilityRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "connectionId",
+        "connectionGeneration",
+        "githubRepo",
+        "branch",
+        "appRoot",
+        "state",
+        "tier",
+        "tiersLeft",
+        "recipeVersion",
+        "toolchain",
+        "host",
+        "hostConfig",
+        "deployLink",
+        "contentSource",
+        "acceptance",
+        "lastVerifiedSha",
+        "previousTier",
+        "lastProvenTier",
+        "tierDropped",
+        "observedAt"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "const": 1
+        },
+        "connectionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "connectionGeneration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "githubRepo": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "branch": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "appRoot": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "in_setup",
+            "your_turn",
+            "fixing",
+            "cannot_yet",
+            "not_started"
+          ]
+        },
+        "tier": {
+          "$ref": "#/$defs/SiteTier"
+        },
+        "tiersLeft": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SiteTierLeft"
+          },
+          "maxItems": 4
+        },
+        "recipeVersion": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 40
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "toolchain": {
+          "$ref": "#/$defs/SiteToolchain"
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hostConfig": {
+          "$ref": "#/$defs/SiteHostConfig"
+        },
+        "deployLink": {
+          "$ref": "#/$defs/SiteDeployLink"
+        },
+        "contentSource": {
+          "$ref": "#/$defs/SiteContentSource"
+        },
+        "acceptance": {
+          "$ref": "#/$defs/SiteAcceptance"
+        },
+        "lastVerifiedSha": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previousTier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SiteTierId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastProvenTier": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SiteTierId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tierDropped": {
+          "type": "boolean"
+        },
+        "observedAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    }
+  }
+}

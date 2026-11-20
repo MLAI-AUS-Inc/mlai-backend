@@ -1,0 +1,97 @@
+{
+  "_recorded_from": "content-factory backend/tests/fixtures/cms-content/next-contentful-blog via scanner._repository_inventory and repository_discovery.with_discovery_projection",
+  "github_repo": "fixture/next-contentful-blog",
+  "repo_head_sha": "0c886bdef62da156694999af97a80cb2ef14743d",
+  "repository_discovery": {
+    "content_source": {
+      "cms": "headless_cms",
+      "reason": "cms_content",
+      "kind": "cms",
+      "signals": [
+        "package:@contentful/rich-text-react-renderer",
+        "package:contentful",
+        "feeds:lib/contentful.ts"
+      ],
+      "vendor": "contentful",
+      "version": 1
+    },
+    "discovery_complete": true,
+    "publish_ready": false,
+    "schema_version": 1,
+    "setup_tier": {
+      "id": "cannot_yet",
+      "label": "Can't be done yet: your articles live in a CMS or database, not in your website's code.",
+      "rank": null,
+      "reason": "cms_content"
+    },
+    "source_sha": "0c886bdef62da156694999af97a80cb2ef14743d",
+    "status": "complete",
+    "support_level": "cannot_yet",
+    "support_paths": [
+      {
+        "action": "choose_support_path",
+        "id": "native",
+        "label": "Native articles",
+        "reason": "No safe article scaffold adapter is registered for this framework/runtime.",
+        "status": "unavailable"
+      },
+      {
+        "action": "configure_contract",
+        "id": "custom_contract",
+        "label": "Custom build verification",
+        "publishing_available": false,
+        "reason": "Build proof only; articles stay portable until a publishing adapter exists",
+        "status": "build_proof_only"
+      },
+      {
+        "action": "configure_ci",
+        "id": "bring_ci",
+        "label": "Verify with your CI",
+        "reason": "Exact repository, source, contract and signed artifact evidence required",
+        "status": "requires_configuration"
+      },
+      {
+        "action": "export_draft",
+        "id": "provider",
+        "label": "CMS or hosted provider",
+        "reason": "A certified provider adapter is required; use portable drafts until one is installed",
+        "status": "unavailable"
+      },
+      {
+        "action": "write_portable",
+        "id": "portable",
+        "label": "Portable article drafts",
+        "reason": "Write and export articles without repository mutations",
+        "status": "available"
+      }
+    ]
+  },
+  "repository_inventory": {
+    "app_root": "",
+    "branch": "main",
+    "content_source": {
+      "cms": "headless_cms",
+      "reason": "cms_content",
+      "kind": "cms",
+      "repository_article_files": 0,
+      "signals": [
+        "package:@contentful/rich-text-react-renderer",
+        "package:contentful",
+        "feeds:lib/contentful.ts"
+      ],
+      "vendor": "contentful",
+      "version": 1
+    },
+    "discovery_complete": true,
+    "file_count": 5,
+    "github_repo": "fixture/next-contentful-blog",
+    "publish_ready": false,
+    "repo_head_sha": "0c886bdef62da156694999af97a80cb2ef14743d",
+    "repository_id": 42,
+    "schema_version": 1,
+    "source_sha": "0c886bdef62da156694999af97a80cb2ef14743d"
+  },
+  "scan_complete": true,
+  "scan_purpose": "inventory",
+  "scan_scope": "inventory"
+}

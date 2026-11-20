@@ -64,8 +64,12 @@ FLAG_KEYS = (
     # switches, ARTICLES_SOURCE_FOLLOW_ENABLED,
     # ARTICLES_PROOF_CARRY_FORWARD_ENABLED,
     # ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED,
-    # ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED and
-    # ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED are on by default.
+    # ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED,
+    # ARTICLES_PREPARE_STICKY_STOP_ENABLED,
+    # ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED,
+    # CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK,
+    # ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED and
+    # ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED are on by default.
     "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED",
     "ARTICLES_REPOSITORY_IDENTITY_REFRESH_ENABLED",
     "MY_STARTUP_GITHUB_CALLBACK_RETURN_FOR_ALL_ENABLED",
@@ -79,12 +83,16 @@ FLAG_KEYS = (
     # cannot read CF's value, so turn this off if CF's is false.
     "ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED",
     "ARTICLES_STAFF_ALERT_RULES_ENABLED",
+    "ARTICLES_STAFF_ESCALATION_LADDER_ENABLED",
     "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE",
     "ARTICLES_FAILURE_POLICY_V2_ENABLED",
     "ARTICLES_SELF_HEAL_POLICY_ENABLED",
     "ARTICLES_SELF_HEAL_REPORT_ENABLED",
+    "ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED",
+    "ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED",
     "ARTICLES_DISPATCH_RELIABILITY_ENABLED",
     "ARTICLES_NO_CODELESS_TERMINAL_ENABLED",
+    "ARTICLES_NO_GENERIC_STOP_ENABLED",
     "ARTICLES_REGISTRY_REFUNDS_ENABLED",
     "ARTICLES_CHANNEL_SWITCH_ENABLED",
     "ARTICLES_SOURCE_REPIN_ENABLED",
@@ -92,7 +100,13 @@ FLAG_KEYS = (
     "ARTICLES_PROOF_CARRY_FORWARD_ENABLED",
     "ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED",
     "ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED",
+    "ARTICLES_PREPARE_STICKY_STOP_ENABLED",
+    "ARTICLES_SOURCE_SYNC_ENABLED",
+    "ARTICLES_SETUP_LADDER_ENABLED",
+    "ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED",
+    "MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED",
     "ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED",
+    "CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK",
     "ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED",
     "ARTICLES_MERGE_WORKER_ENABLED",
     "ARTICLES_DEPLOYMENT_WATCH_SWEEP_ENABLED",
@@ -103,6 +117,7 @@ FLAG_KEYS = (
     "MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED",
     "MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED",
     "MY_STARTUP_TURN_REMINDERS_ENABLED",
+    "MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED",
     "MY_STARTUP_TEAM_ENABLED",
     "MY_STARTUP_SHARED_ACCESS_ENABLED",
     "MY_STARTUP_EMAIL_INVITES_ENABLED",
@@ -151,6 +166,8 @@ COUNT_KEYS = (
     "CONTENT_FACTORY_INTERACTIVE_QUEUE_SLOTS",
     # Setup runs per website preparation (default 3, 0 = no cap).
     "ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT",
+    # Service source rescans per website in 24 hours (default 6, 0 = none).
+    "ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP",
 )
 # 0 is refused: the sweep reads it as 1, and a per-IP sign-in limit of 0 removes
 # that ceiling altogether. Raise a limit for a large event instead.
@@ -179,9 +196,16 @@ JOURNEY_DISABLED_ORGANIZATIONS = "MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZ
 # A Django REST framework rate such as 30/minute. A malformed one breaks every
 # invite resolve at request time.
 INVITE_RESOLVE_RATE = "COMMUNITY_CHAT_INVITE_RESOLVE_RATE"
+# The backend's model allowance for a maintained SDK setup run (plan B14): a
+# positive dollar amount and a positive token count. The SDK control switch
+# needs both; without them a setup run reaches Content Factory with no ceiling.
+SDK_CONTROL_FLAG = "ARTICLES_RUN_SDK_CONTROL_ENABLED"
+CONTROL_USD = "ARTICLES_RUN_CONTROL_MODEL_USD"
+CONTROL_TOKENS = "ARTICLES_RUN_CONTROL_MODEL_TOKENS"
+MAX_CONTROL_TOKENS = 20_000_000
 DISCOVERY_RECONCILIATION_SINCE = "CONTENT_FACTORY_DISCOVERY_RECONCILIATION_SINCE"
 NIGHTLY_RECONCILIATION_SINCE = "CONTENT_FACTORY_NIGHTLY_REFRESH_RECONCILIATION_SINCE"
-KEYS = (*FLAG_KEYS, *COUNT_KEYS, *POSITIVE_KEYS, ALERTS_SINCE, WORKSHOP_WINDOWS,
+KEYS = (*FLAG_KEYS, *COUNT_KEYS, *POSITIVE_KEYS, ALERTS_SINCE, WORKSHOP_WINDOWS, CONTROL_USD, CONTROL_TOKENS,
         JOURNEY_LAUNCHED_AT, ONBOARDING_LAUNCHED_AT, JOURNEY_DISABLED_ORGANIZATIONS, INVITE_RESOLVE_RATE, DISCOVERY_RECONCILIATION_SINCE, NIGHTLY_RECONCILIATION_SINCE)
 MAX_DISABLED_ORGANIZATIONS_LENGTH = 2000
 
@@ -238,6 +262,13 @@ def validate_single(key: str, value: str, *, optional: bool = False) -> None:
     elif key in POSITIVE_KEYS:
         if not re.fullmatch(r"[1-9][0-9]{0,8}", value):
             raise ValueError(f"{key} must be a whole number of 1 or more")
+    elif key == CONTROL_USD:
+        # The same shape the backend accepts when it issues the allowance.
+        if not re.fullmatch(r"[0-9]{1,7}(?:\.[0-9]{1,12})?", value) or float(value) <= 0 or float(value) > 1_000_000:
+            raise ValueError(f"{key} must be a positive dollar amount")
+    elif key == CONTROL_TOKENS:
+        if not re.fullmatch(r"[1-9][0-9]{0,7}", value) or int(value) > MAX_CONTROL_TOKENS:
+            raise ValueError(f"{key} must be a whole number from 1 to {MAX_CONTROL_TOKENS}")
     elif key == ALERTS_SINCE:
         try:
             if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
@@ -268,6 +299,12 @@ def validate(environment: dict[str, str]) -> None:
     """Validate every Articles setting a release may carry; each may be left empty."""
     for key in KEYS:
         validate_single(key, environment.get(key, ""), optional=True)
+    if environment.get(SDK_CONTROL_FLAG, "") == "true":
+        # B14: a release that switches SDK control on carries its positive
+        # allowance too, rather than trusting whatever the host holds.
+        missing = [key for key in (CONTROL_USD, CONTROL_TOKENS) if not environment.get(key, "")]
+        if missing:
+            raise ValueError(f"{SDK_CONTROL_FLAG}=true needs positive {' and '.join(missing)} in the same release")
 
 
 if __name__ == "__main__":

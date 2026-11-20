@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 LOCAL = ZoneInfo("Australia/Melbourne")
 TERMINAL = {"failed", "blocked", "denied", "stopped", "cancelled"}
 GLOBAL_RULES = {"provider_error_rate": 600, "throttle_spike": 3600,
-                "refresh_failure_spike": 3600, "github_callback_failures": 3600}
+                "refresh_failure_spike": 3600, "github_callback_failures": 3600,
+                # One receipt per Melbourne night (background_job_digest, B6).
+                "background_job_failure_spike": 86400}
 GLOBAL_TTL = 7 * 86400
 
 
@@ -149,7 +151,11 @@ def run_alert_rule_sweep(now=None, limit=None):
     # A cursor rotates batches so later startups cannot starve behind the first 500.
     cursor_key = "staff_alert_rules:organization_cursor"
     cursor = cache.get(cursor_key, 0)
-    qs = OrganizationContentConfig.objects.select_related("organization").order_by("organization_id")
+    # Plan F1: a marked test organisation is MLAI's own traffic and raises no staff alert.
+    from .founder_test_orgs import test_organization_ids
+    test_ids = sorted(test_organization_ids())
+    qs = (OrganizationContentConfig.objects.select_related("organization").exclude(organization_id__in=test_ids)
+          .order_by("organization_id"))
     configs = list(qs.filter(organization_id__gt=cursor)[:limit])
     if not configs:
         configs = list(qs[:limit])
@@ -162,9 +168,9 @@ def run_alert_rule_sweep(now=None, limit=None):
     # Rows are now streamed with only the columns the rules read, scheduler
     # workflows are left to SQL, and history before the alert start date is
     # never replayed. Only a run that raises an incident stays in memory.
-    from .founder_journey_alerts import SCHEDULER_WORKFLOWS, alerts_since
-    runs = (ContentFactoryRun.objects.filter(organization_id__in=by_org, created_at__gte=alerts_since())
-        .exclude(workflow__in=SCHEDULER_WORKFLOWS).filter(
+    from .founder_journey_alerts import alerts_since, founder_run_q
+    runs = (ContentFactoryRun.objects.filter(founder_run_q(), organization_id__in=by_org, created_at__gte=alerts_since())
+        .filter(
         Q(status__in=TERMINAL | {"queued", "pending", "starting"}) | Q(created_at__gte=day_start)
         | Q(result__article_preview_quality__self_heal_exhausted=True))
         .only("run_id", "organization_id", "status", "workflow", "created_at", "result", "run_request")
@@ -202,7 +208,10 @@ def run_alert_rule_sweep(now=None, limit=None):
         queue_founder_journey_alerts_batch(incidents, now=now)
     # Rate rules are global, independent of the rotating organization batch.
     provider_filter = Q(result__error_code__icontains="PROVIDER") | Q(result__error_code__icontains="TEMPORARILY_UNAVAILABLE") | Q(result__error_code__icontains="RATE_LIMIT") | Q(result__error_code__icontains="GATEWAY")
-    counts = ContentFactoryRun.objects.filter(updated_at__gte=now-timedelta(minutes=10)).exclude(workflow="island_refresh").aggregate(
+    # Background runs are judged by the nightly digest only (B1, B6).
+    # Nor do marked test organisations' runs (F1): a red fixture is reported by its own job, never as a rate spike.
+    counts = ContentFactoryRun.objects.filter(founder_run_q(), updated_at__gte=now-timedelta(minutes=10)).exclude(
+        organization_id__in=test_ids).aggregate(
         total=Count("pk"), errors=Count("pk", filter=provider_filter))
     hour = timedelta(hours=1)
     refresh = staff_signals.total(staff_signals.REFRESH_FAILED, window=hour, now=now)

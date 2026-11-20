@@ -23,6 +23,7 @@ import time
 from contextlib import contextmanager, nullcontext
 
 from .website_contract import CONNECTION_FIELDS, WebsiteAuthorityError, connection_contract
+from .website_connection_codes import not_connected as _not_connected
 from .website_connections import (
     REPOSITORY_WORKFLOWS, authority_guard, bind_website, contract_for,
     scoped_run_contract, summary_for as website_summary, transition_connection,
@@ -51,7 +52,7 @@ from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import DatabaseError, OperationalError, connection, transaction
-from django.db.models import Count, Max, Prefetch
+from django.db.models import Count, Max, Prefetch, Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils.decorators import method_decorator
@@ -100,7 +101,7 @@ from content_factory.contract import CONTENT_FACTORY_REQUEST_SOURCE
 from content_factory.baseline_metrics import baseline_display_metrics
 from content_factory.baseline_ai_evidence import ai_answer_metadata, compact_ai_providers
 from content_factory.dispatch_binding import bind_dispatch_token_run, run_is_dispatch_token_keyed, reserve_portable_dispatch_intent, bind_portable_dispatch_snapshot
-from content_factory.editorial_catalog import article_brief_for_catalog
+from content_factory.editorial_catalog import article_brief_for_catalog, upgrade_superseded_brief
 from content_factory.article_voice import (
     ArticleVoiceError,
     article_voice_for_dispatch,
@@ -671,11 +672,14 @@ def _get_config(organization):
     return config
 
 
-def _refresh_article_editorial_payload(*, organization, payload):
+def _refresh_article_editorial_payload(*, organization, payload, superseded=None):
     """Revalidate at an effect boundary; an outage is not an empty catalogue.
 
     This is a fresh read, not a lease across a later billing or HTTP operation.
     The receiving worker must still validate current policy at its boundaries.
+    ``superseded`` (plan B9) names how a brief whose customer profile was only
+    re-saved as a newer approved version is treated; see
+    ``editorial_catalog.superseded_brief``.
     """
     try:
         config = OrganizationContentConfig.objects.filter(organization=organization).only("pillar_strategy").first()
@@ -684,7 +688,15 @@ def _refresh_article_editorial_payload(*, organization, payload):
                 {"detail": "Article policy is unavailable. Reload before trying again.", "field": "editorialBrief", "code": "editorial_catalog_unavailable"},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        brief = article_brief_for_catalog(config.pillar_strategy, payload)
+        try:
+            brief = article_brief_for_catalog(config.pillar_strategy, payload)
+        except ValueError:
+            if not superseded:
+                raise
+            from content_factory.editorial_catalog import superseded_brief
+            brief = superseded_brief(config.pillar_strategy, payload, superseded)
+            if brief is None:
+                raise
     except DatabaseError:
         from .website_failure_scope import taxonomy_enabled
         code = "editorial_catalog_transient" if taxonomy_enabled(organization.pk) else "editorial_catalog_unavailable"
@@ -718,7 +730,8 @@ def _revision_editorial_payload_from_run(*, context, run):
     for key in ("editorial_brief", "editorialBrief"):
         if key in request:
             payload[key] = copy.deepcopy(request[key])
-    error = _refresh_article_editorial_payload(organization=context.organization, payload=payload)
+    error = _refresh_article_editorial_payload(organization=context.organization, payload=payload,
+                                               superseded="keep")
     return payload, error
 
 
@@ -818,7 +831,7 @@ def _reserve_article_start_connection(context, payload, *, reserve_operation=Tru
             config = _get_config(context.organization)
             website = config.website_connection
             if website is None:
-                raise WebsiteAuthorityError("website_connection_required", "Prepare this website before generating an article.")
+                raise _not_connected("Prepare this website before generating an article.")
             supplied = connection_contract(payload) or connection_contract(owner_operation_contract())
             if supplied and any(connection_contract(contract_for(website)).get(key) != value for key, value in supplied.items() if key != "connection_target_id"):
                 raise WebsiteAuthorityError("website_connection_changed", "The website changed before the article charge.")
@@ -2782,10 +2795,27 @@ def _normalize_keyword_memory(value) -> str:
     return normalize_topic_feedback_keyword(value)
 
 
+def _article_live_payload(article, observation):
+    """The founder-safe ``article_live`` state of ``article`` (plan C14), or ``None``."""
+    from content_factory.website_deploy_link import article_live_state, enabled
+    if not enabled():
+        return None
+    state = article_live_state(article, observation)
+    if state is None:
+        return None
+    value = {key: state[key] for key in ("state", "since", "reason") if state.get(key) is not None}
+    if state["state"] == "not_live":
+        # "Our team has been told" only once the staff alert for this merge exists.
+        from content_factory.founder_stuck_alerts import article_not_live_alerted
+        value["staffAlerted"] = article_not_live_alerted(article)
+    return value
+
+
 def _serialize_written_article(article, *, publish_attempt=None):
     from content_factory.article_publish_status import latest_live_observation
+    observation = latest_live_observation(article)
     return {
-        "liveVerification": {key: value for key, value in latest_live_observation(article).items()
+        "liveVerification": {key: value for key, value in observation.items()
             if key not in {"observed_body_text", "previous", "last_verified"}},
         "id": str(article.id),
         "title": article.title,
@@ -2806,6 +2836,9 @@ def _serialize_written_article(article, *, publish_attempt=None):
         # gate the dashboard's recent/live list should use. `onMain` is the proven
         # source-of-truth fact, independent of the weaker sitemap `liveUrl`.
         "bucket": article_bucket(article),
+        # Plan C14: the article_live state (live, checking or not_live) once the
+        # article merged, null before; only while the deploy link is on.
+        "articleLive": _article_live_payload(article, observation),
         "onMain": bool(article.on_main_verified_at),
         "onMainAt": article.on_main_verified_at.isoformat() if article.on_main_verified_at else None,
         "mergeCommitSha": article.merge_commit_sha or "",
@@ -3444,10 +3477,17 @@ def _article_content_only_preview_not_available(run) -> bool:
     )
 
 
+def _system_stop_restartable(run):
+    """B24: a run a connection or operation transition stopped may be restarted; a founder's own cancel may not."""
+    from content_factory.system_stopped_runs import restartable
+    return restartable(run)
+
+
 def _article_restart_available(run):
     if run.workflow not in RESTARTABLE_ARTICLE_WORKFLOWS:
         return False
-    if run.status not in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.DENIED} and not _article_content_only_preview_not_available(run):
+    if (run.status not in {ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.DENIED}
+            and not _article_content_only_preview_not_available(run) and not _system_stop_restartable(run)):
         return False
     from content_factory.article_publication_evidence import refund_owns_charge
     if refund_owns_charge(run):
@@ -3456,8 +3496,18 @@ def _article_restart_available(run):
     return bool(title or keyword)
 
 
+def _system_stop_notice(run):
+    from content_factory.system_stopped_runs import notice_for
+    return notice_for(run)
+
+
 def _serialize_article_draft(run, *, written_keys):
-    if run.workflow not in ARTICLE_WORKFLOWS or run.status == ContentFactoryRunStatus.CANCELLED:
+    if run.workflow not in ARTICLE_WORKFLOWS:
+        return None
+    notice = _system_stop_notice(run)
+    if run.status == ContentFactoryRunStatus.CANCELLED and notice is None:
+        # A system-stopped run keeps its card with one notice (B24); every
+        # other cancelled run stays hidden.
         return None
     if hidden_by_draft_delete(run.status, run.result):
         # A finished attempt kept when the owner deleted its draft card.
@@ -3489,13 +3539,15 @@ def _serialize_article_draft(run, *, written_keys):
         "restartAvailable": _article_restart_available(run),
         "updatedAt": run.updated_at.isoformat() if run.updated_at else None,
         "createdAt": run.created_at.isoformat() if run.created_at else None,
+        **({"notice": notice} if notice else {}),
     }
 
 
 def _article_draft_run_window(organization, *, scan_limit, loaded_runs=None):
     """Reuse only identical request-owned versions, preserving the whole draft window."""
+    from content_factory.system_stopped_runs import FOLLOWUP_KEY
     rows = ContentFactoryRun.objects.filter(domain=organization.domain, workflow__in=ARTICLE_WORKFLOWS).exclude(
-        status=ContentFactoryRunStatus.CANCELLED).order_by("-updated_at")
+        Q(status=ContentFactoryRunStatus.CANCELLED) & ~Q(**{f"result__{FOLLOWUP_KEY}__decision": "notice"})).order_by("-updated_at")
     def full(query):
         # These cards need result/request/acceptance fields, including legacy
         # nested packages; do not replace them with an incomplete JSON allowlist.
@@ -3507,7 +3559,7 @@ def _article_draft_run_window(organization, *, scan_limit, loaded_runs=None):
     versions = dict(identities)
     available = {run.pk: run for run in loaded_runs if getattr(run, "pk", None) in versions
         and run.updated_at == versions[run.pk] and run.domain == organization.domain
-        and run.workflow in ARTICLE_WORKFLOWS and run.status != ContentFactoryRunStatus.CANCELLED}
+        and run.workflow in ARTICLE_WORKFLOWS and (run.status != ContentFactoryRunStatus.CANCELLED or _system_stop_notice(run))}
     missing = [identifier for identifier, _ in identities if identifier not in available]
     owned = full(rows.filter(pk__in=missing)) if missing else []
     available.update({run.pk: run for run in owned})
@@ -5497,7 +5549,7 @@ def _github_app_token_payload_for_domain(*, domain: str, github_repo: str, permi
     from .website_tokens import mint_website_token
     config = OrganizationContentConfig.objects.select_related("website_connection__organization").get(organization__domain=normalize_company_domain(domain))
     if not config.website_connection:
-        raise WebsiteAuthorityError("website_connection_required", "Connect this website before repository work.")
+        raise _not_connected("Connect this website before repository work.")
     payload = {**contract_for(config.website_connection), "github_repo": github_repo}
     return mint_website_token(payload, permission_mode=permission_mode, action="setup" if permission_mode == "write" else "read")
 
@@ -8258,11 +8310,33 @@ def _supersede_stale_scan_runs(*, context, request_user):
     return superseded
 
 
+def _restart_editorial_brief(strategy, run_request):
+    """The stored brief, or its upgrade to the profile's newer approved version.
+
+    An owner Save re-versions a customer profile; that is not a revocation, so
+    the owner's Restart carries the article to the current approved version
+    (CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK). A retired, draft or unreceipted
+    profile, a withdrawn no-offer permission or a changed offer still refuses.
+    """
+    try:
+        return article_brief_for_catalog(strategy, run_request)
+    except ValueError:
+        if not getattr(settings, "CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK", True):
+            raise
+        try:
+            upgraded = upgrade_superseded_brief(strategy, run_request)
+        except ValueError:
+            upgraded = None
+        if upgraded is None:
+            raise
+        return upgraded
+
+
 def _restart_article_payload_from_run(*, run, context, config, actor_id):
     run_request = _run_mapping(run.run_request)
     # The stored reader decision is authoritative. Do not invent one from a
     # generated result/package or silently drop it during a replacement start.
-    editorial_brief = article_brief_for_catalog(config.pillar_strategy, run_request)
+    editorial_brief = _restart_editorial_brief(config.pillar_strategy, run_request)
     result = _run_mapping(run.result)
     package = _content_package_from_run(run) or {}
     title, keyword = _article_draft_title_keyword(run)
@@ -8381,7 +8455,8 @@ def _restart_article_run(*, run, context):
             {"detail": "Only article generation drafts can be restarted from the marketing dashboard."},
             status=status.HTTP_409_CONFLICT,
         )
-    if run.status not in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.DENIED} and not _article_content_only_preview_not_available(run):
+    if (run.status not in {ContentFactoryRunStatus.FAILED, ContentFactoryRunStatus.BLOCKED, ContentFactoryRunStatus.DENIED}
+            and not _article_content_only_preview_not_available(run) and not _system_stop_restartable(run)):
         return None, Response(
             {"detail": "Only failed, blocked, or exact-preview-unavailable article drafts can be restarted."},
             status=status.HTTP_409_CONFLICT,
@@ -13547,6 +13622,29 @@ def _friendly_content_factory_error(*, workflow, detail="", unavailable=False):
     return "Content Factory worker is unavailable. Please try again."
 
 
+def content_factory_refusal_code(response_payload):
+    """The ``error_code`` a Content Factory refusal carries, wherever its body nests it.
+
+    FastAPI wraps an HTTPException body in ``detail``; some refusals put the
+    code inside an ``error`` object. Returns '' when no code is present.
+
+    Never returns ``dispatch_rejected``: only Content Factory's explicit keyed
+    rejection (``code`` in the refusal body) proves no run owns the identity,
+    and the dispatch outbox refunds on that code. A body that merely names it
+    as an ``error_code`` must not release a refund while the dispatch is
+    unresolved.
+    """
+    if not isinstance(response_payload, dict):
+        return ""
+    for candidate in (response_payload, response_payload.get("detail"), response_payload.get("error")):
+        if isinstance(candidate, dict):
+            code = candidate.get("error_code")
+            if isinstance(code, str) and code.strip():
+                code = code.strip()[:100]
+                return "" if code == "dispatch_rejected" else code
+    return ""
+
+
 def _blocked_worker_payload(*, workflow, detail="", technical_error="", status_code=None, response_payload=None, retryable=True, diagnostics=None):
     friendly = _friendly_content_factory_error(workflow=workflow, detail=detail, unavailable=True)
     payload_diagnostics = {
@@ -13928,6 +14026,12 @@ def _run_result_from_remote(remote_data):
             merged.pop(key, None)
             merged["review_draft_actions_available"] = False
             merged["reviewDraftActionsAvailable"] = False
+    if not merged.get("error_code") and isinstance(merged.get("error"), dict):
+        # A refusal stored as an error object keeps its code where the
+        # registry and journey read it. Never replaces a code already present.
+        code = content_factory_refusal_code({"error": merged["error"]})
+        if code:
+            merged["error_code"] = code
     # The execution envelope is authoritative even when the worker's nested
     # result omits it. Polling must retain the same fence as service callbacks,
     # including the generation bound into an exact-preview approval receipt.
@@ -15122,7 +15226,7 @@ def _queue_content_factory_run(*, endpoint, workflow, context, config, payload, 
         website = config.website_connection
         try:
             if website is None:
-                raise WebsiteAuthorityError("website_connection_required", "Connect and verify this website before continuing.")
+                raise _not_connected("Connect and verify this website before continuing.")
             supplied = connection_contract(payload) or connection_contract(owner_operation_contract())
             if supplied and any(connection_contract(contract_for(website)).get(key) != value for key, value in supplied.items() if key != "connection_target_id"):
                 raise WebsiteAuthorityError("website_connection_changed", "The website changed before dispatch.")
@@ -15411,6 +15515,13 @@ def _queue_content_factory_run_authorized(*, endpoint, workflow, context, config
             )
             if explicitly_rejected:
                 remote_data.update(status="failed", error_code="dispatch_rejected", backend_code=rejection.get("backend_code"), retryable=True)
+            else:
+                # The refusal's own code is the run's code, so the registry,
+                # the journey and self-heal can map it (INSUFFICIENT_ROO_POINTS
+                # becomes the buy-points ask instead of an unexplained block).
+                refusal_code = content_factory_refusal_code(response_payload)
+                if refusal_code:
+                    remote_data["error_code"] = refusal_code
             # A later generic HTTP refusal can follow an earlier accepted POST.
             # Only the keyed rejection receipt proves no run owns this identity.
             if keyed_dispatch and not explicitly_rejected:
@@ -15852,7 +15963,8 @@ def _call_content_factory_component_revision(*, organization, run_id, payload, u
             require_revision_requester(original, user)
     except RunOwnershipConflict:
         return Response({"detail": "The current startup reviewer permission changed."}, status=409)
-    editorial_error = _refresh_article_editorial_payload(organization=organization, payload=payload)
+    editorial_error = _refresh_article_editorial_payload(organization=organization, payload=payload,
+                                                         superseded="keep")
     if editorial_error is not None:
         return editorial_error  # No POST; retain any submitted batch for explicit retry.
     if original and connection_contract(scoped_run_contract(original)):
@@ -17537,6 +17649,12 @@ class VibeMarketingAutofillView(APIView):
         )
 
 
+def _content_files_not_live_q():
+    from content_factory.website_content_files import not_live_q
+
+    return not_live_q()
+
+
 def _baseline_published_articles(organization, *, limit=8):
     """Publicly reachable articles we wrote, for AI-citation checks.
 
@@ -17555,6 +17673,8 @@ def _baseline_published_articles(organization, *, limit=8):
                 article_url__isnull=False,
             )
         )
+        # Plan C7: a content file that is not live is not a page anyone can cite.
+        .exclude(_content_files_not_live_q())
         .order_by("-pr_merged_at", "-created_at")[: limit * 2]
     )
     seen = set()
@@ -17739,6 +17859,31 @@ class VibeMarketingGitHubConnectView(APIView):
 
 
 
+def _repository_suggestion(context, user, repos, *, probe=True):
+    """Rank the founder's repositories for the picker (plan E8); never raises, never binds.
+
+    ``probe`` reads the top candidates' host config files. Once a repository
+    is chosen there is nothing to suggest, so no founder code is read.
+    """
+    from integrations.services.github_app import github_app_credentials_configured
+    from integrations.services.github_installations import user_github_installations
+    from .website_repository_selection import host_config_hints, installation_access_url, rank_repositories, suggestion
+    domain = str(getattr(context.organization, "domain", "") or "")
+    brand = str(getattr(getattr(context, "company", None), "name", "") or getattr(context.organization, "name", "") or "")
+    try:
+        installs = user_github_installations(user)
+        access_url = (installation_access_url(installs[0].installation_id, account_login=installs[0].account_login,
+                                              account_type=installs[0].account_type) if len(installs) == 1 else None)
+        hints = {}
+        if probe and github_app_credentials_configured() and domain:
+            hints = host_config_hints(repos, rank_repositories(repos, domain=domain, brand=brand), domain=domain)
+        return suggestion(repos, domain=domain, brand=brand, hints=hints, access_url=access_url)
+    except Exception:  # noqa: BLE001 - a suggestion is advice
+        logger.exception("vibe_marketing_repository_suggestion_failed org=%s", context.organization.pk)
+        return {"repo": None, "reasons": [], "looksLikeWebsite": None, "warning": None, "nothingVisible": False,
+                "ranked": []}
+
+
 class VibeMarketingGitHubReposView(APIView):
     def get(self, request):
         context, error_response = _resolve_context_or_response(request)
@@ -17765,8 +17910,14 @@ class VibeMarketingGitHubReposView(APIView):
                 union_repos = list_user_repos(request.user)
                 if union_repos:
                     selected_repo = str(config.github_repo or "").strip()
+                    suggested = _repository_suggestion(context, request.user, union_repos,
+                                                       probe=not selected_repo and len(union_repos) > 1)
                     if not selected_repo and len(union_repos) == 1:
                         selected_repo = str(union_repos[0].get("fullName") or "").strip()
+                    elif not selected_repo and suggested.get("repo"):
+                        # Plan E8: preselect the best match in the picker. Only
+                        # the founder's save binds a repository.
+                        selected_repo = suggested["repo"]
                     resolved_installation_id = str(config.github_installation_id or "").strip()
                     if selected_repo:
                         inst = installation_for_repo(request.user, selected_repo)
@@ -17789,6 +17940,7 @@ class VibeMarketingGitHubReposView(APIView):
                             "installation_id": resolved_installation_id,
                             "repos": union_repos,
                             "repositories": union_repos,
+                            "suggestion": suggested,
                         },
                         status=status.HTTP_200_OK,
                     )
@@ -18943,10 +19095,21 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
     }
     # Resolve the explicit decision without dropping null/conflicting aliases
     # or treating an empty configured catalogue as legacy permission.
+    # Plan B19: a start with no brief gets the server-built default (an already
+    # approved customer profile only) or one founder question, never a bare
+    # "configured catalog requires a brief" refusal. An explicit brief is
+    # validated exactly as before.
+    from .editorial_default_brief import start_brief, startup_country_and_name
     try:
-        editorial_brief = article_brief_for_catalog(config.pillar_strategy, command.data)
+        country, startup_name = startup_country_and_name(context)
+        start = start_brief(config.pillar_strategy, command.data, country=country, startup_name=startup_name)
     except ValueError as exc:
         return Response({"detail": str(exc), "field": "editorialBrief"}, status=status.HTTP_400_BAD_REQUEST)
+    if start.state == "ask":
+        logger.info("vibe_marketing_article_brief_question org_id=%s audience_id=%s",
+                    context.organization.pk, start.audience_id or "")
+        return Response(start.ask_payload(), status=status.HTTP_409_CONFLICT)
+    editorial_brief = start.brief
     if editorial_brief is not None:
         payload["editorial_brief"] = editorial_brief
     # P1.6 (IF-P1-08): a startup with no website has no site to measure, so
@@ -19779,7 +19942,8 @@ class VibeMarketingRunCommentsSubmitView(VibeMarketingRunCommentsMixin, APIView)
         )
         if billing_error is not None:
             return billing_error
-        editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=billing_payload)
+        editorial_error = _refresh_article_editorial_payload(organization=context.organization, payload=billing_payload,
+                                                             superseded="keep")
         if editorial_error is not None:
             return editorial_error
         retry_existing_batch = False
@@ -20405,6 +20569,13 @@ def control_article_run(*, user, context, run, action, data, run_id=None, goal_o
         return founder_run_commands.execute(context=context, user=user, run=run, action=action, data=data,
             header=idempotency_key, invoke=lambda current: control_article_run(user=user, context=context,
                 run=current, action=action, data=data, run_id=run_id, goal_operation_id=goal_operation_id))
+    if action == "resume":
+        from .failure_policy_engine import class_before_wall_enabled, settled_without_delivery
+        if class_before_wall_enabled() and settled_without_delivery(run):
+            # D16: a founder ask answered after its points were returned never
+            # resumes on unpaid points; the founder starts again instead.
+            return Response({"detail": "We returned the points for this article, so it can't continue. Start again to write it.",
+                             "code": "run_refunded_start_again"}, status=status.HTTP_409_CONFLICT)
     from .run_owned_controls import prepare_owned_control
     owned_response = prepare_owned_control(run=run, user=user, action=action, context=context)
     if owned_response is not None:

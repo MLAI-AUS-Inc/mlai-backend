@@ -20,7 +20,8 @@ class StaffConsoleView(MlaiAdminView):
     def handle_exception(self, exc):
         if isinstance(exc, (AdminError, NotAuthenticated, PermissionDenied)):
             return Response({"detail": "Not authorised.", "reason": "not_authorised"}, status=403)
-        if isinstance(exc, (Organization.DoesNotExist, ContentFactoryRun.DoesNotExist)):
+        from content_factory.website_models import WebsiteConnectionOperation
+        if isinstance(exc, (Organization.DoesNotExist, ContentFactoryRun.DoesNotExist, WebsiteConnectionOperation.DoesNotExist)):
             return Response({"detail": "Not found.", "reason": "not_found"}, status=404)
         if isinstance(exc, (ValueError, TypeError, signing.BadSignature)):
             return Response({"detail": "Invalid request.", "reason": "invalid_request"}, status=400)
@@ -57,6 +58,21 @@ class FounderFunnelView(StaffConsoleView):
                 transaction.set_rollback(True)
         except (ValueError, CommandError):
             return Response({'detail': 'Choose valid dates within a window of up to 366 days.', 'reason': 'invalid_window'}, status=400)
+        return Response(report, headers={'Cache-Control': 'private, no-store'})
+
+
+class FounderHealthView(StaffConsoleView):
+    """Plan F9: the daily founder-health report and its SLO lines, read-only (test organisations excluded)."""
+
+    def get(self, request):
+        from django.db import connection, transaction
+        from content_factory.founder_health_report import build_report
+        with transaction.atomic():
+            if connection.vendor == 'postgresql':
+                with connection.cursor() as cursor:
+                    cursor.execute('SET TRANSACTION READ ONLY')
+            report = build_report()
+            transaction.set_rollback(True)
         return Response(report, headers={'Cache-Control': 'private, no-store'})
 
 

@@ -16,6 +16,20 @@ NO_DELIVERY_REFUND_CODES = frozenset({
     "WEBSITE_SOURCE_CHANGED", "VERIFIED_TARGET_REQUIRED", "ARTICLE_DIRECTORY_AGENT_PROVIDER_ERROR",
     # Content Factory's own code when this backend refuses without naming one.
     "CONNECTION_AUTHORIZATION_FAILED",
+    # Maintained SDK and sandbox faults (A5). Before they had codes these
+    # arrived as UNCLASSIFIED or INTERNAL_ERROR, both refund triggers; a code
+    # must not take the refund away.
+    "SDK_CONTROLLER_FAILED", "SDK_MODEL_REQUEST_REFUSED", "SANDBOX_UNAVAILABLE",
+    "SANDBOX_AUTHORITY_CHANGED", "SANDBOX_INTEGRITY_VIOLATION",
+    # B10: the code that replaces the UNCLASSIFIED default, and the remaining
+    # SDK and source-download faults. Each used to arrive as UNCLASSIFIED,
+    # INTERNAL_ERROR or SANDBOX_UNAVAILABLE, all refund triggers; refunds are
+    # unchanged by giving them codes.
+    "TERMINAL_CODE_MISSING", "SDK_CONTROLLER_CONFLICT", "SDK_CALL_RECEIPT_CONFLICT", "SDK_CALL_INDETERMINATE",
+    "SDK_TOOL_RECEIPT_CONFLICT", "SDK_TOOL_INDETERMINATE", "SOURCE_DOWNLOAD_INTERRUPTED", "SOURCE_TOO_LARGE",
+    "SOURCE_BRANCH_MISSING", "SOURCE_ACCESS_REFUSED", "SOURCE_REVISION_UNAVAILABLE",
+    # No dollar ceiling source (B14): our configuration fault, never the founder's.
+    "RUN_BUDGET_NOT_CONFIGURED",
 })
 
 
@@ -130,7 +144,8 @@ def publish_child_binding(config, source_run, payload, remote_data, *, reviewed_
     from .website_contract import connection_contract
     connection = getattr(config, "website_connection", None)
     if connection is None:
-        raise WebsiteAuthorityError("website_connection_required", "Reconnect and verify this website before publishing.")
+        from .website_connection_codes import not_connected
+        raise not_connected("Connect and verify this website before publishing.")
     original = connection_contract(getattr(source_run, "run_request", None) or {})
     if (not original or original.get("website_connection_id") != str(connection.pk)
             or original.get("connection_generation") != connection.generation

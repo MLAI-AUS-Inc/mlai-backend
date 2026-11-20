@@ -353,10 +353,18 @@ def refund_owns_charge(run):
     return mapping(mapping(run.result).get("article_terminal_refund")).get("status") in REFUND_OWNED_STATUSES
 
 
+# Content Factory's ``harness.failure_policy.OPERATOR_ONLY_ACTIONS`` (F4 rule 5):
+# remedies only MLAI staff can perform. Content Factory no longer marks these
+# ``requires_user_action``, but a run that stopped on one still has nothing that
+# continues it, so it owes its charge back exactly as before.
+OPERATOR_ONLY_NEXT_ACTIONS = frozenset({"repair_corpus_adapter", "restore_complete_production_corpus"})
+
+
 def unrecoverable_refund_code(run):
     """Name the no-recovery failure that makes a paid failed article run owe its charge back.
 
-    Content Factory marks every non-retryable failure as needing user action.
+    Content Factory marks every non-retryable failure as needing user action,
+    except an operator-only remedy (``OPERATOR_ONLY_NEXT_ACTIONS``), which is ours.
     When the code's registry contract is a stop with no recovery action, and
     the run has no resume, retry or scheduled recovery, nothing continues this
     run (PawShare run 9f479633, CORPUS_INCOMPLETE at plan_article, 29 Oct 2026).
@@ -373,7 +381,10 @@ def unrecoverable_refund_code(run):
             or request.get("pending_billing_refund") or request.get("roo_points_billing_status") == "refunded"
             or restart_reused_charge(run)):
         return None
-    if (failure.get("requires_user_action", result.get("requires_user_action")) is not True
+    next_action = failure.get("next_action", result.get("next_action"))
+    needs_action = (failure.get("requires_user_action", result.get("requires_user_action")) is True
+        or next_action in OPERATOR_ONLY_NEXT_ACTIONS)
+    if (not needs_action
             or failure.get("retryable", result.get("retryable")) is not False or result.get("retry_available") is True
             or mapping(result.get("recovery")).get("state") == "pending"
             or any(mapping(intent).get("state") == "pending" for intent in mapping(result.get("recovery_intents")).values())):

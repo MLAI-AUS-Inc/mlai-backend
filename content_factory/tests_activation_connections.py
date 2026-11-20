@@ -245,7 +245,8 @@ class ActivationConnectionTests(TestCase):
         binding = contract_for(website)
         response = self.admission(github_repo=website.github_repo)
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data['code'], 'website_connection_required')
+        # B12: a protocol fault of the worker, never "Reconnect this website".
+        self.assertEqual(response.data['code'], 'callback_contract_missing')
         with patch('content_factory.vibe_marketing_views._article_capabilities_for_context', return_value={'canGenerateArticle': True, 'canPublishArticle': True}) as caps:
             self.assertEqual(self.admission(**binding).status_code, 200)
             self.assertTrue(caps.call_args.kwargs['force'])

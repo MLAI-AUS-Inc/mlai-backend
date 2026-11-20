@@ -303,6 +303,7 @@ urlpatterns[_admin_access + 1:_admin_access + 1] = [
     path(route, lazy_view("community_chat.staff_console_views", view)) for route, view in (
         ("admin/startups/", "StartupListView"),
         ("admin/startups/funnel/", "FounderFunnelView"),
+        ("admin/startups/health/", "FounderHealthView"),
         ("admin/startups/<int:organization_id>/", "StartupDetailView"),
         ("admin/startups/<int:organization_id>/actions/", "StartupActionView"),
         ("admin/startups/<int:organization_id>/runs/<str:run_id>/safety/", "StartupSafetyStateView"),

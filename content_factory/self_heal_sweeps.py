@@ -28,10 +28,15 @@ SWEEPS: tuple[tuple[str, str, str], ...] = (
     ("no_delivery_refunds", "content_factory.no_delivery_refunds", "run_refund_sweep"),             # be-runs
     ("merge_worker", "content_factory.publish_merge_worker", "run_merge_sweep"),                    # be-merge
     ("deployment_watch", "content_factory.publish_merge_worker", "run_deployment_watch_sweep"),     # be-merge
+    ("staff_fixing", "content_factory.website_staff_fixing", "run_staff_fixing_sweep"),            # B25
+    ("capability_record", "content_factory.website_capability_record", "run_capability_record_sweep"),  # C10
     ("founder_transitions", "content_factory.founder_transitions", "run_transition_sweep"),         # be-notify
+    ("website_lead_reminders", "founder_tools.website_lead_reminders", "run_lead_reminder_sweep"),  # E3b
     ("team_requests", "founder_tools.startup_team", "run_team_request_sweep"),                      # be-team (held)
     ("staff_alert_rules", "content_factory.staff_alert_rules", "run_alert_rule_sweep"),             # be-staff
+    ("background_job_digest", "content_factory.background_job_digest", "run_background_job_digest_sweep"),  # B6
     ("self_heal_report", "content_factory.failure_policy_engine", "run_dry_run_report_sweep"),      # be-policy
+    ("founder_health_report", "content_factory.founder_health_report", "run_founder_health_report_sweep"),  # F9
 )
 MISSING = "missing"
 ERROR = "error"

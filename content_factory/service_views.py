@@ -299,7 +299,9 @@ def _worker_article_admission_response(request):
         expected = connection_contract(data)
         if expected or (not portable and config.website_connection_id):
             if not expected:
-                raise WebsiteAuthorityError('website_connection_required', 'The reviewed connection identity is required.')
+                # B12: Content Factory sent no identity for a connected site:
+                # a protocol fault, never "Reconnect this website".
+                raise WebsiteAuthorityError('callback_contract_missing', 'The reviewed connection identity is required.')
             current = config.website_connection
             if current is None or any(connection_contract(contract_for(current)).get(key) != value for key, value in expected.items() if key != 'connection_target_id'):
                 raise WebsiteAuthorityError('website_connection_changed', 'The reviewed website connection changed.')
@@ -2318,7 +2320,8 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
     workflow = str(data.get("workflow") or "direct_generate").strip() or "direct_generate"
     error_message = str(data.get("error") or data.get("error_message") or "").strip()
     failure = data.get("failure") if isinstance(data.get("failure"), dict) else {}
-    error_code = str(data.get("error_code") or failure.get("code") or ("UNCLASSIFIED" if run_status in {"failed", "blocked"} else "")).strip()
+    from .no_generic_stop import uncoded_failure_code
+    error_code = str(data.get("error_code") or failure.get("code") or (uncoded_failure_code() if run_status in {"failed", "blocked"} else "")).strip()
     existing_run = ContentFactoryRun.objects.filter(run_id=run_id).first()
     emitted_at = _callback_event_emitted_at(data)
     if not data.get("_execution_version_validated") and _callback_event_is_stale(existing_run=existing_run, emitted_at=emitted_at):
@@ -2414,8 +2417,15 @@ def _sync_generation_callback_to_run(*, data: dict, run_status: str, step_status
                 "artifacts": data.get("failure_artifacts") or [],
             },
         )
+    _alert_generic_stop(run)
     _settle_p2_run(run)
     return run
+
+
+def _alert_generic_stop(run):
+    """B10: staff hear about a generic stop when it arrives, not on the next sweep."""
+    from .no_generic_stop import alert_generic_stop
+    alert_generic_stop(run)
 
 
 def _sync_scan_callback_to_run(*, data: dict, approval_required: bool) -> Optional[ContentFactoryRun]:
@@ -3921,7 +3931,7 @@ class ContentFactoryCallbackView(APIView):
         # Order before *any* handler can mutate state, refund or notify. Use the
         # existing run JSON and row lock; no schema migration is required.
         run_id = str(data.get("run_id") or job_id)
-        if event_type in {"topic_selection", "discovery_progress"}:
+        if event_type in {"topic_selection", "discovery_progress", "research_empty"}:
             from .research_workspace import accepts_research_write, research_config
             organization = Organization.objects.filter(domain=data.get("domain") or "").first()
             if organization and not accepts_research_write(research_config(organization), run_id):
@@ -4024,6 +4034,8 @@ class ContentFactoryCallbackView(APIView):
             return self._handle_article_review_preview_event(data, event_type)
         elif event_type == 'discovery_progress':
             return self._handle_discovery_progress(data)
+        elif event_type == 'research_empty':
+            return self._handle_research_empty(data)
         elif event_type == 'article_progress':
             return self._handle_article_progress(data)
         elif event_type == 'scan_progress':
@@ -6195,7 +6207,8 @@ class ContentFactoryCallbackView(APIView):
         run_id = data.get('run_id') or job_id
         workflow = data.get('workflow') or 'unknown'
         error_message = data.get('error', data.get('error_message', 'Unknown error'))
-        error_code = data.get('error_code') or (data.get('failure') or {}).get('code') or 'UNCLASSIFIED'
+        from .no_generic_stop import uncoded_failure_code
+        error_code = data.get('error_code') or (data.get('failure') or {}).get('code') or uncoded_failure_code()
         domain = data.get('domain', '')
         slack_user_id = data.get('slack_user_id', '')
         diagnostics = _normalize_discovery_diagnostics(data.get('diagnostics'))
@@ -7347,6 +7360,44 @@ class ContentFactoryCallbackView(APIView):
             'message': 'Article complete callback processed',
             'job_id': job_id,
         }, status=status.HTTP_200_OK)
+
+    def _handle_research_empty(self, data):
+        """A scheduled research night that found nothing new (B23).
+
+        Content Factory completed the run empty. The paid slot gets its points
+        back, the automation run completes, and no failure or alert is raised.
+        Only a run the backend scheduled can arrive here; a founder-started run
+        still fails as their ask.
+        """
+        from content_factory.run_backend_facts import save_job_facts
+        from content_factory.models import ContentFactoryJob
+        from integrations.services.article_generation import maybe_auto_refund_terminal_failure
+        from integrations.services.notification_adapters import (
+            research_empty_applies, resolve_automation_run, send_research_empty)
+        from integrations.utils import normalize_domain
+
+        job_id = str(data.get('job_id') or data.get('run_id') or '')
+        run = resolve_automation_run(data.get('notification_context'))
+        # Check before refunding: a late empty callback for a night that already
+        # delivered topics, or for another job, must not credit anything back.
+        if (not research_empty_applies(run, data)
+                or normalize_domain(run.automation.organization.domain) != normalize_domain(data.get('domain') or '')):
+            return Response({'status': 'ignored', 'reason': 'no_scheduled_automation_run', 'job_id': job_id})
+        job = ContentFactoryJob.objects.filter(job_id=job_id).first() if job_id else None
+        refunded, refund_points = False, 0
+        if job is not None:
+            refunded, refund_points = maybe_auto_refund_terminal_failure(
+                job, error_code='NO_OPPORTUNITIES',
+                error_message='Research found nothing new.', refundable=True)
+            job.status = 'completed'
+            job.error_message = ''
+            save_job_facts(job, update_fields=['status', 'error_message', 'updated_at'])
+        deliveries = send_research_empty(data)
+        logger.info('research_empty job=%s automation_run=%s reason=%s refunded=%s',
+                    job_id, run.id, data.get('empty_reason'), refunded)
+        return Response({'status': 'received', 'job_id': job_id, 'outcome': 'empty',
+                         'refunded_points': refund_points if refunded else 0,
+                         'notified': bool(deliveries)}, status=status.HTTP_200_OK)
 
     def _handle_error(self, data):
         """Handle error event from content-factory."""
@@ -9336,6 +9387,8 @@ def _sync_content_factory_run_snapshot(*, run_id: str, data: dict, step_states: 
 
     from .island_research import refund_empty_or_failed_research
     refund_empty_or_failed_research(run)
+    from .no_generic_stop import alert_generic_stop
+    alert_generic_stop(run)  # B10: staff hear about a generic stop at once.
     if (getattr(settings, "ARTICLES_SELF_HEAL_POLICY_ENABLED", False)
             or getattr(settings, "ARTICLES_SELF_HEAL_REPORT_ENABLED", False)):
         _record_p2_pull_request(run, previous_pr_url)

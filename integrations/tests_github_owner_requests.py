@@ -183,6 +183,69 @@ class OwnerApprovalTests(CallbackReasonTestBase):
         self.assertTrue(GitHubInstallation.objects.filter(user=self.new.owner, installation_id="555").exists())
 
 
+    # --- Plan E13: an ambiguous or expired pickup falls back to the picker ---
+
+    def picker_journey(self, built):
+        from content_factory import founder_journey as journeys
+        with patch.object(journeys, "terms_out_of_date", return_value=False), \
+                patch.object(journeys, "article_price_and_balance", return_value=(12, 20)):
+            return journeys.project_founder_journey(built.organization, user=built.owner, company=built.company)
+
+    def test_a_pending_request_is_a_waiting_ask_until_the_owner_approves(self):
+        self.request(self.new)
+        self.new.config.refresh_from_db()
+        status = owner_requests.wait_status(self.new.config)
+        self.assertEqual((status["ask"], status["state"]), (owner_requests.WAIT_ASK, "waiting"))
+        body = self.picker_journey(self.new)
+        self.assertEqual(body["action"]["id"], "waiting_github_owner_approval")
+        self.assertEqual(body["action"]["url"], owner_requests.owner_link())
+
+    def test_an_ambiguous_match_shows_the_repository_picker(self):
+        self.request(self.new)
+        result = handle_website_github_event("installation", installation_created(
+            "agency/banksia-site", "agency/banksia-web"))
+        self.assertEqual(result["owner_requests_connected"], 0)
+        self.verify.assert_not_called()
+        self.new.config.refresh_from_db()
+        self.assertIsNone(self.new.config.website_connection)
+        self.assertEqual(self.new.config.article_system[owner_requests.KEY]["pickup"]["state"], "ambiguous")
+        # The founder GitHub named as the requester can list the repositories to choose from.
+        self.assertTrue(GitHubInstallation.objects.filter(user=self.new.owner, installation_id="555").exists())
+        body = self.picker_journey(self.new)
+        self.assertEqual((body["state"], body["action"]["id"]), ("your_turn", "choose_repository"))
+        self.assertIn("github=multiple_repos", body["action"]["url"])
+        self.assertIn("approved", body["body"])
+
+    def test_one_repository_two_startups_claim_marks_both_ambiguous(self):
+        twin = make_new_journey_org(domain="banksia-studio.com")
+        self.request(self.new)
+        self.request(twin)
+        handle_website_github_event("installation", installation_created("agency/banksia-studio"))
+        for built in (self.new, twin):
+            built.config.refresh_from_db()
+            self.assertEqual(owner_requests.wait_status(built.config)["state"], "ambiguous")
+
+    def test_someone_elses_approval_never_marks_the_founders_request(self):
+        self.request(self.new)
+        handle_website_github_event("installation", installation_created(
+            "stranger/other", requester="stranger", account="stranger", installation_id=778))
+        self.new.config.refresh_from_db()
+        self.assertNotIn("pickup", self.new.config.article_system[owner_requests.KEY])
+        self.assertFalse(GitHubInstallation.objects.filter(user=self.new.owner).exists())
+
+    def test_an_expired_request_falls_back_to_the_picker(self):
+        self.request(self.new, days_ago=owner_requests.REQUEST_DAYS + 1)
+        self.new.config.refresh_from_db()
+        self.assertEqual(owner_requests.wait_status(self.new.config)["state"], "expired")
+        self.assertEqual(self.picker_journey(self.new)["action"]["id"], "choose_repository")
+
+    def test_a_connected_startup_has_no_owner_wait(self):
+        self.request(self.new)
+        handle_website_github_event("installation", installation_created("agency/banksia-studio"))
+        self.new.config.refresh_from_db()
+        self.assertIsNone(owner_requests.wait_status(self.new.config))
+
+
 class LoginFromCodeTests(TestCase):
     def test_reads_the_login_and_never_raises(self):
         token = Obj(raise_for_status=lambda: None, json=lambda: {"access_token": "t"})

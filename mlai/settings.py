@@ -561,6 +561,9 @@ REST_FRAMEWORK = {
         'my_startup_read': os.getenv('MY_STARTUP_READ_RATE', '120/minute'),
         'my_startup_poll': os.getenv('MY_STARTUP_POLL_RATE', '120/minute'),
         'my_startup_write': os.getenv('MY_STARTUP_WRITE_RATE', '30/minute'),
+        # Plan E1: each uncached website preflight fetches a homepage and may
+        # try a few close spellings, so it has its own per-account budget.
+        'founder_website_preflight': os.getenv('FOUNDER_WEBSITE_PREFLIGHT_RATE', '20/minute'),
         'community_chat_upcoming_events': os.getenv('COMMUNITY_CHAT_UPCOMING_EVENTS_RATE', '60/minute'),
         'community_chat_challenge': os.getenv('COMMUNITY_CHAT_CHALLENGE_RATE', '20/minute'),
         'community_chat_invite': os.getenv('COMMUNITY_CHAT_INVITE_RATE', '10/minute'),
@@ -2715,6 +2718,11 @@ MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT = os.getenv("MY_STARTUP_FOUNDER_JOURNE
 MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS = os.getenv("MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS", "").strip()
 MY_STARTUP_FOUNDER_JOURNEY_API_ENABLED = _env_is_true("MY_STARTUP_FOUNDER_JOURNEY_API_ENABLED", False)
 MY_STARTUP_FOUNDER_JOURNEY_OPT_IN_ENABLED = _env_is_true("MY_STARTUP_FOUNDER_JOURNEY_OPT_IN_ENABLED", False)
+# Plan E11, decision D14: the owner's go-ahead for the one-off re-engagement
+# email. founder_reengagement_report refuses --send without it and is still a
+# dry run with it. Set it only for the one ops shell that runs the command,
+# never as a deploy variable.
+FOUNDER_REENGAGEMENT_SEND_APPROVED = _env_is_true("FOUNDER_REENGAGEMENT_SEND_APPROVED", False)
 COMMUNITY_CHAT_ONE_STEP_JOIN_ENABLED = _env_is_true("COMMUNITY_CHAT_ONE_STEP_JOIN_ENABLED", False)
 COMMUNITY_CHAT_INVITE_TOKENS_ENABLED = _env_is_true("COMMUNITY_CHAT_INVITE_TOKENS_ENABLED", False)
 MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED = _env_is_true("MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED", False)
@@ -2764,6 +2772,59 @@ MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_
 MY_STARTUP_SHARED_ACCESS_ENABLED = _env_is_true("MY_STARTUP_SHARED_ACCESS_ENABLED", False)
 MY_STARTUP_EMAIL_INVITES_ENABLED = _env_is_true("MY_STARTUP_EMAIL_INVITES_ENABLED", False)
 
+# Kill switch, default on (plan step A8): the owner's Restart moves an article's
+# stored customer profile choice to the profile's newer approved version
+# instead of refusing it as an invalid brief. Never across a retired, draft or
+# unreceipted profile, a withdrawn no-offer permission or a changed offer.
+# Content Factory's CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK is the paired
+# switch that lets an admitted no-offer run continue past the newer version.
+CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK = _env_is_true("CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK", True)
+
+# B13b source sync. It sits before the P2 block because it is its own staged
+# rollout, not one of the contract's P2 switches.
+# Staged rollout, default off: one coalescing source check per connection
+# chases GitHub's current head. A push storm settles on its last commit after a
+# 60-second quiet period, an hourly head read heals a missed webhook, and the
+# rescan a changed setup needs runs as MLAI's "source_sync" service (read and
+# scan only, never setup or publish), so the founder's Roo points are neither
+# required nor charged nor refunded. Content Factory must list "source_sync"
+# among its admitted scheduler services before this goes on with
+# ARTICLES_RUN_OWNERSHIP_ENABLED.
+ARTICLES_SOURCE_SYNC_ENABLED = _env_is_true("ARTICLES_SOURCE_SYNC_ENABLED", False)
+# Plan F1: test organisations. The marker that every founder report, alert,
+# staff Slack notice, self-heal sweep and revenue number honours is
+# OrganizationContentConfig.pillar_strategy["test_organization"], written only
+# by ``manage.py mark_test_organization`` (dry run unless --apply). This list
+# of organisation ids is an operator override on top of that marker, for the
+# host's .env only (never a deploy variable): comma-separated ids, e.g. "63".
+FOUNDER_TEST_ORGANIZATION_IDS = os.getenv("FOUNDER_TEST_ORGANIZATION_IDS", "").strip()
+# Plan F9, decision D12: the daily founder-health report and its SLO lines.
+# Staged rollout, default off. Off, the scheduler posts nothing; the read-only
+# ``manage.py founder_health_report`` and the staff console view still work.
+# On, one report a Melbourne day goes to CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID.
+ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED = _env_is_true("ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED", False)
+# Plan F10 escalation ladder in the stuck-founder sweep: a failed run alerts after
+# two hours (six while off) and a stop still waiting on us after 48 hours queues one
+# owner escalation. Default off: shadow, the sweep only counts and logs (plan 7.5 rule 7).
+ARTICLES_STAFF_ESCALATION_LADDER_ENABLED = _env_is_true("ARTICLES_STAFF_ESCALATION_LADDER_ENABLED", False)
+# Service rescans per connection in any 24 hours (default 6, 0 = none).
+ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP = max(0, int(os.getenv("ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP") or "6"))
+# Setup ladder lower rungs (plan steps C6, C7), a staged rollout behind owner
+# decision D4. On: a setup Content Factory delivered as a content-files pull
+# request (tier 4) is shown as "delivered, not yet live" with the pull request.
+# Off: such a setup is staff fixing. Either way it is never Ready, never counts
+# as published and never consumes the free article. Pairs with Content
+# Factory's CONTENT_FACTORY_SETUP_LADDER.
+ARTICLES_SETUP_LADDER_ENABLED = _env_is_true("ARTICLES_SETUP_LADDER_ENABLED", False)
+# Plan E1: the website preflight (POST founder-tools/website-preflight/) says
+# before a startup exists whether its address resolves, what kind of host it
+# is, what it will be called and whether the founder already added it; the
+# My Startup one-field create re-checks it. Staged rollout, code default off:
+# off, the endpoint answers 404 and clients keep today's website step.
+MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED", False)
+# Plan E3b: reminders and guidance-change notices for website leads (no organisation). Default off.
+MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED", False)
+
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort
 # (content_factory.p2_foundation.p2_applies) unless the P2 contract names an
@@ -2777,6 +2838,15 @@ ARTICLES_SELF_HEAL_LEGACY_ORGANIZATIONS = os.getenv("ARTICLES_SELF_HEAL_LEGACY_O
 ARTICLES_SELF_HEAL_POLICY_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_POLICY_ENABLED", False)
 ARTICLES_SELF_HEAL_REPORT_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_REPORT_ENABLED", False)
 ARTICLES_SELF_HEAL_SWEEP_LIMIT = int(os.getenv("ARTICLES_SELF_HEAL_SWEEP_LIMIT", "50"))
+# Kill switch, default on (plan step B1): self-heal reads the failure class
+# before the 48-hour wall. A founder ask (needs_user) waits for the founder with
+# no wall; unsupported and unregistered codes stop at once; only items the
+# engine is retrying or repairing hit the wall. A refunded or released run is
+# terminal ("start again"), never resumed (owner decision D16).
+ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED", True)
+# Kill switch, default on (plan step B2): a capped self-heal stop keeps the
+# run's original error_code and records its own stop under self_heal_v1.stop.
+ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED", True)
 ARTICLES_CHANNEL_SWITCH_ENABLED = _env_is_true("ARTICLES_CHANNEL_SWITCH_ENABLED", False)
 ARTICLES_SOURCE_REPIN_ENABLED = _env_is_true("ARTICLES_SOURCE_REPIN_ENABLED", False)
 # Kill switch, on by default and for every startup (not cohort-gated): a push
@@ -2792,6 +2862,12 @@ ARTICLES_PROOF_CARRY_FORWARD_ENABLED = _env_is_true("ARTICLES_PROOF_CARRY_FORWAR
 # A push to a live-URL website that left preparation finished is re-verified by
 # its own source check (setup scan + live check) instead of reopening preparation.
 ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED = _env_is_true("ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED", True)
+# Kill switch, default on (plan B3): a push re-opens a stopped preparation only
+# when the change can alter its outcome (transient or waiting stop, a change
+# under the stop's relevant paths or articles route, or an owned setup merge);
+# otherwise the push's paid source rescan is settled without a scan. Automatic
+# repository scans also count toward a per-operation and per-day budget.
+ARTICLES_PREPARE_STICKY_STOP_ENABLED = _env_is_true("ARTICLES_PREPARE_STICKY_STOP_ENABLED", True)
 # Kill switch, default on: a worker callback for a bound run that omits its
 # website connection fields is checked against that run's own saved consent
 # instead of being refused as "Reconnect this website" (La Vie, 18 Nov 2026).
@@ -2809,6 +2885,11 @@ ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED = _env_is_true("ARTICLES_CLOSE_SUPER
 ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED = _env_is_true("ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
 ARTICLES_DISPATCH_RELIABILITY_ENABLED = _env_is_true("ARTICLES_DISPATCH_RELIABILITY_ENABLED", False)
 ARTICLES_NO_CODELESS_TERMINAL_ENABLED = _env_is_true("ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False)
+# B10 kill switch, default on: a terminal callback without a code is stored as
+# TERMINAL_CODE_MISSING (not UNCLASSIFIED), and a missing, generic or
+# unregistered code shows "We're fixing this" on both founder paths with an
+# immediate staff alert (content_factory/no_generic_stop.py). Refunds unchanged.
+ARTICLES_NO_GENERIC_STOP_ENABLED = _env_is_true("ARTICLES_NO_GENERIC_STOP_ENABLED", True)
 ARTICLES_REGISTRY_REFUNDS_ENABLED = _env_is_true("ARTICLES_REGISTRY_REFUNDS_ENABLED", False)
 MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED = _env_is_true("MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED", False)
 MY_STARTUP_STAFF_CONSOLE_ENABLED = _env_is_true("MY_STARTUP_STAFF_CONSOLE_ENABLED", False)

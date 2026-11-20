@@ -43,8 +43,9 @@ class DeliveryReceiptConflict(ValueError):
 
 class DeliveryScopeError(ValueError):
     """Transport disposition, deliberately independent of causal B1 failures."""
-    def __init__(self, code):
+    def __init__(self, code, *, raise_site=None):
         self.code, self.status, self.retryable = code, 409, False
+        self.raise_site = raise_site
         super().__init__(code)
 
 
@@ -158,7 +159,8 @@ def _check_current_scope(website, operation, run, envelope):
     if operation.state in {"completed", "failed", "blocked"}:
         status = envelope["body"]["state_projection"]["status"]
         if status != operation.state and not (operation.state in {"failed", "blocked"} and status in {"failed", "blocked"}):
-            _scope_error("website_operation_terminal")
+            # B24: stale-operation protocol fault, acked as terminal below.
+            raise DeliveryScopeError("website_operation_terminal", raise_site="setup_delivery_receiver.check_current_scope")
 
 
 def _version(envelope):
@@ -513,6 +515,8 @@ def receive_setup_delivery(payload, *, expected_kind=None, path_run_id=None, pul
             acknowledged=terminal, retryable=exc.retryable)
         if terminal:
             receipt["reason_code"] = code
+            if getattr(exc, "raise_site", None):
+                receipt["raise_site"] = exc.raise_site
         return Response(receipt, status=exc.status)
 
 

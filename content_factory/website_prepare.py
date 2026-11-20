@@ -30,7 +30,7 @@ PERMISSION_STEPS = {
 
 AUTHORIZATION_CODES = frozenset({"github_reconnect_required", "github_authorization_required",
     "github_repository_unavailable", "github_workflow_permission_required", "github_ci_evidence_permission_required",
-    "website_connection_required", "github_access_required", "github_verification_required"})
+    "website_connection_required", "website_not_connected", "github_access_required", "github_verification_required"})
 DEPLOYMENT_WAIT_CODES = frozenset({"deployment_source_unverified", "deployment_marker_unverified",
     "live_route_unavailable", "ci_attestation_required", "ci_evidence_unavailable", "verified_target_required",
     "deployment_verification_required", "native_ci_attestation_missing", "ci_proof_unavailable"})
@@ -116,8 +116,17 @@ def _cleanup_retry_journey(op, context, config, journey):
     return journey
 
 
-# Content Factory refuses setup when the repository head moved since the scan.
-SOURCE_CHANGED_CODES = frozenset({"SOURCE_CHANGED", "WEBSITE_SOURCE_CHANGED"})
+# Content Factory refuses setup when the repository head moved since the scan
+# (upper case); the backend's own head check raises the lower-case code
+# (website_connections.verify_repository_head). Both restart from a fresh scan.
+SOURCE_CHANGED_CODES = frozenset({"SOURCE_CHANGED", "WEBSITE_SOURCE_CHANGED", "website_source_changed"})
+# Automatic re-pins to the current head before a moved source becomes a stop
+# with "Try again" (which restarts from a fresh scan again). A push storm that
+# outruns this many re-reads also has its own source checks queued per push.
+SOURCE_REPIN_LIMIT = 3
+SOURCE_REPIN_MINUTES = (1, 5, 15)
+# Child run states after which a re-pin cannot leave two setups running.
+SETTLED_CHILD_STATUSES = frozenset({"completed", "failed", "blocked", "cancelled", "denied"})
 
 
 SETUP_PR_RESULT_KEYS = ("pr_url", "pull_request_url", "draft_pr_url", "pr_number", "pull_request_number", "draft_pr_number")
@@ -208,7 +217,8 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
     """Reuse one prepare receipt for the current consent generation."""
     connection = config.website_connection
     if connection is None:
-        raise WebsiteAuthorityError("website_connection_required", "Select and authorize your website repository first.")
+        from .website_connection_codes import not_connected
+        raise not_connected("Select and authorize your website repository first.")
     # A new-journey setup never merges without the owner's click, and that
     # stays true even if V2 is later switched off (G10).
     from .website_setup_owner_approval import require_owner_click
@@ -262,7 +272,9 @@ def start_prepare(config, *, expected=None, company_id=None, user=None, retry=Fa
                 "child_run_id": op.receipt.get("child_run_id") if check_again else None,
                 "reason_code": "", "blocked_step": None, "deployment_attempts": 0,
                 "dispatch_outcome": "replayed" if check_again else "new_attempt"}
-            for key in ("deployment_wait_started_at", "transient_started_at", "child_resume_pending", "failure_class"):
+            for key in ("deployment_wait_started_at", "transient_started_at", "child_resume_pending", "failure_class",
+                    "source_repins", "child_dispatch_budget"):
+                # A scan-budget hold is judged again at the next scan (plan B3).
                 op.receipt.pop(key, None)
             op.payload = {**op.payload, "attempt": op.payload.get("attempt", 1) + (0 if check_again else 1),
                 "user_clicks": op.payload.get("user_clicks", 1) + 1}
@@ -404,6 +416,18 @@ def _finish_prepare(op, *, now):
     from .website_goal_runner import owns_goal, finish_goal
     if owns_goal(op):
         finish_goal(op, now=now)
+    from . import website_prepare_counters as counters
+    from . import website_prepare_sticky_stop as sticky
+    counters.observe(op)
+    sticky.record_stop(op, now=now)
+    if op.state == "completed":
+        # The operation's scan budget bounds a loop that never finishes; a
+        # website that reached Ready starts it again (plan B3).
+        sticky.reset_scan_budget(op)
+        # B25: a staff fix that reached Ready ends its bounded life as Ready.
+        from .website_staff_fixing import active as staff_fixing_active, close as close_staff_fixing
+        if staff_fixing_active(op):
+            close_staff_fixing(op, "ready", now=now)
     if op.state not in {"pending", "running"} and op.receipt.get("staff_alerted"):
         # Ready, or stopped, cancelled or superseded: this preparation's own
         # deadline alert is no longer a founder waiting on it.
@@ -412,7 +436,16 @@ def _finish_prepare(op, *, now):
     logger.info("website_prepare operation=%s company=%s connection=%s generation=%s step=%s state=%s reason=%s attempt=%s next_attempt=%s dispatch_outcome=%s",
         op.pk, op.payload.get("company_id"), op.connection_id, op.generation, op.receipt.get("current_step"),
         op.state, op.receipt.get("reason_code", ""), op.attempts, op.next_attempt_at, op.receipt.get("dispatch_outcome", ""))
-    return _persist_prepare(op, now=now)
+    saved = _persist_prepare(op, now=now)
+    if saved is not None and saved.state == "needs_attention" and counters.at_cap(saved.receipt):
+        # The same failure stopped OWNER_RETRY_CAP times: Try again is no
+        # longer offered, so staff hear of it now (the sweep's own slot).
+        try:
+            from .founder_stuck_alerts import queue_operation_stopped_alert
+            queue_operation_stopped_alert(saved, code=str(saved.receipt.get("reason_code") or ""), now=now)
+        except Exception:  # noqa: BLE001 - the stuck sweep queues the same alert later
+            logger.exception("website_prepare retry_cap_alert_failed operation=%s", saved.pk)
+    return saved
 
 
 def _permission_action(connection, *, grants=None):
@@ -442,6 +475,8 @@ def prepare_failure(op, step, error, *, now=None):
         decision = {**decision, "code": original["code"], "failure_class": legacy_failure_class(original["code"],
             retryable=original["retryable"], status=getattr(error, "status", None))}
     code, classification = decision["code"], decision["failure_class"]
+    from . import website_prepare_counters as counters
+    counters.count_failure(op)
     strict_policy = bool(policy_enabled or decision["contract_invalid"])
     permission_needed = step in PERMISSION_STEPS.get(code, ())
     if not (strict_policy and classification == "waiting"):
@@ -478,7 +513,30 @@ def prepare_failure(op, step, error, *, now=None):
     if observation_enabled:
         op.receipt["failure_taxonomy_observation"] = {"failure": decision["failure"], "classification": decision["failure"]["failure_class"] if decision["failure"] else None,
             "policy_classification": classification, "contract_invalid": decision["contract_invalid"]}
-    if (getattr(error, "user_action", None) and (classification == "needs_user" or not strict_policy and getattr(error, "result", None) is None)
+    # The page choice is an ask whatever the registry's policy view says: the
+    # error is raised only when the founder's consent says they choose (or a
+    # legacy card renders it), so it never becomes a "Try again" stop (plan A9).
+    page_choice = (code == "articles_page_choice_required"
+        and (getattr(error, "user_action", None) or {}).get("id") == "choose_articles_page")
+    from .website_staff_fixing import enter as enter_staff_fixing, repair_exhausted
+    repair = repair_exhausted(getattr(error, "result", None))
+    if repair is not None and code not in SOURCE_CHANGED_CODES:
+        # B11: the repair loop ran out on our own candidate. Staff fix it; the
+        # founder is told nothing is needed. Keyed on the receipt, not the code.
+        source = getattr(error, "result", None) or {}
+        enter_staff_fixing(op, now=now, code=code, step=step, repair_receipt=repair,
+                           run_id=str(source.get("setup_run_id") or source.get("run_id") or ""))
+        from .website_operations import prepare_receipt
+        op.receipt = prepare_receipt(op)
+        return
+    if code == "RUN_BUDGET_NOT_CONFIGURED":
+        # B14: no dollar ceiling source is our configuration fault. Staff are
+        # alerted at once; the founder sees "working" and is never charged.
+        _alert_budget_not_configured(op, now=now)
+    if code in SOURCE_CHANGED_CODES and _repin_to_current_source(op, now=now):
+        pass
+    elif (getattr(error, "user_action", None) and (classification == "needs_user" or page_choice
+            or not strict_policy and getattr(error, "result", None) is None)
             and (code not in PERMISSION_CODES or permission_needed)):
         op.state, op.next_attempt_at = "needs_user", None
         op.receipt.update(status="needs_you", user_action=error.user_action, failure_class="needs_user", retryable=False)
@@ -579,7 +637,60 @@ def prepare_failure(op, step, error, *, now=None):
         op.state, op.next_attempt_at = "needs_attention", None
         op.receipt.update(status="needs_attention", user_action={"id": "retry", "label": "Try again"})
     from .website_operations import prepare_receipt
+    counters.observe(op)
     op.receipt = prepare_receipt(op)
+
+
+def _alert_budget_not_configured(op, *, now):
+    from .founder_journey_alerts import queue_founder_journey_alert
+    logger.error("website_prepare_budget_not_configured operation=%s connection=%s", op.pk, op.connection_id)
+    try:
+        queue_founder_journey_alert(organization=op.connection.organization, alert_reason="our_team_item",
+            company_id=op.payload.get("company_id"), slot=f"budget-not-configured-{op.pk}-{op.generation}",
+            details={"kind": "run_budget_not_configured", "code": "RUN_BUDGET_NOT_CONFIGURED",
+                     "website_operation_id": str(op.pk)})
+    except Exception:  # noqa: BLE001 - the log line above still reaches staff
+        logger.error("website_prepare_budget_alert_failed operation=%s", op.pk, exc_info=True)
+
+
+def _repin_to_current_source(op, *, now):
+    """Re-read the moved repository head and carry on, instead of stopping (plan A11).
+
+    A setup or check refused because GitHub's branch moved can never pass on
+    the old scan, so the preparation starts again from a scan of the current
+    head, as "Try again" does: a new attempt and request identity, no replayed
+    scan or setup run, and the owner's saved consent and company kept. A
+    failed or blocked setup child has its branch queued for cleanup, as a
+    retry would; a child still running is never doubled, so the stop stands
+    with "Try again" (which fences it). Bounded by ``SOURCE_REPIN_LIMIT``; after that the
+    stop stands with "Try again". Goal-owned preparations are left to the goal
+    runner, which re-pins them itself on a source change.
+    """
+    from .website_goal_runner import owns_goal
+    if owns_goal(op):
+        return False
+    count = int(op.receipt.get("source_repins") or 0) + 1
+    if count > SOURCE_REPIN_LIMIT:
+        return False
+    from workflow_runs.models import ContentFactoryRun
+    children = [ContentFactoryRun.objects.filter(run_id=identifier, organization_id=op.connection.organization_id).first()
+        for identifier in dict.fromkeys(identifier for identifier in (op.receipt.get("hosted_verification_run_id"),
+            op.receipt.get("child_run_id") or op.payload.get("run_id")) if identifier)]
+    if any(child is not None and child.status not in SETTLED_CHILD_STATUSES for child in children):
+        # A child still running owns the repository and its spend. Never start
+        # a second setup beside it; "Try again" fences it first.
+        return False
+    for child in children:
+        if child is not None and child.status in {"failed", "blocked"}:
+            _queue_superseded_setup_cleanup(op, child)
+    values = _source_recheck_values(op, message="Your website changed, so we're reading the latest version.")
+    op.payload = values["payload"]
+    op.receipt = {**values["receipt"], "source_repins": count, "failure_class": "waiting", "retryable": False}
+    op.receipt.pop("failure", None)
+    op.state = "pending"
+    op.next_attempt_at = now + timedelta(minutes=SOURCE_REPIN_MINUTES[min(count, len(SOURCE_REPIN_MINUTES)) - 1])
+    logger.info("website_prepare_source_repin operation=%s connection=%s repin=%s", op.pk, op.connection_id, count)
+    return True
 
 
 def _canonical_article_route(route):
@@ -588,29 +699,61 @@ def _canonical_article_route(route):
     return re.sub(r"/+", "/", route).rstrip("/") or "/"
 
 
-def _setup_surface(config, journey, *, goal=None):
-    """Respect a saved owner choice, then use the current scan's listing route."""
+def _page_ask_hidden(organization, config=None):
+    """Whether this organisation's journey shows no "choose articles page" ask.
+
+    The new journey (and the P2 cohort built on it) retired that ask
+    (``founder_journey.RETIRED_ACTIONS``); an operation resting on it there is
+    a silent stall (Lilia Daily Planner, waiting since 9 Nov 2026).
+    """
+    if organization is None or getattr(organization, "pk", None) is None:
+        return False
+    from .p2_foundation import legacy_opt_in_ids
+    from .founder_journey_cohort import is_new_journey
+    return organization.pk in legacy_opt_in_ids() or is_new_journey(organization, config)
+
+
+def _page_choice_record(route, candidates, *, reason):
+    """What MLAI picked and what else the scan offered; changeable in website settings."""
+    alternatives = [item for item in dict.fromkeys(candidates) if item != route][:8]
+    return {"version": 1, "chosen_by": "mlai", "mode": "existing", "route": route,
+        "alternatives": alternatives, "reason": reason, "changeable": True}
+
+
+def _page_choice_required(candidates):
+    error = WebsiteAuthorityError("articles_page_choice_required", "Choose the articles page to prepare.", retryable=False)
+    error.user_action = {"id": "choose_articles_page", "candidates": candidates}
+    return error
+
+
+def _setup_surface(config, journey, *, goal=None, organization=None, choice=None):
+    """Respect a saved owner choice, then use the current scan's listing route.
+
+    An ambiguous scan never parks an organisation on an ask its journey does
+    not show (plan A9, decision D3): MLAI picks the page (the clear listing,
+    else the preferred or first candidate) and records the alternatives in
+    ``choice``, unless the founder's recorded consent says they choose
+    (``page_policy == "pick"``), which is never overridden. The ask is also
+    kept for a legacy-cohort site, whose cards render it, while
+    ``ARTICLES_AUTO_PAGE_ENABLED`` is off.
+    """
     from django.conf import settings
     from .website_goal import mapping
     answers = mapping(mapping(mapping(goal).get("consent")).get("answers"))
-    if getattr(settings, "ARTICLES_AUTO_PAGE_ENABLED", False) and goal is not None and answers.get("page_policy") == "explicit":
+    founder_picks = answers.get("page_policy") == "pick"
+    auto_page = getattr(settings, "ARTICLES_AUTO_PAGE_ENABLED", False)
+    if auto_page and goal is not None and answers.get("page_policy") == "explicit":
         return "existing" if answers.get("page_mode") == "existing" else "none", _canonical_article_route(answers["page_route"])
     pending = (config.article_system or {}).get("pending_article_system_setup") or {}
     if pending.get("mode") in {"existing", "none"} and pending.get("route_path"):
         return pending["mode"], _canonical_article_route(pending["route_path"])
-    from django.conf import settings
-    if getattr(settings, "ARTICLES_AUTO_PAGE_ENABLED", False) and goal is not None:
+    if auto_page and goal is not None:
         from .website_article_page import choose_page
-        from .website_goal import mapping
-        consent = mapping(mapping(goal).get("consent"))
-        answers = mapping(consent.get("answers"))
-        if answers.get("page_policy") == "explicit":
-            return "existing" if answers.get("page_mode") == "existing" else "none", _canonical_article_route(answers["page_route"])
-        selection = choose_page(mapping(journey).get("discovery"), pick_when_ambiguous=answers.get("page_policy") == "pick")
+        selection = choose_page(mapping(journey).get("discovery"), pick_when_ambiguous=founder_picks)
         if selection["requiresChoice"]:
-            error = WebsiteAuthorityError("articles_page_choice_required", "Choose the articles page to prepare.", retryable=False)
-            error.user_action = {"id": "choose_articles_page", "candidates": selection["candidates"]}
-            raise error
+            raise _page_choice_required(selection["candidates"])
+        if choice is not None and selection["mode"] == "existing" and len(selection["candidates"]) > 1:
+            choice.update(_page_choice_record(selection["route"], selection["candidates"], reason=selection["reason"]))
         return selection["mode"], selection["route"]
     discovery = (journey or {}).get("discovery") or {}
     resolution = discovery.get("resolution") or {}
@@ -636,9 +779,13 @@ def _setup_surface(config, journey, *, goal=None):
         if len(candidates) == 1:
             return "existing", candidates[0]
         if candidates:
-            error = WebsiteAuthorityError("articles_page_choice_required", "Choose the articles page to prepare.", retryable=False)
-            error.user_action = {"id": "choose_articles_page", "candidates": candidates}
-            raise error
+            if founder_picks or not (auto_page or _page_ask_hidden(organization, config)):
+                raise _page_choice_required(candidates)
+            chosen = candidates[0]
+            if choice is not None:
+                choice.update(_page_choice_record(chosen, candidates,
+                    reason="preferred_listing" if listing else "first_candidate"))
+            return "existing", chosen
         # An "ambiguous" scan with no listing page at all has nothing to choose
         # between. Tiger Tutor (6 Nov 2026) stopped here 41 times with a
         # non-retryable "scan the repository" that no scan could change. Create
@@ -728,8 +875,13 @@ def _owner_request(op, context, config, step, *, user, journey=None):
             # setup writes no workflow file into the founder's repository.
             data["verification_mode"] = "hosted"
     if step == "setup":
+        choice = {}
         mode, surface = _merged_setup_surface(op, config) or _superseded_setup_surface(op, config) or _setup_surface(
-            config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"))
+            config, journey or journey_for_context(context, config), goal=op.receipt.get("goal"),
+            organization=getattr(context, "organization", None), choice=choice)
+        if choice:
+            # Shown in website settings and the setup preview; the founder can change it.
+            op.receipt["article_page_choice"] = choice
         pending = (config.article_system or {}).get("pending_article_system_setup") or {}
         if op.payload.get("manual_setup_example_cleanup_retry") or op.payload.get("source_reverify"):
             pending = {**pending, "source_scan_run_id": op.receipt.get("scan_run_id") or ""}
@@ -1068,6 +1220,16 @@ def _advance_claimed_prepare(op, *, now, handlers):
                     # are superseded by this one (La Vie #37 beside #38, 16 Nov 2026).
                     from .website_superseded_setup_prs import close_superseded_setup_prs
                     close_superseded_setup_prs(op, child)
+            from .website_content_files import setup_delivered_not_live
+            content_files = (setup_delivered_not_live(child.result)
+                             if child and child.workflow == "article_system_setup" else None)
+            if content_files is not None:
+                # Plan C7: Content Factory's last setup rung delivered the
+                # articles as files. Never Ready, never merged for the founder
+                # as a setup, never a published article.
+                from .website_content_files import settle_prepare
+                settle_prepare(op, child, content_files, now=now)
+                return _finish_prepare(op, now=now)
             owner_action = _setup_owner_action(child, setup, op.connection) if child and child.workflow == "article_system_setup" else None
             if owner_action:
                 if owns_goal(op) and not any(item["name"] == "previewed" and item["state"] == "passed"
@@ -1108,7 +1270,8 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 prepare_failure(op, step, error, now=now)
                 if classification == "transient" and op.state == "pending":
                     op.receipt["child_resume_pending"] = True
-                elif op.state == "needs_attention":
+                elif op.state == "needs_attention" and op.receipt.get("status") != "staff_fixing":
+                    # B11: a staff fix asks nothing of the founder.
                     op.receipt["user_action"] = {"id": "open_run", "label": "Open setup run", "run_id": child_id}
                 return _finish_prepare(op, now=now)
             if child and child.workflow == "article_system_setup":
@@ -1152,6 +1315,19 @@ def _advance_claimed_prepare(op, *, now, handlers):
                 op.receipt.update(current_step=step, blocked_step=step)
                 raise WebsiteAuthorityError(blocked.get("reasonCode") or blocked.get("reason_code") or journey.get("reasonCode") or "website_prepare_blocked",
                     blocked.get("reason") or blocked.get("message") or journey.get("reason") or "Website preparation needs attention.", retryable=False)
+            if step in {"permissions", "setup"}:
+                # Plan C15: articles that live in a CMS or database can't be
+                # wired by any tier. Stop honestly before any setup run, charge
+                # or staff alert, once the scan of this source says so. Only at
+                # repository selection: a site whose setup already ran (an open
+                # or merged setup pull request, or a verified integration) is
+                # never closed by a later scan.
+                from . import website_cms_content as cms_content
+                observed = (journey.get("repository") or {}).get("observedSourceSha") or ""
+                cms = cms_content.classification(journey.get("discovery"), source_sha=observed)
+                if cms is not None and not cms_content.setup_already_ran(op, journey, source_sha=observed):
+                    cms_content.stop(op, cms, now=now, source_sha=observed or (journey.get("discovery") or {}).get("sourceSha") or "")
+                    return _finish_prepare(op, now=now)
             if step == "setup" and not op.payload.get("repair_setup"):
                 from .website_connections import settled_setup_run
                 if settled_setup_run(op.connection, source_sha=(journey.get("repository") or {}).get("observedSourceSha") or ""):
@@ -1162,6 +1338,17 @@ def _advance_claimed_prepare(op, *, now, handlers):
             if op.receipt.get("last_completed") == {"step": step, "facts_digest": digest}:
                 raise WebsiteAuthorityError("prepare_no_progress", blocked.get("reason") or next_action.get("label") or "Website preparation needs attention.", retryable=False)
             from . import website_prepare_setup_cap as setup_cap
+            from . import website_prepare_sticky_stop as sticky
+            budget = sticky.scan_budget_reached(op, now=now) if step == "scan" else None
+            if budget is not None:
+                # Scans count toward the child-dispatch budget too (plan B3):
+                # each push used to buy one more scan of an unchanged failure.
+                sticky.hold_for_budget(op, budget, now=now)
+                saved = _finish_prepare(op, now=now)
+                if saved is not None:
+                    sticky.queue_budget_alert(saved.connection, saved, scope=budget[0], count=budget[1],
+                        limit=budget[2], now=now)
+                return saved
             if step == "setup" and setup_cap.reached(op):
                 # Facts that change on every pass never repeat a digest; this
                 # operation's own setup count bounds that loop instead.
@@ -1181,6 +1368,10 @@ def _advance_claimed_prepare(op, *, now, handlers):
                     from .website_hosted_setup_lineage import discard_for_new_setup
                     discard_for_new_setup(op)
                     setup_cap.record(op, run_id)
+                elif step == "scan":
+                    sticky.record_scan(op, run_id)
+                from . import website_prepare_counters as counters
+                counters.count_child(op, run_id)
                 op.receipt.update(child_run_id=run_id, **{f"{step}_run_id": run_id})
                 op.payload = {**op.payload, "run_id": run_id}
                 break
@@ -1241,13 +1432,19 @@ def wake_prepare_after_commit(connection_id):
     transaction.on_commit(lambda: advance_prepares_for_connection(connection_id), robust=True)
 
 
-def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_id=""):
+def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_id="", source_sha="", carried=False):
     """Source changes reopen the current operation without granting new consent.
 
     Stopping preparation keeps its setup pull request publishable, so an owned
     merge of a current-generation setup (MLAI's Publish, or the owner merging
     that verified pull request on GitHub) also reopens a cancelled preparation
     to verify that setup. Any other push leaves stopped work stopped.
+
+    With sticky stops (plan B3, ``website_prepare_sticky_stop``) a push that is
+    not an owned merge re-opens a ``needs_attention`` or ``stopped`` preparation
+    only when the change can alter its outcome, and leaves a finished one whose
+    proof the push carried (``carried``) to the free carried re-check.
+    ``source_sha`` is the pushed head.
     """
     from .website_models import WebsiteConnection
     from .models import OrganizationContentConfig
@@ -1275,6 +1472,10 @@ def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_i
             return latest
     if enrolled(connection.organization_id) and latest and owns_goal(latest):
         return wake_goal_for_source(config, company_id=company.pk, user=connection.authorized_by, now=timezone.now())
+    if not owned_merge_run_id and latest is not None:
+        from . import website_prepare_sticky_stop as sticky
+        if sticky.hold_push(connection, latest, source_sha=source_sha, carried=carried):
+            return None
     if not owned_merge_run_id and _source_check_owns_push(connection, config, latest):
         # The push's own source check rescans for build proof at the new commit
         # and checks the live page; reopening a finished preparation here only
@@ -1331,7 +1532,9 @@ def _source_check_owns_push(connection, config, latest):
 # Cancellation bookkeeping stays with the cancel follow-up that owns the cleanup.
 SOURCE_RECHECK_DROPPED_RECEIPT_KEYS = frozenset({"scan_run_id", "setup_run_id", "completed_steps", "deployment_wait_started_at",
     "transient_started_at", "child_resume_pending", "remote_effects", "remote_outcome_unknown", "remote_cleanup_pending",
-    "cancellation_undoes_remote_writes"})
+    "cancellation_undoes_remote_writes",
+    # A scan-budget hold is judged again at the next scan (plan B3).
+    "child_dispatch_budget"})
 
 
 def _source_recheck_values(op, *, message, merged_setup_run_id=""):

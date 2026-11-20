@@ -65,7 +65,8 @@ def owner_support_operation(context, config, *, action, data, user=None):
     from .website_connections import authority_guard, scoped_run_contract, require_unlocked_remote_call
     from .vibe_marketing_views import _content_factory_headers, _content_factory_remote_config
     if config.website_connection is None:
-        raise WebsiteAuthorityError("website_connection_required", "Select a current website connection for this integration.")
+        from .website_connection_codes import not_connected
+        raise not_connected("Select a current website connection for this integration.")
     run = ContentFactoryRun.objects.filter(run_id=data.get("run_id"), organization=context.organization).first()
     if run is None:
         raise WebsiteAuthorityError("website_source_run_required", "Select the current scan or integration operation.", status=404)
