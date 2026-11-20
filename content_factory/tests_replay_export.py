@@ -172,3 +172,12 @@ class ExportReplayRecordTests(TestCase):
         run = make_run()
         run.result["failure"]["details"]["url"] = "https://cdn.other-company.com/sitemap.xml"
         self.assertEqual(export_record(run)["http"], [])
+
+    def test_a_url_shaped_domain_or_repository_is_still_caught(self):
+        run = make_run(domain=f"https://www.{DOMAIN}/", github_repo=f"https://github.com/{REPO}.git")
+        for leaked in ("private-storefront", "avery-goods", "founder-shop"):
+            run.result = {**run.result, "error_code": leaked}
+            with self.subTest(leaked=leaked), self.assertRaisesRegex(RecordError, "identifying"):
+                export_record(run)
+        run.result = {**run.result, "error_code": "CORPUS_INCOMPLETE"}
+        self.assertEqual(export_record(run)["http"][0]["url"], f"https://{EXPORT_SITE}/sitemap.xml")

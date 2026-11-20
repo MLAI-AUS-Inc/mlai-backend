@@ -208,13 +208,29 @@ def _codes(values, limit=32):
     return [code for code in (_token(item) for item in (values if isinstance(values, list) else [])[:limit]) if code]
 
 
+def _site_domain(domain):
+    """The founder's bare host (no scheme, path, port or ``www.``), lower-case."""
+    text = str(domain or "").strip().lower()
+    host = (urlsplit(text if "://" in text else f"//{text}").hostname or "") if text else ""
+    return host.removeprefix("www.")
+
+
+def _repository_parts(repo):
+    """``owner/name`` of a repository given as ``owner/name`` or a GitHub URL, lower-case."""
+    text = str(repo or "").strip().lower()
+    if "://" in text:
+        text = urlsplit(text).path
+    text = text.removeprefix("github.com/").strip("/").removesuffix(".git")
+    return [part for part in text.split("/") if part]
+
+
 def _public_path(url, domain):
     """The path of a URL on the founder's own site, rewritten to the export host; else None."""
     if not isinstance(url, str):
         return None
     parts = urlsplit(url)
     host = (parts.hostname or "").lower()
-    own = str(domain or "").strip().lower().removeprefix("www.")
+    own = _site_domain(domain)
     if parts.scheme not in {"http", "https"} or not own or host.removeprefix("www.") != own or parts.username:
         return None
     path = parts.path or "/"
@@ -337,8 +353,10 @@ def export_record(run, *, steps=(), now=None) -> dict:
 def _identifying_values(record, run) -> list[str]:
     """The founder's domain and repository must not survive, even inside a code-shaped value."""
     text = json.dumps(record, sort_keys=True).lower()
-    domain = str(run.domain or "").strip().lower().removeprefix("www.")
-    repo = str(run.github_repo or "").strip().lower()
-    names = [domain, repo, *repo.split("/"), domain.split(".")[0] if domain.count(".") else ""]
-    return [f"identifying:{kind}" for kind, name in zip(("domain", "repository", "owner", "name", "site"), names)
+    domain = _site_domain(run.domain)
+    parts = _repository_parts(run.github_repo)
+    names = [("domain", domain), ("site", domain.split(".")[0] if domain.count(".") else ""),
+             ("repository", "/".join(parts))]
+    names += [("owner" if index == 0 else "name", part) for index, part in enumerate(parts[:2])]
+    return [f"identifying:{kind}" for kind, name in names
             if len(name) >= 4 and re.search(rf"(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])", text)]
