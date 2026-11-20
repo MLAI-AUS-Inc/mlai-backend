@@ -2864,9 +2864,11 @@ CYBERTEST_TEST_BALANCE_POINTS = int(os.getenv('CYBERTEST_TEST_BALANCE_POINTS', '
 CYBERTEST_USD_PER_AUD = os.getenv('CYBERTEST_USD_PER_AUD', '0.697')
 CYBERTEST_AUD_PER_POINT = os.getenv('CYBERTEST_AUD_PER_POINT', '1.2798')
 CYBERTEST_PERSISTENT_BINDINGS_ENABLED = False
-# Companies whose own checks cost no Roo points (MLAI by default), comma-separated UUIDs.
-CYBERTEST_FREE_COMPANY_IDS = [value.strip() for value in os.getenv(
-    'CYBERTEST_FREE_COMPANY_IDS', '0d0c20f3-65f4-4f33-bab5-6e771d473475').split(',') if value.strip()]
+# GitHub repository IDs whose checks cost no Roo points, comma-separated. Defaults:
+# MLAI-AUS-Inc/mlai-au 747450323, mlai-backend 918452761, mlai-chat 1319031949,
+# content-factory 1112644407 (now drsamdonegan/content-factory), valley-backend 1190194664.
+CYBERTEST_FREE_REPOSITORY_IDS = [value.strip() for value in os.getenv(
+    'CYBERTEST_FREE_REPOSITORY_IDS', '747450323,918452761,1319031949,1112644407,1190194664').split(',') if value.strip()]
 
 # Validate effective environment/debug values; do not load a second dotenv or
 # quietly turn staging credentials into live authority. Default is unchanged.

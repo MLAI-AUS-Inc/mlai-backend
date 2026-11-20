@@ -58,18 +58,16 @@ def _payer(row,user):
         raise CheckoutError('WRONG_ACCOUNT','This checkout belongs to another account.',403)
 
 
-def free_company_ids():
-    values=getattr(settings,'CYBERTEST_FREE_COMPANY_IDS',())
-    try:return {str(UUID(str(value))) for value in values}
-    except (ValueError,TypeError,AttributeError):return set()
+def free_repository_ids():
+    """GitHub repository IDs (not names, which can be renamed or reused)."""
+    values=getattr(settings,'CYBERTEST_FREE_REPOSITORY_IDS',())
+    if not isinstance(values,(list,tuple,set)):return set()
+    return {str(value).strip() for value in values if str(value).strip().isdigit()}
 
 
 def _sponsored(normalized):
-    """MLAI's own company is checked for free; it must still own that company."""
-    company=normalized.get('mlai_company_id');user_id=normalized.get('mlai_user_id')
-    if not company or not user_id or company not in free_company_ids():return False
-    from founder_tools.models import VibeRaisingCompany
-    return VibeRaisingCompany.objects.filter(pk=company,profile__user_id=user_id).exists()
+    """MLAI's own repositories are checked for free; everything else is paid."""
+    return bool(normalized.get('purchase')) and normalized.get('repository_id') in free_repository_ids()
 
 
 def is_sponsored(row):
