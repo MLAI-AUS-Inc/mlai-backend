@@ -112,14 +112,28 @@ def _hours(seconds):
 # Sections
 
 
-def _funnel_runs(*, since, using, test_ids):
-    """One scalar count of the runs ``journey_funnel`` would load whole for this cohort's startups."""
+def _funnel_runs(*, since, until, using, test_ids):
+    """Scalar counts of what ``journey_funnel`` would load whole for this cohort.
+
+    The same selection journey_funnel makes: the startups founded by non-staff
+    accounts that signed up in [since, until), and every article or research
+    run of those startups, whenever it was created (journey_funnel reads them
+    all, so a created_at window would not bound it). Two COUNT queries.
+    """
+    from django.contrib.auth import get_user_model
+    from founder_tools.models import VibeRaisingCompany
     from workflow_runs.models import ContentFactoryRun
     from .founder_funnel import RESEARCH_WORKFLOWS
     from .run_state import ARTICLE_WORKFLOWS
-    return (ContentFactoryRun.objects.using(using)
-            .filter(created_at__gte=since, workflow__in=tuple(ARTICLE_WORKFLOWS) + RESEARCH_WORKFLOWS)
-            .exclude(organization_id__in=sorted(test_ids)).count())
+    users = get_user_model().objects.using(using).filter(date_joined__gte=since, date_joined__lt=until,
+                                                         is_staff=False).values("pk")
+    organizations = (VibeRaisingCompany.objects.using(using)
+                     .filter(profile__user_id__in=users, organization__isnull=False)
+                     .exclude(organization_id__in=sorted(test_ids)).values("organization_id"))
+    runs = (ContentFactoryRun.objects.using(using)
+            .filter(organization_id__in=organizations, workflow__in=tuple(ARTICLE_WORKFLOWS) + RESEARCH_WORKFLOWS)
+            .count())
+    return runs, organizations.order_by().values("organization_id").distinct().count()
 
 
 def _skipped_funnel(*, since, runs):
@@ -134,11 +148,19 @@ def _funnel(*, now, using, test_ids=frozenset(), run_limit=FUNNEL_RUN_LIMIT):
     # journey_funnel reads each cohort run's result document. The scheduler ran
     # out of memory on 10 Nov loading 2,047 of those, so the funnel is skipped
     # (and says so) rather than read when the cohort has more than run_limit runs.
-    runs = _funnel_runs(since=since, using=using, test_ids=test_ids)
-    if runs > run_limit:
-        logger.warning("founder_health_report_funnel_skipped runs=%s limit=%s", runs, run_limit)
+    # It also reads each cohort startup's whole strategy document, so the number
+    # of startups is bounded the same way.
+    runs, organizations = _funnel_runs(since=since, until=now, using=using, test_ids=test_ids)
+    if runs > run_limit or organizations > run_limit:
+        logger.warning("founder_health_report_funnel_skipped runs=%s organizations=%s limit=%s",
+                       runs, organizations, run_limit)
         return _skipped_funnel(since=since, runs=runs)
-    report = journey_funnel(since=since, until=now, using=using)
+    try:
+        report = journey_funnel(since=since, until=now, using=using)
+    except ValueError:
+        # More sign-ups than journey_funnel's cohort ceiling: skip, never fail the report.
+        logger.warning("founder_health_report_funnel_skipped reason=cohort_too_large")
+        return _skipped_funnel(since=since, runs=runs)
     approved = report["approved"]
     stopped = approved.get("stuckAt") or {}
     stages, previous = [], None
@@ -322,12 +344,16 @@ def _stuck(*, now, using, limit, test_ids):
     from .founder_stuck_alerts import STUCK_REASON, Scope, _find, stuck_alert_id
     from .website_models import WebsiteConnectionOperation
     from .website_staff_fixing import KEY, STATUS
+    full = []
     scope = Scope(run_stuck_after=STUCK_AFTER, lookback=STUCK_LOOKBACK, limit=limit, cursor=False,
-                  excluded_organization_ids=test_ids)
+                  excluded_organization_ids=test_ids, full_pages=full)
     conditions = [condition for condition in _find(now=now, scope=scope)
                   if condition.stuck_since <= now - STUCK_AFTER]
+    # A full page means older stuck founders may be past it: the section says it
+    # was truncated, so a zero count is never read as an all-clear.
+    page_full = bool(full)
     if not conditions:
-        return {"founders": [], "withoutOwner": 0, "total": 0, "truncated": False}
+        return {"founders": [], "withoutOwner": 0, "total": 0, "truncated": page_full}
     organization_ids = sorted({condition.organization_id for condition in conditions})
     receipts = dict(alerts._receipt_index(organization_ids))
     staff_owned = set(WebsiteConnectionOperation.objects.using(using).filter(
@@ -350,7 +376,7 @@ def _stuck(*, now, using, limit, test_ids):
             entry["owned"] = True
     rows = list(founders.values())
     return {"founders": rows[:LIST_LIMIT], "withoutOwner": sum(not row["owned"] for row in rows), "total": len(rows),
-            "truncated": len(rows) > LIST_LIMIT}
+            "truncated": page_full or len(rows) > LIST_LIMIT}
 
 
 def _startups(*, using, limit, test_ids):
@@ -502,8 +528,8 @@ def render_lines(report) -> list[str]:
         lines.append(f"  {'PASS' if slo['pass'] else 'FAIL'} {slo['label']}: {slo['value']}")
     funnel = report["funnel"]
     if funnel.get("skipped"):
-        lines.append(f"Funnel skipped: {funnel['runs']} runs since {funnel['since'][:10]} is over the row limit; "
-                     "run manage.py founder_funnel_report for it")
+        lines.append(f"Funnel skipped: {funnel['runs']} runs for sign-ups since {funnel['since'][:10]} is over the "
+                     "row limit; run manage.py founder_funnel_report for it")
     else:
         lines.append(f"Funnel (startups from sign-ups since {funnel['since'][:10]}): {funnel['organizations']} "
                      f"startups, {funnel['notConnected']} not connected")
@@ -603,16 +629,9 @@ def run_founder_health_report_sweep(now=None, limit=None, *, client=None) -> dic
     key = DAILY_KEY.format(day=local.date().isoformat())
     if not cache.add(key, now.isoformat(), DAILY_TTL):
         return {"status": "already_posted"}
-    report = build_report(now=now, row_limit=min(int(limit or ROW_LIMIT), ROW_LIMIT))
-    text = render_text(report)
-    channel = str(getattr(settings, "CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID", "") or "").strip()
-    failing = [slo["id"] for slo in report["slos"] if not slo["pass"]]
-    if not SLACK_CHANNEL.fullmatch(channel):
-        logger.warning("founder_health_report_unconfigured failing_slos=%s", ",".join(failing) or "none")
-        return {"status": "unconfigured", "failingSlos": failing}
-    ts = _post(channel, text, client=client)
-    if not ts:
-        # A failed post frees the day for a later tick, at most MAX_DAILY_ATTEMPTS times.
+
+    def free_the_day():
+        # A failed build or post frees the day for a later tick, at most MAX_DAILY_ATTEMPTS times.
         attempts_key = DAILY_ATTEMPTS_KEY.format(day=local.date().isoformat())
         cache.add(attempts_key, 0, DAILY_TTL)
         try:
@@ -621,6 +640,22 @@ def run_founder_health_report_sweep(now=None, limit=None, *, client=None) -> dic
             attempts = MAX_DAILY_ATTEMPTS
         if attempts < MAX_DAILY_ATTEMPTS:
             cache.delete(key)
+
+    try:
+        report = build_report(now=now, row_limit=min(int(limit or ROW_LIMIT), ROW_LIMIT))
+    except Exception as exc:  # noqa: BLE001 - a failed read is reported, never raised into the scheduler
+        logger.warning("founder_health_report_build_failed error_type=%s", type(exc).__name__, exc_info=True)
+        free_the_day()
+        return {"status": "error"}
+    text = render_text(report)
+    channel = str(getattr(settings, "CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID", "") or "").strip()
+    failing = [slo["id"] for slo in report["slos"] if not slo["pass"]]
+    if not SLACK_CHANNEL.fullmatch(channel):
+        logger.warning("founder_health_report_unconfigured failing_slos=%s", ",".join(failing) or "none")
+        return {"status": "unconfigured", "failingSlos": failing}
+    ts = _post(channel, text, client=client)
+    if not ts:
+        free_the_day()
         return {"status": "undelivered", "failingSlos": failing}
     logger.info("founder_health_report_posted failing_slos=%s", ",".join(failing) or "none")
     return {"status": "posted", "failingSlos": failing}

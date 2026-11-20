@@ -249,9 +249,33 @@ class FounderHealthReportTests(HealthFixture):
         since = (self.now - timedelta(days=90)).date().isoformat()
         # Ten founder article runs (La Vie, Maxbiz and Vyavos one each, Tala seven; never the test
         # org's two) are over the limit of 3.
-        self.assertIn(f"Funnel skipped: 10 runs since {since} is over the row limit; "
+        self.assertIn(f"Funnel skipped: 10 runs for sign-ups since {since} is over the row limit; "
                       "run manage.py founder_funnel_report for it", report["lines"])
         self.assertFalse([line for line in report["lines"] if line.startswith(("  signed_up", "Time to first"))])
+
+    def test_funnel_bound_counts_a_cohort_startups_older_runs_too(self):
+        # journey_funnel reads every run of a cohort startup, however old, so the bound must count them.
+        self.build_catalogue()
+        lavie = Organization.objects.get(pk=173)
+        for _ in range(3):
+            self.make_run(lavie, status="completed", created=self.at(days=400))
+        with patch.object(health, "FUNNEL_RUN_LIMIT", 12), \
+                patch("content_factory.founder_funnel.journey_funnel") as journey:
+            report = health.build_report(now=self.now)
+        journey.assert_not_called()
+        self.assertEqual(report["funnel"]["runs"], 13)
+
+    def test_a_cohort_over_the_signup_ceiling_skips_the_funnel_instead_of_failing(self):
+        self.build_catalogue()
+        with patch("content_factory.founder_funnel.journey_funnel", side_effect=ValueError("too many")):
+            report = health.build_report(now=self.now)
+        self.assertTrue(report["funnel"]["skipped"])
+
+    def test_a_full_stuck_page_is_reported_as_truncated(self):
+        self.build_catalogue()
+        report = health.build_report(now=self.now, row_limit=1)
+        self.assertTrue(report["stuck"]["truncated"])
+        self.assertIn("stuck", report["lines"][-1])
 
     def test_report_queries_do_not_grow_with_the_number_of_startups(self):
         def count():
@@ -345,6 +369,18 @@ class FounderHealthDeliveryTests(HealthFixture):
         # Three tries a day, then the day is left alone; never raised into the scheduler.
         self.assertEqual(statuses, ["undelivered", "undelivered", "undelivered", "already_posted", "already_posted"])
         self.assertEqual(len(slack.posts), 3)
+
+    @override_settings(ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED=True, CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID=CHANNEL)
+    def test_a_failed_build_frees_the_day_and_is_never_raised(self):
+        slack = FakeSlack()
+        with patch.object(health, "build_report", side_effect=RuntimeError("database gone")):
+            first = health.run_founder_health_report_sweep(now=self.now, client=slack)
+        self.assertEqual(first, {"status": "error"})
+        self.assertEqual(slack.posts, [])
+        # The next tick builds and posts: a failed read never burns the day.
+        self.assertEqual(health.run_founder_health_report_sweep(now=self.now + timedelta(minutes=5),
+                                                                client=slack)["status"], "posted")
+        self.assertEqual(len(slack.posts), 1)
 
     @override_settings(ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED=True, CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID="",
                        ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED=False, ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED=False)

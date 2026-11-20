@@ -186,6 +186,9 @@ class Scope:
     # False reads the newest page only and never moves the alert sweep's cursor
     # (the daily founder-health report, F9).
     cursor: bool = True
+    # When a list is given, each kind whose bounded head page came back full is
+    # appended to it (the report's truncation line). Never part of equality.
+    full_pages: list | None = field(default=None, compare=False, hash=False)
 
 
 def find_stuck_conditions(*, now) -> list[StuckCondition]:
@@ -225,6 +228,8 @@ def _pages(queryset, scope, *, kind, pk_field) -> list[dict]:
     if scope.limit is None:
         return list(queryset.order_by("-updated_at", pk_field))
     head = list(queryset.order_by("-updated_at", f"-{pk_field}")[:scope.limit])
+    if scope.full_pages is not None and len(head) >= scope.limit:
+        scope.full_pages.append(kind)
     if not scope.cursor:
         return head
     key = CURSOR_KEY.format(kind=kind)
