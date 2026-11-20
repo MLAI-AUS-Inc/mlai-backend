@@ -230,6 +230,21 @@ class SweepRuleTests(SimpleTestCase):
             "self_heal:new_sweep: the sweep's module does not read its shadow flag ARTICLES_NEW_SWEEP_SHADOW_ENABLED",
             "self_heal:new_sweep: the sweep's module does not read its history horizon ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE"])
 
+    def test_a_read_only_digest_needs_its_shadow_flag_but_no_horizon(self):
+        source = ("from django.conf import settings\n\n"
+                  "def run(now=None):\n    return {'post': settings.ARTICLES_NEW_SWEEP_SHADOW_ENABLED}\n")
+        root = self.tree(new_sweep_source=source)
+        declared = dict(self.OLD, **{"self_heal:new_sweep": {
+            "digest": True, "shadow_flag": "ARTICLES_NEW_SWEEP_SHADOW_ENABLED",
+            "reason": "One read-only summary a day; off, it posts nothing."}})
+        self.assertEqual(checker.sweep_errors(root, declared, 1), [])
+        unread = self.tree(new_sweep_source="def run(now=None):\n    return {}\n")
+        self.assertEqual(checker.sweep_errors(unread, declared, 1), [
+            "self_heal:new_sweep: the sweep's module does not read its shadow flag ARTICLES_NEW_SWEEP_SHADOW_ENABLED"])
+        del declared["self_heal:new_sweep"]["digest"]
+        self.assertEqual(checker.sweep_errors(root, declared, 1), [
+            "self_heal:new_sweep: history_horizon must be a release-installable *_SINCE setting defined in mlai/settings.py"])
+
     def test_grandfathering_a_new_sweep_breaks_the_ratchet(self):
         root = self.tree(new_sweep_source="def run(now=None):\n    return {}\n")
         declared = dict(self.OLD, **{"self_heal:new_sweep": {"grandfathered": True, "reason": "Trying to skip rule 7."}})

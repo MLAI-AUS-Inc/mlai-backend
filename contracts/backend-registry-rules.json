@@ -71,6 +71,11 @@
       "grandfathered": true,
       "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by ARTICLES_SELF_HEAL_POLICY_ENABLED, with the ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE horizon (B1)."
     },
+    "self_heal:founder_health_report": {
+      "digest": true,
+      "shadow_flag": "ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED",
+      "reason": "F9 daily founder-health digest: read-only, one bounded Slack summary per Melbourne day, never one alert per row. Off (the default) it posts nothing; the command and the staff view still build the report, which is its shadow."
+    },
     "self_heal:founder_transitions": {
       "grandfathered": true,
       "reason": "Shipped before F4 rule 7 with an on/off switch but no shadow mode; gated by MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED and MY_STARTUP_TURN_REMINDERS_ENABLED."

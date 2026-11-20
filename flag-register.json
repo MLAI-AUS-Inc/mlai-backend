@@ -78,6 +78,10 @@
       "reason": "Failure code, not a setting."
     },
     {
+      "name": "FOUNDER_ASKS",
+      "reason": "Module constant in content_factory/founder_journey.py that the failure-contract checker reads by AST (F4 rule 3); not a setting."
+    },
+    {
       "name": "PYTHON_DOTENV_DISABLED",
       "reason": "Written into a child process environment, not a setting."
     },
@@ -312,6 +316,12 @@
     },
     {
       "name": "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED",
       "default": "false",
       "owner": "platform",
       "expiry": "2027-02-28"
@@ -721,6 +731,12 @@
     },
     {
       "name": "ARTICLES_STAFF_ALERT_RULES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_STAFF_ESCALATION_LADDER_ENABLED",
       "default": "false",
       "owner": "platform",
       "expiry": "2027-02-28"
@@ -1337,6 +1353,13 @@
       "owner": "platform",
       "expiry": "permanent",
       "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
+    },
+    {
+      "name": "FOUNDER_TEST_ORGANIZATION_IDS",
+      "default": "",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational setting (host-only list of marked test organisations, F1), not a rollout switch."
     },
     {
       "name": "FOUNDER_TOOLS_URL",

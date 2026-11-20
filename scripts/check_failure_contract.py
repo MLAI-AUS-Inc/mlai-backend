@@ -566,6 +566,8 @@ def sweep_errors(root, declared, ratchet):
 
     Both must be settings a release can install (the deploy config validator's
     keys) and defined in mlai/settings.py, and the sweep's module must read them.
+    A read-only digest (``"digest": true``, one bounded summary per period, no
+    per-row alerts) names its shadow flag but no history horizon.
     """
     errors = []
     if not isinstance(declared, dict):
@@ -596,6 +598,11 @@ def sweep_errors(root, declared, ratchet):
                           f"defined in {SETTINGS_PATH}")
         elif flag not in source:
             errors.append(f"{name}: the sweep's module does not read its shadow flag {flag}")
+        if entry.get("digest") is True and horizon is None:
+            # A read-only digest posts one bounded summary per period, never one
+            # alert per historical row, so it has no history to hold back; it still
+            # needs its shadow flag (above).
+            continue
         if not isinstance(horizon, str) or horizon not in release_keys or f"{horizon} = " not in settings_text:
             errors.append(f"{name}: history_horizon must be a release-installable *_SINCE setting defined in {SETTINGS_PATH}")
         elif horizon not in source and HORIZON_READERS.get(horizon, "\0") not in source:

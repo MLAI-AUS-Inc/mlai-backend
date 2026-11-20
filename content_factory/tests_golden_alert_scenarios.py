@@ -26,7 +26,6 @@ from __future__ import annotations
 from contextlib import ExitStack
 import re
 from datetime import timedelta
-from unittest import skip
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -715,6 +714,16 @@ class AlertInvariantTests(GoldenFixture):
         self.assertEqual(self.sweep_all(now=self.now + timedelta(minutes=22)), [])
         self.assertEqual(set(self.receipts()) - before, set())
 
-    @skip("TODO(F1): the test-org marker has not landed on this base branch; wire it here when it does.")
     def test_a_marked_test_organization_produces_nothing(self):
-        """F1: build_all() on organisations carrying the test-org marker gives no receipt, notice or Slack line."""
+        """F1: build_all() on organisations carrying the test-org marker gives no receipt or Slack line."""
+        from . import founder_test_orgs
+        built = self.build_all()
+        for item in built:
+            founder_test_orgs.set_marker(item.organization, marked=True, reason="golden fixture", now=self.now)
+        self.assertEqual(founder_test_orgs.test_organization_ids(), {item.organization.pk for item in built})
+        self.assertEqual(self.sweep_all(), [])
+        self.assertEqual(self.produced(), [])
+        # Self-heal never picks a marked organisation, so no Content Factory action or channel switch is made.
+        self.assertEqual((self.cf_actions, self.channel_switches), ([], []))
+        self.assertEqual(self.sweep_all(now=self.now + timedelta(minutes=11)), [])
+        self.assertEqual(self.produced(), [])
