@@ -8,8 +8,9 @@ A founder can be stuck in three ways that the cohort-gated alerts miss:
   (La Vie's reconnect sat pending after 21 attempts); a deployment or policy wait
   is left out, because it has its own 24-hour deadline that ends in a stop;
 * the founder's latest article or setup run stopped (failed, blocked, stopped or
-  denied) more than six hours ago with no founder action and no scheduled
-  self-heal retry.
+  denied) more than six hours ago (two hours with
+  ``ARTICLES_STAFF_ESCALATION_LADDER_ENABLED``, the plan 7.6 escalation
+  ladder) with no founder action and no scheduled self-heal retry.
 
 Each condition queues one ``founder_stuck`` receipt through the shared
 founder-journey alert store, keyed by the operation or run and the kind of stop,
@@ -67,7 +68,26 @@ OPERATION_RETRY_ATTEMPTS = 10
 # A setup that keeps progressing can legitimately be pending for a day (steps,
 # then a deployment wait of up to 24 hours), so only twice that reads as stuck.
 OPERATION_PENDING_AFTER = timedelta(hours=48)
-RUN_STUCK_AFTER = timedelta(hours=6)
+# Plan 7.6 escalation ladder: a failed run reaches staff within two hours once
+# ARTICLES_STAFF_ESCALATION_LADDER_ENABLED is on. Until then (shadow, plan 7.5
+# rule 7) the earlier six-hour wait holds; see run_stuck_after().
+RUN_STUCK_AFTER = timedelta(hours=2)
+SHADOW_RUN_STUCK_AFTER = timedelta(hours=6)
+
+
+def escalation_ladder_enabled() -> bool:
+    """``ARTICLES_STAFF_ESCALATION_LADDER_ENABLED`` (plan F10, default off: shadow).
+
+    Off, the sweep keeps the six-hour failed-run wait and only logs the owner
+    escalations it would queue. On, a failed run alerts after two hours and a
+    stop still waiting on us after 48 hours queues one owner escalation.
+    """
+    return bool(getattr(settings, "ARTICLES_STAFF_ESCALATION_LADDER_ENABLED", False))
+
+
+def run_stuck_after() -> timedelta:
+    """How long a stopped run waits before its stuck alert, under the current switch."""
+    return RUN_STUCK_AFTER if escalation_ladder_enabled() else SHADOW_RUN_STUCK_AFTER
 CURSOR_KEY = "founder_stuck_alerts:cursor:{kind}"
 PENDING_ORGS_KEY = "founder_stuck_alerts:pending_organizations"
 CURSOR_TIMEOUT_SECONDS = 7 * 24 * 3600
@@ -147,10 +167,21 @@ def run_founder_stuck_alert_sweep(now=None) -> dict:
     if not cache.add(THROTTLE_KEY, now.isoformat(), SWEEP_INTERVAL_SECONDS):
         return {"status": "throttled"}
     conditions = find_stuck_conditions(now=now)
+    # Plan 7.6: anything still waiting on us after 48 hours escalates to the owner once, on this channel.
+    from .staff_escalation import owner_escalations
+    owner = owner_escalations(conditions, now=now)
+    shadow = {}
+    if escalation_ladder_enabled():
+        conditions = [*conditions, *owner]
+    else:
+        # Shadow (plan 7.5 rule 7): count what would be sent; queue nothing new.
+        shadow = {"owner_escalations_shadow": len(owner)}
+        if owner:
+            logger.info("founder_stuck_owner_escalation_shadow count=%s", len(owner))
     organization_ids = {condition.organization_id for condition in conditions}
     queued = _queue(conditions, organization_ids=organization_ids)
     delivered = _deliver_pending(now=now, organization_ids=organization_ids)
-    return {"status": "completed", "candidates": len(conditions), "queued": queued, **delivered}
+    return {"status": "completed", "candidates": len(conditions), "queued": queued, **shadow, **delivered}
 
 
 def _deliver_pending(*, now, organization_ids) -> dict:
@@ -178,7 +209,8 @@ class Scope:
     """How far detection looks. Alerts wait and page through 90 days; the staff console sees every stop now."""
 
     organization_ids: frozenset | None = None
-    run_stuck_after: timedelta = RUN_STUCK_AFTER
+    # None: the switch decides (run_stuck_after()); the console passes zero.
+    run_stuck_after: timedelta | None = None
     lookback: timedelta | None = LOOKBACK
     limit: int | None = QUERY_LIMIT
     # Plan F1: marked test organisations, never read as stuck founders.
@@ -268,7 +300,8 @@ def stuck_alert_id(condition: StuckCondition) -> str:
 
 OPERATION_FIELDS = ("id", "connection__organization_id", "action", "state", "attempts", "created_at", "updated_at",
                     "receipt__reason_code", "receipt__error_code", "receipt__failure__code", "receipt__code",
-                    "receipt__last_error", "receipt__user_action__id")
+                    "receipt__last_error", "receipt__user_action__id", "receipt__status",
+                    "receipt__staff_fixing__since", "receipt__staff_fixing__owner__user_id")
 # Prepare records its code as reason_code (sometimes error_code or failure.code);
 # other operations use code or last_error. The first safe code wins.
 OPERATION_CODE_FIELDS = ("receipt__reason_code", "receipt__error_code", "receipt__failure__code", "receipt__code",
@@ -300,6 +333,11 @@ def _operation_condition(row, *, kind, stuck_since) -> StuckCondition:
     action = row.get("receipt__user_action__id")
     if kind == "retired_ask" and isinstance(action, str) and alerts.SAFE_CODE.fullmatch(action):
         details["action"] = action
+    if row.get("receipt__status") == "staff_fixing" and isinstance(row.get("receipt__staff_fixing__since"), str):
+        # B25's bounded life; the escalation ladder reads it (plan F10).
+        details["staff_fixing_since"] = row["receipt__staff_fixing__since"][:40]
+        if row.get("receipt__staff_fixing__owner__user_id") is not None:
+            details["staff_fixing_owner"] = True
     return StuckCondition(
         organization_id=row["connection__organization_id"], slot=f"op-{row['id']}-{kind}", kind=f"operation_{kind}",
         step=row["action"], code=_operation_code(row), stuck_since=stuck_since, details=details)
@@ -358,8 +396,9 @@ RUN_FIELDS = ("pk", "run_id", "organization_id", "workflow", "status", "updated_
 def _stopped_runs(*, now, scope) -> list[StuckCondition]:
     newer = ContentFactoryRun.objects.filter(organization_id=OuterRef("organization_id"), workflow__in=RUN_WORKFLOWS,
                                              created_at__gt=OuterRef("created_at"))
+    wait = run_stuck_after() if scope.run_stuck_after is None else scope.run_stuck_after
     rows = ContentFactoryRun.objects.filter(workflow__in=RUN_WORKFLOWS, status__in=RUN_STOP_STATUSES,
-                                            organization__isnull=False, updated_at__lte=now - scope.run_stuck_after)
+                                            organization__isnull=False, updated_at__lte=now - wait)
     if scope.lookback is not None:
         rows = rows.filter(updated_at__gte=now - scope.lookback)
     if scope.organization_ids is not None:
@@ -560,7 +599,8 @@ def stuck_alert_text(receipt, context) -> str:
     entry = _registry_entry(code)
     description = (entry or {}).get("user_message") or KIND_DESCRIPTIONS.get(str(details.get("kind")), "")
     step = STEP_LABELS.get(str(details.get("step") or ""), str(details.get("step") or "Unknown step"))
-    parts = [f"Founder stuck: {founder} at {startup}" + (f" ({context['domain']})." if context.get("domain") else ".")]
+    parts = [("Escalated to the owner after 48 hours. " if details.get("escalation") == "owner" else "")
+             + f"Founder stuck: {founder} at {startup}" + (f" ({context['domain']})." if context.get("domain") else ".")]
     parts.append(f"Step: {step}.")
     parts.append(f"Reason: {code + ': ' if code else ''}{description or 'No failure code was reported.'}")
     since = alerts._timestamp(details.get("stuck_since_at"))

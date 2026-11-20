@@ -33,6 +33,23 @@ Every pull request replays the catalogue's founder failures through the function
 
 **Rule: a pull request that says it fixes a founder issue adds or updates a replay record** for that failure. CI does not enforce this yet. After release, `replay_stopped` carries the fix to founders already stuck.
 
+## Staff operation actions and the escalation ladder (Phase 4, F10)
+
+Behind `MY_STARTUP_STAFF_CONSOLE_ENABLED` (unchanged, default off), the staff console's action endpoint (`POST /community-chat/admin/startups/<org>/actions/`) also takes `operationId` for the startup's current website preparation (`content_factory/staff_operation_actions.py`):
+
+- `restart_prepare`: the founder's own Try again under the founder who authorised the website. With `resetAttemptCap: true` it also clears the setup dispatch cap and the scan budget hold; that reset has its own cap (`CAP_RESET_LIMIT`, 1 per preparation) and is recorded in `staff_cap_resets_v1`.
+- `rescan`: "Check website again" from the server on a stopped or finished preparation; the scan budget holds.
+- `reset_setup`: Try again, then start the setup over from a fresh scan; the setup dispatch cap holds.
+- `replay_current_build`: the `replay_stopped` replay of this one preparation, keyed `CODE@build:APP_RELEASE`, so a stop is replayed once per build.
+
+Every action needs a note (why) and an `idempotencyKey`; a repeat with the same key replays the first answer. Each call, refused or done, appends a `staff_actions_v1` row to the operation's receipt (who, when, why, state before and after). A staff action never approves or merges a setup pull request: those requests are refused (`founder_consent_required`) and audited, and a preparation resting on a founder ask is refused (`founder_turn`). Choosing the articles page for the founder, regranting a free article and archiving a duplicate are not offered. The startup detail lists only the actions the server offers (`website.operation.actions`).
+
+Each staff console row carries `escalation`, the plan 7.6 ladder as data (`content_factory/staff_escalation.py`): a generic or internal stop reaches staff at once, a failed run at 2 hours, an unanswered ask follows E7's reminders and staff threshold, and anything still waiting on us after 48 hours sends one owner escalation through the stuck-alert sweep (same channel and `ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED` kill switch; only for stops that crossed 48 hours within the last 7 days). `staff_fixing` shows B25's bounds.
+
+The two new alert rules ship in shadow (plan 7.5 rule 7) behind `ARTICLES_STAFF_ESCALATION_LADDER_ENABLED` (default off). Off, the sweep keeps the six-hour failed-run wait and only counts the owner escalations it would queue (`owner_escalations_shadow` in the sweep result and a `founder_stuck_owner_escalation_shadow` log line); the console ladder shows the six-hour wait and marks the owner rung `shadow_not_sent`. On, a failed run alerts after two hours (`founder_stuck_alerts.RUN_STUCK_AFTER`) and the owner escalation is queued.
+
+A restart on the goal runner opens a successor preparation (a stopped goal is terminal); the action counts that as re-opened, as `replay_stopped` does, and writes the audit row on both operations.
+
 ## Class before wall, original codes and one alert per cause (Phase 1, B1, B2, B5, B6)
 
 `is_scheduler_run` is the one audience test for the engine and every alert producer. Besides the saved request source it now also treats a run whose admission receipt names a scheduler principal (`run_owner_v1.identity.principal.kind == "scheduler"`) as background work; `founder_run_q()` matches it in SQL. The staff provider-error-rate rule uses `founder_run_q()` instead of a workflow-name exclude. Self-heal candidates stop at the alerts' history horizon (`ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE`); an invalid horizon selects no runs. The wall counts from the run's own failure (its latest failed or blocked step's end, else its last update), not from the first sweep.

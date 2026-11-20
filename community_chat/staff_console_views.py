@@ -20,7 +20,8 @@ class StaffConsoleView(MlaiAdminView):
     def handle_exception(self, exc):
         if isinstance(exc, (AdminError, NotAuthenticated, PermissionDenied)):
             return Response({"detail": "Not authorised.", "reason": "not_authorised"}, status=403)
-        if isinstance(exc, (Organization.DoesNotExist, ContentFactoryRun.DoesNotExist)):
+        from content_factory.website_models import WebsiteConnectionOperation
+        if isinstance(exc, (Organization.DoesNotExist, ContentFactoryRun.DoesNotExist, WebsiteConnectionOperation.DoesNotExist)):
             return Response({"detail": "Not found.", "reason": "not_found"}, status=404)
         if isinstance(exc, (ValueError, TypeError, signing.BadSignature)):
             return Response({"detail": "Invalid request.", "reason": "invalid_request"}, status=400)

@@ -592,6 +592,7 @@ jobs:
           content_factory.tests_golden_alert_scenarios \
           content_factory.tests_self_heal_class_before_wall \
           content_factory.tests_self_heal_history_commands \
+          content_factory.tests_staff_operation_actions \
           content_factory.tests_founder_stuck_alerts \
           content_factory.tests_stand_in_preview_approval_unit \
           content_factory.tests_website_live_status \
@@ -1731,6 +1732,7 @@ jobs:
         ARTICLES_READY_ON_MERGE_ENABLED: ${{ vars.ARTICLES_READY_ON_MERGE_ENABLED || '' }}
         ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED: ${{ vars.ARTICLES_NO_WORKFLOW_ALL_COHORTS_ENABLED || '' }}
         ARTICLES_STAFF_ALERT_RULES_ENABLED: ${{ vars.ARTICLES_STAFF_ALERT_RULES_ENABLED || '' }}
+        ARTICLES_STAFF_ESCALATION_LADDER_ENABLED: ${{ vars.ARTICLES_STAFF_ESCALATION_LADDER_ENABLED || '' }}
         ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE: ${{ vars.ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE || '' }}
         ARTICLES_FAILURE_POLICY_V2_ENABLED: ${{ vars.ARTICLES_FAILURE_POLICY_V2_ENABLED || '' }}
         ARTICLES_SELF_HEAL_POLICY_ENABLED: ${{ vars.ARTICLES_SELF_HEAL_POLICY_ENABLED || '' }}
