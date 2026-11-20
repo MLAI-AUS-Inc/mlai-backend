@@ -8,6 +8,7 @@ import re
 from datetime import date, timedelta
 from difflib import SequenceMatcher
 from typing import Any
+from uuid import uuid4
 
 from django.conf import settings
 from django.core.cache import cache, caches
@@ -1526,6 +1527,13 @@ def _serialize_linear_meeting_action_batch(
     batch: LinearMeetingActionBatch,
 ) -> dict[str, Any]:
     items = list(batch.items.all())
+    approved = [item for item in items if item.status == LinearMeetingActionItem.Status.APPROVED]
+    linked = sum(1 for item in approved if (item.linear_issue_payload or {}).get("alreadyTracked"))
+    counts = {
+        status: sum(1 for item in items if item.status == status)
+        for status in LinearMeetingActionItem.Status.values
+    }
+    counts.update(created=len(approved) - linked, alreadyTracked=linked)
     return {
         "id": str(batch.id),
         "status": batch.status,
@@ -1533,10 +1541,7 @@ def _serialize_linear_meeting_action_batch(
         "slackChannelId": batch.slack_channel_id,
         "slackThreadTs": batch.slack_thread_ts,
         "expiresAt": batch.expires_at.isoformat(),
-        "counts": {
-            status: sum(1 for item in items if item.status == status)
-            for status in LinearMeetingActionItem.Status.values
-        },
+        "counts": counts,
         "items": [
             {
                 "id": str(item.id),
@@ -1651,6 +1656,27 @@ def get_linear_project_sizing_context(
     }
 
 
+def _validated_project_page(data: dict, project_id: str, connection_name: str) -> dict:
+    project = data.get("project")
+    if not isinstance(project, dict):
+        raise ValueError("Linear project was not found.")
+    connection = project.get(connection_name)
+    nodes = connection.get("nodes") if isinstance(connection, dict) else None
+    info = _page_info(connection)
+    if (project.get("id") != project_id or not isinstance(nodes, list)
+            or any(not isinstance(node, dict) for node in nodes)
+            or not isinstance(info.get("hasNextPage"), bool)
+            or (info["hasNextPage"] and not info.get("endCursor"))):
+        raise LinearMeetingGraphQLError("Linear returned an incomplete or incorrectly scoped project inventory.")
+    return {
+        "project": {key: value for key, value in project.items() if key != connection_name},
+        "nodes": nodes,
+        "pageInfo": info,
+        "snapshotAt": timezone.now().isoformat(),
+        "orderBy": "createdAt",
+    }
+
+
 def get_linear_project_issue_page(
     project_id: str,
     *,
@@ -1698,17 +1724,9 @@ def get_linear_project_issue_page(
         {"id": project_id, "first": page_size, "after": cursor},
         operation_name="LinearProjectIssueInventory",
     )
-    project = data.get("project")
-    if not isinstance(project, dict):
-        raise ValueError("Linear project was not found.")
-    issue_connection = project.get("issues")
     return {
-        "project": {key: value for key, value in project.items() if key != "issues"},
-        "nodes": _connection_nodes(issue_connection),
-        "pageInfo": _page_info(issue_connection),
-        "snapshotAt": timezone.now().isoformat(),
+        **_validated_project_page(data, project_id, "issues"),
         "terminalStateTypes": sorted(TERMINAL_WORKFLOW_TYPES),
-        "orderBy": "createdAt",
     }
 
 
@@ -1747,19 +1765,7 @@ def get_linear_project_update_page(
         {"id": project_id, "first": page_size, "after": cursor},
         operation_name="LinearProjectUpdateInventory",
     )
-    project = data.get("project")
-    if not isinstance(project, dict):
-        raise ValueError("Linear project was not found.")
-    update_connection = project.get("projectUpdates")
-    return {
-        "project": {
-            key: value for key, value in project.items() if key != "projectUpdates"
-        },
-        "nodes": _connection_nodes(update_connection),
-        "pageInfo": _page_info(update_connection),
-        "snapshotAt": timezone.now().isoformat(),
-        "orderBy": "createdAt",
-    }
+    return _validated_project_page(data, project_id, "projectUpdates")
 
 
 def list_teams(limit: int = 100, member_limit: int = 50) -> list[dict[str, Any]]:
@@ -2170,6 +2176,157 @@ def list_recent_open_issues(limit: int = 100) -> list[dict[str, Any]]:
     ]
 
 
+def _meeting_work_text(value: Any) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def _meeting_work_timestamp(value: Any):
+    try:
+        stamp = parse_datetime(str(value or ""))
+    except ValueError:
+        return None
+    return stamp if stamp and timezone.is_aware(stamp) else None
+
+
+def _recorded_meeting_outcome(description: str) -> str:
+    if not description.startswith("### Meeting action\n"):
+        return _meeting_work_text(description)
+    work = description.removeprefix("### Meeting action\n").split("\n\n", 1)[0]
+    criteria = re.search(r"^### Acceptance criteria\n((?:- [^\n]+(?:\n|$))+)", description, re.MULTILINE)
+    if criteria:
+        work += " " + " ".join(line.removeprefix("- ") for line in criteria[1].splitlines())
+    return _meeting_work_text(work)
+
+
+def _matching_project_work(payload: dict, marker: str) -> dict | None:
+    """Scan the authorized project, including closed issues, before a meeting write."""
+    project_id = payload["project_id"]
+    title = _meeting_work_text(payload["title"])
+    outcome = _meeting_work_text(payload.get("project_work_outcome")) or title
+    distinct = str(payload.get("project_work_distinct_issue_id") or "")
+    snapshot = _meeting_work_timestamp(payload.get("project_work_snapshot_at"))
+    if snapshot and snapshot > timezone.now():
+        snapshot = None
+    terms = set(re.findall(r"\w+", title)) - {"a", "an", "the", "in", "for", "to", "add", "build", "update"}
+    matches = {}
+    ambiguous = False
+    cursor = None
+    seen = set()
+    for _ in range(5):
+        page = get_linear_project_issue_page(project_id, after=cursor, limit=100)
+        info = page.get("pageInfo") or {}
+        nodes = page.get("nodes")
+        if ((page.get("project") or {}).get("id") != project_id or not isinstance(nodes, list)
+                or not isinstance(info.get("hasNextPage"), bool)):
+            break
+        for item in nodes:
+            if not item.get("id") or not item.get("title") or not (item.get("team") or {}).get("id"):
+                raise LinearMeetingActionConflictError("Project issue details are incomplete. Refresh the proposal.")
+            if item["team"]["id"] != payload["team_id"]:
+                continue
+            body = str(item.get("description") or "")
+            stamp = _meeting_work_timestamp(item.get("updatedAt") or item.get("createdAt"))
+            reviewed = snapshot is not None and stamp is not None and stamp <= snapshot
+            if distinct and distinct in (item["id"], item.get("identifier")):
+                if not reviewed:
+                    ambiguous = True
+                continue
+            existing_title = _meeting_work_text(item["title"])
+            if marker in body.splitlines() or (title == existing_title and (
+                outcome == _recorded_meeting_outcome(body.strip()) or (outcome == title and not body.strip())
+            )):
+                matches[item["id"]] = {key: item.get(key) for key in ("id", "identifier", "title", "url")}
+            elif title == existing_title:
+                ambiguous = True
+            elif not reviewed and len(terms) >= 2:
+                issue_terms = set(re.findall(r"\w+", existing_title))
+                common = terms & issue_terms
+                if len(common) >= 2 and len(common) / max(len(terms), len(issue_terms)) >= 0.65:
+                    ambiguous = True
+        if not info["hasNextPage"]:
+            if len(matches) == 1 and not ambiguous:
+                return next(iter(matches.values()))
+            if matches or ambiguous:
+                raise LinearMeetingActionConflictError(
+                    "Possible overlapping work in the project. Refresh the proposal and review the existing issues."
+                )
+            return None
+        cursor = info.get("endCursor")
+        if not cursor or cursor in seen:
+            break
+        seen.add(cursor)
+    raise LinearMeetingActionConflictError("The project issue inventory is incomplete. Refresh the proposal.")
+
+
+def _write_reviewed_project_work(payload: dict, mutation: str, input_data: dict) -> dict:
+    """Serialize a project's reviewed writes from inventory read through provider reply."""
+    project = str(payload.get("project_id") or "").strip()
+    if not project or not payload.get("idempotency_key"):
+        raise ValueError("Reviewed project work requires a project and an idempotency key.")
+    lock_key = "linear-meeting-project:" + hashlib.sha256(project.encode()).hexdigest()
+    owner = uuid4().hex
+    try:
+        acquired = cache.add(lock_key, owner, timeout=_linear_channel_write_lock_ttl())
+    except Exception as exc:
+        raise LinearMeetingActionConflictError("The project write lock is unavailable. Retry the review.") from exc
+    if not acquired:
+        raise LinearMeetingActionConflictError("Another meeting action is being verified in this project. Retry the review.")
+    try:
+        return _write_locked_meeting_outcome(payload, mutation, input_data, project, lock_key, owner)
+    finally:
+        _release_linear_channel_issue_write_lock(lock_key, owner)
+
+
+def _write_locked_meeting_outcome(payload: dict, mutation: str, input_data: dict, project: str, lock_key: str, owner: str) -> dict:
+    title = _meeting_work_text(payload["title"])
+    outcome = _meeting_work_text(payload.get("project_work_outcome")) or title
+    identity = json.dumps([project, payload["team_id"], title, outcome], ensure_ascii=True)
+    digest = hashlib.sha256(identity.encode()).hexdigest()
+    marker = f"<!-- roo-meeting-work:{digest} -->"
+    existing = _matching_project_work(payload, marker)
+    if existing:
+        return {**existing, "alreadyTracked": True}
+    enforcement = _enforce_project_sizing(payload)
+    if cache.get(lock_key) != owner:
+        raise LinearMeetingActionConflictError("The project write lock expired. Refresh the review.")
+    # A period is excluded from public issue idempotency keys. This receipt spans
+    # separate Slack requests and survives transport receipts becoming stale.
+    with transaction.atomic():
+        guard, created = LinearIssueCreationReceipt.objects.select_for_update().get_or_create(
+            idempotency_key=f"m.{digest[:62]}", defaults={"request_payload": {"project_id": project}},
+        )
+        if not created and guard.status != LinearIssueCreationReceipt.Status.FAILED:
+            raise LinearMeetingIdempotencyConflictError(
+                "A previous write for this outcome is awaiting verification in Linear. Refresh before retrying."
+            )
+        if not created:
+            guard.status = LinearIssueCreationReceipt.Status.PENDING
+            guard.last_error = ""
+            guard.save(update_fields=["status", "last_error", "updated_at"])
+    input_data = dict(input_data)
+    input_data["description"] = (str(input_data.get("description") or "") + "\n\n" + marker).strip()
+    try:
+        data = _graphql_write(mutation, {"input": input_data}, operation_name="CreateLinearMeetingIssue")
+        issue = data["issueCreate"]["issue"]
+        if not issue.get("id"):
+            raise LinearChannelIssueWriteUncertainError("Linear returned an issue without an ID.")
+    except LinearChannelIssueWriteUncertainError:
+        # This outcome guard remains pending unless the issue is observed.
+        issue = _matching_project_work(payload, marker)
+        if issue is None:
+            raise LinearMeetingIdempotencyConflictError("Linear may have accepted the issue. Check its receipt before retrying.")
+        issue = {**issue, "alreadyTracked": True}
+    except (LinearMeetingConfigurationError, LinearMeetingRateLimitError, LinearMeetingGraphQLError) as exc:
+        _fail_linear_issue_receipt(guard, exc)
+        raise
+    if enforcement and not issue.get("alreadyTracked"):
+        issue = {**issue, "sizingEnforcement": enforcement}
+    LinearIssueCreationReceipt.objects.filter(pk=guard.pk).update(
+        status=LinearIssueCreationReceipt.Status.COMPLETED, linear_issue_payload=issue, updated_at=timezone.now(),
+    )
+    return issue
+
+
 def create_linear_meeting_issue(payload: dict[str, Any]) -> dict[str, Any]:
     payload = dict(payload)
     title = str(payload.get("title") or "").strip()
@@ -2195,7 +2352,8 @@ def create_linear_meeting_issue(payload: dict[str, Any]) -> dict[str, Any]:
         if not title or not team_id:
             raise ValueError("Stored idempotent Linear issue payload is invalid.")
 
-        enforcement = _enforce_project_sizing(payload)
+        guarded = payload.get("recheck_project_work") is True
+        enforcement = None if guarded else _enforce_project_sizing(payload)
         input_data: dict[str, Any] = {
             "title": title,
             "teamId": team_id,
@@ -2236,17 +2394,20 @@ def create_linear_meeting_issue(payload: dict[str, Any]) -> dict[str, Any]:
           }
         }
         """
-        data = _graphql(mutation, {"input": input_data}, operation_name="CreateLinearMeetingIssue")
-        result = data.get("issueCreate") if isinstance(data.get("issueCreate"), dict) else {}
-        if not result.get("success"):
-            raise LinearMeetingGraphQLError(
-                "Linear issueCreate returned success=false.",
-                operation="CreateLinearMeetingIssue",
-            )
-        issue = result.get("issue")
-        issue_payload = issue if isinstance(issue, dict) else {}
+        if guarded:
+            issue_payload = _write_reviewed_project_work(payload, mutation, input_data)
+        else:
+            data = _graphql(mutation, {"input": input_data}, operation_name="CreateLinearMeetingIssue")
+            result = data.get("issueCreate") if isinstance(data.get("issueCreate"), dict) else {}
+            if not result.get("success"):
+                raise LinearMeetingGraphQLError(
+                    "Linear issueCreate returned success=false.",
+                    operation="CreateLinearMeetingIssue",
+                )
+            issue = result.get("issue")
+            issue_payload = issue if isinstance(issue, dict) else {}
         sizing_metadata = payload.get("sizing_metadata")
-        if isinstance(sizing_metadata, dict):
+        if isinstance(sizing_metadata, dict) and not issue_payload.get("alreadyTracked"):
             issue_payload = {**issue_payload, "sizingMetadata": dict(sizing_metadata)}
         if enforcement:
             issue_payload = {**issue_payload, "sizingEnforcement": enforcement}
@@ -2496,19 +2657,67 @@ def _fail_linear_issue_receipt(
     )
 
 
-def create_linear_meeting_project_update(payload: dict[str, Any]) -> dict[str, Any]:
-    project_id = str(payload.get("project_id") or "").strip()
-    body = str(payload.get("body") or "").strip()
-    if not project_id:
-        raise ValueError("project_id is required.")
-    if not body:
-        raise ValueError("body is required.")
+def _claim_project_update(key: str, update: dict[str, str]):
+    # Issue keys cannot contain a period. These records cannot be accessed or
+    # reclaimed by the issue receipt API even if the original keys are identical.
+    digest = hashlib.sha256(f"project-update:{key.lower()}".encode()).hexdigest()
+    with transaction.atomic():
+        receipt, created = LinearIssueCreationReceipt.objects.select_for_update().get_or_create(
+            idempotency_key=f"u.{digest[:62]}",
+            defaults={"request_payload": update},
+        )
+        if receipt.request_payload.get("projectId") != update["projectId"]:
+            raise LinearMeetingIdempotencyConflictError("This publication belongs to a different project.")
+        if created:
+            return receipt, True
+        if receipt.status == LinearIssueCreationReceipt.Status.FAILED:
+            receipt.status = LinearIssueCreationReceipt.Status.PENDING
+            receipt.last_error = ""
+            receipt.save(update_fields=["status", "last_error", "updated_at"])
+            return receipt, True
+        return receipt, False
 
-    health = str(payload.get("health") or "onTrack").strip()
-    valid_health_values = {"onTrack", "atRisk", "offTrack"}
-    if health not in valid_health_values:
-        raise ValueError("health must be one of: onTrack, atRisk, offTrack.")
 
+def _recover_project_update(receipt: LinearIssueCreationReceipt) -> dict[str, Any]:
+    """Read back a possible successful write. An inconclusive read never authorizes a retry."""
+    expected = receipt.request_payload
+    start = receipt.updated_at - timedelta(seconds=2)
+    end = receipt.updated_at + timedelta(minutes=5)
+    cursor = None
+    matches = {}
+    for _ in range(5):
+        page = get_linear_project_update_page(expected["projectId"], after=cursor, limit=100)
+        project = page["project"]
+        if project.get("id") != expected["projectId"]:
+            break
+        reached_start = False
+        for item in page["nodes"]:
+            timestamp = parse_datetime(str(item.get("createdAt") or ""))
+            if timestamp is None or timezone.is_naive(timestamp):
+                continue
+            if timestamp < start:
+                reached_start = True
+            if (start <= timestamp <= end and item.get("id")
+                    and item.get("body") == expected["body"] and item.get("health") == expected["health"]):
+                matches[item["id"]] = {
+                    **{field: item.get(field) for field in ("id", "url", "body", "health", "createdAt")},
+                    "project": {"id": project["id"], "name": project.get("name")},
+                }
+        info = page["pageInfo"]
+        if reached_start or not info.get("hasNextPage"):
+            if len(matches) == 1:
+                return next(iter(matches.values()))
+            break
+        next_cursor = info.get("endCursor")
+        if not next_cursor or next_cursor == cursor:
+            break
+        cursor = next_cursor
+    raise LinearMeetingIdempotencyConflictError(
+        "This project update may already have been published. Check the project's update history."
+    )
+
+
+def _publish_project_update(update: dict[str, str]) -> dict[str, Any]:
     mutation = """
     mutation CreateLinearMeetingProjectUpdate($input: ProjectUpdateCreateInput!) {
       projectUpdateCreate(input: $input) {
@@ -2527,19 +2736,50 @@ def create_linear_meeting_project_update(payload: dict[str, Any]) -> dict[str, A
       }
     }
     """
-    data = _graphql(
-        mutation,
-        {"input": {"projectId": project_id, "body": body, "health": health}},
-        operation_name="CreateLinearMeetingProjectUpdate",
+    data = _graphql_write(mutation, {"input": update}, operation_name="CreateLinearMeetingProjectUpdate")
+    published = data["projectUpdateCreate"]["projectUpdate"]
+    if not published.get("id"):
+        raise LinearChannelIssueWriteUncertainError("Linear did not confirm the project update's ID.")
+    return published
+
+
+def create_linear_meeting_project_update(payload: dict[str, Any]) -> dict[str, Any]:
+    update = {
+        "projectId": str(payload.get("project_id") or "").strip(),
+        "body": str(payload.get("body") or "").strip(),
+        "health": str(payload.get("health") or "").strip(),
+    }
+    if not update["projectId"] or not update["body"]:
+        raise ValueError("project_id and body are required.")
+    if update["health"] not in {"onTrack", "atRisk", "offTrack"}:
+        raise ValueError("health must be one of: onTrack, atRisk, offTrack.")
+    if "idempotency_key" not in payload:
+        return _publish_project_update(update)
+    key = str(payload.get("idempotency_key") or "")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", key):
+        raise ValueError("idempotency_key must be a 64-character hexadecimal digest.")
+    receipt, claimed = _claim_project_update(key, update)
+    if receipt.status == LinearIssueCreationReceipt.Status.COMPLETED:
+        return {**receipt.linear_issue_payload, "idempotentReplay": True}
+    recovered = not claimed
+    if claimed:
+        try:
+            published = _publish_project_update(receipt.request_payload)
+        except LinearChannelIssueWriteUncertainError:
+            recovered = True
+            published = _recover_project_update(receipt)
+        except (LinearMeetingConfigurationError, LinearMeetingGraphQLError, LinearMeetingRateLimitError) as exc:
+            _fail_linear_issue_receipt(receipt, exc)
+            raise
+    else:
+        published = _recover_project_update(receipt)
+    LinearIssueCreationReceipt.objects.filter(pk=receipt.pk, status=LinearIssueCreationReceipt.Status.PENDING).update(
+        status=LinearIssueCreationReceipt.Status.COMPLETED,
+        linear_issue_payload=published,
+        last_error="",
+        updated_at=timezone.now(),
     )
-    result = data.get("projectUpdateCreate") if isinstance(data.get("projectUpdateCreate"), dict) else {}
-    if not result.get("success"):
-        raise LinearMeetingGraphQLError(
-            "Linear projectUpdateCreate returned success=false.",
-            operation="CreateLinearMeetingProjectUpdate",
-        )
-    project_update = result.get("projectUpdate")
-    return project_update if isinstance(project_update, dict) else {}
+    return {**published, "idempotentReplay": True} if recovered else published
 
 
 def create_linear_project_sizing_run(payload: dict[str, Any]) -> dict[str, Any]:
@@ -3800,10 +4040,12 @@ def _graphql_write(
         )
         raise LinearMeetingGraphQLError(message, operation=operation_name)
     mutation_shapes = {
+        "CreateLinearMeetingIssue": ("issueCreate", "issue"),
         "LinearChannelIssueCreate": ("issueCreate", "issue"),
         "LinearChannelIssueUpdate": ("issueUpdate", "issue"),
         "LinearChannelIssueComment": ("commentCreate", "comment"),
         "LinearChannelIssueDuplicate": ("issueRelationCreate", "issueRelation"),
+        "CreateLinearMeetingProjectUpdate": ("projectUpdateCreate", "projectUpdate"),
     }
     root_name, entity_name = mutation_shapes.get(operation_name, ("", ""))
     root = data.get(root_name) if isinstance(data, dict) and root_name else None
