@@ -17,45 +17,46 @@ class Item:
     id: str
     name: str
     required_level: int
+    price: int
 
 
 CATALOG = {
     # Null fur is the default "Outback red"; every fur colour is a starter.
     "fur": (
-        Item("golden_sand", "Golden sand", 0),
-        Item("blue_flier", "Blue flier", 0),
-        Item("ironbark", "Ironbark", 0),
-        Item("snow_gum", "Snow gum", 0),
-        Item("midnight_wallaroo", "Midnight wallaroo", 0),
+        Item("golden_sand", "Golden sand", 0, 1),
+        Item("blue_flier", "Blue flier", 0, 1),
+        Item("ironbark", "Ironbark", 0, 2),
+        Item("snow_gum", "Snow gum", 0, 2),
+        Item("midnight_wallaroo", "Midnight wallaroo", 0, 2),
     ),
     # Hair items are styles; colour belongs to the fur slot.
     "hair": (
-        Item("honey_tuft", "Tuft", 0),
-        Item("cocoa_curls", "Curls", 1),
-        Item("peach_fringe", "Swept fringe", 2),
-        Item("lilac_bob", "Bob", 4),
-        Item("mint_mohawk", "Mohawk", 6),
+        Item("honey_tuft", "Tuft", 0, 1),
+        Item("cocoa_curls", "Curls", 1, 1),
+        Item("peach_fringe", "Swept fringe", 2, 2),
+        Item("lilac_bob", "Bob", 4, 2),
+        Item("mint_mohawk", "Mohawk", 6, 3),
     ),
     "glasses": (
-        Item("classic_black", "Classic black", 0),
-        Item("honey_rounds", "Honey rounds", 1),
-        Item("rose_hearts", "Rose hearts", 3),
-        Item("ocean_visor", "Ocean visor", 4),
-        Item("lilac_stars", "Lilac stars", 6),
+        Item("classic_black", "Classic black", 0, 1),
+        Item("honey_rounds", "Honey rounds", 1, 2),
+        Item("rose_hearts", "Rose hearts", 3, 2),
+        Item("ocean_visor", "Ocean visor", 4, 3),
+        Item("lilac_stars", "Lilac stars", 6, 3),
     ),
     "jacket": (
-        Item("sage_bomber", "Sage bomber", 1),
-        Item("blue_denim", "Blue denim", 2),
-        Item("berry_varsity", "Berry varsity", 3),
-        Item("sunflower_raincoat", "Sunflower raincoat", 5),
-        Item("lilac_puffer", "Lilac puffer", 6),
+        Item("sage_bomber", "Sage bomber", 1, 2),
+        Item("blue_denim", "Blue denim", 2, 2),
+        Item("berry_varsity", "Berry varsity", 3, 3),
+        Item("sunflower_raincoat", "Sunflower raincoat", 5, 3),
+        Item("lilac_puffer", "Lilac puffer", 6, 4),
     ),
     "shoes": (
-        Item("red_sneakers", "Red sneakers", 0),
-        Item("cream_high_tops", "Cream high tops", 2),
-        Item("bush_boots", "Bush boots", 3),
-        Item("pink_roller_skates", "Pink roller skates", 4),
-        Item("teal_runners", "Teal runners", 5),
+        Item("red_sneakers", "Red sneakers", 0, 1),
+        Item("cream_high_tops", "Cream high tops", 2, 2),
+        Item("bush_boots", "Bush boots", 3, 2),
+        Item("pink_roller_skates", "Pink roller skates", 4, 3),
+        Item("teal_runners", "Teal runners", 5, 3),
     ),
 }
 
@@ -116,7 +117,7 @@ def item_unlocked(item, level):
     )
 
 
-def catalog_for(level):
+def catalog_for(level, owned=()):
     """Return all choices and current server-derived availability."""
     return {
         slot: [
@@ -124,11 +125,15 @@ def catalog_for(level):
                 "id": item.id,
                 "name": item.name,
                 "required_level": item.required_level,
+                "price_points": item.price,
+                "owned": item.id in owned,
                 "unlocked": item_unlocked(item, level),
                 "unavailable_reason": (
                     None
                     if item_unlocked(item, level)
-                    else "history_unreconciled" if level is None else "level_required"
+                    else "history_unreconciled"
+                    if level is None
+                    else "level_required"
                 ),
             }
             for item in items

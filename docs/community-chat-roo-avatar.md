@@ -3,8 +3,7 @@
 `GET` and `PATCH /api/v1/community-chat/roo-avatar/` read and save the signed-in
 member's kangaroo outfit across devices. This is the backend source contract,
 not deployment evidence. The schema requires the specifically approved
-[`0016_roo_avatar` migration](roo-avatar-migration-proposal.md) and, for the
-fur slot, the [`0019_roo_avatar_fur` migration](roo-avatar-fur-migration-proposal.md).
+[`0016_roo_avatar` migration](roo-avatar-migration-proposal.md), the [`0019_roo_avatar_fur` migration](roo-avatar-fur-migration-proposal.md), and `0020_roo_avatar_owned_items` for ownership.
 
 ## Identity and authority
 
@@ -23,8 +22,7 @@ account/relay, and reset drafts and cached snapshots on an account or community
 switch. Body identity, rank, eligibility and community overrides are rejected.
 
 Outfits are private account preferences. They do not replace `avatar_url`,
-publish public profile metadata, award contribution Roo, spend wallet Roo, or
-mint permanent badge entitlements.
+publish public profile metadata, award contribution Roo, or mint badges. Confirmed purchases spend wallet Roo.
 
 ## Read and write snapshot
 
@@ -37,6 +35,7 @@ GET and a successful PATCH return the same shape:
   "relay_url": "wss://chat.example.test",
   "catalog_version": "roo-avatar-v1",
   "version": 0,
+  "available_points": 12,
   "current_level": null,
   "rank_name": null,
   "history_reconciled": false,
@@ -47,7 +46,7 @@ GET and a successful PATCH return the same shape:
   "updated_at": null,
   "catalog": {
     "fur": [{"id": "golden_sand", "name": "Golden sand", "required_level": 0,
-      "unlocked": true, "unavailable_reason": null}],
+      "unlocked": true, "unavailable_reason": null, "price_points": 1, "owned": false}],
     "hair": [], "glasses": [], "jacket": [], "shoes": []
   }
 }
@@ -74,33 +73,33 @@ This is current-rank eligibility, not a permanent unlock entitlement.
 
 ## Stable catalog
 
-| Slot | Stable ID | Name | Required level |
-| --- | --- | --- | ---: |
-| fur | golden_sand | Golden sand | 0 |
-| fur | blue_flier | Blue flier | 0 |
-| fur | ironbark | Ironbark | 0 |
-| fur | snow_gum | Snow gum | 0 |
-| fur | midnight_wallaroo | Midnight wallaroo | 0 |
-| hair | honey_tuft | Tuft | 0 |
-| hair | cocoa_curls | Curls | 1 |
-| hair | peach_fringe | Swept fringe | 2 |
-| hair | lilac_bob | Bob | 4 |
-| hair | mint_mohawk | Mohawk | 6 |
-| glasses | classic_black | Classic black | 0 |
-| glasses | honey_rounds | Honey rounds | 1 |
-| glasses | rose_hearts | Rose hearts | 3 |
-| glasses | ocean_visor | Ocean visor | 4 |
-| glasses | lilac_stars | Lilac stars | 6 |
-| jacket | sage_bomber | Sage bomber | 1 |
-| jacket | blue_denim | Blue denim | 2 |
-| jacket | berry_varsity | Berry varsity | 3 |
-| jacket | sunflower_raincoat | Sunflower raincoat | 5 |
-| jacket | lilac_puffer | Lilac puffer | 6 |
-| shoes | red_sneakers | Red sneakers | 0 |
-| shoes | cream_high_tops | Cream high tops | 2 |
-| shoes | bush_boots | Bush boots | 3 |
-| shoes | pink_roller_skates | Pink roller skates | 4 |
-| shoes | teal_runners | Teal runners | 5 |
+| Slot | Stable ID | Name | Required level | Roo Points |
+| --- | --- | --- | ---: | ---: |
+| fur | golden_sand | Golden sand | 0 | 1 |
+| fur | blue_flier | Blue flier | 0 | 1 |
+| fur | ironbark | Ironbark | 0 | 2 |
+| fur | snow_gum | Snow gum | 0 | 2 |
+| fur | midnight_wallaroo | Midnight wallaroo | 0 | 2 |
+| hair | honey_tuft | Tuft | 0 | 1 |
+| hair | cocoa_curls | Curls | 1 | 1 |
+| hair | peach_fringe | Swept fringe | 2 | 2 |
+| hair | lilac_bob | Bob | 4 | 2 |
+| hair | mint_mohawk | Mohawk | 6 | 3 |
+| glasses | classic_black | Classic black | 0 | 1 |
+| glasses | honey_rounds | Honey rounds | 1 | 2 |
+| glasses | rose_hearts | Rose hearts | 3 | 2 |
+| glasses | ocean_visor | Ocean visor | 4 | 3 |
+| glasses | lilac_stars | Lilac stars | 6 | 3 |
+| jacket | sage_bomber | Sage bomber | 1 | 2 |
+| jacket | blue_denim | Blue denim | 2 | 2 |
+| jacket | berry_varsity | Berry varsity | 3 | 3 |
+| jacket | sunflower_raincoat | Sunflower raincoat | 5 | 3 |
+| jacket | lilac_puffer | Lilac puffer | 6 | 4 |
+| shoes | red_sneakers | Red sneakers | 0 | 1 |
+| shoes | cream_high_tops | Cream high tops | 2 | 2 |
+| shoes | bush_boots | Bush boots | 3 | 2 |
+| shoes | pink_roller_skates | Pink roller skates | 4 | 3 |
+| shoes | teal_runners | Teal runners | 5 | 3 |
 
 `fur` is Roo's whole fur colour. Null fur is the default "Outback red", which
 has no catalog object. Every fur colour has required level 0, so all of them
@@ -114,12 +113,19 @@ remain owned by `community_chat.volunteer.policy`; this catalog adds no second
 rank or badge engine. Renderers map stable IDs to assets and must not persist
 array positions.
 
+The default Outback red coat and empty accessory slots are free. The wardrobe
+keeps each currently equipped legacy item when pricing begins. Purchased
+items belong to the member in this community and can be equipped again for
+free when eligible. `owned` records ownership and `unlocked` records level
+eligibility. `available_points` is the whole-point digital-service balance
+after reservations. Opening the wardrobe and previewing items are free.
+
 ## Update
 
-PATCH accepts exactly these fields:
+PATCH accepts the saved version, outfit, and an optional confirmed purchase total in whole Roo Points.
 
 ```json
-{"version": 0, "outfit": {
+{"version": 0, "purchase_points": 4, "outfit": {
   "fur": "snow_gum", "hair": "honey_tuft", "glasses": "classic_black",
   "jacket": null, "shoes": null
 }}
@@ -135,12 +141,16 @@ missing or extra slot is rejected.
 booleans, strings and floating-point versions are rejected. The first save
 creates version 1. Every successful replacement advances it by one. Locks
 serialize writes across devices, including concurrent first saves. Both the
-version and current eligibility are checked within the transaction. A failed
-write leaves the stored outfit unchanged.
+version and current eligibility are checked within the transaction. The server sums the catalog price of each eligible unowned selection.
+The supplied `purchase_points` must equal this sum. Omission consents to a
+zero-cost equip only. The digital-first wallet debit, saved outfit, ownership
+and version commit together. A repeated version cannot charge twice.
 
 | Status | `error` and `outcome` | Meaning |
 | --- | --- | --- |
 | 400 | invalid_roo_avatar | Wrong fields, missing slot, invalid version or unknown/cross-category ID |
+| 402 | roo_avatar_insufficient_points | The wallet cannot cover the confirmed total |
+| 409 | roo_avatar_price_changed | Reload the catalog and explicitly confirm the new total |
 | 403 | roo_avatar_item_locked | At least one selected item is unavailable at the freshly verified rank |
 | 409 | roo_avatar_version_conflict | Another device saved after the client's read |
 | 503 | roo_avatar_scope_unavailable | Missing trusted community/relay configuration |

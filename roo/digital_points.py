@@ -27,6 +27,14 @@ def spendable_balance(account):
     return account.balance_microroo + account.digital_balance_microroo
 
 
+def available_balance(user, account, *, exclude_turn_id=None):
+    """Return digital-service points available after active reservations, in microroo."""
+    from .services import PointsService
+    return max(spendable_balance(account) - PointsService._reserved_microroo(
+        user, exclude_turn_id=exclude_turn_id, include_digital=True,
+    ), 0)
+
+
 @transaction.atomic
 def spend(*, user, amount, source, description, actor, key, reference_type=None,
           reference_id=None, allow_reserved_turn_id=None):
@@ -45,9 +53,7 @@ def spend(*, user, amount, source, description, actor, key, reference_type=None,
     account, _ = PointsAccount.objects.get_or_create(user=user)
     account = PointsAccount.objects.select_for_update().get(pk=account.pk)
     PointsService._ensure_microroo_account(account)
-    available = max(spendable_balance(account) - PointsService._reserved_microroo(
-        user, exclude_turn_id=allow_reserved_turn_id, include_digital=True,
-    ), 0)
+    available = available_balance(user, account, exclude_turn_id=allow_reserved_turn_id)
     if available < amount:
         raise InsufficientBalanceError("Insufficient available digital-service points")
     digital = min(amount, account.digital_balance_microroo)

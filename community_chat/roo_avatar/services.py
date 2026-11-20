@@ -13,11 +13,16 @@ from rest_framework.exceptions import AuthenticationFailed
 from community_chat.models import CommunityChatAccountSession
 from community_chat.onboarding import require_community_access
 from community_chat.volunteer.access import community_id
-from community_chat.volunteer.policy import progress
+from community_chat.volunteer.policy import MICROROO, progress
 from community_chat.volunteer.services import contribution_total, state_for
+
+from roo.digital_points import available_balance
+from roo.models import PointsAccount
+from roo.services import InsufficientBalanceError, PointsService
 
 from .models import CommunityRooAvatar
 from .policy import (
+    CATALOG,
     CATALOG_VERSION,
     SLOTS,
     RooAvatarError,
@@ -71,10 +76,25 @@ def _rank(user):
     return progress(total)["current_level"] if total is not None else None
 
 
+def _owned(row):
+    if row is None:
+        return set()
+    # Wardrobes saved before pricing already own what they were wearing.
+    return set(row.owned_items).union(
+        item for slot in SLOTS if (item := getattr(row, slot)) is not None
+    )
+
+
 def _snapshot(user, scope, relay_url, row, rank):
     outfit = {slot: getattr(row, slot) for slot in SLOTS} if row else empty_outfit()
     level = rank["level"] if rank else None
+    account = PointsAccount.objects.filter(user=user).first()
+    balance = 0
+    if account:
+        PointsService._ensure_microroo_account(account)
+        balance = available_balance(user, account) // MICROROO
     return {
+        "available_points": balance,
         "account_id": str(user.community_chat_profile_id),
         "community_id": scope,
         "relay_url": relay_url,
@@ -85,7 +105,7 @@ def _snapshot(user, scope, relay_url, row, rank):
         "history_reconciled": rank is not None,
         "outfit": outfit,
         "effective_outfit": effective_outfit(outfit, level),
-        "catalog": catalog_for(level),
+        "catalog": catalog_for(level, _owned(row)),
         "updated_at": row.updated_at.isoformat() if row else None,
     }
 
@@ -101,8 +121,14 @@ def read_avatar(*, authenticated_session):
 
 
 def update_avatar(*, authenticated_session, values):
-    """Validate and replace an eligible outfit without modifying rank or Roo."""
-    version, outfit = validate_update(values)
+    """Buy quoted, eligible items and equip the outfit in one transaction."""
+    if not isinstance(values, dict):
+        raise RooAvatarError("invalid_roo_avatar")
+    payload = values.copy()
+    confirmed = payload.pop("purchase_points", 0)
+    if type(confirmed) is not int or confirmed < 0:
+        raise RooAvatarError("invalid_roo_avatar")
+    version, outfit = validate_update(payload)
     with transaction.atomic():
         user = _locked_account(authenticated_session)
         scope, relay_url = _scope()
@@ -117,13 +143,25 @@ def update_avatar(*, authenticated_session, values):
         outfit.setdefault("fur", row.fur if row else None)
         rank = _rank(user)
         require_unlocked(outfit, rank["level"] if rank else None)
+        owned = _owned(row)
+        purchases = [
+            item
+            for slot in SLOTS
+            for item in CATALOG[slot]
+            if outfit[slot] == item.id and item.id not in owned
+        ]
+        price = sum(item.price for item in purchases)
+        if confirmed != price:
+            raise RooAvatarError("roo_avatar_price_changed", 409)
+        owned_items = sorted(owned.union(item.id for item in purchases))
         if row is None:
             row = CommunityRooAvatar.objects.create(
-                user=user, community=scope, **outfit
+                user=user, community=scope, owned_items=owned_items, **outfit
             )
         else:
             changes = {
                 **outfit,
+                "owned_items": owned_items,
                 "version": row.version + 1,
                 "updated_at": max(
                     timezone.now(), row.updated_at + timedelta(microseconds=1)
@@ -132,4 +170,19 @@ def update_avatar(*, authenticated_session, values):
             CommunityRooAvatar.objects.filter(pk=row.pk).update(**changes)
             for key, value in changes.items():
                 setattr(row, key, value)
+        if price:
+            try:
+                PointsService.spend_microroo(
+                    user=user,
+                    delta_microroo=price * MICROROO,
+                    source="TOOLS",
+                    description="Roo wardrobe: "
+                    + ", ".join(item.name for item in purchases),
+                    created_by_slack_id="roo-wardrobe",
+                    idempotency_key=f"roo-wardrobe:{row.pk}:{row.version}",
+                    reference_type="ROO_WARDROBE",
+                    reference_id=str(row.pk),
+                )
+            except InsufficientBalanceError as exc:
+                raise RooAvatarError("roo_avatar_insufficient_points", 402) from exc
         return _snapshot(user, scope, relay_url, row, rank)
