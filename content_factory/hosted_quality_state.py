@@ -113,6 +113,12 @@ def hold_owner(quality):
     return "founder"
 
 
+def honest_retry_status_enabled():
+    """ARTICLES_HONEST_RETRY_STATUS_ENABLED (default off): founders see retryable=false on staff-owned holds."""
+    from django.conf import settings
+    return bool(getattr(settings, "ARTICLES_HONEST_RETRY_STATUS_ENABLED", False))
+
+
 def staff_fixing(quality):
     """True when the hold is ours to fix and the founder has nothing to do."""
     return hold_owner(quality) == "staff"
@@ -225,6 +231,9 @@ def founder_quality(quality, *, target=None, safety_alert=None):
     if ours:
         view["hold_owner"] = "staff"
         view["founder_message"] = staff_fixing_message()
+        if honest_retry_status_enabled():
+            # Staff own this hold: a founder recheck cannot clear it.
+            view["retryable"] = False
     if target is not None and (quality.get("preview_url"), quality.get("resume_generation")) == target:
         check = _safety_check(quality)
         if check:

@@ -93,3 +93,24 @@ class StaffFixingAlertTests(TestCase):
         run = SimpleNamespace(result={"article_preview_quality": held(hold_owner="staff")}, run_request={},
                               status="approval_required", created_at=timezone.now(), workflow="article_generation")
         self.assertIn("article_quality_review_required", _run_reasons(run, timezone.now()))
+
+
+class HonestRetryStatusTests(TestCase):
+    """Founder-proof plan WS6: a staff-owned hold never offers the founder a recheck."""
+
+    def projected(self, quality):
+        return founder_result(result_with(quality))["article_preview_quality"]
+
+    def test_flag_off_keeps_todays_payload(self):
+        with override_settings(ARTICLES_HONEST_RETRY_STATUS_ENABLED=False):
+            self.assertNotIn("retryable", self.projected(held(hold_owner="staff")))
+
+    @override_settings(ARTICLES_HONEST_RETRY_STATUS_ENABLED=True)
+    def test_a_staff_hold_is_not_retryable_for_the_founder(self):
+        projected = self.projected(held(hold_owner="staff"))
+        self.assertEqual((projected["hold_owner"], projected["retryable"]), ("staff", False))
+
+    @override_settings(ARTICLES_HONEST_RETRY_STATUS_ENABLED=True)
+    def test_a_founder_hold_keeps_its_recheck(self):
+        claims = {"code": "visible_review_rejected", "errors": ["claim-001: unsupported"]}
+        self.assertNotIn("retryable", self.projected(held(hold_owner="founder", visible_content_acceptance=claims)))

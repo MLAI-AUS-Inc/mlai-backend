@@ -453,6 +453,12 @@
       "reason": "Operational setting (endpoint, credential, limit, timing or identity), not a rollout switch."
     },
     {
+      "name": "ARTICLES_HONEST_RETRY_STATUS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
       "name": "ARTICLES_HOSTED_ATTESTATION_ENABLED",
       "default": "false",
       "owner": "platform",
