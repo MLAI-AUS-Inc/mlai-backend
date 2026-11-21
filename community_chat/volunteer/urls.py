@@ -5,6 +5,7 @@ from . import views
 
 urlpatterns = [
     path("journey/", views.JourneyView.as_view()),
+    path("point-history/", views.PointHistoryView.as_view()),
     path("policy/", views.PolicyView.as_view()),
     path("opportunities/", views.OpportunitiesView.as_view()),
     path("opportunities/<uuid:opportunity_id>/", views.OpportunitiesView.as_view()),
