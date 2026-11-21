@@ -38,10 +38,11 @@ class NativePointsRequestTests(TestCase):
             )
         self.relay = SimpleNamespace(key=self.relay_key, pubkey=public_key(self.relay_key), publish=Mock())
 
-    def event(self, author, event_id, kind, content, tags):
+    def event(self, author, event_id, kind, content, tags, *, include_channel=True):
+        channel_tags = [["h", str(ROO_POINTS_CHANNEL_ID)]] if include_channel else []
         return dict(
             id=event_id, pubkey=author, kind=kind, content=content,
-            tags=[["h", str(ROO_POINTS_CHANNEL_ID)], *tags],
+            tags=[*channel_tags, *tags],
             created_at=int(timezone.now().timestamp()),
         )
 
@@ -60,11 +61,19 @@ class NativePointsRequestTests(TestCase):
         handle_event(self.relay, source)
         deliver_ready(self.relay)
         row = PointsRequest.objects.get()
-        wrong = self.event(self.member_key, "ac" * 32, 7, "✅", [["e", row.native_summary_id]])
-        handle_event(self.relay, wrong)
-        self.assertFalse(Ledger.objects.exists())
+        target = ["e", row.native_summary_id]
+        invalid_reactions = [
+            self.event(self.member_key, "ac" * 32, 7, "✅", [target], include_channel=False),
+            self.event(self.admin_key, "ae" * 32, 7, "✅", [
+                ["h", "11111111-1111-4111-8111-111111111111"], target,
+            ], include_channel=False),
+            self.event(self.admin_key, "af" * 32, 7, "✅", [["e", source["id"]]], include_channel=False),
+        ]
+        for reaction in invalid_reactions:
+            handle_event(self.relay, reaction)
+            self.assertFalse(Ledger.objects.exists())
 
-        reaction = self.event(self.admin_key, "ad" * 32, 7, "✔️", [["e", row.native_summary_id]])
+        reaction = self.event(self.admin_key, "ad" * 32, 7, "✔️", [target], include_channel=False)
         handle_event(self.relay, reaction)
         handle_event(self.relay, reaction)
         row.refresh_from_db()
