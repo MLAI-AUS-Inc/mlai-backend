@@ -69,6 +69,11 @@ class RooAvatarApiTests(TestCase):
             reconciled_at=timezone.now(),
         )
 
+    def fund(self, points=25):
+        return PointsAccount.objects.create(
+            user=self.user, balance=points, earned_balance=points
+        )
+
     def patch(self, outfit, version=0, **extra):
         return self.client.patch(
             self.url, {"version": version, "outfit": outfit, **extra}, format="json"
@@ -92,8 +97,9 @@ class RooAvatarApiTests(TestCase):
         self.assertEqual(Ledger.objects.count(), before)
 
     def test_saved_outfit_is_shared_across_devices_but_not_accounts(self):
+        self.fund()
         selected = {**empty_outfit(), "hair": "honey_tuft", "glasses": "classic_black"}
-        saved = self.patch(selected)
+        saved = self.patch(selected, purchase_points=2)
         self.assertEqual(saved.status_code, 200)
         self.assertEqual(saved.data["version"], 1)
         second = credentials_for(self.user)
@@ -119,6 +125,7 @@ class RooAvatarApiTests(TestCase):
         self.assertIsNone(row.hair)
 
     def test_rank_correction_and_unknown_history_suppress_but_retain_preferences(self):
+        self.fund()
         self.state.historical_microroo = 250 * MICROROO
         self.state.save()
         selected = {
@@ -128,7 +135,7 @@ class RooAvatarApiTests(TestCase):
             "jacket": "lilac_puffer",
             "shoes": "teal_runners",
         }
-        self.assertEqual(self.patch(selected).status_code, 200)
+        self.assertEqual(self.patch(selected, purchase_points=15).status_code, 200)
         for total in [0, None]:
             self.state.historical_microroo = total
             self.state.save()
@@ -140,7 +147,9 @@ class RooAvatarApiTests(TestCase):
             self.assertEqual(result["history_reconciled"], total is not None)
             self.assertEqual(result["current_level"], 0 if total == 0 else None)
         self.assertEqual(
-            self.patch({**empty_outfit(), "glasses": "classic_black"}, 1).status_code,
+            self.patch(
+                {**empty_outfit(), "glasses": "classic_black"}, 1, purchase_points=1
+            ).status_code,
             200,
         )
 
@@ -182,9 +191,12 @@ class RooAvatarApiTests(TestCase):
             )
 
     def test_fur_saves_for_unreconciled_history_and_can_return_to_default(self):
+        self.fund()
         self.state.historical_microroo = None
         self.state.save()
-        saved = self.patch({**empty_outfit(), "fur": "midnight_wallaroo"})
+        saved = self.patch(
+            {**empty_outfit(), "fur": "midnight_wallaroo"}, purchase_points=2
+        )
         self.assertEqual(saved.status_code, 200)
         self.assertIsNone(saved.data["current_level"])
         self.assertEqual(saved.data["outfit"]["fur"], "midnight_wallaroo")
@@ -198,20 +210,21 @@ class RooAvatarApiTests(TestCase):
         self.assertIsNone(CommunityRooAvatar.objects.get(user=self.user).fur)
 
     def test_four_slot_outfit_from_an_earlier_client_keeps_the_saved_fur(self):
+        self.fund()
         earlier = {
             "hair": "honey_tuft",
             "glasses": None,
             "jacket": None,
             "shoes": "red_sneakers",
         }
-        first = self.patch(earlier)
+        first = self.patch(earlier, purchase_points=2)
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.data["version"], 1)
         self.assertEqual(first.data["outfit"], {"fur": None, **earlier})
         self.assertIsNone(CommunityRooAvatar.objects.get(user=self.user).fur)
-        chosen = self.patch({**empty_outfit(), "fur": "ironbark"}, 1)
+        chosen = self.patch({**empty_outfit(), "fur": "ironbark"}, 1, purchase_points=2)
         self.assertEqual(chosen.status_code, 200)
-        kept = self.patch({**earlier, "glasses": "classic_black"}, 2)
+        kept = self.patch({**earlier, "glasses": "classic_black"}, 2, purchase_points=1)
         self.assertEqual(kept.status_code, 200)
         self.assertEqual(kept.data["version"], 3)
         self.assertEqual(
@@ -225,8 +238,12 @@ class RooAvatarApiTests(TestCase):
         )
 
     def test_unknown_fur_is_rejected_without_changing_the_saved_outfit(self):
+        self.fund()
         self.assertEqual(
-            self.patch({**empty_outfit(), "fur": "golden_sand"}).status_code, 200
+            self.patch(
+                {**empty_outfit(), "fur": "golden_sand"}, purchase_points=1
+            ).status_code,
+            200,
         )
         for fur in ["outback_red", "honey_tuft", 7]:
             result = self.patch({**empty_outfit(), "fur": fur}, 1)
@@ -235,6 +252,50 @@ class RooAvatarApiTests(TestCase):
             self.assertEqual(result.data["slots"], ["fur"])
         row = CommunityRooAvatar.objects.get(user=self.user)
         self.assertEqual((row.fur, row.version), ("golden_sand", 1))
+
+    def test_quote_purchase_and_re_equip(self):
+        self.fund(2)
+        selected = {**empty_outfit(), "fur": "ironbark"}
+        for extra in [{}, {"purchase_points": 1}, {"purchase_points": 3}]:
+            self.assertEqual(self.patch(selected, **extra).status_code, 409)
+        self.assertFalse(CommunityRooAvatar.objects.exists())
+        bought = self.patch(selected, purchase_points=2)
+        self.assertEqual(bought.status_code, 200)
+        self.assertEqual(bought.data["available_points"], 0)
+        self.assertEqual(bought.data["current_level"], 0)
+        self.assertTrue(
+            next(x for x in bought.data["catalog"]["fur"] if x["id"] == "ironbark")[
+                "owned"
+            ]
+        )
+        self.assertEqual(self.patch(selected, purchase_points=2).status_code, 409)
+        self.assertEqual(self.patch(empty_outfit(), 1).status_code, 200)
+        self.assertEqual(self.patch(selected, 2).status_code, 200)
+        ledger = Ledger.objects.get(user=self.user, reference_type="ROO_WARDROBE")
+        self.assertEqual(ledger.delta_microroo, -2 * MICROROO)
+
+    def test_multiple_items_rollback_if_short_and_keep_legacy_equipment(self):
+        self.fund(1)
+        CommunityRooAvatar.objects.create(
+            user=self.user, community=COMMUNITY, fur="snow_gum"
+        )
+        self.assertEqual(self.patch(empty_outfit(), 1).status_code, 200)
+        self.assertEqual(
+            self.patch({**empty_outfit(), "fur": "snow_gum"}, 2).status_code, 200
+        )
+        result = self.patch(
+            {**empty_outfit(), "hair": "honey_tuft", "glasses": "classic_black"},
+            3,
+            purchase_points=2,
+        )
+        self.assertEqual(result.status_code, 402)
+        saved = self.client.get(self.url).data
+        self.assertEqual(
+            (saved["version"], saved["available_points"], saved["outfit"]["fur"]),
+            (3, 1, "snow_gum"),
+        )
+        self.assertFalse(saved["catalog"]["hair"][0]["owned"])
+        self.assertFalse(Ledger.objects.filter(reference_type="ROO_WARDROBE").exists())
 
     def test_large_spendable_balance_is_not_contribution_rank(self):
         PointsAccount.objects.create(
@@ -260,8 +321,12 @@ class RooAvatarApiTests(TestCase):
         self.assertFalse(CommunityRooAvatar.objects.exists())
 
     def test_community_scope_is_server_owned_and_preferences_do_not_cross_it(self):
+        self.fund()
         self.assertEqual(
-            self.patch({**empty_outfit(), "hair": "honey_tuft"}).status_code, 200
+            self.patch(
+                {**empty_outfit(), "hair": "honey_tuft"}, purchase_points=1
+            ).status_code,
+            200,
         )
         with override_settings(COMMUNITY_CHAT_VOLUNTEER_COMMUNITY="other-community"):
             result = self.client.get(self.url).data
@@ -352,6 +417,7 @@ class RooAvatarConcurrencyTests(TransactionTestCase):
         VolunteerMemberState.objects.create(
             user=user, community=COMMUNITY, historical_microroo=0
         )
+        PointsAccount.objects.create(user=user, balance=1, earned_balance=1)
         barrier = Barrier(2)
 
         def save(index):
@@ -362,9 +428,10 @@ class RooAvatarConcurrencyTests(TransactionTestCase):
                     authenticated_session=creds[index].session,
                     values={
                         "version": 0,
+                        "purchase_points": 1,
                         "outfit": {
                             **empty_outfit(),
-                            "hair": "honey_tuft" if index else None,
+                            "hair": "honey_tuft",
                         },
                     },
                 )
@@ -377,4 +444,7 @@ class RooAvatarConcurrencyTests(TransactionTestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(save, range(2)))
         self.assertCountEqual(results, [1, "roo_avatar_version_conflict"])
+        self.assertEqual(
+            Ledger.objects.filter(user=user, reference_type="ROO_WARDROBE").count(), 1
+        )
         self.assertEqual(CommunityRooAvatar.objects.filter(user=user).count(), 1)

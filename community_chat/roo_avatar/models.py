@@ -31,6 +31,7 @@ class CommunityRooAvatar(models.Model):
     shoes = models.CharField(
         max_length=32, choices=choices("shoes"), null=True, blank=True
     )
+    owned_items = models.JSONField(default=list, blank=True)
     version = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

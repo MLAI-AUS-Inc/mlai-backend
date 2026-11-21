@@ -11,10 +11,9 @@ from founder_tools.models import VibeRaisingCompany
 from organizations.models import Organization
 from roo.models import Ledger
 from startup_updates.models import MonthlyUpdateDraft
+from startup_updates.reward_policy import MONTHLY_POINTS, STANDARD_POINTS
 
 MELBOURNE = ZoneInfo("Australia/Melbourne")
-MONTHLY_POINTS = 20
-STANDARD_POINTS = 5
 
 
 def reward_key(draft, month=None):
