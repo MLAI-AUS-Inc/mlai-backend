@@ -162,7 +162,7 @@ def contribution_total(user, state=None):
     unknown = (
         Ledger.objects.filter(user=user, pk__gt=state.historical_ledger_cutoff)
         .exclude(source="purchased_topup")
-        .exclude(reference_type__in=("VOLUNTEER_LEVEL_BONUS", "VOLUNTEER_CORRECTION"))
+        .exclude(reference_type__in=("VOLUNTEER_LEVEL_BONUS", "VOLUNTEER_CORRECTION", "MLAI_ARCADE"))
         .exclude(pk__in=known_ledger)
         .exclude(pk__in=legacy_boost.values("pk"))
         .exclude(pk__in=capped_monthly_ledger_ids, source="STARTUP_UPDATE", kind="EARN")
@@ -704,13 +704,26 @@ def request_recognition(user, payload, *, actor=None, trusted_receipt=None):
     return record, "created"
 
 
-def award_milestones(user, recognition=None):
+def award_milestones(user, recognition=None, *, new_contribution=True):
     """Issue missing stable bonuses once inside the member's award transaction."""
-    if not flag("awards_enabled") or not flag("bonuses_enabled"):
+    bonuses_enabled = flag("awards_enabled") and flag("bonuses_enabled")
+    gained = 0
+    if recognition is not None and new_contribution:
+        from .credits import recognition_level_microroo
+        gained = (recognition_level_microroo(recognition) if one_record_enabled()
+                  else recognition.reward_microroo)
+    if not bonuses_enabled and not gained:
         return
     state = state_for(user)
     total = contribution_total(user, state)
     if total is None:
+        return
+    # Only a newly recorded contribution can cross a ladder threshold.
+    # Reconciled openings and wallet-only bonuses never create arcade pulls.
+    if gained and (recognition.ledger_id is None or recognition.ledger_id > state.historical_ledger_cutoff):
+        from community_chat.arcade import earn_level_rounds
+        earn_level_rounds(user, total, gained)
+    if not bonuses_enabled:
         return
     store_level(state, total)
     historical = (

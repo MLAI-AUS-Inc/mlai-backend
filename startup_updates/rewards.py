@@ -146,4 +146,6 @@ def award_completion(user, company, draft, *, newly_approved=False):
             created_by_slack_id=getattr(user, "slack_id", "") or "system",
             idempotency_key=key, reference_type="MONTHLY_UPDATE_DRAFT", reference_id=str(draft.pk),
         )
+    from community_chat.arcade import earn_pulse_round
+    earn_pulse_round(user, draft.pk)
     return reward_receipt(ledger, user=user, awarded=created)

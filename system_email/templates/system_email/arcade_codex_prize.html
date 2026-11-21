@@ -1,0 +1,21 @@
+{% extends "system_email/base.html" %}
+{% block content %}
+<tr><td bgcolor="#191824" style="padding:28px 32px 26px;background:#191824;color:#fff8e9;border-bottom:6px solid #22dbc8">
+  <p style="margin:0 0 18px;color:#35ead3;font-size:15px;letter-spacing:2px;font-weight:bold">MLAI ARCADE</p>
+  <h1 style="margin:0;color:#fff8e9;font-size:32px;line-height:1.12">You won $50 in Codex credits!</h1>
+</td></tr>
+<tr><td style="padding:24px 32px;color:#24212b;font-size:16px;line-height:1.55">
+  <p style="margin:0 0 18px">Your three reels lined up. Here’s the personal code for your win.</p>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td bgcolor="#e6fbf6" style="padding:16px 20px;border-left:4px solid #087769;background:#e6fbf6">
+    <div style="font-size:13px;font-weight:bold;color:#17564d">Your Codex code</div>
+    <div style="margin-top:4px;font:700 19px/1.4 Menlo,Consolas,monospace;color:#15181a;word-break:break-all">{{ activation_code }}</div>
+  </td></tr></table>
+  {% if expiry_display %}<p style="margin:12px 0 0;color:#17564d;font-size:14px">Redeem before {{ expiry_display }}.</p>{% endif %}
+  <p style="margin:20px 0 12px">Sign in to the ChatGPT account you use for Codex, review the offer terms and confirm redemption. Then open Codex with that same account.</p>
+  <table role="presentation" cellpadding="0" cellspacing="0"><tr><td bgcolor="#075f55" style="border-radius:7px;background:#075f55">
+    <a href="{{ activation_url }}" style="display:inline-block;padding:13px 22px;color:#ffffff;font-size:16px;font-weight:bold;text-decoration:none">Activate my credits</a>
+  </td></tr></table>
+  <p style="margin:20px 0 0;color:#545360;font-size:14px">Keep your activation link private. If you have trouble redeeming the code, reply to this email and the MLAI team will help.</p>
+  <p style="margin:18px 0 0">Happy building!<br>The MLAI team</p>
+</td></tr>
+{% endblock %}

@@ -693,6 +693,8 @@ jobs:
           community_chat.tests.test_volunteer_policy \
           community_chat.tests.test_volunteer \
           community_chat.tests.test_volunteer_backfill \
+          community_chat.tests.test_arcade \
+          crm.tests.test_arcade_prize_database \
           community_chat.tests.test_volunteer_one_record \
           community_chat.tests.test_volunteer_presentation \
           community_chat.tests.test_volunteer_events \

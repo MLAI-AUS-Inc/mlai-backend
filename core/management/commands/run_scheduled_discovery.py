@@ -26,6 +26,7 @@ from content_factory.website_live_status import run_live_status_sweep
 from content_factory.website_deploy_link import run_article_live_sweep
 from content_factory.dispatch_outbox import process_dispatch_outbox
 from content_factory.services.island_refresh_scheduler import run_island_refresh_scheduler
+from crm.arcade_delivery import run_arcade_prize_delivery
 from crm.blasts import run_blast_dispatch_scheduler
 from crm.listmonk_sync import run_listmonk_sync_scheduler
 from crm.luma_sync import run_luma_guest_sync_scheduler
@@ -236,6 +237,7 @@ class Command(BaseCommand):
             # Automatic event reminders (day before, hour before). Off unless
             # CRM_AUTO_REMINDERS_ENABLED; queues through the normal blast path.
             ("crm_event_reminders", run_reminder_scheduler),
+            ("arcade_prize_delivery", run_arcade_prize_delivery),
             ("crm_blast_dispatch", run_blast_dispatch_scheduler),
             # Polls listmonk for campaign progress, opens, clicks, bounces and
             # unsubscribes. Runs whenever listmonk is configured, throttled to

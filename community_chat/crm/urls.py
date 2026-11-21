@@ -2,6 +2,7 @@
 
 from django.urls import path
 
+from .arcade_views import ArcadeStockView
 from . import views
 from .deliverability_views import (DeliverabilityView, IncidentAcknowledgeView, IncidentsView,
     StreamPolicyView, SelfCheckView, SeedHeartbeatView, ReconfirmationDraftView, ContactTypoCorrectionView)
@@ -17,6 +18,7 @@ urlpatterns = [
     path("deliverability/incidents/", IncidentsView.as_view(), name="community_chat_crm_deliverability_incidents"),
     path("deliverability/incidents/<uuid:incident_id>/", IncidentsView.as_view(), name="community_chat_crm_deliverability_incident"),
     path("deliverability/incidents/<uuid:incident_id>/acknowledge/", IncidentAcknowledgeView.as_view(), name="community_chat_crm_deliverability_acknowledge"),
+    path("arcade-stock/", ArcadeStockView.as_view(), name="community_chat_crm_arcade_stock"),
     path("access/", views.AccessView.as_view(), name="community_chat_crm_access"),
     path("overview/", views.OverviewView.as_view(), name="community_chat_crm_overview"),
     path("events/", views.EventsView.as_view(), name="community_chat_crm_events"),
