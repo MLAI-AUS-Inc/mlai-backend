@@ -13,9 +13,9 @@ from rest_framework.exceptions import AuthenticationFailed
 from community_chat.models import CommunityChatAccountSession
 from community_chat.onboarding import require_community_access
 from community_chat.volunteer.access import community_id
-from community_chat.volunteer.policy import MICROROO, progress
-from community_chat.volunteer.services import contribution_total, state_for
-
+from community_chat.volunteer.policy import MICROROO
+from community_chat.volunteer.profile_progression import public_position
+from community_chat.volunteer.services import contribution_total
 from roo.digital_points import available_balance
 from roo.models import PointsAccount
 from roo.services import InsufficientBalanceError, PointsService
@@ -72,8 +72,7 @@ def _scope():
 
 
 def _rank(user):
-    total = contribution_total(user, state_for(user))
-    return progress(total)["current_level"] if total is not None else None
+    return public_position(contribution_total(user))
 
 
 def _owned(row):
@@ -88,6 +87,7 @@ def _owned(row):
 def _snapshot(user, scope, relay_url, row, rank):
     outfit = {slot: getattr(row, slot) for slot in SLOTS} if row else empty_outfit()
     level = rank["level"] if rank else None
+    owned = _owned(row)
     account = PointsAccount.objects.filter(user=user).first()
     balance = 0
     if account:
@@ -101,11 +101,11 @@ def _snapshot(user, scope, relay_url, row, rank):
         "catalog_version": CATALOG_VERSION,
         "version": row.version if row else 0,
         "current_level": level,
-        "rank_name": rank["name"] if rank else None,
+        "rank_name": rank["rank"]["name"] if rank else None,
         "history_reconciled": rank is not None,
         "outfit": outfit,
-        "effective_outfit": effective_outfit(outfit, level),
-        "catalog": catalog_for(level, _owned(row)),
+        "effective_outfit": effective_outfit(outfit, level, owned),
+        "catalog": catalog_for(level, owned),
         "updated_at": row.updated_at.isoformat() if row else None,
     }
 
@@ -142,8 +142,8 @@ def update_avatar(*, authenticated_session, values):
         # An outfit from a client without the fur slot keeps the saved fur.
         outfit.setdefault("fur", row.fur if row else None)
         rank = _rank(user)
-        require_unlocked(outfit, rank["level"] if rank else None)
         owned = _owned(row)
+        require_unlocked(outfit, rank["level"] if rank else None, owned)
         purchases = [
             item
             for slot in SLOTS

@@ -45,8 +45,8 @@ GET and a successful PATCH return the same shape:
     "jacket": null, "shoes": null},
   "updated_at": null,
   "catalog": {
-    "fur": [{"id": "golden_sand", "name": "Golden sand", "required_level": 0,
-      "unlocked": true, "unavailable_reason": null, "price_points": 1, "owned": false}],
+    "fur": [{"id": "golden_sand", "name": "Golden sand", "required_level": 1,
+      "unlocked": false, "unavailable_reason": "history_unreconciled", "price_points": 1, "owned": false}],
     "hair": [], "glasses": [], "jacket": [], "shoes": []
   }
 }
@@ -59,74 +59,58 @@ include `fur`. `unavailable_reason` is null, `level_required`, or
 not an extra catalog object. No saved row yields version 0, null `updated_at`
 and five null selections. A saved row's timestamp is an ISO-8601 datetime.
 
-`current_level` and `rank_name` derive from the existing verified Volunteer
-contribution total and rank policy. Spendable balance, purchased Roo, unverified client activity and
-unknown legacy earnings do not unlock cosmetics. Unreconciled or unclassified
-history yields null rank/level and `history_reconciled: false`; starter items
-with required level 0 remain available without fabricating a Curious rank.
+The wardrobe and the private journey use the same 200-level contribution
+ladder as published member profiles. The verified contribution total determines
+`current_level` and `rank_name` independently of wallet balance and profile
+publication. When the total is unknown, both fields are null and
+`history_reconciled` is false.
 
-`outfit` is the raw saved preference. `effective_outfit` suppresses choices that
-are currently unavailable, preserving the saved preference if an audited rank
-correction later restores eligibility. Render and initialize editing from
-`effective_outfit`, while explaining temporarily unavailable saved choices.
-This is current-rank eligibility, not a permanent unlock entitlement.
+`outfit` is the saved preference. Render and initialize the editor from
+`effective_outfit`, which includes owned items even after a level correction.
 
 ## Stable catalog
 
 | Slot | Stable ID | Name | Required level | Roo Points |
 | --- | --- | --- | ---: | ---: |
-| fur | golden_sand | Golden sand | 0 | 1 |
-| fur | blue_flier | Blue flier | 0 | 1 |
-| fur | ironbark | Ironbark | 0 | 2 |
-| fur | snow_gum | Snow gum | 0 | 2 |
-| fur | midnight_wallaroo | Midnight wallaroo | 0 | 2 |
-| hair | honey_tuft | Tuft | 0 | 1 |
-| hair | cocoa_curls | Curls | 1 | 1 |
-| hair | peach_fringe | Swept fringe | 2 | 2 |
-| hair | lilac_bob | Bob | 4 | 2 |
-| hair | mint_mohawk | Mohawk | 6 | 3 |
-| glasses | classic_black | Classic black | 0 | 1 |
-| glasses | honey_rounds | Honey rounds | 1 | 2 |
-| glasses | rose_hearts | Rose hearts | 3 | 2 |
-| glasses | ocean_visor | Ocean visor | 4 | 3 |
-| glasses | lilac_stars | Lilac stars | 6 | 3 |
-| jacket | sage_bomber | Sage bomber | 1 | 2 |
-| jacket | blue_denim | Blue denim | 2 | 2 |
-| jacket | berry_varsity | Berry varsity | 3 | 3 |
-| jacket | sunflower_raincoat | Sunflower raincoat | 5 | 3 |
-| jacket | lilac_puffer | Lilac puffer | 6 | 4 |
-| shoes | red_sneakers | Red sneakers | 0 | 1 |
-| shoes | cream_high_tops | Cream high tops | 2 | 2 |
-| shoes | bush_boots | Bush boots | 3 | 2 |
-| shoes | pink_roller_skates | Pink roller skates | 4 | 3 |
-| shoes | teal_runners | Teal runners | 5 | 3 |
+| fur | golden_sand | Golden sand | 1 | 1 |
+| hair | honey_tuft | Tuft | 2 | 1 |
+| glasses | classic_black | Classic black | 3 | 2 |
+| shoes | red_sneakers | Red sneakers | 4 | 2 |
+| fur | blue_flier | Blue flier | 5 | 3 |
+| hair | cocoa_curls | Curls | 6 | 3 |
+| glasses | honey_rounds | Honey rounds | 7 | 4 |
+| shoes | cream_high_tops | Cream high tops | 8 | 5 |
+| fur | ironbark | Ironbark | 9 | 6 |
+| hair | peach_fringe | Swept fringe | 10 | 7 |
+| glasses | rose_hearts | Rose hearts | 12 | 8 |
+| shoes | bush_boots | Bush boots | 14 | 10 |
+| fur | snow_gum | Snow gum | 16 | 12 |
+| hair | lilac_bob | Bob | 18 | 14 |
+| glasses | ocean_visor | Ocean visor | 19 | 15 |
+| shoes | pink_roller_skates | Pink roller skates | 20 | 16 |
+| fur | midnight_wallaroo | Midnight wallaroo | 22 | 18 |
+| hair | mint_mohawk | Mohawk | 24 | 21 |
+| glasses | lilac_stars | Lilac stars | 25 | 23 |
+| shoes | teal_runners | Teal runners | 26 | 24 |
+| jacket | sage_bomber | Sage bomber | 28 | 27 |
+| jacket | blue_denim | Blue denim | 30 | 30 |
+| jacket | berry_varsity | Berry varsity | 32 | 33 |
+| jacket | sunflower_raincoat | Sunflower raincoat | 34 | 36 |
+| jacket | lilac_puffer | Lilac puffer | 36 | 40 |
 
-`fur` is Roo's whole fur colour. Null fur is the default "Outback red", which
-has no catalog object. Every fur colour has required level 0, so all of them
-are available to every member, including while history is unreconciled. Hair
-items are styles only: their stable IDs are unchanged,
-and only the display names dropped the colour.
-
-Existing level names are Curious (0), Connected (1), Contributor (2), Regular
-(3), Collaborator (4), Community Builder (5), and Steward (6). Their thresholds
-remain owned by `community_chat.volunteer.policy`; this catalog adds no second
-rank or badge engine. Renderers map stable IDs to assets and must not persist
-array positions.
-
-The default Outback red coat and empty accessory slots are free. The wardrobe
-keeps each currently equipped legacy item when pricing begins. Purchased
-items belong to the member in this community and can be equipped again for
-free when eligible. `owned` records ownership and `unlocked` records level
-eligibility. `available_points` is the whole-point digital-service balance
-after reservations. Opening the wardrobe and previewing items are free.
+The default Outback red coat and empty accessory slots are free at every level.
+Each catalog item has a one-time price. `owned` includes both purchases and
+previously equipped legacy items. `unlocked` means the member can equip the
+item, either through ownership or by reaching its purchase level.
+`available_points` is the whole-point digital-service balance after reservations.
 
 ## Update
 
 PATCH accepts the saved version, outfit, and an optional confirmed purchase total in whole Roo Points.
 
 ```json
-{"version": 0, "purchase_points": 4, "outfit": {
-  "fur": "snow_gum", "hair": "honey_tuft", "glasses": "classic_black",
+{"version": 0, "purchase_points": 3, "outfit": {
+  "fur": null, "hair": "honey_tuft", "glasses": "classic_black",
   "jacket": null, "shoes": null
 }}
 ```
@@ -162,5 +146,6 @@ retry with a fresh version. On a locked response, reload eligibility before
 saving again. All responses have `Cache-Control: private, no-store`.
 
 `catalog_version` stays `roo-avatar-v1`: released iOS builds refuse any other
-value, and the fur slot is purely additive for them (they ignore the extra
-`fur` keys and keep sending four-slot updates, which preserve the saved fur).
+value. Clients can omit `fur` on updates to retain the saved coat. Native
+builds that validate item or member levels against the old maximum of six
+require a client update to read this catalog.

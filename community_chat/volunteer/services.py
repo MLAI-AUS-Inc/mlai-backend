@@ -41,6 +41,7 @@ from .models import (
     VolunteerSourceReceipt,
 )
 from .evidence import source_is_invalidated
+from .profile_progression import public_position
 from .policy import (
     VERSION,
     catalogue,
@@ -411,6 +412,7 @@ def journey(user):
         policy_version=VERSION,
         contribution_roo=roo(total) if total is not None else None,
         wallet_balance=roo(PointsService.get_available_microroo(user)),
+        profile_rank=public_position(total),
         levels=public_levels,
         attendance={"verified": attendance_verified(user)},
         suggestions=suggestions,
