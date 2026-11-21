@@ -411,6 +411,10 @@ class GoldenScenarioTests(GoldenFixture):
         self.assert_second_pass_adds_nothing()
 
     def test_org_175_a_live_nine_night_streak_gives_one_digest_alert(self):
+        # Anchor the fixture after midnight so the oldest run stays in the nine-night window.
+        self.now = timezone.localtime(self.now, digest.LOCAL).replace(
+            hour=12, minute=0, second=0, microsecond=0,
+        )
         self.build_175_streak()
         texts = self.sweep_all()
         self.assertEqual(self.produced(), [STREAK])
