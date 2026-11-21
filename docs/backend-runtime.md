@@ -99,9 +99,9 @@ against production as part of this refactor.
 
 ## Python dependencies
 
-Python 3.11 is the supported runtime. Both requirements source files resolve into
+Python 3.11.5 is the minimum supported runtime in the 3.11 series. Both requirements source files resolve into
 [`requirements.lock`](../requirements.lock), installed with hash verification
-by CI and Docker. The framework target is Django 5.2.17 with DRF 3.16.1 and
+by CI and Docker. The framework target is Django 5.2.17 with DRF 3.18.2 and
 SimpleJWT 5.5.1. The psycopg binary distribution avoids an implicit dependency on
 a machine's locally installed libpq for Python imports.
 
@@ -113,7 +113,7 @@ hashed Django Admin and DRF assets before any deployment or migration starts.
 Regenerate the lock after intentionally editing either requirements input:
 
 ```sh
-env -u UV_INDEX_URL -u UV_EXTRA_INDEX_URL uv --no-config pip compile requirements.txt requirements-engine.txt --python-version 3.11 --universal --generate-hashes --no-emit-index-url --default-index https://pypi.org/simple --output-file requirements.lock
+env -u UV_INDEX_URL -u UV_EXTRA_INDEX_URL uv --no-config pip compile requirements.txt requirements-engine.txt --python-version 3.11.5 --universal --generate-hashes --no-emit-index-url --default-index https://pypi.org/simple --output-file requirements.lock
 python scripts/check_dependency_lock.py --record-inputs
 python scripts/check_dependency_lock.py
 ```
@@ -201,3 +201,14 @@ compatibility, and verifies the final merge leaves both editorial content and
 encrypted credentials intact. Run the two modes in separate invocations. The
 harness rejects existing database URLs and removes its database files after
 stopping the cluster. This remains scoped test approval, not production approval.
+
+## Legacy profile avatar uploads
+
+The authenticated `PATCH /api/v1/auth/update-profile/` and
+`PATCH /api/v1/auth/update_user/` endpoints accept multipart `avatar` and
+`team_avatar` fields. Team uploads still require membership in the eligible
+team for the requested app. Each image must be at most 10 MiB, 24 million
+pixels and 8,192 pixels on either side. The stored derivative fits within
+300 × 300 pixels. Rejected images return HTTP 400 with `error` and `field`.
+Storage failures return HTTP 503 with the same fields. A failed avatar request
+leaves the saved profile and avatar URLs unchanged.
