@@ -268,6 +268,109 @@
         "ask"
       ]
     },
+    "FounderRepoHealthItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "message",
+        "action"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "lockfile_out_of_sync",
+            "framework_build_blocked_by_advisory",
+            "type_error",
+            "missing_env",
+            "unsupported_node",
+            "build_failed_other",
+            "host_not_deploying",
+            "checks_permission_missing",
+            "sitemap_unreachable"
+          ]
+        },
+        "severity": {
+          "enum": [
+            "blocking",
+            "warning"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        }
+      }
+    },
+    "FounderRepoHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headSha",
+        "buildStatus",
+        "hostStatus",
+        "blocking",
+        "items",
+        "checkedAt"
+      ],
+      "properties": {
+        "headSha": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "buildStatus": {
+          "enum": [
+            "passed",
+            "failed",
+            "not_checked"
+          ]
+        },
+        "hostStatus": {
+          "enum": [
+            "passed",
+            "failed",
+            "unknown",
+            "not_checked"
+          ]
+        },
+        "blocking": {
+          "type": "boolean"
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 9,
+          "items": {
+            "$ref": "#/$defs/FounderRepoHealthItem"
+          }
+        },
+        "checkedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
     "FounderJourney": {
       "type": "object",
       "additionalProperties": false,
@@ -1247,6 +1350,9 @@
             "articleCost",
             "balance"
           ]
+        },
+        "repoHealth": {
+          "$ref": "#/$defs/FounderRepoHealth"
         }
       },
       "required": [

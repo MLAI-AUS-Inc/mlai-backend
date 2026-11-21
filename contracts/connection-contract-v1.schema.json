@@ -1,0 +1,36 @@
+{
+  "$id": "https://mlai.au/contracts/connection-contract-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "description": "The website connection identity (content_factory.website_contract.CONNECTION_FIELDS) every Content Factory request to the backend carries. Content Factory pins a copy with a sha256 lock; tests_connection_contract_schema keeps this file and CONNECTION_FIELDS equal.",
+  "properties": {
+    "connection_generation": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "connection_target_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "repository_id": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "website_connection_id": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "website_connection_id",
+    "connection_generation"
+  ],
+  "title": "Website connection contract v1",
+  "type": "object",
+  "x-connection-fields": [
+    "website_connection_id",
+    "connection_generation",
+    "connection_target_id",
+    "repository_id"
+  ]
+}

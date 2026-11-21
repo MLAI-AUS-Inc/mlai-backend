@@ -172,7 +172,14 @@ class AuthorityCodeRegistryTests(SimpleTestCase):
     # Raised today without a registry row; the registry is vendored from
     # Content Factory, so this one waits for its row there. Remove it from
     # this set when the row lands (the test fails until you do).
-    AWAITING_REGISTRY_ROW = frozenset({"company_billing_founder_unavailable"})
+    # The two repo_health codes are raised only behind the default-off
+    # ARTICLES_REPO_HEALTH_ENABLED switch; their rows go into Content
+    # Factory's failure-codes.json before that switch is turned on.
+    AWAITING_REGISTRY_ROW = frozenset({
+        "company_billing_founder_unavailable",
+        "repo_health_build_not_green",
+        "repo_health_blocked",
+    })
 
     def raised_codes(self):
         root = Path(__file__).resolve().parents[1]
