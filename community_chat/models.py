@@ -584,3 +584,64 @@ class TokenUsageDailyBucket(models.Model):
             f"{self.usage_date}:{self.account_id}:{self.source}:"
             f"{self.session_id}:{self.model}"
         )
+
+
+class EmailChangeStatus(models.TextChoices):
+    CURRENT = "awaiting_current", "Awaiting current inbox"
+    NEW = "awaiting_new", "Awaiting new inbox"
+    COMPLETED = "completed", "Completed"
+    CANCELLED = "cancelled", "Cancelled"
+    EXPIRED = "expired", "Expired"
+    CONFLICT = "conflict", "Address unavailable"
+
+
+class CommunityChatEmailChange(models.Model):
+    """One account email change bound to a scoped account session."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    session = models.ForeignKey(CommunityChatAccountSession, null=True, on_delete=models.SET_NULL)
+    auth_version = models.PositiveIntegerField()
+    old_digest = models.CharField(max_length=64, blank=True)
+    new_email_ciphertext = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=EmailChangeStatus.choices)
+    generation = models.PositiveSmallIntegerField(default=0)
+    code_digest = models.CharField(max_length=64, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    expires_at = models.DateTimeField(db_index=True)
+    code_expires_at = models.DateTimeField()
+    resend_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True)
+    replay = models.JSONField(default=dict)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("user",),
+                condition=models.Q(status__in=("awaiting_current", "awaiting_new")),
+                name="chat_one_open_email_change",
+            ),
+        ]
+
+
+class CommunityChatEmailChangeJob(models.Model):
+    """Retryable mail or relay revocation associated with an email change."""
+
+    change = models.ForeignKey(CommunityChatEmailChange, on_delete=models.CASCADE)
+    key = models.CharField(max_length=110)
+    kind = models.CharField(max_length=24)
+    generation = models.PositiveSmallIntegerField(default=0)
+    ciphertext = models.TextField(blank=True)
+    public_key = models.CharField(max_length=64, blank=True, db_index=True)
+    invite_ids = models.JSONField(default=list)
+    expires_at = models.DateTimeField(null=True)
+    available_at = models.DateTimeField(db_index=True)
+    claimed_at = models.DateTimeField(null=True)
+    finished_at = models.DateTimeField(null=True)
+    attempts = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("change", "key"), name="chat_email_change_job_key"),
+        ]

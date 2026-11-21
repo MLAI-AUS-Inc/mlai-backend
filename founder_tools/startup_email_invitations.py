@@ -236,9 +236,11 @@ def _eligible(invitation, company, roster, now):
         raise _unavailable()
 
 
+@transaction.atomic
 def accept(user, public_id, *, confirm=False):
     """Preview or accept using a live, verified identity. A GET never joins."""
-    if not team._valid_user(user):
+    user = User.objects.select_for_update().filter(pk=user.pk, is_active=True).first() if user.pk else None
+    if not user or not team._valid_user(user):
         raise _unavailable()
     found = Invitation.objects.select_related("company__organization").filter(public_id=public_id).first()
     if found is None or found.company.organization_id is None:
@@ -247,8 +249,7 @@ def accept(user, public_id, *, confirm=False):
         invitation = Invitation.objects.select_related("company__organization", "inviter").filter(
             pk=found.pk, public_id=public_id,
         ).first()
-        user = User.objects.filter(pk=user.pk, is_active=True).first()
-        if not invitation or not user or invitation.email not in _verified_addresses(user):
+        if not invitation or invitation.email not in _verified_addresses(user):
             raise _unavailable()
         company = invitation.company
         if company.organization_id != found.company.organization_id:

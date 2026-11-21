@@ -232,7 +232,7 @@ def get_or_create_user_for_slack_id(slack_user_id: str) -> User:
                 try:
                     existing_user = assign_direct_slack_identity(
                         existing_user,
-                        slack_user_id,
+                        slack_user_id, matching_email=email,
                     )
                 except ConflictingSlackFounderLinkError:
                     email = f"{slack_user_id}@slack.placeholder.com"

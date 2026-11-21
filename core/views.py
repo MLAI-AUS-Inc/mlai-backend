@@ -474,6 +474,7 @@ class MagicLinkVerifyView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [AuthEndpointRateThrottle]
 
+    @transaction.atomic
     def get(self, request):
         token = request.query_params.get('token')
         logger.info("Received magic link verification request.")
@@ -498,7 +499,13 @@ class MagicLinkVerifyView(APIView):
                 if _invalid_operations_next_path(requested_next_path, next_param, app_param):
                     return _invalid_next_path_response()
 
-                user = User.objects.get(email__iexact=email)
+                users = User.objects.select_for_update()
+                if 'user_id' in token_data and 'auth_version' in token_data:
+                    user = users.get(pk=token_data['user_id'], email=email, auth_version=token_data['auth_version'])
+                elif settings.MLAI_LEGACY_EMAIL_MAGIC_LINKS_ENABLED and 'user_id' not in token_data and 'auth_version' not in token_data:
+                    user = users.get(email__iexact=email)
+                else:
+                    raise User.DoesNotExist
                 from core.account_bans import account_is_banned
                 if account_is_banned(user):
                     return Response({"error": "Account unavailable."}, status=status.HTTP_403_FORBIDDEN)
@@ -593,7 +600,7 @@ class MagicLinkVerifyView(APIView):
 
             except User.DoesNotExist:
                 logger.warning("Magic link referenced a user that no longer exists")
-                return Response({"error": "User does not exist."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
         else:
             logger.warning("Invalid or expired magic link token.")
             return Response({"error": "Invalid or expired token."}, status=status.HTTP_400_BAD_REQUEST)
@@ -703,7 +710,10 @@ class UpdateProfileView(APIView):
         full_name = request.data.get("full_name")
         first_name = request.data.get("first_name")
         last_name = request.data.get("last_name")
-        email = request.data.get("email")
+        supplied_email = User.objects.normalize_email(request.data.get("email"))
+        if supplied_email and supplied_email != user.email:
+            return Response({"error": "email_change_required"}, status=status.HTTP_400_BAD_REQUEST)
+        changed_fields = set()
         phone = request.data.get("phone")
         about = request.data.get("about")
         app_context = _normalize_app_context(request.data.get('app'), default='')
@@ -716,22 +726,27 @@ class UpdateProfileView(APIView):
         else:
             personas = request.data.get("personas")
 
-        logger.info(f"UpdateProfileView PATCH: user={user.email}, data_keys={list(request.data.keys())}, files_keys={list(request.FILES.keys())}")
+        logger.info("UpdateProfileView PATCH: user_id=%s", user.pk)
 
         # Update the user's profile information.
         if first_name:
             user.first_name = first_name
+            changed_fields.add("first_name")
         if last_name:
             user.last_name = last_name
+            changed_fields.add("last_name")
             
         if full_name:
             user.full_name = full_name
+            changed_fields.update(("first_name", "last_name"))
         
         if phone is not None:
             user.phone = phone
+            changed_fields.add("phone")
             
         if about is not None:
             user.about = about
+            changed_fields.add("about")
 
         if personas is not None:
             # Ensure it's a list and validate against known persona choices.
@@ -762,11 +777,7 @@ class UpdateProfileView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             user.personas = deduped_personas
-
-        # Only update the email if it's changed.
-        if email and email != user.email:
-            # TODO: Consider marking the email as unverified and sending a verification email.
-            user.email = email
+            changed_fields.add("personas")
 
         team = None
         if "team_avatar" in request.FILES:
@@ -822,13 +833,13 @@ class UpdateProfileView(APIView):
 
         if "avatar" in avatar_urls:
             user.avatar_url = avatar_urls["avatar"]
-        if "team_avatar" in avatar_urls:
-            with transaction.atomic():
-                user.save()
+            changed_fields.add("avatar_url")
+        with transaction.atomic():
+            if changed_fields:
+                user.save(update_fields=changed_fields | {"updated_at"})
+            if "team_avatar" in avatar_urls:
                 team.avatar_url = avatar_urls["team_avatar"]
                 team.save(update_fields=["avatar_url"])
-        else:
-            user.save()
 
         team_profile = user_team_profile(user)
 

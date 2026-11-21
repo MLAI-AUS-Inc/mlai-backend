@@ -1,0 +1,8 @@
+{% if verification_code %}Enter this code in MLAI Chat to approve the sign-in email change to {{ new_email_masked }}.
+
+{{ verification_code }}
+
+Return to Settings to finish. If you didn't start this request, you can ignore this email.
+{% else %}Your MLAI sign-in email changed to {{ new_email_masked }}. Use the new address when you sign in again.
+{% endif %}
+If this activity is unexpected, contact hi@mlai.au. MLAI staff will never ask for your code.

@@ -86,6 +86,10 @@ def _valid_session(session, now):
 
 
 def _validate_device_owner(session):
+    from .email_change import retired_signer
+
+    if retired_signer(session.public_key):
+        raise InvalidAccountSession("invalid_session")
     # Older clients could sign into another account with the previous account's
     # relay key. Reject those already-issued credentials as well as refreshes:
     # otherwise the account APIs and relay keep serving different identities.

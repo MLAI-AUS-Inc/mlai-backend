@@ -642,6 +642,7 @@ jobs:
           community_chat.tests.test_account_sessions \
           community_chat.tests.test_device_management \
           community_chat.tests.test_session_device_binding \
+          community_chat.tests.test_account_email_change.AccountEmailChangeTests \
           community_chat.tests.test_account_profiles.AccountProfileTests \
           community_chat.tests.test_account_privacy.AccountPrivacyTests \
           community_chat.tests.test_deletion_tasks \
@@ -1043,6 +1044,7 @@ jobs:
       run: |
         python manage.py test \
           community_chat.tests.test_api.CommunityChatDeviceAuthorityTransactionTests \
+          community_chat.tests.test_account_email_change.AccountEmailChangeConcurrencyTests \
           community_chat.tests.test_account_profiles.AccountProfileConcurrencyTests \
           community_chat.tests.test_account_privacy.AccountPrivacyConcurrencyTests \
           roo.tests_apple_iap.AppleConcurrencyTests \
