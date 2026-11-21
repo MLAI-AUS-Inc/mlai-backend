@@ -3367,8 +3367,7 @@ class LinkedCoworkingEligibilityTests(APITestCase):
 
     def test_slack_only_placeholder_is_not_reported_as_founder_tools_linked(self):
         SlackFounderAccountLink.objects.all().delete()
-        self.slack_user.email = "ucowlink12@slack.placeholder.com"
-        self.slack_user.save(update_fields=["email"])
+        User.objects.filter(pk=self.slack_user.pk).update(email="ucowlink12@slack.placeholder.com")
 
         response = self.client.post(
             reverse("coworking-book"),
@@ -3387,8 +3386,7 @@ class LinkedCoworkingEligibilityTests(APITestCase):
 
     def test_admin_batch_does_not_report_placeholder_target_as_linked(self):
         SlackFounderAccountLink.objects.all().delete()
-        self.slack_user.email = "ucowlink12@slack.placeholder.com"
-        self.slack_user.save(update_fields=["email"])
+        User.objects.filter(pk=self.slack_user.pk).update(email="ucowlink12@slack.placeholder.com")
 
         response = self.client.post(
             reverse("coworking-book-many"),
