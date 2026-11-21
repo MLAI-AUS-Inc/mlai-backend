@@ -236,6 +236,7 @@ class MonthlyRewardTests(SimpleTestCase):
         self.eligibility = Mock(return_value={"eligible": True})
         self.shared = Mock(return_value=True)
         self.award = Mock(side_effect=self.credit)
+        self.earn_round = Mock()
         self.org_lock = Mock()
         for replacement in (
             patch.object(rewards, "update_ledger", self.existing),
@@ -243,6 +244,7 @@ class MonthlyRewardTests(SimpleTestCase):
             patch("startup_updates.reward_eligibility.startup_reward_eligibility", self.eligibility),
             patch("startup_updates.benefits.published_update_is_shared", self.shared),
             patch("roo.services.PointsService.award", self.award),
+            patch("community_chat.arcade.earn_pulse_round", self.earn_round),
             patch.object(rewards.Organization.objects, "select_for_update", self.org_lock),
         ):
             replacement.start()
@@ -267,6 +269,7 @@ class MonthlyRewardTests(SimpleTestCase):
         self.assertEqual(self.award.call_args.kwargs["delta"], 20)
         self.assertEqual(self.award.call_args.kwargs["reference_id"], "41")
         self.org_lock.return_value.get.assert_called_once_with(pk=7)
+        self.earn_round.assert_called_once_with(self.user, self.draft.pk)
 
     def test_private_first_approval_gets_five_without_verification_lookup(self):
         self.shared.return_value = False
@@ -306,6 +309,7 @@ class MonthlyRewardTests(SimpleTestCase):
         self.assertEqual(self.complete()["status"], "already_awarded")
         self.draft.month = date(2026, 9, 1)
         self.assertFalse(self.complete()["awarded"])
+        self.earn_round.assert_not_called()
         self.award.assert_not_called()
         self.eligibility.assert_not_called()
 
@@ -349,6 +353,7 @@ class MonthlyRewardTests(SimpleTestCase):
         self.award.side_effect = RuntimeError("Synthetic unavailable wallet")
         with self.assertRaisesRegex(RuntimeError, "unavailable wallet"):
             self.complete()
+        self.earn_round.assert_not_called()
 
     def test_calendar_boundary_including_daylight_savings(self):
         before = datetime(2026, 9, 30, 13, 59, tzinfo=timezone.utc)
