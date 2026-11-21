@@ -1239,8 +1239,20 @@ CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID = os.getenv('CONTENT_FACTORY_OPS_SLACK_CHAN
 # bounds run/company created_at. The default replays every stuck run and startup
 # since 29 Sep at MAX_PER_TICK a minute; set SINCE to the flip date to start clean.
 ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED', 'false').lower() == 'true'
+# Founder-proof plan workstream 6: a hosted quality hold staff own is projected
+# to founders as retryable=false, so no "Check again" is offered beside
+# "We're fixing this". Default off keeps today's founder payload.
+ARTICLES_HONEST_RETRY_STATUS_ENABLED = os.getenv('ARTICLES_HONEST_RETRY_STATUS_ENABLED', 'false').lower() == 'true'
 ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE', '2026-09-29').strip()
 ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK = int(os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK', '20'))
+# Workstream 5 (content_factory/staff_hold_alerts.py): one ops Slack post when an
+# article's final check is held for staff, with the run, the startup and the top
+# three finding codes, and one more if it is still held 24 hours later.
+ARTICLES_STAFF_HOLD_ALERTS_ENABLED = os.getenv('ARTICLES_STAFF_HOLD_ALERTS_ENABLED', 'false').lower() == 'true'
+# Workstream 5 (content_factory/author_bio_check.py): saving an author profile
+# checks the bio against the site's About page text and returns the phrases it
+# could not find there as a warning. It never blocks the save.
+ARTICLES_AUTHOR_BIO_CHECK_ENABLED = os.getenv('ARTICLES_AUTHOR_BIO_CHECK_ENABLED', 'false').lower() == 'true'
 # One "founder stuck" alert for every cohort (content_factory/founder_stuck_alerts.py):
 # a stopped website setup, a website step retrying for too long, or a latest article
 # run stopped with no next action. A kill switch that defaults on; the sweep runs at
@@ -2826,6 +2838,20 @@ ARTICLES_SETUP_LADDER_ENABLED = _env_is_true("ARTICLES_SETUP_LADDER_ENABLED", Fa
 MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED", False)
 # Plan E3b: reminders and guidance-change notices for website leads (no organisation). Default off.
 MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED", False)
+
+# Founder-proof article flow switches (outside the P2 block; all default off).
+# Default off: one decision for "the founder's branch moved". With it on, the
+# read guard, the owner preview retry, re-pin, the terminal callback and publish
+# all ask website_connections.resolve_run_source (follow, refuse or unchanged,
+# with a reason code) instead of each deciding alone. Off keeps the old paths.
+ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED = _env_is_true("ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED", False)
+# Workstream 3: repo health at connect. Stores host/build probe results on the
+# website connection, shows them in the journey, re-runs the host probe on push
+# and requires a green build probe for the current head before an article charge.
+ARTICLES_REPO_HEALTH_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_ENABLED", False)
+# Opening a fix pull request on the founder's repo (lockfile or patch bump). Held
+# off until the owner approves a write to founder repositories.
+ARTICLES_REPO_HEALTH_FIX_PR_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_FIX_PR_ENABLED", False)
 
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort

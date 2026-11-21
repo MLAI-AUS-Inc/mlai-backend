@@ -2121,12 +2121,12 @@
         "locked"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "235249971042aa74927dd80af7b312193438dde4de61c8b2f44498a323e27200",
+      "function_sha256": "2c8911862a3d69f89a0ccf99b788c9cac6dc6a0d986464b71b7b4a341ef3078b",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_source_operation_control.py"
       ],
-      "reason": "Owned source change delegates to strict backend source-repin control/ticket path; legacy request mutation is below owned early return.",
+      "reason": "Owned source change delegates to strict backend source-repin control/ticket path; legacy request mutation is below owned early return. Re-reviewed 21 Nov 2026 (owner approved, backend #1399): ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED (default off) routes the moved-head decision through resolve_run_source; with it off the existing path is unchanged.",
       "guard": "_repin_owned_source and immutable original digest/current scope/budget/source proof.",
       "pending_owner": null
     },
@@ -3612,12 +3612,12 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "f97a0b68902be80f9452e02891e96aeba4752a1ed60bc7c68d9c96d283d8ffbf",
+      "function_sha256": "26a67884ba5e05fef6419fcb09ae8e7462f2baa6844c2e5f3e9edc94b7c712a9",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_retired_writers.py"
       ],
-      "reason": "Authenticated old denied callback cannot record failure, terminal lifecycle or clock for owned Run.",
+      "reason": "Authenticated old denied callback cannot record failure, terminal lifecycle or clock for owned Run. Re-reviewed 21 Nov 2026 (owner approved, backend #1399): ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED (default off) routes the moved-head decision through resolve_run_source; with it off the existing path is unchanged.",
       "guard": "authoritative_run early return before writes.",
       "pending_owner": null
     },
@@ -6016,8 +6016,8 @@
     {
       "path": "content_factory/founder_journey_contract.py",
       "function": "enrich_journey",
-      "function_sha256": "27658d82b3e2d57eff2e1cd30c156aa187e8010fd22dbda28ee55386a94f1773",
-      "reason": "Canonical current article DTO calls the read-only rights, verified review/resume and stop-control projections; no local lifecycle or monetary effects. Retired hosted delivery maps to contentOnly and emits no hosting capabilities. The website step reads has_connected_website (read-only) to stay pending until the site is connected when ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE is on.",
+      "function_sha256": "b0223b7acba42f1175310c3835c3596be14231f4b5492b60989fb88c8f6e2e73",
+      "reason": "Canonical current article DTO calls the read-only rights, verified review/resume and stop-control projections; no local lifecycle or monetary effects. Retired hosted delivery maps to contentOnly and emits no hosting capabilities. The website step reads has_connected_website (read-only) to stay pending until the site is connected when ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE is on. Re-reviewed 21 Nov 2026 (owner approved, backend #1399): adds the read-only repoHealth projection (ARTICLES_REPO_HEALTH_ENABLED, default off); no lifecycle or monetary effect.",
       "test_refs": [
         "content_factory.tests_founder_article_contract",
         "content_factory.tests_founder_article_controls"
@@ -6499,8 +6499,8 @@
     {
       "path": "content_factory/vibe_marketing_views.py",
       "function": "VibeMarketingSettingsView.put",
-      "function_sha256": "eea8018f76a6c58f2c6e44f14cf988a4915d7a547bb6ef01e2ceefdaf7ccb4ec",
-      "reason": "Only keyed new-journey first-author bodies enter the retained command boundary; accepted receipt and existing settings writes commit together. Existing no-key/general settings semantics and validation remain intact.",
+      "function_sha256": "1b28ffa0e3652a98e363d4042e4b26addd8ab4a5a4ba2a29da56e518488e243b",
+      "reason": "Only keyed new-journey first-author bodies enter the retained command boundary; accepted receipt and existing settings writes commit together. Existing no-key/general settings semantics and validation remain intact. Re-reviewed 21 Nov 2026 (owner approved, backend #1399): after the settings write commits, an advisory author-bio check (ARTICLES_AUTHOR_BIO_CHECK_ENABLED, default off) reads the site's About page and returns warnings; it never blocks or changes the save.",
       "test_refs": [
         "content_factory/tests_founder_library_commands.py",
         "content_factory/tests_author_photos_unit.py",
