@@ -841,6 +841,9 @@ def _reserve_article_start_connection(context, payload, *, reserve_operation=Tru
             if payload.get("expected_source_sha") not in (None, "", website.verified_sha):
                 raise WebsiteAuthorityError("website_source_changed", "The verified website source changed before admission.")
             payload.update(contract_for(website), connection_target_id=selected, expected_source_sha=website.verified_sha)
+            from . import repo_health
+            # Workstream 3: no article is charged until the current head builds.
+            repo_health.require_green_build(website)
             if reserve_operation:
                 from .website_operations import reserve_workflow_operation
                 reserve_workflow_operation(website, workflow="article_generation", payload=payload)

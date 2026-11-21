@@ -179,7 +179,9 @@ def process_github_event(event_type, payload) -> dict:
     if event_type == "push":
         from .website_reconciliation import handle_website_github_event
         lifecycle = handle_website_github_event(event_type, payload)
-        return {**handle_push(payload), "website_connections_invalidated": lifecycle.get("invalidated", 0)}
+        from . import repo_health
+        health = repo_health.on_push(payload) if repo_health.enabled() else {}
+        return {**handle_push(payload), "website_connections_invalidated": lifecycle.get("invalidated", 0), **health}
     if event_wakes_enabled() and event_type in {"deployment_status", "check_run", "check_suite"}:
         return {"event": event_type, "prepares_woken": wakes}
     return {"event": event_type or "unknown", "ignored": True}

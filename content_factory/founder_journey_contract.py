@@ -231,6 +231,11 @@ def enrich_journey(payload, *, organization, company, config, user, run, connect
             "controls": article_controls(organization=organization, company=company, user=user, run=run),
             "failure": deepcopy(failure), "capabilities": deepcopy(payload["capabilities"])}
     payload.setdefault("holdingReason", None)
+    from . import repo_health
+    if repo_health.enabled():
+        health = repo_health.journey_block(connection)
+        if health is not None:
+            payload["repoHealth"] = health
     return payload
 
 

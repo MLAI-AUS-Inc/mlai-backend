@@ -2918,6 +2918,13 @@ ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPL
 MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
 MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)
 ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED = _env_is_true("ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED", False)
+# Workstream 3: repo health at connect. Stores host/build probe results on the
+# website connection, shows them in the journey, re-runs the host probe on push
+# and requires a green build probe for the current head before an article charge.
+ARTICLES_REPO_HEALTH_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_ENABLED", False)
+# Opening a fix pull request on the founder's repo (lockfile or patch bump). Held
+# off until the owner approves a write to founder repositories.
+ARTICLES_REPO_HEALTH_FIX_PR_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_FIX_PR_ENABLED", False)
 # Startup team (held until its security sign-off; declared here so the block is complete).
 MY_STARTUP_TEAM_ENABLED = _env_is_true("MY_STARTUP_TEAM_ENABLED", False)
 MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED = _env_is_true("MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED", False)
