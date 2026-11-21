@@ -13,7 +13,7 @@ from integrations.models import CommunityBridgeChannel
 from roo.models import PointsRequestDelivery
 from roo.services import PointsService, record_volunteer_credit
 
-ROO_POINTS_CHANNEL_ID = UUID("3f0bb319-a4f5-50fd-bdf1-ce0020ae6bb9")
+ROO_POINTS_CHANNEL_ID = UUID("e39d3ec7-0ea1-4d78-95fa-adb0d7cafb65")
 EVENT_ID = re.compile(r"[0-9a-f]{64}")
 CONFIRMATION = "confirmation"
 CELEBRATION = "celebration"
