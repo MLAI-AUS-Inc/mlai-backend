@@ -131,8 +131,14 @@ def thread_root(event, relay):
 
 
 def handle_event(relay, event):
-    if (event["pubkey"] == relay.pubkey or tags(event, "slack-bridge")
-            or tags(event, "h") != [["h", str(ROO_POINTS_CHANNEL_ID)]]):
+    if event["pubkey"] == relay.pubkey or tags(event, "slack-bridge"):
+        return
+    channel_tags = tags(event, "h")
+    # Chat reactions omit the h tag. The relay scopes them to the target
+    # message, and the approval lookup below requires this channel's summary.
+    if channel_tags != [["h", str(ROO_POINTS_CHANNEL_ID)]] and (
+        event["kind"] != REACTION or channel_tags
+    ):
         return
     content = event["content"].strip()
     if event["kind"] in MESSAGE_KINDS:
