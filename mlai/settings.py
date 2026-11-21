@@ -564,6 +564,7 @@ REST_FRAMEWORK = {
         # Plan E1: each uncached website preflight fetches a homepage and may
         # try a few close spellings, so it has its own per-account budget.
         'founder_website_preflight': os.getenv('FOUNDER_WEBSITE_PREFLIGHT_RATE', '20/minute'),
+        'community_chat_roo_points_mute': '120/minute',
         'community_chat_upcoming_events': os.getenv('COMMUNITY_CHAT_UPCOMING_EVENTS_RATE', '60/minute'),
         'community_chat_challenge': os.getenv('COMMUNITY_CHAT_CHALLENGE_RATE', '20/minute'),
         'community_chat_invite': os.getenv('COMMUNITY_CHAT_INVITE_RATE', '10/minute'),
@@ -2508,6 +2509,7 @@ COMMUNITY_CHAT_DELETION_CONTACT = os.getenv("COMMUNITY_CHAT_DELETION_CONTACT", "
 # Public Roo's identity verified in the MLAI Slack workspace. Empty values pause
 # the first-party DM connection; no other bot is enabled by this setting.
 COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
+ROO_POINTS_LEVEL_UP_ENABLED = _env_is_true("ROO_POINTS_LEVEL_UP_ENABLED", False)
 ROO_LINK_LOVE_SLACK_CHANNEL_ID = os.getenv("ROO_LINK_LOVE_SLACK_CHANNEL_ID", "C09BQAWJ66R")
 COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID", "U090FV0GTT4")
 # Personal agent bots (for example an OpenAI dot installed through OpenAI's own

@@ -35,6 +35,22 @@ services:
       retries: 3
       start_period: 300s
 
+  roo-points-worker:
+    profiles: [roo-points]
+    image: mlai-backend-web
+    logging: *default-logging
+    command: python manage.py run_roo_points_channel
+    env_file:
+      - .env
+      - path: .roo-points-worker.env
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      RUN_MIGRATIONS_ON_START: "0"
+    depends_on: [db]
+    restart: unless-stopped
+    stop_grace_period: 45s
+
   web:
     build:
       context: .

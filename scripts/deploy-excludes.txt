@@ -34,3 +34,5 @@ outputs
 output
 .worktrees
 .codex-work
+
+.roo-points-worker.env

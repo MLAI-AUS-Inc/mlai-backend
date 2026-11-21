@@ -1517,6 +1517,14 @@ class PointsRequest(models.Model):
     slack_channel_id = models.CharField(max_length=50, blank=True, null=True)
     slack_thread_ts = models.CharField(max_length=50, blank=True, null=True)
     slack_summary_message_ts = models.CharField(max_length=50, blank=True, null=True)
+    native_event_id = models.CharField(max_length=64, unique=True, null=True, blank=True)
+    native_channel_id = models.UUIDField(null=True, blank=True)
+    native_root_id = models.CharField(max_length=64, blank=True, default="")
+    native_summary_id = models.CharField(max_length=64, unique=True, null=True, blank=True)
+    native_recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="native_roo_points_requests",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1534,6 +1542,35 @@ class PointsRequest(models.Model):
             f"{self.requester_slack_id} requested {self.points} pts for "
             f"{self.target_slack_id} ({self.status})"
         )
+
+
+class RooPointsMutePreference(models.Model):
+    """An explicit #roo-points preference shared by this account's devices."""
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, primary_key=True)
+    muted = models.BooleanField()
+
+
+class PointsRequestDelivery(models.Model):
+    """Persist the ordered messages produced by one points request."""
+
+    request = models.ForeignKey(PointsRequest, on_delete=models.CASCADE, related_name="deliveries")
+    stage = models.CharField(max_length=20)
+    channel_id = models.UUIDField()
+    parent_id = models.CharField(max_length=64, blank=True, default="")
+    content = models.TextField()
+    mention_keys = models.JSONField(default=list)
+    transition = models.JSONField(default=dict, blank=True)
+    signed_event = models.JSONField(null=True, blank=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    available_at = models.DateTimeField(default=timezone.now, db_index=True)
+    attempts = models.PositiveIntegerField(default=0)
+    external_confirmation_id = models.CharField(max_length=50, blank=True, default="")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=("request", "stage"), name="roo_points_delivery_stage"),
+        ]
 
 
 class ChannelFirstPost(models.Model):
@@ -1579,3 +1616,10 @@ class QuestProgress(models.Model):
     def __str__(self):
         status = "✓" if self.completed else f"{self.current_count}"
         return f"{self.slack_user_id} - {self.quest_id}: {status}"
+
+
+class PointsRequestScan(models.Model):
+    """Checkpoint for the bounded native-room event scan."""
+
+    channel_id = models.UUIDField(primary_key=True)
+    through = models.PositiveBigIntegerField()

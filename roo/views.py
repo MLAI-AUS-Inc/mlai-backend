@@ -28,7 +28,7 @@ from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, BoostPostAdmission,
     TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
     CoworkingBookingOperation,
-    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase,
+    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase, PointsRequestDelivery,
 )
 
 from .purchase_tax import inclusive_gst_snapshot, validate_gst_payment
@@ -2629,30 +2629,14 @@ class PointsRequestViewSet(viewsets.ViewSet):
                     )
 
                 user = get_or_create_user_for_slack_id(points_request.target_slack_id)
-                ledger, _ = PointsService.award(
-                    user=user,
-                    delta=points_request.points,
-                    source='MANUAL',
-                    description=points_request.reason,
-                    created_by_slack_id=admin_slack_id,
-                    idempotency_key=f"points_request:{points_request.id}:approve",
-                    reference_type='POINTS_REQUEST',
-                    reference_id=str(points_request.id),
-                )
-                record_volunteer_credit(ledger)
+                from .points_request_workflow import approve_locked_request
 
-                points_request.status = 'approved'
-                points_request.approved_by_slack_id = admin_slack_id
-                points_request.approved_at = timezone.now()
-                points_request.ledger_entry = ledger
-                points_request.save(
-                    update_fields=[
-                        'status',
-                        'approved_by_slack_id',
-                        'approved_at',
-                        'ledger_entry',
-                        'updated_at',
-                    ]
+                ledger = approve_locked_request(
+                    points_request, user, admin_slack_id=admin_slack_id,
+                    recover_slack=(
+                        request.data.get("recover_slack_confirmation") is True
+                        and HasStrictRooApiKey().has_permission(request, self)
+                    ),
                 )
         except PointsRequest.DoesNotExist:
             return Response({'error': 'Points request not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -2668,8 +2652,74 @@ class PointsRequestViewSet(viewsets.ViewSet):
                 **PointsRequestSerializer(points_request).data,
                 'points_awarded': ledger.delta,
                 'new_balance': balance['balance'],
+                'chat_level_up_pending': points_request.deliveries.filter(stage='celebration').exists(),
+                'slack_confirmation_queued': points_request.deliveries.filter(stage='slack_confirmation').exists(),
             }
         )
+
+
+    @action(detail=False, methods=["post"], url_path="claim-slack-confirmation")
+    def claim_slack_confirmation(self, request):
+        from .native_points_requests import bridged_confirmation_link
+        from .points_request_workflow import SLACK_CONFIRMATION, bridge_channel
+
+        if not HasStrictRooApiKey().has_permission(request, self):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+        if not settings.ROO_POINTS_LEVEL_UP_ENABLED:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        with transaction.atomic():
+            now = timezone.now()
+            delivery = (
+                PointsRequestDelivery.objects.select_related("request").select_for_update(skip_locked=True)
+                .filter(stage=SLACK_CONFIRMATION, delivered_at__isnull=True, available_at__lte=now)
+                .order_by("available_at", "pk").first()
+            )
+            if not delivery:
+                return Response(status=status.HTTP_204_NO_CONTENT)
+            source = delivery.request
+            delivery.attempts += 1
+            delivery.available_at = now + timedelta(seconds=min(60 * delivery.attempts, 900))
+            delivery.save(update_fields=["available_at", "attempts"])
+            mapping = bridge_channel(source.slack_channel_id)
+            if not mapping or mapping.destination_channel_id != str(delivery.channel_id):
+                return Response(status=status.HTTP_204_NO_CONTENT)
+            prior = bridged_confirmation_link(delivery)
+            return Response({
+                "request_id": source.pk,
+                "channel_id": source.slack_channel_id,
+                "thread_ts": source.slack_thread_ts or source.slack_summary_message_ts,
+                "text": delivery.content,
+                "attempt": delivery.attempts,
+                "author_id": settings.COMMUNITY_CHAT_ROO_SLACK_USER_ID,
+                "existing_message_id": prior.source_message_id if prior else None,
+            })
+
+    @action(detail=True, methods=["post"], url_path="slack-confirmation")
+    def slack_confirmation(self, request, pk=None):
+        """Record the exact legacy Roo confirmation for the delivery worker."""
+        from .points_request_workflow import CELEBRATION, SLACK_CONFIRMATION
+
+        if not HasStrictRooApiKey().has_permission(request, self):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+        message_id = request.data.get("message_id")
+        channel_id = request.data.get("channel_id")
+        if not isinstance(message_id, str) or not re.fullmatch(r"[0-9]{1,20}\.[0-9]{1,20}", message_id):
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            deliveries = PointsRequestDelivery.objects.select_for_update().filter(
+                request_id=pk, request__slack_channel_id=channel_id,
+                stage__in=(CELEBRATION, SLACK_CONFIRMATION),
+            ).order_by("pk")
+            for delivery in deliveries:
+                if delivery.external_confirmation_id:
+                    continue
+                delivery.external_confirmation_id = message_id
+                fields = ["external_confirmation_id"]
+                if delivery.stage == SLACK_CONFIRMATION:
+                    delivery.delivered_at = timezone.now()
+                    fields.append("delivered_at")
+                delivery.save(update_fields=fields)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class PointsPurchaseViewSet(viewsets.ViewSet):

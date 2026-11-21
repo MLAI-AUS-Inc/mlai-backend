@@ -516,6 +516,8 @@ install_remote_env_value() {
 install_remote_env_value WEBSITE_CONNECTION_WRITE_MODE "$WEBSITE_CONNECTION_WRITE_MODE"
 install_remote_env_value WEBSITE_CONNECTION_CANARY_DOMAINS "$WEBSITE_CONNECTION_CANARY_DOMAINS"
 install_remote_env_value APPROVED_MIGRATION_PLAN_SHA256 "$APPROVED_MIGRATION_PLAN_SHA256"
+install_remote_env_value ROO_POINTS_LEVEL_UP_ENABLED "${ROO_POINTS_LEVEL_UP_ENABLED:-false}"
+install_remote_env_value ROO_POINTS_NATIVE_ACTIVE_FROM "${ROO_POINTS_NATIVE_ACTIVE_FROM:-}"
 install_remote_env_value SYSTEM_EMAIL_RESEND_MESSAGES "$SYSTEM_EMAIL_RESEND_MESSAGES"
 for system_email_setting in $SYSTEM_EMAIL_DEPLOY_SETTINGS; do
     if [ -n "${!system_email_setting}" ]; then
@@ -1100,6 +1102,19 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF | tee "$remote_deploy_log"
     else
         docker compose stop event-discount-worker || true
         docker compose rm -f event-discount-worker || true
+    fi
+    if [ "\$(read_env_value ROO_POINTS_LEVEL_UP_ENABLED)" = "true" ]; then
+        if ! grep -Eq '^ROO_POINTS_NATIVE_SIGNING_KEY=[0-9a-f]{64}$' .roo-points-worker.env; then
+            echo "Roo Points needs the dedicated worker signing key in .roo-points-worker.env."
+            exit 1
+        fi
+        if ! [[ "\$(read_env_value ROO_POINTS_NATIVE_ACTIVE_FROM)" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Roo Points needs a Unix activation timestamp."
+            exit 1
+        fi
+        runtime_services+=("\${roo_points_runtime_services[@]}")
+    else
+        docker compose stop roo-points-worker || true
     fi
     if [ "\$(read_env_value AGENT_RUNTIME_COMMUNITY_ENABLED)" = "true" ]; then
         runtime_services+=("\${community_agent_runtime_services[@]}")
