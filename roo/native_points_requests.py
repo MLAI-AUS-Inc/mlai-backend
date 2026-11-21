@@ -229,6 +229,7 @@ def prepare_event(relay, delivery):
             if not mapped or not EVENT_ID.fullmatch(mapped.destination_parent_message_id):
                 return False
             parent = mapped.destination_parent_message_id
+            created_at = max(created_at, int(mapped.created_at.timestamp()) + 1)
     elif delivery.stage == REPOST:
         if not request.deliveries.filter(stage=CELEBRATION, delivered_at__isnull=False).exists():
             return False

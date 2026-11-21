@@ -120,7 +120,7 @@ class NativePointsRequestTests(TestCase):
         deliver_ready(self.relay)
         self.relay.publish.assert_not_called()
         row.deliveries.filter(stage="celebration").update(external_confirmation_id="101.2")
-        CommunityBridgeMessageLink.objects.create(
+        bridged = CommunityBridgeMessageLink.objects.create(
             channel=channel, source_platform="slack", source_channel_id="CLOCAL",
             source_author_id="UROO", source_message_id="101.2", source_parent_message_id="100.1",
             destination_platform="buzz", destination_channel_id=channel.destination_channel_id,
@@ -131,6 +131,7 @@ class NativePointsRequestTests(TestCase):
         self.assertEqual(self.relay.publish.call_count, 2)
         _, original = self.relay.publish.call_args_list[0].args
         self.assertIn(["e", "02" * 32, "", "reply"], original["tags"])
+        self.assertGreater(original["created_at"], int(bridged.created_at.timestamp()))
 
         with transaction.atomic():
             unchanged = PointsRequest.objects.create(
