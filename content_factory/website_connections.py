@@ -481,12 +481,15 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         if revision is not None and str(revision) != str(candidate.configuration_version):
             raise WebsiteAuthorityError("website_configuration_changed", "Refresh the reviewed website configuration.")
         cleanup = action in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation", "cancel_receipt"}
+        source_action = (guard_source_action(action, payload, follow_moved_preview=follow_moved_preview)
+                         if not cleanup and single_source_resolver_enabled() else None)
         if cleanup:
             validate_operation(candidate, {**payload, "action": action}, worker_cleanup=action == "worker_cleanup",
                 restoration=action in {"restoration", "restoration_read"}, cancellation=action == "cancel_operation", cancellation_receipt=action == "cancel_receipt")
             if domain.casefold() != candidate.organization.domain.casefold() or (github_repo and github_repo.casefold() != candidate.github_repo.casefold()):
                 raise WebsiteAuthorityError("worker_cleanup_scope_mismatch", "Cleanup does not belong to this company and repository.")
         else:
+            github_repo = followed_repository_name(source_action, payload, contract, candidate, github_repo)
             validate_authority(candidate, payload, action=action, domain=domain, github_repo=github_repo)
             validate_operation(candidate, payload)
             require_repository_write_policy(action=action, domain=candidate.organization.domain)
@@ -528,10 +531,9 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
             try:
                 verify_repository_head(candidate, expected or candidate.verified_sha)
             except WebsiteAuthorityError as exc:
-                from .source_repin import follow_enabled as source_follow_enabled
-                # "read" covers the retry's own attempt fence (advance_workflow_attempt).
-                if not (follow_moved_preview and action in {"preview", "read"} and exc.code == "website_source_changed"
-                        and source_follow_enabled()):
+                if not proceed_past_moved_head(exc, action=action, source_action=source_action, payload=payload,
+                        connection=candidate, pinned_sha=expected or candidate.verified_sha,
+                        follow_moved_preview=follow_moved_preview):
                     raise
                 # The run's pin is now stale: never record it as GitHub's head.
                 followed = True
@@ -592,6 +594,243 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
                 _authority_depth.reset(depth_token)
                 _verified_heads.reset(heads_token)
                 _verified_native_targets.reset(native_token)
+
+
+# One decision for "the founder's branch moved" (build plan workstream 4).
+# Six guards used to answer it six ways (BE #1364, #1375, #1383; CF #1255,
+# #1263, #1264). With ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED on, every caller
+# asks resolve_run_source; off, each keeps its old path.
+
+#: Run actions whose source decision is made here.
+SOURCE_ACTIONS = ("read", "preview_retry", "repin", "terminal_callback", "publish")
+#: What happened to the selected branch since the run's pinned commit.
+SOURCE_STATES = ("unchanged", "fast_forward", "setup_files_changed", "repo_renamed",
+                 "repo_unreachable", "history_rewritten", "unverified")
+SOURCE_OUTCOMES = ("follow", "refuse", "unchanged")
+
+# Each cell is (outcome, reason code). ``follow`` moves the run to the current
+# head (or name), ``unchanged`` keeps its pin and lets it carry on, ``refuse``
+# stops this action. A new action or state without a full row fails
+# tests_single_source_resolver.
+_FF = ("follow", "head_fast_forward")
+_SETUP = ("refuse", "setup_files_changed")
+_RENAMED = ("follow", "repository_renamed")
+_UNREACHABLE = ("refuse", "repository_unreachable")
+_REWRITTEN = ("refuse", "history_rewritten")
+SOURCE_DECISIONS = {
+    "read": {
+        "unchanged": ("unchanged", "head_unchanged"), "fast_forward": _FF, "setup_files_changed": _SETUP,
+        "repo_renamed": _RENAMED, "repo_unreachable": _UNREACHABLE, "history_rewritten": _REWRITTEN,
+        # GitHub's compare could not be read: follow as the switch-on path did before.
+        "unverified": ("follow", "head_moved_unverified"),
+    },
+    "preview_retry": {
+        "unchanged": ("unchanged", "head_unchanged"), "fast_forward": _FF, "setup_files_changed": _SETUP,
+        "repo_renamed": _RENAMED, "repo_unreachable": _UNREACHABLE, "history_rewritten": _REWRITTEN,
+        "unverified": ("follow", "head_moved_unverified"),
+    },
+    "repin": {
+        "unchanged": ("unchanged", "head_unchanged"), "fast_forward": _FF, "setup_files_changed": _SETUP,
+        "repo_renamed": _RENAMED, "repo_unreachable": _UNREACHABLE, "history_rewritten": _REWRITTEN,
+        # Re-pin re-reads GitHub's head itself (require_current_head).
+        "unverified": ("follow", "head_moved_unverified"),
+    },
+    "terminal_callback": {
+        # A callback reports work done on the pinned commit. It is recorded
+        # whatever the branch did since; it never moves the pin itself.
+        "unchanged": ("unchanged", "head_unchanged"),
+        "fast_forward": ("unchanged", "callback_keeps_pin"),
+        "setup_files_changed": ("unchanged", "callback_keeps_pin"),
+        "repo_renamed": _RENAMED, "repo_unreachable": _UNREACHABLE,
+        "history_rewritten": ("unchanged", "callback_keeps_pin"),
+        "unverified": ("unchanged", "callback_keeps_pin"),
+    },
+    "publish": {
+        # The founder approved the exact preview commit: publish never follows
+        # a moved head (the preview is rebuilt first), only a rename.
+        "unchanged": ("unchanged", "head_unchanged"),
+        "fast_forward": ("refuse", "reviewed_source_moved"),
+        "setup_files_changed": _SETUP,
+        "repo_renamed": _RENAMED, "repo_unreachable": _UNREACHABLE, "history_rewritten": _REWRITTEN,
+        "unverified": ("refuse", "reviewed_source_moved"),
+    },
+}
+
+
+def single_source_resolver_enabled():
+    """ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED, default off."""
+    from django.conf import settings
+    return bool(getattr(settings, "ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED", False))
+
+
+@dataclass(frozen=True)
+class SourceObservation:
+    """What the selected branch did since the run's pin; ``state`` is one of SOURCE_STATES."""
+    state: str
+    pinned_sha: str = ""
+    detail: tuple = ()
+
+
+@dataclass(frozen=True)
+class SourceDecision:
+    """``outcome`` is follow, refuse or unchanged; ``reason`` is a stable code."""
+    outcome: str
+    reason: str
+    action: str
+    state: str
+
+    @property
+    def proceeds(self):
+        return self.outcome != "refuse"
+
+
+def decide_run_source(action, observation):
+    """Pure table lookup; an unknown action or state refuses."""
+    row = SOURCE_DECISIONS.get(action)
+    if row is None:
+        return SourceDecision("refuse", "unknown_source_action", action, getattr(observation, "state", ""))
+    cell = row.get(observation.state)
+    if cell is None:
+        return SourceDecision("refuse", "unknown_source_state", action, observation.state)
+    outcome, reason = cell
+    from .source_repin import follow_enabled
+    if outcome == "follow" and action in {"read", "preview_retry"} and observation.state != "repo_renamed" and not follow_enabled():
+        # As before, reads and the owner's retry follow a push only with
+        # ARTICLES_SOURCE_FOLLOW_ENABLED; re-pin keeps its own cohort checks.
+        return SourceDecision("refuse", "source_follow_disabled", action, observation.state)
+    return SourceDecision(outcome, reason, action, observation.state)
+
+
+def classify_source_comparison(comparison, *, setup_cache=None, article_run=True):
+    """Map one GitHub compare (pinned...head) to a SOURCE_STATES value, without network.
+
+    Setup files are judged only for article runs: a setup run installs them.
+    Changes to the article registry and content folder are not setup changes.
+    """
+    from .website_source_carry import decide, setup_paths
+    if not isinstance(comparison, dict):
+        return "unverified"
+    status = comparison.get("status")
+    if status == "identical":
+        return "unchanged"
+    if status != "ahead":
+        return "history_rewritten" if status in {"diverged", "behind"} else "unverified"
+    # The article list itself (registry_path) gains entries as articles land,
+    # so only the files around it count.
+    cache = {key: value for key, value in setup_cache.items() if key != "registry_path"} if isinstance(setup_cache, dict) else {}
+    if not article_run or not setup_paths(cache):
+        return "fast_forward"
+    verdict = decide(cache, comparison, owned_merge=True)
+    if verdict.get("reason") == "setup_files_changed":
+        return "setup_files_changed"
+    return "fast_forward" if verdict.get("carry") else "unverified"
+
+
+def observe_run_source(run, connection, *, pinned_sha="", head_ref="", github_repo=""):
+    """Read what the branch did since ``pinned_sha`` (one GitHub compare, outside locks)."""
+    from .website_repository_identity import has_pausing_blocker
+    claimed = str(github_repo or getattr(run, "github_repo", "") or "").strip()
+    if claimed and claimed.casefold() != str(connection.github_repo or "").casefold():
+        # The connection is matched by the permanent repository id, so a
+        # different name here is a rename or transfer (D3).
+        return SourceObservation("repo_unreachable" if has_pausing_blocker(connection) else "repo_renamed", pinned_sha)
+    if has_pausing_blocker(connection):
+        return SourceObservation("repo_unreachable", pinned_sha)
+    if not pinned_sha:
+        return SourceObservation("unverified", pinned_sha)
+    if head_ref and head_ref == pinned_sha:
+        return SourceObservation("unchanged", pinned_sha)
+    from .source_repin import ARTICLE_WORKFLOWS
+    from .website_source_carry import compare_sources, setup_paths
+    config = OrganizationContentConfig.objects.filter(website_connection=connection).first()
+    cache = getattr(config, "article_system_setup_cache", None)
+    article_run = getattr(run, "workflow", "") in ARTICLE_WORKFLOWS
+    comparison = compare_sources(connection, pinned_sha, head_ref or connection.branch,
+        setup_files=setup_paths(cache) if article_run else None)
+    return SourceObservation(classify_source_comparison(comparison, setup_cache=cache, article_run=article_run), pinned_sha)
+
+
+def resolve_run_source(run, action, *, observation=None, connection=None, pinned_sha="", head_ref="", github_repo=""):
+    """The one answer to "the founder's branch moved": follow, refuse or unchanged, with a reason.
+
+    ``action`` is one of SOURCE_ACTIONS. Pass ``observation`` when the caller
+    already knows the branch state; otherwise it is read from GitHub.
+    """
+    if observation is None:
+        if connection is None:
+            raise ValueError("resolve_run_source needs a connection or an observation.")
+        pinned = pinned_sha or str((getattr(run, "run_request", None) or {}).get("expected_source_sha") or "")
+        observation = observe_run_source(run, connection, pinned_sha=pinned, head_ref=head_ref, github_repo=github_repo)
+    decision = decide_run_source(action, observation)
+    logger.info("run_source_resolved run_id=%s action=%s state=%s outcome=%s reason=%s",
+                getattr(run, "run_id", ""), action, observation.state, decision.outcome, decision.reason)
+    return decision
+
+
+def guard_source_action(action, payload, *, follow_moved_preview=False):
+    """Which SOURCE_ACTIONS row an authority_guard call is, or None for the old path."""
+    if follow_moved_preview and action in {"preview", "read"}:
+        return "preview_retry"
+    if action == "read":
+        return "read"
+    if action in {"publish", "merge"}:
+        return "publish"
+    if action == "config_write" and is_terminal_callback(payload):
+        return "terminal_callback"
+    return None
+
+
+#: Worker events that end a run (also what record_denied_terminal_callback records).
+TERMINAL_CALLBACK_EVENTS = frozenset({"generation_failed", "generation_blocked", "error", "article_system_setup_failed",
+    "generation_pr_opened", "article_complete", "article_system_setup_complete", "article_system_setup_completed",
+    "scan_complete", "scaffold_complete", "publish_bundle_ready", "content_ready", "article_system_setup_preview_failed"})
+
+
+def is_terminal_callback(payload):
+    """A terminal worker event, or an event-less terminal status snapshot."""
+    payload = payload if isinstance(payload, dict) else {}
+    event = str(payload.get("event_type") or payload.get("event") or "")
+    return event in TERMINAL_CALLBACK_EVENTS or (not event and payload.get("status") in {"failed", "blocked", "completed"})
+
+
+def proceed_past_moved_head(exc, *, action, source_action, payload, connection, pinned_sha, follow_moved_preview=False):
+    """Whether authority_guard may carry on after GitHub's head no longer matches the pin.
+
+    ``source_action`` is set only with ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED
+    (see guard_source_action); then the resolver's table decides. Otherwise
+    the old rule stays: only the owner's preview retry follows, and only with
+    ARTICLES_SOURCE_FOLLOW_ENABLED.
+    """
+    if source_action is not None:
+        if exc.authority_code != "website_source_changed":
+            return False
+        return resolve_run_source(_source_run(payload), source_action, connection=connection,
+            pinned_sha=pinned_sha, github_repo=connection.github_repo).proceeds
+    from .source_repin import follow_enabled as source_follow_enabled
+    # "read" covers the retry's own attempt fence (advance_workflow_attempt).
+    return bool(follow_moved_preview and action in {"preview", "read"} and exc.code == "website_source_changed"
+                and source_follow_enabled())
+
+
+def followed_repository_name(source_action, payload, contract, connection, github_repo):
+    """The repository name authority_guard checks: the connection's, when the resolver follows a rename.
+
+    Only the same permanent repository id qualifies, and only with the
+    resolver switched on (``source_action`` set). Otherwise ``github_repo``
+    is returned unchanged and validate_authority refuses a mismatch as before.
+    """
+    if (not source_action or not github_repo or github_repo.casefold() == str(connection.github_repo or "").casefold()
+            or not contract.get("repository_id") or contract["repository_id"] != connection.repository_id):
+        return github_repo
+    decision = resolve_run_source(_source_run(payload), source_action, connection=connection, github_repo=github_repo)
+    return connection.github_repo if decision.outcome == "follow" else github_repo
+
+
+def _source_run(payload):
+    from workflow_runs.models import ContentFactoryRun
+    identifier = str(payload.get("run_id") or payload.get("job_id") or "")
+    return ContentFactoryRun.objects.filter(run_id=identifier).first() if identifier else None
+
 
 
 def scoped_run_contract(run):
@@ -2071,9 +2310,7 @@ def record_denied_terminal_callback(payload, denial):
     revival. Old consent, old attempts and completed runs remain immutable.
     """
     event = str(payload.get("event_type") or payload.get("event") or "")
-    terminal_event = event in {"generation_failed", "generation_blocked", "error", "article_system_setup_failed",
-        "generation_pr_opened", "article_complete", "article_system_setup_complete", "article_system_setup_completed",
-        "scan_complete", "scaffold_complete", "publish_bundle_ready", "content_ready", "article_system_setup_preview_failed"}
+    terminal_event = event in TERMINAL_CALLBACK_EVENTS
     terminal_snapshot = not event and payload.get("status") in {"failed", "blocked", "completed"}
     if denial.retryable or not (terminal_event or terminal_snapshot):
         return False

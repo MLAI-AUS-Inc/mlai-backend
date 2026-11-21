@@ -687,6 +687,12 @@
       "expiry": "2027-02-28"
     },
     {
+      "name": "ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
       "name": "ARTICLES_SITE_FINGERPRINT_ENABLED",
       "default": "false",
       "owner": "platform",
