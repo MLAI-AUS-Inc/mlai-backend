@@ -35,7 +35,7 @@ typing_extensions==4.14.1
 urllib3==2.3.0
 whitenoise==6.9.0
 firebase-admin==6.6.0
-Pillow==11.0.0
+Pillow==13.0.0
 PyGithub>=2.0.0
 pydantic>=2.6
 PyYAML==6.0.3  # Read-only deployment workflow detection; no object construction.
