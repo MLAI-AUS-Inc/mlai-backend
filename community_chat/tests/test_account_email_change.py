@@ -76,6 +76,13 @@ class AccountEmailChangeTests(TestCase):
             origin="mlaichat://callback", platform="ios", device_name="Other phone", public_key="b" * 64,
         )
         self.assertTrue(issue_password_reset(self.user.email))
+        with override_settings(COMMUNITY_CHAT_SIGNUP_ENABLED=True):
+            outstanding_signup = issue_email_code_challenge(
+                email="new@example.test", client_id="mlai-chat-ios", installation_id=uuid.uuid4(),
+                origin="mlaichat://callback", platform="ios", device_name="Unregistered phone",
+                public_key="c" * 64, onboarding_version=1,
+            )
+        self.assertTrue(outstanding_signup.encrypted_signup_email)
         member = CommunityMemberProfile.objects.create(
             user=self.user, status=CommunityMemberProfile.Status.APPROVED, marketing_opt_in=True,
         )
@@ -108,6 +115,9 @@ class AccountEmailChangeTests(TestCase):
         self.assertEqual(device.status, DeviceBindingStatus.REVOKED)
         old_chat_code.refresh_from_db()
         self.assertIsNotNone(old_chat_code.invalidated_at)
+        outstanding_signup.refresh_from_db()
+        self.assertIsNotNone(outstanding_signup.invalidated_at)
+        self.assertEqual(outstanding_signup.encrypted_signup_email, "")
         self.assertFalse(self.user.password_reset_challenges.filter(consumed_at__isnull=True).exists())
 
         with self.assertRaises(InvalidAccountSession):
