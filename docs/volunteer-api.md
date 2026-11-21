@@ -90,7 +90,7 @@ recognition history remains available.
 
 | Route | Contract |
 | --- | --- |
-| GET `journey/` | `account_id`, `community_id`, `relay_url`, `policy_version`, `contribution_roo`, `wallet_balance`, `current_level`, `next_level`, `levels`, `points_to_next`, `progress`, `attendance`, `suggestions`, `actions`, `capabilities`, `feature_flags`, `history_reconciled`, `updated_at` |
+| GET `journey/` | `account_id`, `community_id`, `relay_url`, `policy_version`, `contribution_roo`, `wallet_balance`, `profile_rank`, `current_level`, `next_level`, `levels`, `points_to_next`, `progress`, `attendance`, `suggestions`, `actions`, `capabilities`, `feature_flags`, `history_reconciled`, `updated_at` |
 | GET `policy/` | `{version, levels, actions}` |
 | GET `opportunities/`, `opportunities/:id/` | Public opportunity list/detail; optional kind/project filter |
 | GET `projects/`, `projects/:id/` | Public project list/detail |
@@ -362,6 +362,12 @@ The questioner marks a native MLAI answer in the advice thread useful with a che
 Question, answer and reaction invalidations block deferred awards. Existing credits preserve their audit trail and use the established correction mechanism. Member locks are acquired in canonical account order, and recognition plus wallet credit remain atomic and idempotent.
 
 ## 200-level contribution profiles
+
+The private journey returns `profile_rank` from the same ladder as the
+wardrobe and published profile, including when the member has no published
+profile. It is null while the contribution total is unknown. The journey's
+existing `current_level`, `next_level` and `levels` describe the older
+volunteer milestones and their wallet bonuses.
 
 Authenticated MLAI Chat clients can set `include_contributions: true` on
 `POST /community-chat/profiles/batch/` for up to ten verified profile keys.
