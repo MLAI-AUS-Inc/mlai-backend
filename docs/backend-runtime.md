@@ -201,3 +201,14 @@ compatibility, and verifies the final merge leaves both editorial content and
 encrypted credentials intact. Run the two modes in separate invocations. The
 harness rejects existing database URLs and removes its database files after
 stopping the cluster. This remains scoped test approval, not production approval.
+
+## Legacy profile avatar uploads
+
+The authenticated `PATCH /api/v1/auth/update-profile/` and
+`PATCH /api/v1/auth/update_user/` endpoints accept multipart `avatar` and
+`team_avatar` fields. Team uploads still require membership in the eligible
+team for the requested app. Each image must be at most 10 MiB, 24 million
+pixels and 8,192 pixels on either side. The stored derivative fits within
+300 × 300 pixels. Rejected images return HTTP 400 with `error` and `field`.
+Storage failures return HTTP 503 with the same fields. A failed avatar request
+leaves the saved profile and avatar URLs unchanged.

@@ -36,6 +36,7 @@ from .refresh_sessions import (
     revoke_refresh_credential,
 )
 from .models import Hackathon
+from .profile_avatars import encode_profile_avatar, store_profile_avatar
 from .serializers import (
     HackathonSerializer,
     MyTokenObtainPairSerializer,
@@ -767,37 +768,8 @@ class UpdateProfileView(APIView):
             # TODO: Consider marking the email as unverified and sending a verification email.
             user.email = email
 
-        user.save()
-
-        # Handle avatar upload
-        avatar_file = request.FILES.get('avatar')
-        if avatar_file:
-            try:
-                from PIL import Image
-                from io import BytesIO
-                from .firebase_utils import upload_file_to_storage
-
-                img = Image.open(avatar_file)
-                img.thumbnail((300, 300))
-
-                output_buffer = BytesIO()
-                img_format = img.format if img.format else 'PNG'
-                img.save(output_buffer, format=img_format)
-                output_buffer.seek(0)
-
-                filename = f"avatars/{user.id}_{int(timezone.now().timestamp())}.{img_format.lower()}"
-                avatar_url = upload_file_to_storage(output_buffer, filename, content_type=f'image/{img_format.lower()}')
-
-                if avatar_url:
-                    user.avatar_url = avatar_url
-                    user.save()
-
-            except Exception as e:
-                logger.error(f"Error uploading avatar: {e}")
-
-        # Handle team avatar upload
-        team_avatar_file = request.FILES.get('team_avatar')
-        if team_avatar_file:
+        team = None
+        if "team_avatar" in request.FILES:
             if app_context == 'hospital':
                 team = _active_hospital_team(user)
             elif app_context == 'esafety':
@@ -818,32 +790,45 @@ class UpdateProfileView(APIView):
                     _active_hospital_team(user)
                     or (user.esafety_teams.first() if hasattr(user, 'esafety_teams') else None)
                 )
-            if team:
+            if team is None:
+                return Response(
+                    {"error": "An eligible team is required to upload a team avatar.", "field": "team_avatar"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        encoded_avatars = {}
+        for field in ("avatar", "team_avatar"):
+            if field in request.FILES:
                 try:
-                    from PIL import Image
-                    from io import BytesIO
-                    from .firebase_utils import upload_file_to_storage
+                    encoded_avatars[field] = encode_profile_avatar(request.FILES[field])
+                except ValueError as exc:
+                    return Response({"error": str(exc), "field": field}, status=status.HTTP_400_BAD_REQUEST)
 
-                    img = Image.open(team_avatar_file)
-                    img.thumbnail((300, 300))
+        avatar_urls = {}
+        owners = {"avatar": ("avatars", user.id)}
+        if team is not None:
+            owners["team_avatar"] = ("team-avatars", team.id)
+        for field, encoded in encoded_avatars.items():
+            directory, owner_id = owners[field]
+            try:
+                avatar_urls[field] = store_profile_avatar(encoded, directory, owner_id)
+            except Exception:
+                logger.warning("Profile image storage failed for field %s", field)
+            if not avatar_urls.get(field):
+                return Response(
+                    {"error": "The avatar could not be stored. Try again.", "field": field},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
 
-                    output_buffer = BytesIO()
-                    img_format = img.format if img.format else 'PNG'
-                    img.save(output_buffer, format=img_format)
-                    output_buffer.seek(0)
-
-                    filename = f"team-avatars/{team.id}_{int(timezone.now().timestamp())}.{img_format.lower()}"
-                    team_avatar_url = upload_file_to_storage(output_buffer, filename, content_type=f'image/{img_format.lower()}')
-
-                    if team_avatar_url:
-                        team.avatar_url = team_avatar_url
-                        team.save(update_fields=['avatar_url'])
-                        logger.info(f"Team avatar uploaded for team {team.id}: {team_avatar_url}")
-
-                except Exception as e:
-                    logger.error(f"Error uploading team avatar: {e}")
-            else:
-                logger.warning(f"User {user.email} uploaded team_avatar but has no team")
+        if "avatar" in avatar_urls:
+            user.avatar_url = avatar_urls["avatar"]
+        if "team_avatar" in avatar_urls:
+            with transaction.atomic():
+                user.save()
+                team.avatar_url = avatar_urls["team_avatar"]
+                team.save(update_fields=["avatar_url"])
+        else:
+            user.save()
 
         team_profile = user_team_profile(user)
 
