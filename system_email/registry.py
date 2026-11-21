@@ -42,6 +42,19 @@ _SPECS = (
         text_template="system_email/chat_sign_in_code.txt",
         required_context=("verification_code", "expires_minutes"),
     ),
+    *(
+        MessageSpec(
+            key=f"chat_email_change_{kind}", category=AUTH, subject=subject,
+            html_template="system_email/email_change.html",
+            text_template="system_email/email_change.txt",
+            required_context=("new_email_masked",),
+        )
+        for kind, subject in (
+            ("current_code", "Confirm your MLAI sign-in email change"),
+            ("new_code", "Verify your new MLAI sign-in email"),
+            ("receipt", "Your MLAI sign-in email changed"),
+        )
+    ),
     MessageSpec(
         key="magic_link",
         category=AUTH,

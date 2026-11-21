@@ -3,6 +3,7 @@ from .slack_emoji_views import SlackEmojiDirectoryView
 from django.urls import include, path
 from .apple_iap_views import AppleIapView, AppleIapTransactionView, AppleIapNotificationView
 from .privacy_views import AccountDeletionView, AiConsentView
+from .email_change_views import EmailChangeView
 from .device_management_views import AccountDevicesView, AccountDeviceView
 from .onboarding_views import InviteResolveView, MemberOnboardingView
 from .account_ban_views import AccountBanView
@@ -111,6 +112,11 @@ from .usage_views import (
 
 
 urlpatterns = [
+    *[
+        path(f"account/email-change/{action}/", EmailChangeView.as_view(action=action),
+             name=f"community_chat_email_change_{action.replace('-', '_')}")
+        for action in ("status", "start", "verify-current", "confirm", "resend", "cancel")
+    ],
     path("mentor/calendar-connections/", MentorCalendarConnectionsView.as_view(), name="community_chat_mentor_calendar_connections"),
     path("mentor/calendar-connections/google/authorize/", MentorCalendarAuthorizeView.as_view(), name="community_chat_mentor_calendar_authorize"),
     path("mentor/calendar-connections/google/callback/", MentorCalendarCallbackView.as_view(), name="community_chat_mentor_calendar_callback"),

@@ -12,6 +12,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.utils import timezone
 
+from .email_change import cancel_password_resets_locked
 from .models import PasswordResetChallenge, PasswordResetEmailDelivery
 from .password_delivery import encrypt_reset_link
 
@@ -70,10 +71,10 @@ def issue_password_reset(email, *, requested_ip_hash=''):
     now = timezone.now()
     secret = secrets.token_urlsafe(32)
     with transaction.atomic():
-        PasswordResetChallenge.objects.filter(
-            user=user,
-            consumed_at__isnull=True,
-        ).update(consumed_at=now)
+        user = User.objects.select_for_update().filter(pk=user.pk).first()
+        if not user or not user.is_active or _is_placeholder_email(user.email) or not User.objects.for_email(canonical_email).filter(pk=user.pk).exists():
+            return False
+        cancel_password_resets_locked(user, now=now)
         challenge = PasswordResetChallenge.objects.create(
             user=user,
             secret_hash=_hash_secret(secret),
@@ -103,23 +104,19 @@ def consume_password_reset(token, new_password):
     challenge_id, secret = _parse_reset_token(token)
     now = timezone.now()
     with transaction.atomic():
-        try:
-            challenge = (
-                PasswordResetChallenge.objects.select_for_update()
-                .select_related('user')
-                .get(id=challenge_id)
-            )
-        except PasswordResetChallenge.DoesNotExist as exc:
-            raise InvalidPasswordResetToken('Invalid or expired password token.') from exc
+        owner_id = PasswordResetChallenge.objects.filter(pk=challenge_id).values_list('user_id', flat=True).first()
+        user = User.objects.select_for_update().filter(pk=owner_id).first() if owner_id else None
+        challenge = PasswordResetChallenge.objects.select_for_update().filter(id=challenge_id).first()
+        if user is None or challenge is None:
+            raise InvalidPasswordResetToken('Invalid or expired password token.')
         if (
             challenge.consumed_at is not None
             or challenge.expires_at <= now
             or not secrets.compare_digest(challenge.secret_hash, _hash_secret(secret))
-            or not challenge.user.is_active
+            or not user.is_active
         ):
             raise InvalidPasswordResetToken('Invalid or expired password token.')
 
-        user = User.objects.select_for_update().get(pk=challenge.user_id)
         validate_password(new_password, user=user)
         user.set_password(new_password)
         if user.email_verified_at is None:
@@ -135,10 +132,7 @@ def consume_password_reset(token, new_password):
         )
         challenge.consumed_at = now
         challenge.save(update_fields=('consumed_at',))
-        PasswordResetChallenge.objects.filter(
-            user=user,
-            consumed_at__isnull=True,
-        ).exclude(id=challenge.id).update(consumed_at=now)
+        cancel_password_resets_locked(user, now=now)
     return user
 
 
@@ -154,10 +148,7 @@ def change_password(user, current_password, new_password):
         locked_user.set_password(new_password)
         locked_user.auth_version += 1
         locked_user.save(update_fields=('password', 'password_set_at', 'auth_version'))
-        PasswordResetChallenge.objects.filter(
-            user=locked_user,
-            consumed_at__isnull=True,
-        ).update(consumed_at=now)
+        cancel_password_resets_locked(locked_user, now=now)
     return True
 
 

@@ -49,9 +49,13 @@ class PreviewDomainClaimTests(TestCase):
             idempotency_key=f"{connection.pk}:deployment:{uuid.uuid4()}",
             receipt={"status": "passed", "provider_verified": True, "public_url": f"https://{domain}/articles", **receipt})
 
+    def seed_email(self, user, email, **fields):
+        # Direct fixture write lets these tests model pre-existing proof state.
+        get_user_model().objects.filter(pk=user.pk).update(email=email, **fields)
+        user.refresh_from_db()
+
     def prove_mailbox(self, user, email, *, consumed=True):
-        user.email = email
-        user.save(update_fields=["email"])
+        self.seed_email(user, email)
         CommunityChatEmailCodeChallenge.objects.create(
             user=user, email_digest=email_digest(email), code_digest="b" * 64, client_id="mlai-chat-web",
             installation_id=uuid.uuid4(), origin="https://chat.example.test", platform="web", public_key="c" * 64,
@@ -112,17 +116,15 @@ class PreviewDomainClaimTests(TestCase):
 
     def test_a_verified_stamp_does_not_follow_an_email_change(self):
         self.prove_mailbox(self.owner, self.owner.email)
-        self.owner.email = "ceo@brand.example.test"
-        self.owner.save(update_fields=["email"])
+        self.seed_email(self.owner, "ceo@brand.example.test")
         self.assertEqual(self.basis("brand.example.test"), "none")
 
     def test_a_code_counts_only_while_the_account_is_unsaved_since_it_was_requested(self):
         # R2-BEB-1: the outbox mails the address the account holds at delivery, not the one typed for the code.
         self.prove_mailbox(self.owner, "ceo@brand.example.test")
         self.assertEqual(self.basis("brand.example.test"), "email_domain")
-        for email in ("elsewhere@gmail.com", "ceo@brand.example.test"):  # PATCH /profile away and back
-            self.owner.email = email
-            self.owner.save()
+        for email in ("elsewhere@gmail.com", "ceo@brand.example.test"):
+            self.seed_email(self.owner, email, updated_at=timezone.now())
         self.assertEqual(self.basis("brand.example.test"), "none")
         self.prove_mailbox(self.owner, "ceo@brand.example.test")
         self.assertEqual(self.basis("brand.example.test"), "email_domain")

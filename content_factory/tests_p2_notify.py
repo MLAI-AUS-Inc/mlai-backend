@@ -276,8 +276,7 @@ class NotificationTests(TransactionTestCase):
         self.reserve(run)
         with patch.object(transport, "post_email", side_effect=transport.NotificationTransportError("email_response_unavailable")):
             transitions.drain(self.now)
-        self.owner.email = "changed@synthetic.example"
-        self.owner.save(update_fields=["email"])
+        User.objects.filter(pk=self.owner.pk).update(email="changed@synthetic.example")
         transitions.drain(self.now + timedelta(minutes=3))
         self.assertEqual(self.sent, [])
 
