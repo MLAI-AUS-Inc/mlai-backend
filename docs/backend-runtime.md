@@ -99,9 +99,9 @@ against production as part of this refactor.
 
 ## Python dependencies
 
-Python 3.11 is the supported runtime. Both requirements source files resolve into
+Python 3.11.5 is the minimum supported runtime in the 3.11 series. Both requirements source files resolve into
 [`requirements.lock`](../requirements.lock), installed with hash verification
-by CI and Docker. The framework target is Django 5.2.17 with DRF 3.16.1 and
+by CI and Docker. The framework target is Django 5.2.17 with DRF 3.18.2 and
 SimpleJWT 5.5.1. The psycopg binary distribution avoids an implicit dependency on
 a machine's locally installed libpq for Python imports.
 
@@ -113,7 +113,7 @@ hashed Django Admin and DRF assets before any deployment or migration starts.
 Regenerate the lock after intentionally editing either requirements input:
 
 ```sh
-env -u UV_INDEX_URL -u UV_EXTRA_INDEX_URL uv --no-config pip compile requirements.txt requirements-engine.txt --python-version 3.11 --universal --generate-hashes --no-emit-index-url --default-index https://pypi.org/simple --output-file requirements.lock
+env -u UV_INDEX_URL -u UV_EXTRA_INDEX_URL uv --no-config pip compile requirements.txt requirements-engine.txt --python-version 3.11.5 --universal --generate-hashes --no-emit-index-url --default-index https://pypi.org/simple --output-file requirements.lock
 python scripts/check_dependency_lock.py --record-inputs
 python scripts/check_dependency_lock.py
 ```
