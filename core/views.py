@@ -500,8 +500,9 @@ class MagicLinkVerifyView(APIView):
                     return _invalid_next_path_response()
 
                 users = User.objects.select_for_update()
-                if 'user_id' in token_data and 'auth_version' in token_data:
-                    user = users.get(pk=token_data['user_id'], email=email, auth_version=token_data['auth_version'])
+                versioned = 'user_id' in token_data and 'auth_version' in token_data
+                if versioned:
+                    user = users.get(pk=token_data['user_id'], email=email)
                 elif settings.MLAI_LEGACY_EMAIL_MAGIC_LINKS_ENABLED and 'user_id' not in token_data and 'auth_version' not in token_data:
                     user = users.get(email__iexact=email)
                 else:
@@ -509,6 +510,8 @@ class MagicLinkVerifyView(APIView):
                 from core.account_bans import account_is_banned
                 if account_is_banned(user):
                     return Response({"error": "Account unavailable."}, status=status.HTTP_403_FORBIDDEN)
+                if versioned and token_data['auth_version'] != user.auth_version:
+                    raise User.DoesNotExist
                 logger.info("Verified magic link for existing user_id=%s", user.id)
 
                 if app_param == 'admin' and not _is_operations_admin(user):
