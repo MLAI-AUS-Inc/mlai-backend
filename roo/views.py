@@ -2564,7 +2564,7 @@ class PointsRequestViewSet(viewsets.ViewSet):
     @action(detail=True, methods=['patch'], url_path='slack-summary')
     def attach_slack_summary(self, request, pk=None):
         try:
-            points_request = PointsRequest.objects.get(pk=pk)
+            points_request = PointsRequest.objects.get(pk=pk, manual_time_key__isnull=True)
         except PointsRequest.DoesNotExist:
             return Response({'error': 'Points request not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -2604,6 +2604,7 @@ class PointsRequestViewSet(viewsets.ViewSet):
         points_request = PointsRequest.objects.filter(
             slack_channel_id=slack_channel_id,
             slack_summary_message_ts=slack_message_ts,
+            manual_time_key__isnull=True,
         ).first()
         if not points_request:
             return Response({'error': 'Points request not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -2621,7 +2622,7 @@ class PointsRequestViewSet(viewsets.ViewSet):
 
         try:
             with transaction.atomic():
-                points_request = PointsRequest.objects.select_for_update().get(pk=pk)
+                points_request = PointsRequest.objects.select_for_update().get(pk=pk, manual_time_key__isnull=True)
                 if points_request.status != 'pending':
                     return Response(
                         {'error': f'Points request is already {points_request.status}'},

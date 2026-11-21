@@ -1517,6 +1517,8 @@ class PointsRequest(models.Model):
     slack_channel_id = models.CharField(max_length=50, blank=True, null=True)
     slack_thread_ts = models.CharField(max_length=50, blank=True, null=True)
     slack_summary_message_ts = models.CharField(max_length=50, blank=True, null=True)
+    manual_time = models.JSONField(null=True, blank=True)
+    manual_time_key = models.CharField(max_length=64, unique=True, null=True, blank=True)
     native_event_id = models.CharField(max_length=64, unique=True, null=True, blank=True)
     native_channel_id = models.UUIDField(null=True, blank=True)
     native_root_id = models.CharField(max_length=64, blank=True, default="")
