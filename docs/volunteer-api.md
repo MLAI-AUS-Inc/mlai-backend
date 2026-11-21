@@ -91,6 +91,7 @@ recognition history remains available.
 | Route | Contract |
 | --- | --- |
 | GET `journey/` | `account_id`, `community_id`, `relay_url`, `policy_version`, `contribution_roo`, `wallet_balance`, `profile_rank`, `current_level`, `next_level`, `levels`, `points_to_next`, `progress`, `attendance`, `suggestions`, `actions`, `capabilities`, `feature_flags`, `history_reconciled`, `updated_at` |
+| GET `point-history/` | Private, paginated `{total_roo, results, next_offset}` for the signed-in member. `scope=contribution` includes reviewed historical credits and changes that count toward level. `scope=wallet` lists earned wallet credits, including level bonuses. |
 | GET `policy/` | `{version, levels, actions}` |
 | GET `opportunities/`, `opportunities/:id/` | Public opportunity list/detail; optional kind/project filter |
 | GET `projects/`, `projects/:id/` | Public project list/detail |
