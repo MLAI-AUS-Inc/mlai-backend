@@ -154,6 +154,7 @@ rollout sequence.
 
 ## Roo
 
+- [MLAI Arcade](mlai-arcade.md) — Pulse and level-up pulls, prize policy and account API.
 - [Roo awards to members without Slack](roo-chat-only-points.md)
 
 - [Roo event discounts](roo-event-discounts.md) — private quotes, general-point holds, one-use Luma coupons and supervised reconciliation.

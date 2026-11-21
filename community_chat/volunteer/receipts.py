@@ -250,7 +250,7 @@ def record_attendance_receipt(receipt):
 
 def process_receipt(receipt):
     """Retry a stored receipt; errors leave an auditable, recoverable status."""
-    if receipt.community != community_id():
+    if receipt.community != community_id() or receipt.origin == "mlai_arcade":
         raise VolunteerError("source_unavailable", 403)
     try:
         return _process_receipt(receipt.pk)
@@ -463,7 +463,8 @@ def _mirror_monthly_receipt(receipt, user):
             ],
         ),
     )
-    if not created and record.ledger_id != ledger.pk:
+    new_contribution = created or record.ledger_id != ledger.pk
+    if not created and new_contribution:
         if record.ledger_id is not None or record.status in ("approved", "reversed"):
             raise VolunteerError("monthly_award_conflict", 409)
         # A pending learning request and a verified startup update share one
@@ -494,7 +495,7 @@ def _mirror_monthly_receipt(receipt, user):
         record.save()
     receipt.recognition, receipt.status, receipt.error = record, "processed", ""
     receipt.save(update_fields=("recognition", "status", "error", "updated_at"))
-    award_milestones(user, record)
+    award_milestones(user, record, new_contribution=new_contribution)
     return receipt
 
 
@@ -637,7 +638,8 @@ def award_legacy_intro(user, slack_user_id, channel_id):
             note="Existing first-contact award",
             review_history=[review],
         )
-    award_milestones(user, record)
+    from .credits import one_record_enabled
+    award_milestones(user, record, new_contribution=not one_record_enabled())
     return awarded, PointsService.get_balance(user)["balance"]
 
 

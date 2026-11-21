@@ -39,6 +39,7 @@ REFERENCE_LABELS = {
     "FIRST_CHANNEL_POST": (COUNTS, "first_channel_post"),
     "MONTHLY_UPDATE_DRAFT": (NOT_LEVEL, "startup_update"),
     "MENTOR_SESSION": (NOT_LEVEL, "mentor_payout"),
+    "MLAI_ARCADE": (NOT_LEVEL, "arcade_prize"),
     "VOLUNTEER_LEVEL_BONUS": (NOT_LEVEL, "level_bonus"),
     "VOLUNTEER_CORRECTION": (NOT_LEVEL, "correction"),
     "ACCOUNT_MERGE": (NOT_LEVEL, "account_merge"),
@@ -275,7 +276,7 @@ def record_wallet_credit(ledger):
         ),
     )
     if created:
-        award_milestones(user, record)
+        award_milestones(user, record, new_contribution=False)
     return record
 
 

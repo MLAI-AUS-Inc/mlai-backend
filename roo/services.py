@@ -943,6 +943,8 @@ class PointsService:
         PointsService._sync_legacy_account(account)
         account.save()
         
+        from community_chat.arcade import earn_ledger_levels
+        earn_ledger_levels(user, ledger)
         return ledger, True
 
     @staticmethod
