@@ -1432,8 +1432,22 @@ jobs:
       with:
         ssh-private-key: ${{ secrets.DO_SSH_KEY }}
 
-    - name: Add Known Hosts
-      run: ssh-keyscan -H 209.38.85.60 >> ~/.ssh/known_hosts
+    - name: Pin the deployment SSH host key
+      env:
+        DEPLOY_HOST: 209.38.85.60
+        DEPLOY_HOST_KEY: ${{ vars.DO_SSH_HOST_KEY }}
+      run: |
+        set -euo pipefail
+        [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9:.][a-zA-Z0-9.:-]*$ ]]
+        [[ "$DEPLOY_HOST_KEY" =~ ^ssh-ed25519[[:blank:]][A-Za-z0-9+/=]+$ ]] || {
+          echo '::error::DO_SSH_HOST_KEY must contain the verified Ed25519 public host key'
+          exit 1
+        }
+        install -m 700 -d "$HOME/.ssh"
+        printf '%s %s\n' "$DEPLOY_HOST" "$DEPLOY_HOST_KEY" > "$HOME/.ssh/known_hosts.deploy"
+        ssh-keygen -l -f "$HOME/.ssh/known_hosts.deploy" > /dev/null
+        printf 'Host %s\n  StrictHostKeyChecking yes\n  HostKeyAlgorithms ssh-ed25519\n  UserKnownHostsFile ~/.ssh/known_hosts.deploy\n' "$DEPLOY_HOST" >> "$HOME/.ssh/config"
+        chmod 600 "$HOME/.ssh/config" "$HOME/.ssh/known_hosts.deploy"
 
     - name: Deploy
       env:
