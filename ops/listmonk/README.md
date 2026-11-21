@@ -141,7 +141,7 @@ On the droplet, run this project from `/root/mlai-listmonk`, next to `/root/mlai
    - Create an **API** user with that role and copy its token. `subscribers:sql_query` is required: without it the feedback sync gets 403 and stops the shared scheduler.
 9. **Template.**
    - Create a campaign template named `MLAI blast` that wraps `{{ template "content" . }}`. Use [`templates/mlai-campaign.html`](templates/mlai-campaign.html), which already has everything below.
-   - Its footer must identify MLAI (name and a contact address) and include `{{ UnsubscribeURL }}`. Add `{{ TrackView }}` for the open pixel.
+   - Its footer must identify MLAI (name and a contact address) and include `{{ UnsubscribeURL }}`.
    - Note its ID.
 10. **Public hostname.**
     - Add a proxied Cloudflare `A` record for `lists.mlai.au` pointing at the droplet, and set a configuration rule for SSL mode "Full".
