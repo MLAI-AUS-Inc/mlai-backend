@@ -212,6 +212,11 @@ def founder_quality(quality, *, target=None, safety_alert=None):
     if not isinstance(quality, dict):
         return quality
     view = {key: quality[key] for key in FOUNDER_QUALITY_KEYS if key in quality}
+    if quality.get("self_heal_removed_claims"):
+        # Owner decision D4: the founder sees every sentence of theirs the final
+        # check removed. Their own article text only; findings stay staff-only.
+        from .article_quality_record import removed_claims
+        view["removed_claims"] = [text for entry in removed_claims(quality) for text in entry["removed"]]
     if automatic_retry_pending(quality, target=target):
         # A recoverable enqueue failure reads as the check still running. The
         # stored state keeps the real failure, and approval stays blocked.

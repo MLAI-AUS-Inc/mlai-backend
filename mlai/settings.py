@@ -1241,6 +1241,14 @@ CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID = os.getenv('CONTENT_FACTORY_OPS_SLACK_CHAN
 ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED', 'false').lower() == 'true'
 ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE', '2026-09-29').strip()
 ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK = int(os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK', '20'))
+# Workstream 5 (content_factory/staff_hold_alerts.py): one ops Slack post when an
+# article's final check is held for staff, with the run, the startup and the top
+# three finding codes, and one more if it is still held 24 hours later.
+ARTICLES_STAFF_HOLD_ALERTS_ENABLED = os.getenv('ARTICLES_STAFF_HOLD_ALERTS_ENABLED', 'false').lower() == 'true'
+# Workstream 5 (content_factory/author_bio_check.py): saving an author profile
+# checks the bio against the site's About page text and returns the phrases it
+# could not find there as a warning. It never blocks the save.
+ARTICLES_AUTHOR_BIO_CHECK_ENABLED = os.getenv('ARTICLES_AUTHOR_BIO_CHECK_ENABLED', 'false').lower() == 'true'
 # One "founder stuck" alert for every cohort (content_factory/founder_stuck_alerts.py):
 # a stopped website setup, a website step retrying for too long, or a latest article
 # run stopped with no next action. A kill switch that defaults on; the sweep runs at

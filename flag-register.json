@@ -188,6 +188,12 @@
       "expiry": "2027-02-28"
     },
     {
+      "owner": "platform",
+      "expiry": "2027-02-28",
+      "name": "ARTICLES_AUTHOR_BIO_CHECK_ENABLED",
+      "default": "false"
+    },
+    {
       "name": "ARTICLES_AUTO_PAGE_ENABLED",
       "default": "false",
       "owner": "platform",
@@ -758,6 +764,12 @@
       "default": "false",
       "owner": "platform",
       "expiry": "2027-02-28"
+    },
+    {
+      "owner": "platform",
+      "expiry": "2027-02-28",
+      "name": "ARTICLES_STAFF_HOLD_ALERTS_ENABLED",
+      "default": "false"
     },
     {
       "name": "ARTICLES_STAND_IN_PREVIEW_APPROVAL_ENABLED",

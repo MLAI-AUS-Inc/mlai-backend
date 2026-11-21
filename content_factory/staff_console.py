@@ -183,7 +183,7 @@ def startup_detail(organization_id, *, now=None):
     config = _config(org)
     website = config.website_connection if config else None
     row["runs"] = [{"runId": r.run_id, "status": r.status, "code": failure_code(r),
-                    **{k: mapping(r.result).get(k) for k in RECEIPT_KEYS}} for r in runs]
+                    **{k: mapping(r.result).get(k) for k in RECEIPT_KEYS}, **_quality_findings(r)} for r in runs]
     row["website"] = ({"id": str(website.pk), "state": website.state, "verifiedSha": website.verified_sha,
                        "repository": website.github_repo, "siteUrl": website.site_url,
                        "targets": list(website.targets.filter(generation=website.generation).values("target_key", "source_sha", "adapter", "contract")),
@@ -212,6 +212,21 @@ def startup_detail(organization_id, *, now=None):
     strategy = mapping(getattr(config, "pillar_strategy", None))
     row["support"] = {key: strategy.get(key) for key in ("website_support", "website_goal", "website_doctor", "self_heal")}
     return row
+
+
+def _quality_findings(run) -> dict:
+    """A held article's final-check findings, shown beside Retry now (workstream 5).
+
+    Only when Content Factory sent its findings list or removed sentences, so a
+    run without them keeps exactly today's row.
+    """
+    quality = mapping(mapping(run.result).get("article_preview_quality"))
+    if "findings_detail" not in quality and not quality.get("self_heal_removed_claims"):
+        return {}
+    from .article_quality_record import quality_record
+    record = quality_record(run)
+    return {"qualityFindings": record["findings"], "qualityHoldOwner": record["holdOwner"],
+            "qualityRemovedClaims": record["removedClaims"], "qualityHistory": record["history"]}
 
 
 def alert_list(*, state="open", now=None):
