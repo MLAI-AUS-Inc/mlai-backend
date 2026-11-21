@@ -8,7 +8,7 @@ from cryptography.fernet import InvalidToken
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -225,16 +225,23 @@ def consume_email_code(*, challenge_id, code, client_id, installation_id):
             invalid = True
         else:
             if signup:
-                # Case-insensitive uniqueness in core.User resolves concurrent
-                # verifications and a concurrent signup in another MLAI product.
-                # An unowned-address proof cannot attach to a user who
-                # acquired that address through another flow.
                 if User.objects.for_email(signup_email).exists():
-                    raise InvalidEmailCode("invalid_or_expired_code")
-                locked_user = User.objects.create(
-                    email=signup_email, password=make_password(None), email_verified_at=now,
-                )
-                CommunityMemberProfile.objects.create(user=locked_user)
+                    # Concurrent signup proofs can resolve the same new account.
+                    # A changed or reserved address cannot adopt an old proof.
+                    # Skip a locked user because we already hold the email
+                    # namespace and ordinary account mutations lock user first.
+                    locked_user = User.objects.select_for_update(
+                        skip_locked=connection.features.has_select_for_update_skip_locked,
+                    ).filter(
+                        email=signup_email, auth_version=1, date_joined__gte=challenge.created_at,
+                    ).first()
+                    if not is_email_code_eligible(locked_user):
+                        raise InvalidEmailCode("invalid_or_expired_code")
+                else:
+                    locked_user = User.objects.create(
+                        email=signup_email, password=make_password(None), email_verified_at=now,
+                    )
+                    CommunityMemberProfile.objects.create(user=locked_user)
                 challenge.user = locked_user
             challenge.encrypted_signup_email = ""
             challenge.consumed_at = now
