@@ -1831,6 +1831,13 @@
       "expiry": "2027-02-28"
     },
     {
+      "name": "ROO_MANUAL_TIME_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28",
+      "reason": "Stages manual volunteer time requests and approvals while the Slack and MLAI Chat flows are verified."
+    },
+    {
       "name": "ROO_POINTS_LEVEL_UP_ENABLED",
       "default": "false",
       "owner": "platform",
