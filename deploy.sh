@@ -518,6 +518,7 @@ install_remote_env_value WEBSITE_CONNECTION_CANARY_DOMAINS "$WEBSITE_CONNECTION_
 install_remote_env_value APPROVED_MIGRATION_PLAN_SHA256 "$APPROVED_MIGRATION_PLAN_SHA256"
 install_remote_env_value ROO_POINTS_LEVEL_UP_ENABLED "${ROO_POINTS_LEVEL_UP_ENABLED:-false}"
 install_remote_env_value ROO_POINTS_NATIVE_ACTIVE_FROM "${ROO_POINTS_NATIVE_ACTIVE_FROM:-}"
+install_remote_env_value ROO_MANUAL_TIME_ENABLED "${ROO_MANUAL_TIME_ENABLED:-false}"
 install_remote_env_value SYSTEM_EMAIL_RESEND_MESSAGES "$SYSTEM_EMAIL_RESEND_MESSAGES"
 for system_email_setting in $SYSTEM_EMAIL_DEPLOY_SETTINGS; do
     if [ -n "${!system_email_setting}" ]; then

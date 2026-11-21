@@ -1,4 +1,5 @@
 from django.urls import path, include
+from .manual_time_views import SlackManualTimeView
 from .event_discount_views import EventDiscountQuoteView, EventDiscountRedeemView, EventDiscountRedemptionsView
 from rest_framework.routers import DefaultRouter
 from .views import (
@@ -39,6 +40,8 @@ router.register(r'requests', PointsRequestViewSet, basename='points-request')
 router.register(r'purchases', PointsPurchaseViewSet, basename='points-purchase')
 
 urlpatterns = [
+    path("manual-time/", SlackManualTimeView.as_view()),
+    path("manual-time/<str:operation>/", SlackManualTimeView.as_view()),
     path('cybertest/', include('roo.cybertest_service_urls')),
     path('event-discounts/quote/', EventDiscountQuoteView.as_view(), name='event-discount-quote'),
     path('event-discounts/redeem/', EventDiscountRedeemView.as_view(), name='event-discount-redeem'),
