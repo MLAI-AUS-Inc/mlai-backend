@@ -178,6 +178,7 @@ def deliver_email_code(delivery_id):
         "challenge__user"
     ).get(id=delivery_id)
     challenge = delivery.challenge
+    claimed = CommunityChatEmailCodeDelivery.objects.filter(id=delivery.id, claimed_at=delivery.claimed_at)
     now = timezone.now()
     if (
         (challenge.user_id is None and not challenge.encrypted_signup_email)
@@ -204,7 +205,7 @@ def deliver_email_code(delivery_id):
             "Chat email-code delivery payload could not be decrypted delivery_id=%s",
             delivery.id,
         )
-        CommunityChatEmailCodeDelivery.objects.filter(id=delivery.id).update(
+        claimed.update(
             status=EmailCodeDeliveryStatus.FAILED,
             encrypted_code="",
             claimed_at=None,
@@ -215,7 +216,7 @@ def deliver_email_code(delivery_id):
     except Exception as exc:
         final_attempt = delivery.attempts >= MAX_DELIVERY_ATTEMPTS
         delay_seconds = min(300, 2 ** max(0, delivery.attempts - 1))
-        CommunityChatEmailCodeDelivery.objects.filter(id=delivery.id).update(
+        claimed.update(
             status=(
                 EmailCodeDeliveryStatus.FAILED
                 if final_attempt
@@ -235,7 +236,7 @@ def deliver_email_code(delivery_id):
         )
         return "failed" if final_attempt else "retry"
 
-    CommunityChatEmailCodeDelivery.objects.filter(id=delivery.id).update(
+    claimed.update(
         status=EmailCodeDeliveryStatus.SENT,
         encrypted_code="",
         claimed_at=None,

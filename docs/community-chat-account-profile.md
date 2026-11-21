@@ -64,3 +64,39 @@ Clients can group active keys by the returned `public_id` in mention pickers,
 preferring a key already in the current channel. Display names and self-published
 profile metadata do not prove that two keys belong to the same person. This is
 presentation metadata; relay permission checks still authorize every action.
+
+## Verified sign-in email change
+
+Set `COMMUNITY_CHAT_EMAIL_CHANGE_ENABLED=true` only after every issuer is
+issuing account-bound magic links, the legacy one-hour link lifetime has
+passed, `MLAI_LEGACY_EMAIL_MAGIC_LINKS_ENABLED=false` is live on all API and
+worker instances, and the transactional system sender is healthy. Migration
+`community_chat.0021_account_email_change` adds the request and durable jobs.
+
+The private account response advertises `email_change_available`. The
+`account/email-change/` subpaths are `GET status/` and `POST start/`,
+`verify-current/`, `confirm/`, `resend/`, `cancel/`. Start takes
+`new_email`; other writes take `request_id`; verification writes also take
+`code`. Send an `Idempotency-Key` for start, verification, confirmation and
+resend. Keep the same key for a retry of the same action and body. Proxy
+configuration must preserve the key and the browser `X-MLAI-Public-Key`
+binding. A request survives access token rotation within the same session.
+
+Confirmation returns `reauthentication_required`, expires all previously
+authorised account credentials, retires the old Chat signers and schedules
+relay revocation on the Chat email-code worker. The user signs in with the
+new address. If confirmation timed out, the next successful sign-in and
+private account response establish the committed address. The worker also
+drains notices and discards expired code material. Monitor relay retry age
+and security-mail failures independently of HTTP completion.
+
+Open address-only invites at the retired primary expire so they cannot pass
+to a later owner. Existing account memberships and ID-bound invitations
+remain attached to their original user. Community marketing requires a new
+consent choice after the change. The update-profile routes return
+`email_change_required` for attempts to change the sign-in address.
+
+To pause, set `COMMUNITY_CHAT_EMAIL_CHANGE_ENABLED=false` and keep the
+email-code worker running. It expires pending changes and drains already
+committed receipts and revocations. Keep legacy magic link acceptance off
+after the first address change.
