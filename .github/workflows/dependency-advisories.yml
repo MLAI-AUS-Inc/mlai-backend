@@ -1,0 +1,50 @@
+name: Python dependency advisories
+
+on:
+  pull_request:
+    paths:
+      - requirements.lock
+      - .github/workflows/dependency-advisories.yml
+  push:
+    branches: [main]
+    paths:
+      - requirements.lock
+      - .github/workflows/dependency-advisories.yml
+  schedule:
+    - cron: '31 16 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the verified OSV scanner
+        run: |
+          set -euo pipefail
+          scanner="$RUNNER_TEMP/osv-scanner"
+          curl --fail --silent --show-error --location --retry 3 --max-time 45 \
+            https://github.com/google/osv-scanner/releases/download/v2.7.1/osv-scanner_linux_amd64 \
+            -o "$scanner"
+          printf '%s  %s\n' fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8 "$scanner" |
+            sha256sum --check
+          chmod +x "$scanner"
+
+      - name: Scan the production hash lock
+        run: |
+          "$RUNNER_TEMP/osv-scanner" scan source \
+            --lockfile=requirements.txt:requirements.lock --format=json --output-file=osv-report.json
+
+      - name: Retain the advisory report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dependency-advisories
+          path: osv-report.json
+          if-no-files-found: error
+          retention-days: 30
