@@ -18,8 +18,8 @@ from integrations.models import CommunityBridgeMessageLink
 from roo.models import PointsRequest, PointsRequestDelivery, PointsRequestScan
 from roo.permissions import is_points_admin_user
 from roo.points_request_workflow import (
-    CELEBRATION, CONFIRMATION, EVENT_ID, REPOST, ROO_POINTS_CHANNEL_ID, SUMMARY,
-    approve_locked_request, bridge_channel, enqueue, mention,
+    CELEBRATION, CONFIRMATION, EVENT_ID, REPOST, ROO_POINTS_CHANNEL_ID, SLACK_CONFIRMATION, SUMMARY,
+    approve_locked_request, bridge_channel, enqueue, mention, slack_confirmation_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,9 @@ class RooRelay:
         return result.json()
 
     def query(self, channel, kinds, **filters):
-        result = self.post("/query", {"#h": [str(channel)], "kinds": kinds, **filters})
+        if channel is not None:
+            filters["#h"] = [str(channel)]
+        result = self.post("/query", {"kinds": kinds, **filters})
         if not isinstance(result, list):
             raise ValueError("Unexpected Roo relay query response")
         return result
@@ -97,6 +99,19 @@ class RooRelay:
         mid = (start + end) // 2
         yield from self.scan(start, mid)
         yield from self.scan(mid + 1, end)
+
+
+def ensure_roo_profile(relay):
+    if relay.query(None, [0], authors=[relay.pubkey], limit=1):
+        return
+    event = native_crypto.sign_event(
+        relay.key, kind=0, created_at=timezone.now().timestamp(), tags=[],
+        content=native_crypto.canonical_json({
+            "name": "Roo", "display_name": "Roo",
+            "about": "I help MLAI Chat members request and celebrate Roo Points. 🦘",
+        }),
+    )
+    relay.publish(None, event)
 
 
 def thread_root(event, relay):
@@ -171,7 +186,7 @@ def scan_requests(relay, start):
     PointsRequestScan.objects.filter(channel_id=ROO_POINTS_CHANNEL_ID, through__lt=end).update(through=end)
 
 
-def bridged_confirmation(delivery):
+def bridged_confirmation_link(delivery):
     req = delivery.request
     mapping = bridge_channel(req.slack_channel_id)
     if not mapping or mapping.destination_channel_id != str(delivery.channel_id):
@@ -188,15 +203,11 @@ def bridged_confirmation(delivery):
     if delivery.external_confirmation_id:
         mapped = candidates.filter(source_message_id=delivery.external_confirmation_id).first()
     else:
-        text = (
-            f"✅ Points request approved by <@{req.approved_by_slack_id}>.\n\n"
-            f"<@{req.target_slack_id}> received {req.points} points.\nReason: {req.reason}"
-        )
-        matches = list(candidates.filter(source_payload__text=text, created_at__gte=req.approved_at)[:2])
+        matches = list(candidates.filter(
+            source_payload__text=slack_confirmation_text(req), created_at__gte=req.approved_at,
+        )[:2])
         mapped = matches[0] if len(matches) == 1 else None
-    if not mapped or not EVENT_ID.fullmatch(mapped.destination_parent_message_id):
-        return None
-    return mapped.destination_parent_message_id
+    return mapped
 
 
 def prepare_event(relay, delivery):
@@ -214,9 +225,10 @@ def prepare_event(relay, delivery):
                 return False
             created_at = max(created_at, confirmation.signed_event["created_at"] + 1)
         else:
-            parent = bridged_confirmation(delivery)
-            if not parent:
+            mapped = bridged_confirmation_link(delivery)
+            if not mapped or not EVENT_ID.fullmatch(mapped.destination_parent_message_id):
                 return False
+            parent = mapped.destination_parent_message_id
     elif delivery.stage == REPOST:
         if not request.deliveries.filter(stage=CELEBRATION, delivered_at__isnull=False).exists():
             return False
@@ -240,7 +252,7 @@ def prepare_event(relay, delivery):
 def deliver_ready(relay):
     pending = PointsRequestDelivery.objects.filter(
         delivered_at__isnull=True, available_at__lte=timezone.now(),
-    ).order_by("available_at", "pk").values_list("pk", flat=True)[:50]
+    ).exclude(stage=SLACK_CONFIRMATION).order_by("available_at", "pk").values_list("pk", flat=True)[:50]
     for delivery_id in list(pending):
         with transaction.atomic():
             row = PointsRequestDelivery.objects.select_for_update().select_related("request").get(pk=delivery_id)

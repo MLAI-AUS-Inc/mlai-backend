@@ -1,3 +1,4 @@
+from .roo_points_views import RooPointsMuteView
 from .slack_emoji_views import SlackEmojiDirectoryView
 from django.urls import include, path
 from .apple_iap_views import AppleIapView, AppleIapTransactionView, AppleIapNotificationView
@@ -220,6 +221,7 @@ urlpatterns = [
         name="community_chat_coding_turn_finalize",
     ),
     path("account/", AccountView.as_view(), name="community_chat_account"),
+    path("account/roo-points-mute/", RooPointsMuteView.as_view(), name="community_chat_roo_points_mute"),
     path("account/devices/", AccountDevicesView.as_view(), name="community_chat_account_devices"),
     path("account/devices/<uuid:device_id>/", AccountDeviceView.as_view(), name="community_chat_account_device"),
     path(

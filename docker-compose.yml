@@ -40,7 +40,10 @@ services:
     image: mlai-backend-web
     logging: *default-logging
     command: python manage.py run_roo_points_channel
-    env_file: [.env]
+    env_file:
+      - .env
+      - path: .roo-points-worker.env
+        required: false
     environment:
       APP_ENV: ${APP_ENV:-production}
       RUN_MIGRATIONS_ON_START: "0"

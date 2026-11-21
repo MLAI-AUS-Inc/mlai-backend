@@ -6,7 +6,7 @@ import time
 from django.core.management.base import BaseCommand, CommandError
 import requests
 
-from roo.native_points_requests import RooRelay, deliver_ready, scan_requests
+from roo.native_points_requests import RooRelay, deliver_ready, ensure_roo_profile, scan_requests
 
 
 class Command(BaseCommand):
@@ -20,8 +20,12 @@ class Command(BaseCommand):
         if not raw.isdecimal() or int(raw) <= 0:
             raise CommandError("Set ROO_POINTS_NATIVE_ACTIVE_FROM to an explicit Unix timestamp")
         relay = RooRelay(os.getenv("ROO_POINTS_NATIVE_SIGNING_KEY", ""))
+        profile_ready = False
         while True:
             try:
+                if not profile_ready:
+                    ensure_roo_profile(relay)
+                    profile_ready = True
                 scan_requests(relay, int(raw))
                 deliver_ready(relay)
             except (requests.RequestException, ValueError) as exc:

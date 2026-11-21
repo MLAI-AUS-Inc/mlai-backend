@@ -19,6 +19,7 @@ CONFIRMATION = "confirmation"
 CELEBRATION = "celebration"
 REPOST = "repost"
 SUMMARY = "summary"
+SLACK_CONFIRMATION = "slack_confirmation"
 
 
 def verified_devices(user):
@@ -53,7 +54,14 @@ def enqueue(request, stage, channel_id, parent_id, content, mention_keys, transi
     )[0]
 
 
-def approve_locked_request(request, user, *, admin_slack_id=None, admin=None):
+def slack_confirmation_text(request):
+    return (
+        f"✅ Points request approved by <@{request.approved_by_slack_id}>.\n\n"
+        f"<@{request.target_slack_id}> received {request.points} points.\nReason: {request.reason}"
+    )
+
+
+def approve_locked_request(request, user, *, admin_slack_id=None, admin=None, recover_slack=False):
     """Award an already locked pending request and persist its notifications."""
     user = lock_member(user)
     native = request.native_channel_id is not None
@@ -79,6 +87,10 @@ def approve_locked_request(request, user, *, admin_slack_id=None, admin=None):
     ])
     if not capture:
         return ledger
+
+    if recover_slack and bridge and request.slack_summary_message_ts:
+        enqueue(request, SLACK_CONFIRMATION, bridge.destination_channel_id, "",
+                slack_confirmation_text(request), [])
 
     label, keys = mention(user)
     if native:

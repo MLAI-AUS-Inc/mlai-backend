@@ -6,6 +6,7 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from rest_framework.test import APIRequestFactory
 import requests
 
 from agent_runtime.native_crypto import public_key, signing_key
@@ -14,6 +15,7 @@ from integrations.models import CommunityBridgeChannel, CommunityBridgeMessageLi
 from roo.models import Ledger, PointsRequest, PointsRequestDelivery
 from roo.native_points_requests import deliver_ready, handle_event
 from roo.points_request_workflow import ROO_POINTS_CHANNEL_ID, approve_locked_request
+from roo.views import PointsRequestViewSet
 
 
 @override_settings(
@@ -130,3 +132,63 @@ class NativePointsRequestTests(TestCase):
             )
             approve_locked_request(unchanged, self.member, admin=self.admin)
         self.assertEqual(list(unchanged.deliveries.values_list("stage", flat=True)), ["confirmation"])
+
+    @override_settings(COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID="TLOCAL",
+                       COMMUNITY_CHAT_ROO_SLACK_USER_ID="UROO",
+                       ROO_API_KEY="test-roo", INTERNAL_API_KEY="test-internal")
+    def test_committed_slack_award_reclaims_confirmation_and_delivers_both_celebrations(self):
+        channel = CommunityBridgeChannel.objects.create(
+            slack_workspace_id="TLOCAL", slack_channel_id="CLOCAL",
+            destination_platform="buzz", audience="community", mirror_decision="mirror",
+            destination_channel_id="11111111-1111-4111-8111-111111111111",
+        )
+        with transaction.atomic():
+            request = PointsRequest.objects.create(
+                requester_slack_id="UONE", target_slack_id="UONE",
+                slack_channel_id="CLOCAL", slack_thread_ts="100.1",
+                slack_summary_message_ts="100.2", points=30, reason="Volunteering",
+            )
+            approve_locked_request(request, self.member, admin_slack_id="UADMIN", recover_slack=True)
+        claim = PointsRequestViewSet.as_view({"post": "claim_slack_confirmation"})
+        factory = APIRequestFactory()
+
+        def take(key="test-roo"):
+            return claim(factory.post("/claim/", HTTP_X_API_KEY=key))
+
+        self.assertEqual(take("test-internal").status_code, 403)
+        first = take()
+        self.assertEqual(first.data["request_id"], request.pk)
+        self.assertEqual(first.data["attempt"], 1)
+        self.assertEqual(take().status_code, 204)
+        self.relay.publish.assert_not_called()
+
+        request.deliveries.filter(stage="slack_confirmation").update(available_at=timezone.now())
+        second = take()
+        self.assertEqual(second.data["attempt"], 2)
+        self.assertEqual(second.data["text"], first.data["text"])
+        CommunityBridgeMessageLink.objects.create(
+            channel=channel, source_platform="slack", source_channel_id="CLOCAL",
+            source_author_id="UROO", source_message_id="101.2", source_parent_message_id="100.1",
+            destination_platform="buzz", destination_channel_id=channel.destination_channel_id,
+            destination_message_id="01" * 32, destination_parent_message_id="02" * 32,
+            source_payload={"text": first.data["text"]},
+        )
+        request.deliveries.filter(stage="slack_confirmation").update(available_at=timezone.now())
+        self.assertEqual(take().data["existing_message_id"], "101.2")
+        confirm = PointsRequestViewSet.as_view({"post": "slack_confirmation"})
+        receipt = {"message_id": "101.2", "channel_id": "CLOCAL"}
+        self.assertEqual(
+            confirm(factory.post("/receipt/", receipt, HTTP_X_API_KEY="test-roo"), pk=request.pk).status_code,
+            204,
+        )
+        self.assertIsNotNone(request.deliveries.get(stage="slack_confirmation").delivered_at)
+        self.assertEqual(take().status_code, 204)
+        deliver_ready(self.relay)
+        self.assertEqual(self.relay.publish.call_count, 2)
+        (original, reply), (destination, repost) = [call.args for call in self.relay.publish.call_args_list]
+        self.assertEqual(str(original), channel.destination_channel_id)
+        self.assertEqual(destination, ROO_POINTS_CHANNEL_ID)
+        self.assertEqual(reply["content"], repost["content"])
+        self.assertIn(["e", "02" * 32, "", "reply"], reply["tags"])
+        self.assertFalse(any(tag[0] == "e" for tag in repost["tags"]))
+        self.assertEqual(Ledger.objects.filter(reference_type="POINTS_REQUEST").count(), 1)

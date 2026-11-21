@@ -85,6 +85,31 @@ class CommunityChatAccountSessionTests(TestCase):
         client.cookies["mlai_chat_access"] = credentials.access_token
         return challenge, credentials, client
 
+    def test_roo_points_default_and_explicit_preference_across_session_keys(self):
+        url = reverse("community_chat_roo_points_mute")
+        mobile = self.bearer_client()
+        web_challenge, _, web = self.web_session()
+        headers = {"HTTP_ORIGIN": ORIGIN, "HTTP_X_MLAI_PUBLIC_KEY": web_challenge.public_key}
+        self.assertNotEqual(web_challenge.public_key, self.challenge.public_key)
+        self.assertEqual(APIClient().get(url).status_code, 401)
+        self.assertEqual(mobile.get(url).json(), {"muted": True, "explicit": False})
+        self.assertEqual(web.get(url, **headers).json(), {"muted": True, "explicit": False})
+        self.assertEqual(
+            mobile.put(url, {"muted": False}, format="json").json(),
+            {"muted": False, "explicit": True},
+        )
+        self.assertEqual(web.get(url, **headers).json(), {"muted": False, "explicit": True})
+        self.assertEqual(
+            web.put(url, {"muted": True, "initialize": True}, format="json", **headers).json(),
+            {"muted": False, "explicit": True},
+        )
+        self.assertEqual(
+            web.put(url, {"muted": True}, format="json", **headers).json(),
+            {"muted": True, "explicit": True},
+        )
+        self.assertEqual(mobile.get(url).json(), {"muted": True, "explicit": True})
+        self.assertEqual(mobile.put(url, {"muted": "false"}, format="json").status_code, 400)
+
     def test_tokens_are_hashed_and_account_endpoint_returns_own_profile(self):
         session = self.credentials.session
         self.assertEqual(

@@ -1544,6 +1544,13 @@ class PointsRequest(models.Model):
         )
 
 
+class RooPointsMutePreference(models.Model):
+    """An explicit #roo-points preference shared by this account's devices."""
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, primary_key=True)
+    muted = models.BooleanField()
+
+
 class PointsRequestDelivery(models.Model):
     """Persist the ordered messages produced by one points request."""
 
