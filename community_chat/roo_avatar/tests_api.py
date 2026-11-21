@@ -5,8 +5,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.cache.backends.locmem import LocMemCache
 from django.db import close_old_connections, connection
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
@@ -19,6 +21,7 @@ from community_chat.models import CommunityChatAccountSession
 from community_chat.roo_avatar.models import CommunityRooAvatar
 from community_chat.roo_avatar.policy import RooAvatarError, empty_outfit
 from community_chat.roo_avatar.services import read_avatar, update_avatar
+from community_chat.throttles import CommunityChatScopedThrottle
 from community_chat.volunteer.ladder import threshold
 from community_chat.volunteer.models import VolunteerMemberState, VolunteerSourceReceipt
 from community_chat.volunteer.policy import MICROROO
@@ -54,6 +57,12 @@ def credentials_for(user, *, web=False):
 @override_settings(**SETTINGS)
 class RooAvatarApiTests(TestCase):
     def setUp(self):
+        # SQLite can reuse rolled-back account IDs across test cases.
+        throttle_cache = LocMemCache(self.id(), {})
+        self.addCleanup(throttle_cache.clear)
+        self.enterContext(
+            patch.object(CommunityChatScopedThrottle, "cache", throttle_cache)
+        )
         self.user = get_user_model().objects.create_user(
             email="avatar@example.test",
             first_name="Alex",
