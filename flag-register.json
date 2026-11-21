@@ -1783,6 +1783,13 @@
       "expiry": "2027-02-28"
     },
     {
+      "name": "ROO_POINTS_LEVEL_UP_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Operational control for the Roo Points relay worker and celebration delivery."
+    },
+    {
       "name": "SENTRY_ENABLED",
       "default": "(unset)",
       "owner": "platform",
