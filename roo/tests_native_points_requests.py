@@ -13,7 +13,7 @@ from agent_runtime.native_crypto import public_key, signing_key
 from community_chat.models import CommunityChatDevice
 from integrations.models import CommunityBridgeChannel, CommunityBridgeMessageLink
 from roo.models import Ledger, PointsRequest, PointsRequestDelivery
-from roo.native_points_requests import deliver_ready, handle_event
+from roo.native_points_requests import RooRelay, deliver_ready, handle_event
 from roo.points_request_workflow import ROO_POINTS_CHANNEL_ID, approve_locked_request
 from roo.views import PointsRequestViewSet
 
@@ -43,6 +43,14 @@ class NativePointsRequestTests(TestCase):
             id=event_id, pubkey=author, kind=kind, content=content,
             tags=[["h", str(ROO_POINTS_CHANNEL_ID)], *tags],
             created_at=int(timezone.now().timestamp()),
+        )
+
+    def test_relay_http_query_uses_an_array_of_filters(self):
+        relay = RooRelay("12" * 32)
+        relay.post = Mock(return_value=[])
+        self.assertEqual(relay.query(ROO_POINTS_CHANNEL_ID, [9], limit=200), [])
+        relay.post.assert_called_once_with(
+            "/query", [{"#h": [str(ROO_POINTS_CHANNEL_ID)], "kinds": [9], "limit": 200}],
         )
 
     def test_approval_creates_distinct_thread_and_repost_with_durable_native_ids(self):

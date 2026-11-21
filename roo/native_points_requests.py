@@ -75,7 +75,7 @@ class RooRelay:
     def query(self, channel, kinds, **filters):
         if channel is not None:
             filters["#h"] = [str(channel)]
-        result = self.post("/query", {"kinds": kinds, **filters})
+        result = self.post("/query", [{"kinds": kinds, **filters}])
         if not isinstance(result, list):
             raise ValueError("Unexpected Roo relay query response")
         return result
