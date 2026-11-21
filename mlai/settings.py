@@ -1239,6 +1239,10 @@ CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID = os.getenv('CONTENT_FACTORY_OPS_SLACK_CHAN
 # bounds run/company created_at. The default replays every stuck run and startup
 # since 29 Sep at MAX_PER_TICK a minute; set SINCE to the flip date to start clean.
 ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED', 'false').lower() == 'true'
+# Founder-proof plan workstream 6: a hosted quality hold staff own is projected
+# to founders as retryable=false, so no "Check again" is offered beside
+# "We're fixing this". Default off keeps today's founder payload.
+ARTICLES_HONEST_RETRY_STATUS_ENABLED = os.getenv('ARTICLES_HONEST_RETRY_STATUS_ENABLED', 'false').lower() == 'true'
 ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE', '2026-09-29').strip()
 ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK = int(os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK', '20'))
 # Workstream 5 (content_factory/staff_hold_alerts.py): one ops Slack post when an
