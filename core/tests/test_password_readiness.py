@@ -2,6 +2,7 @@ import json
 from io import StringIO
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import IntegrityError, transaction
@@ -16,10 +17,21 @@ class PasswordReadinessModelTests(TestCase):
         user = User.objects.create_user(email="  Mixed.Case@Example.COM  ")
 
         self.assertEqual(user.email, "mixed.case@example.com")
-        user.email = "  SECOND@Example.COM "
-        user.save(update_fields=("email",))
+        placeholder = User.objects.create_user(email="u12345678@slack.placeholder.com")
+        placeholder.email = "  SECOND@Example.COM "
+        placeholder.save(update_fields=("email",))
+        placeholder.refresh_from_db()
+        self.assertEqual(placeholder.email, "second@example.com")
+
+    def test_existing_primary_requires_the_verified_change_workflow(self):
+        user = User.objects.create_user(email="original@example.com")
+        user.email = "replacement@example.com"
+
+        with self.assertRaises(ValidationError):
+            user.save(update_fields=("email",))
+
         user.refresh_from_db()
-        self.assertEqual(user.email, "second@example.com")
+        self.assertEqual(user.email, "original@example.com")
 
     def test_case_insensitive_email_constraint_rejects_duplicates(self):
         User.objects.create_user(email="person@example.com")

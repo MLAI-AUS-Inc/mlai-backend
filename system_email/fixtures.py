@@ -12,6 +12,13 @@ SAMPLE_CONTEXT = {
         "verification_code": "123456", "expires_minutes": 10, "first_name": "Sam",
         "product_name": "MLAI Chat", "support_url": "https://mlai.au/support",
     },
+    "chat_email_change_current_code": {
+        "verification_code": "123456", "new_email_masked": "s***@example.com",
+    },
+    "chat_email_change_new_code": {
+        "verification_code": "654321", "new_email_masked": "s***@example.com",
+    },
+    "chat_email_change_receipt": {"new_email_masked": "s***@example.com"},
     "magic_link": {
         "magic_link": "https://chat.mlai.au/verify-email?token=sample", "app_name": "MLAI Chat",
         "first_name": "Sam",

@@ -52,7 +52,7 @@ class CampaignUiContractTests(CrmApiMixin, TestCase):
         self.assertFalse(blasts.resolve_audience(blast, now=self.now).querysets['email'].exists())
         CommunityMemberConsent.objects.create(user=self.member, purpose='marketing_email', granted=True,
             policy_version='synthetic', source='test')
-        self.member.email = 'changed@example.test'; self.member.save()
+        type(self.member).objects.filter(pk=self.member.pk).update(email='changed@example.test')
         self.assertFalse(blasts.resolve_audience(blast, now=self.now).querysets['email'].exists())
 
     def test_city_preset_uses_reviewed_location_ids_and_infers_marketing(self):

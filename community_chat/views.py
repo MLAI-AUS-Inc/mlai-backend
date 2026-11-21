@@ -52,6 +52,7 @@ from .account_cookies import (
     clear_account_session_cookies,
     set_account_session_cookies,
 )
+from .email_change import available_for as email_change_available, lock_signer, retired_signer
 from .account_sessions import (
     InvalidAccountSession,
     InvalidBrowserAccountBinding,
@@ -213,7 +214,9 @@ def _require_token_key(request, public_key):
         raise PermissionDenied("This authorization is bound to a different device key.")
 
 
-def _require_current_chat_credential_locked(request, locked_user, *, allow_unapproved=False):
+def _require_current_chat_credential_locked(
+    request, locked_user, *, allow_unapproved=False, session_expired=PermissionDenied,
+):
     """Revalidate a Chat credential after taking the shared user row lock.
 
     ``allow_unapproved`` lets desktop sign-in v2 admit a pending or new member
@@ -222,6 +225,9 @@ def _require_current_chat_credential_locked(request, locked_user, *, allow_unapp
     """
 
     now = timezone.now()
+    public_key = getattr(request, "community_chat_public_key", None)
+    if public_key and retired_signer(public_key):
+        raise session_expired("Sign in with a new installation key.")
     if not (allow_unapproved and device_auth_v2.admits_unapproved_member(locked_user)):
         _require_eligible(locked_user)
     account_session = getattr(request, "community_chat_account_session", None)
@@ -248,7 +254,7 @@ def _require_current_chat_credential_locked(request, locked_user, *, allow_unapp
             current.access_token_hash,
             presented_hash,
         ):
-            raise PermissionDenied("MLAI Chat session has expired.")
+            raise session_expired("MLAI Chat session has expired.")
         request.community_chat_account_session = current
 
     bootstrap_token = getattr(request, "community_chat_bootstrap_token", None)
@@ -522,6 +528,8 @@ class PasswordAuthView(APIView):
             # pre-lock authorization.
             if (
                 not locked_user.is_active
+                or not locked_user.__class__.objects.for_email(email).filter(pk=locked_user.pk).exists()
+                or retired_signer(public_key)
                 or not locked_user.has_usable_password()
                 or not locked_user.check_password(data["password"])
             ):
@@ -630,6 +638,8 @@ def _issue_email_code_bootstrap(user, challenge):
     # pending proofs and credentials. Keep issuance on that side of the fence.
     get_user_model().objects.select_for_update().get(pk=user.pk)
     _lock_device_auth_installation(challenge)
+    if retired_signer(challenge.public_key):
+        raise _EmailCodeBindingConflict("public_key_retired")
     cleanup_grant_ids = ()
     active_key = CommunityChatDevice.objects.filter(
         public_key=challenge.public_key,
@@ -1019,6 +1029,7 @@ class AccountView(APIView):
                 "authenticated": True,
                 "onboarding": onboarding_payload(user),
                 "profile": own_chat_profile(user),
+                "email_change_available": email_change_available(user),
                 "public_profile": public_chat_profile(user),
                 "session": {
                     "id": str(account_session.id),
@@ -2150,6 +2161,9 @@ class InviteView(APIView):
                 _require_token_challenge_context(request, challenge)
                 public_key = challenge.public_key
                 _require_token_key(request, public_key)
+                lock_signer(public_key)
+                if retired_signer(public_key):
+                    return Response({"error": "public_key_retired"}, status=409)
                 enforce_bootstrap_limits(
                     request,
                     action="invite",

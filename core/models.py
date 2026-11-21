@@ -107,6 +107,12 @@ class User(AbstractBaseUser, PermissionsMixin):
             ),
         ]
 
+    @classmethod
+    def from_db(cls, db, field_names, values):
+        instance = super().from_db(db, field_names, values)
+        instance._loaded_primary_email = instance.__dict__.get('email')
+        return instance
+
     def save(self, *args, **kwargs):
         self.email = type(self).objects.normalize_email(self.email)
         from .account_bans import guard_account_save
@@ -122,13 +128,34 @@ class User(AbstractBaseUser, PermissionsMixin):
                 if current:
                     self.auth_version = max(self.auth_version, current.auth_version)
             update_fields = kwargs.get('update_fields')
-            if current is None or (
-                (update_fields is None or 'email' in update_fields)
-                and current.email != self.email
-            ):
-                guard_primary_email(self, using=kwargs.get('using') or self._state.db or 'default')
+            using = kwargs.get('using') or self._state.db or 'default'
+            if current is not None and current.email != self.email:
+                loaded_email = getattr(self, '_loaded_primary_email', None)
+                explicit_change = (
+                    'email' in update_fields
+                    if update_fields is not None
+                    else loaded_email is not None and self.email != loaded_email
+                )
+                if explicit_change:
+                    from django.core.exceptions import ValidationError
+
+                    guard_primary_email(self, using=using)
+                    if not current.email.endswith('@slack.placeholder.com'):
+                        raise ValidationError('Use the verified email-change workflow.')
+                else:
+                    # A stale profile or integration save must not restore a former primary address.
+                    self.email = current.email
+                    if update_fields is None:
+                        kwargs['update_fields'] = [
+                            field.name for field in self._meta.concrete_fields
+                            if not field.primary_key and field.name not in {'email', 'email_verified_at'}
+                            and field.attname in self.__dict__
+                        ]
+            if current is None:
+                guard_primary_email(self, using=using)
             guard_account_save(self)
             super().save(*args, **kwargs)
+            self._loaded_primary_email = self.email
 
     def _get_session_auth_hash(self, secret=None):
         if self.auth_version == 1:

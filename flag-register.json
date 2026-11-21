@@ -92,6 +92,12 @@
   ],
   "flags": [
     {
+      "name": "MLAI_LEGACY_EMAIL_MAGIC_LINKS_ENABLED",
+      "default": "true",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
       "name": "AGENT_RUNTIME_ACTIONS_ENABLED",
       "default": "false",
       "owner": "platform",
@@ -870,6 +876,12 @@
     },
     {
       "name": "COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_EMAIL_CHANGE_ENABLED",
       "default": "false",
       "owner": "platform",
       "expiry": "2027-02-28"
