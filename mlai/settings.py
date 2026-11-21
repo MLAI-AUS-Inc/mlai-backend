@@ -2839,6 +2839,20 @@ MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_PREFLIGH
 # Plan E3b: reminders and guidance-change notices for website leads (no organisation). Default off.
 MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED", False)
 
+# Founder-proof article flow switches (outside the P2 block; all default off).
+# Default off: one decision for "the founder's branch moved". With it on, the
+# read guard, the owner preview retry, re-pin, the terminal callback and publish
+# all ask website_connections.resolve_run_source (follow, refuse or unchanged,
+# with a reason code) instead of each deciding alone. Off keeps the old paths.
+ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED = _env_is_true("ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED", False)
+# Workstream 3: repo health at connect. Stores host/build probe results on the
+# website connection, shows them in the journey, re-runs the host probe on push
+# and requires a green build probe for the current head before an article charge.
+ARTICLES_REPO_HEALTH_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_ENABLED", False)
+# Opening a fix pull request on the founder's repo (lockfile or patch bump). Held
+# off until the owner approves a write to founder repositories.
+ARTICLES_REPO_HEALTH_FIX_PR_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_FIX_PR_ENABLED", False)
+
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort
 # (content_factory.p2_foundation.p2_applies) unless the P2 contract names an
@@ -2869,11 +2883,6 @@ ARTICLES_SOURCE_REPIN_ENABLED = _env_is_true("ARTICLES_SOURCE_REPIN_ENABLED", Fa
 # copy-ready run no longer stops because the site moved. Content Factory's
 # CONTENT_FACTORY_SOURCE_FOLLOW_ENABLED is the paired switch.
 ARTICLES_SOURCE_FOLLOW_ENABLED = _env_is_true("ARTICLES_SOURCE_FOLLOW_ENABLED", True)
-# Default off: one decision for "the founder's branch moved". With it on, the
-# read guard, the owner preview retry, re-pin, the terminal callback and publish
-# all ask website_connections.resolve_run_source (follow, refuse or unchanged,
-# with a reason code) instead of each deciding alone. Off keeps the old paths.
-ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED = _env_is_true("ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED", False)
 # Kill switch, default on: a push that leaves the articles setup files alone
 # (one GitHub compare) keeps the website Ready; the proof is re-checked in the
 # background for free and articles lock only if that re-check fails.
@@ -2937,13 +2946,6 @@ ARTICLES_SETUP_EXAMPLE_AUTO_REMOVE_ENABLED = _env_is_true("ARTICLES_SETUP_EXAMPL
 MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED = _env_is_true("MY_STARTUP_TRANSITION_NOTIFICATIONS_ENABLED", False)
 MY_STARTUP_TURN_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_TURN_REMINDERS_ENABLED", False)
 ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED = _env_is_true("ARTICLES_PUBLISH_REVIEWED_DRAFT_ENABLED", False)
-# Workstream 3: repo health at connect. Stores host/build probe results on the
-# website connection, shows them in the journey, re-runs the host probe on push
-# and requires a green build probe for the current head before an article charge.
-ARTICLES_REPO_HEALTH_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_ENABLED", False)
-# Opening a fix pull request on the founder's repo (lockfile or patch bump). Held
-# off until the owner approves a write to founder repositories.
-ARTICLES_REPO_HEALTH_FIX_PR_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_FIX_PR_ENABLED", False)
 # Startup team (held until its security sign-off; declared here so the block is complete).
 MY_STARTUP_TEAM_ENABLED = _env_is_true("MY_STARTUP_TEAM_ENABLED", False)
 MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED = _env_is_true("MY_STARTUP_TEAM_DOMAIN_AUTO_JOIN_ENABLED", False)
