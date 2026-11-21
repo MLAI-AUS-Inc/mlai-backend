@@ -28,7 +28,7 @@ from .models import (
     PointsAdmin, Minter, Task, Ledger, PointsAccount, BoostPostAdmission,
     TaskAssignment, TaskSubmission, CoworkingBooking, CoworkingDayCapacity,
     CoworkingBookingOperation,
-    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase,
+    RewardsCatalog, RewardRedemption, TaskTemplate, PointsRequest, PointsPurchase, PointsRequestDelivery,
 )
 
 from .purchase_tax import inclusive_gst_snapshot, validate_gst_payment
@@ -2629,30 +2629,10 @@ class PointsRequestViewSet(viewsets.ViewSet):
                     )
 
                 user = get_or_create_user_for_slack_id(points_request.target_slack_id)
-                ledger, _ = PointsService.award(
-                    user=user,
-                    delta=points_request.points,
-                    source='MANUAL',
-                    description=points_request.reason,
-                    created_by_slack_id=admin_slack_id,
-                    idempotency_key=f"points_request:{points_request.id}:approve",
-                    reference_type='POINTS_REQUEST',
-                    reference_id=str(points_request.id),
-                )
-                record_volunteer_credit(ledger)
+                from .points_request_workflow import approve_locked_request
 
-                points_request.status = 'approved'
-                points_request.approved_by_slack_id = admin_slack_id
-                points_request.approved_at = timezone.now()
-                points_request.ledger_entry = ledger
-                points_request.save(
-                    update_fields=[
-                        'status',
-                        'approved_by_slack_id',
-                        'approved_at',
-                        'ledger_entry',
-                        'updated_at',
-                    ]
+                ledger = approve_locked_request(
+                    points_request, user, admin_slack_id=admin_slack_id,
                 )
         except PointsRequest.DoesNotExist:
             return Response({'error': 'Points request not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -2668,8 +2648,31 @@ class PointsRequestViewSet(viewsets.ViewSet):
                 **PointsRequestSerializer(points_request).data,
                 'points_awarded': ledger.delta,
                 'new_balance': balance['balance'],
+                'chat_level_up_pending': points_request.deliveries.filter(stage='celebration').exists(),
             }
         )
+
+
+    @action(detail=True, methods=["post"], url_path="slack-confirmation")
+    def slack_confirmation(self, request, pk=None):
+        """Record the exact legacy Roo confirmation for the delivery worker."""
+        import re
+        from .points_request_workflow import CELEBRATION
+
+        if not HasStrictRooApiKey().has_permission(request, self):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+        message_id = request.data.get("message_id")
+        channel_id = request.data.get("channel_id")
+        if not isinstance(message_id, str) or not re.fullmatch(r"[0-9]+\.[0-9]+", message_id):
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+        with transaction.atomic():
+            delivery = PointsRequestDelivery.objects.select_for_update().filter(
+                request_id=pk, request__slack_channel_id=channel_id, stage=CELEBRATION,
+            ).first()
+            if delivery and not delivery.external_confirmation_id:
+                delivery.external_confirmation_id = message_id
+                delivery.save(update_fields=["external_confirmation_id"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class PointsPurchaseViewSet(viewsets.ViewSet):
