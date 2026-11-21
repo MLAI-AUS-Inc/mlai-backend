@@ -9,7 +9,10 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
+
+from core.email_aliases import lock_email_namespace
 
 from .email_delivery import decrypt_signup_email, encrypt_email_code, encrypt_signup_email
 from .models import (
@@ -83,12 +86,19 @@ def issue_email_code_challenge(
     code = f"{secrets.randbelow(1_000_000):06d}"
     now = timezone.now()
     with transaction.atomic():
-        if eligible_user is not None:
+        if user is not None:
             # Serialize creation of a new sign-in capability with server-side
             # device deletion. A challenge committed before DELETE is
             # invalidated there; one committed afterward is a fresh explicit
             # account proof rather than a surviving pre-delete credential.
-            User.objects.select_for_update().get(pk=eligible_user.pk)
+            locked = User.objects.select_for_update(no_key=True).filter(pk=user.pk).first()
+        else:
+            locked = None
+        lock_email_namespace(canonical_email)
+        # The lookup may have waited behind an email change or signup.
+        owner = User.objects.resolve_email(canonical_email)
+        eligible_user = locked if locked and owner and locked.pk == owner.pk and is_email_code_eligible(locked) else None
+        signup = signup and owner is None
         active = CommunityChatEmailCodeChallenge.objects.filter(
             email_digest=digest,
             client_id=client_id,
@@ -157,15 +167,19 @@ def consume_email_code(*, challenge_id, code, client_id, installation_id):
     invalid = False
     identity = (
         CommunityChatEmailCodeChallenge.objects.filter(id=challenge_id)
-        .values("user_id")
+        .values("user_id", "encrypted_signup_email")
         .first()
     )
     with transaction.atomic():
         locked_user = None
         if identity is not None and identity["user_id"] is not None:
-            locked_user = User.objects.select_for_update().get(
-                pk=identity["user_id"]
-            )
+            locked_user = User.objects.select_for_update().filter(pk=identity["user_id"]).first()
+        elif identity and identity["encrypted_signup_email"]:
+            try:
+                signup_address = normalize_email(decrypt_signup_email(identity["encrypted_signup_email"]))
+            except (InvalidToken, UnicodeError, ValueError):
+                raise InvalidEmailCode("invalid_or_expired_code") from None
+            lock_email_namespace(signup_address)
         try:
             challenge = _locked_email_code_challenges().get(id=challenge_id)
         except (CommunityChatEmailCodeChallenge.DoesNotExist, ValueError):
@@ -213,14 +227,14 @@ def consume_email_code(*, challenge_id, code, client_id, installation_id):
             if signup:
                 # Case-insensitive uniqueness in core.User resolves concurrent
                 # verifications and a concurrent signup in another MLAI product.
-                user, created = User.objects.get_or_create_for_email(signup_email, defaults={
-                    "email": signup_email, "password": make_password(None), "email_verified_at": now,
-                })
-                locked_user = User.objects.select_for_update().get(pk=user.pk)
-                if not is_email_code_eligible(locked_user):
+                # An unowned-address proof cannot attach to a user who
+                # acquired that address through another flow.
+                if User.objects.for_email(signup_email).exists():
                     raise InvalidEmailCode("invalid_or_expired_code")
-                if created:
-                    CommunityMemberProfile.objects.create(user=locked_user)
+                locked_user = User.objects.create(
+                    email=signup_email, password=make_password(None), email_verified_at=now,
+                )
+                CommunityMemberProfile.objects.create(user=locked_user)
                 challenge.user = locked_user
             challenge.encrypted_signup_email = ""
             challenge.consumed_at = now
@@ -229,11 +243,22 @@ def consume_email_code(*, challenge_id, code, client_id, installation_id):
             if user.email_verified_at is None:
                 user.email_verified_at = now
                 user.save(update_fields=("email_verified_at",))
-            CommunityChatEmailCodeChallenge.objects.filter(
-                user=user,
-                consumed_at__isnull=True,
-                invalidated_at__isnull=True,
-            ).exclude(id=challenge.id).update(invalidated_at=now, encrypted_signup_email="")
+            invalidate_email_codes(Q(user=user) & ~Q(pk=challenge.pk), now=now)
             return user, challenge
     if invalid:
         raise InvalidEmailCode("invalid_or_expired_code")
+
+
+def invalidate_email_codes(scope, *, now):
+    """Fence outstanding proofs and erase their queued delivery material."""
+    open_challenges = CommunityChatEmailCodeChallenge.objects.filter(
+        scope, consumed_at__isnull=True, invalidated_at__isnull=True,
+    )
+    CommunityChatEmailCodeDelivery.objects.filter(
+        challenge__in=open_challenges,
+        status__in=(EmailCodeDeliveryStatus.PENDING, EmailCodeDeliveryStatus.SENDING),
+    ).update(
+        status=EmailCodeDeliveryStatus.CANCELLED, encrypted_code="",
+        claimed_at=None, updated_at=now,
+    )
+    open_challenges.update(invalidated_at=now, encrypted_signup_email="")

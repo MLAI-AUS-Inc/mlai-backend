@@ -17,7 +17,6 @@ from .slack_founder_links import (
     ConflictingSlackFounderLinkError,
     assign_direct_slack_identity,
     ensure_user_can_accept_direct_slack_identity,
-    user_participates_in_slack_founder_link,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,13 +134,6 @@ def ensure_slack_user(
         )
         if user:
             update_fields = []
-            if (
-                user.email.lower() != normalized_email
-                and not user.email_aliases.filter(email__iexact=normalized_email).exists()
-                and not user_participates_in_slack_founder_link(user)
-            ):
-                user.email = normalized_email
-                update_fields.append("email")
             if first_name and not user.first_name:
                 user.first_name = first_name
                 update_fields.append("first_name")
@@ -166,7 +158,7 @@ def ensure_slack_user(
         return SlackUserRegistrationResult(user=user, created=False, linked=True)
     if user and user.slack_id != slack_id:
         try:
-            user = assign_direct_slack_identity(user, slack_id)
+            user = assign_direct_slack_identity(user, slack_id, matching_email=normalized_email)
         except ConflictingSlackFounderLinkError:
             # Preserve the explicit account boundary. Roo may still register
             # this Slack identity as a separate placeholder user.
@@ -292,7 +284,7 @@ def resolve_existing_user_from_profile(
             # Keep the assignment in a savepoint so a concurrent unique-key
             # winner can be inspected without poisoning this transaction.
             with transaction.atomic():
-                user = assign_direct_slack_identity(user, requested_slack_id)
+                user = assign_direct_slack_identity(user, requested_slack_id, matching_email=normalized_email)
         except ConflictingSlackFounderLinkError:
             if raise_link_conflict:
                 raise
