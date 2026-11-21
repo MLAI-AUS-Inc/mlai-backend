@@ -570,6 +570,18 @@
       "expiry": "2027-02-28"
     },
     {
+      "name": "ARTICLES_REPO_HEALTH_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_REPO_HEALTH_FIX_PR_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
       "name": "ARTICLES_RUN_CONTROL_MODEL_TOKENS",
       "default": "0",
       "owner": "platform",
