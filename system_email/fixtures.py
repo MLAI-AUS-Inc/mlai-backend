@@ -21,6 +21,9 @@ SAMPLE_CONTEXT = {
     },
     "monthly_update_7d": {"first_name": "Sam", "startups": _STARTUPS},
     "monthly_update_1d": {"first_name": "Sam", "startups": _STARTUPS},
+    "arcade_codex_prize": {
+        "activation_code": "EXAMPLE-ONLY", "activation_url": "https://chatgpt.com/codex/p/EXAMPLE-ONLY",
+    },
     "event_perk_code": {
         "first_name": "Sam", "event_name": "Example Meetup", "perk_label": "Half-price ticket",
         "coupon_code": "ROO-ABCDEFGHJKLMNPQR", "checkout_url": "https://luma.com/example?coupon=ROO-ABCDEFGHJKLMNPQR",

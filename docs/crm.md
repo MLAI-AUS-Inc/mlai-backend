@@ -999,3 +999,13 @@ stronger record from this implementation or treat a missing report as clean.
 
 Provider contracts: [Customer.io From overrides and tracking](https://docs.customer.io/integrations/api/app/tag/send-messages/sendemail/),
 [Resend domain tracking](https://github.com/resend/resend-skills/blob/main/skills/resend/references/sending/overview.md).
+
+## MLAI Arcade prize stock and email
+
+In Chat **Admin → Campaigns → MLAI Arcade prize stock**, choose **$50 Codex credits** and paste one code or one personal ChatGPT activation link per line. Each import accepts up to 200 entries. A second paste of the same code reports a duplicate. To stock half-price tickets, supply single-use discount codes for the named Luma event, its public event URL and a future local expiry. A Codex expiry is optional. The issuer must have provisioned the codes before import. Codes can be imported after deployment.
+
+Only authorised CRM admins on their verified device can import or see counts. Stock is encrypted using the existing connector credential keyring. Keep the old decryption keys on rotation so remaining and reserved codes stay redeemable. A recipient must have an active, email-verified account and a deliverable CRM/system email address. At most one Codex code may be awarded every 36 hours across the pool. Fewer qualifying spins can stretch a batch beyond 30 days.
+
+The existing discovery scheduler processes the reserved prize with the transactional Resend sender (`SYSTEM_EMAIL_RESEND_API_KEY`, `MLAI_SYSTEM_FROM_EMAIL`, `SYSTEM_EMAIL_REPLY_TO`). A winner receives both HTML and plain text, with their private activation link and instructions. CRM records acceptance and exceptions in its audit log. System Email tracks Resend's subsequent delivery feedback. The message subject, logs and admin responses contain no codes. The code is reserved for that winner throughout retries.
+
+If **need review** increases, look up the matching `arcade_codex_delivery` CRM audit event and transactional System Email record using its reservation's `arcade-codex/<stock UUID>` key. Check address eligibility, suppressions, credentials and the provider receipt before contacting the winner. Ambiguous sends automatically retry with the same code/key for under 23 hours. A rejected or ambiguous reservation stays assigned to its original winner.

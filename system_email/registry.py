@@ -87,6 +87,14 @@ _SPECS = (
         required_context=("startup_name", "inviter_name", "invite_email", "expires_on", "accept_url", "asset_base"),
     ),
     MessageSpec(
+        key="arcade_codex_prize",
+        category=NOTIFICATION,
+        subject="You won $50 in Codex credits at MLAI Arcade",
+        html_template="system_email/arcade_codex_prize.html",
+        text_template="system_email/arcade_codex_prize.txt",
+        required_context=("activation_code", "activation_url"),
+    ),
+    MessageSpec(
         key="event_perk_code",
         category=NOTIFICATION,
         subject="Your {{ perk_label|lower }} code for {{ event_name }}",
