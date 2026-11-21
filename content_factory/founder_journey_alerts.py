@@ -114,6 +114,9 @@ P2_REASON_LABELS = {
     "connection_invariant": "A website connection is in a state that should never happen",
     # E7: founder_transitions, one per ask that waited past its per-action threshold.
     "ask_waiting": "A founder ask has waited past its staff threshold",
+    # Workstream 5: content_factory.staff_hold_alerts, behind ARTICLES_STAFF_HOLD_ALERTS_ENABLED.
+    "article_staff_hold": "An article's final check is held for staff",
+    "article_staff_hold_24h": "An article has been held for staff for 24 hours",
 }
 P2_ALERT_REASONS = frozenset(P2_REASON_LABELS)
 ALERT_REASONS = ALERT_REASONS | P2_ALERT_REASONS

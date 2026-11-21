@@ -14726,6 +14726,8 @@ def _sync_local_run_from_remote(run, remote_data):
     owned = refresh_owned_run(run)
     if owned is not None:
         queue_hosted_quality_review_alert(owned)
+        from .staff_hold_alerts import queue_staff_hold_alert
+        queue_staff_hold_alert(owned)
         notify_after_staff_safety_verification(owned)
         return owned
     from content_factory.run_state import stale_execution_event
@@ -17152,7 +17154,20 @@ class VibeMarketingSettingsView(APIView):
             return saved
         # Full bootstrap may reconcile a setup PR through the worker. Commit
         # company/config writes before that worker reauthorizes this same org.
-        return Response(_serialize_bootstrap(saved, request=request), status=status.HTTP_200_OK)
+        payload = _serialize_bootstrap(saved, request=request)
+        if self.prepared_authors is not None and isinstance(payload, dict):
+            # Workstream 5: once the save has committed, warn (never block) about
+            # bio sentences the site's About page does not state. Off by default.
+            from .author_bio_check import author_bio_warnings
+            try:
+                warning = author_bio_warnings(self.prepared_authors,
+                                              getattr(getattr(saved, "organization", None), "domain", ""))
+            except Exception:  # noqa: BLE001 - a warning must never fail a saved profile
+                logger.warning("author_bio_check_failed", exc_info=True)
+                warning = None
+            if warning is not None:
+                payload = {**payload, "authorBioCheck": warning}
+        return Response(payload, status=status.HTTP_200_OK)
 
     @staticmethod
     def _authors_with_stored_photos(request):

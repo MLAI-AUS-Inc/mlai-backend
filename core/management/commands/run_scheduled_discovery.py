@@ -11,6 +11,7 @@ from core.slack_founder_link_retention import (
 )
 from content_analytics.services.report_scheduler import run_daily_article_report_scheduler
 from content_factory.founder_journey_alerts import run_founder_journey_alert_sweep
+from content_factory.staff_hold_alerts import run_staff_hold_alert_sweep
 from content_factory.founder_stuck_alerts import run_founder_stuck_alert_sweep
 from content_factory.system_stopped_runs import run_system_stopped_run_sweep
 from content_factory.website_connection_invariants import run_connection_invariant_sweep
@@ -137,6 +138,9 @@ class Command(BaseCommand):
             # per intro, recent intros only; COMMUNITY_CHAT_INTRO_WELCOME_ENABLED.
             ("chat_intro_welcomes", run_chat_intro_welcome_sweep),
             ("founder_journey_alerts", run_founder_journey_alert_sweep),
+            # Workstream 5: an article held for staff, and still held at 24 h.
+            # Off unless ARTICLES_STAFF_HOLD_ALERTS_ENABLED is true.
+            ("staff_hold_alerts", run_staff_hold_alert_sweep),
             # One "founder stuck" alert for every cohort: a stopped website
             # setup, a website step retrying too long, or a latest run stopped
             # with no next action. On unless ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED
