@@ -285,6 +285,7 @@ class LinearDeploymentWiringTests(unittest.TestCase):
             "APPROVED_MIGRATION_PLAN_SHA256": "a" * 64,
             "ROO_POINTS_LEVEL_UP_ENABLED": "false",
             "ROO_POINTS_NATIVE_ACTIVE_FROM": "",
+            "ROO_MANUAL_TIME_ENABLED": "false",
             "SYSTEM_EMAIL_RESEND_MESSAGES": "article_review_ready,monthly_update_7d",
         }
         keys = set(re.findall(r"^\s*install_remote_env_value ([A-Z0-9_]+)", (REPO_ROOT / "deploy.sh").read_text(), re.MULTILINE))
