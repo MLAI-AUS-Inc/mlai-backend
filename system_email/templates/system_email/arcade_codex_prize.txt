@@ -7,7 +7,8 @@ Your three reels lined up. Here’s your personal code.
 {{ activation_code }}
 
 Activate your credits at {{ activation_url }}
-
+{% if expiry_display %}Redeem before {{ expiry_display }}.
+{% endif %}
 1. Sign in to the ChatGPT account you use for Codex.
 2. Review the offer terms and confirm redemption.
 3. Open Codex with the same ChatGPT account.

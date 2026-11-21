@@ -2,6 +2,7 @@
 
 import logging
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
@@ -45,6 +46,12 @@ def _deliver(pk, now):
         if SystemEmail.objects.filter(idempotency_key=key).exclude(provider_message_id="").exists():
             _record(stock, "sent")
             return
+        # A scheduler tick can span multiple provider calls and wait on a row
+        # lock. Take a fresh time after the lock before dispatching this code.
+        expires = parse_datetime(stock.source.get("expiresAt") or "")
+        if expires and expires <= max(now, timezone.now()):
+            _record(stock, "needs_review", "code_expired_before_dispatch")
+            return
         first = parse_datetime(stock.metadata.get("firstAttempt", "")) or now
         if now - first >= RETRY_WINDOW:
             _record(stock, "needs_review", "provider_receipt_window")
@@ -67,6 +74,10 @@ def _deliver(pk, now):
         stock.occurred_at = now + timedelta(minutes=min(60, 2 ** min(attempt, 6)))
         stock.save(update_fields=("metadata", "occurred_at", "updated_at"))
         context = {"activation_code": code, "activation_url": CODEX_PREFIX + code}
+        if expires:
+            context["expiry_display"] = expires.astimezone(ZoneInfo("Australia/Melbourne")).strftime(
+                "%-d %B %Y at %-I:%M %p %Z"
+            )
 
     try:
         api.send(MESSAGE, to=email, user_id=stock.target_id, idempotency_key=key, context=context)

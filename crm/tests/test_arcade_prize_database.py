@@ -1,6 +1,7 @@
 """Real database stock, CRM permission and private Resend fulfillment regressions."""
 
 from datetime import timedelta
+from zoneinfo import ZoneInfo
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -28,8 +29,9 @@ class ArcadePrizeTests(TestCase):
         self.admin = get_user_model().objects.create_user("admin@example.test", is_superuser=True)
         self.winner = get_user_model().objects.create_user("winner@example.test", email_verified_at=timezone.now())
 
-    def stock(self, *codes):
-        return import_stock(self.admin, {"prize": "codex", "codes": list(codes)})
+    def stock(self, *codes, expires=None):
+        return import_stock(self.admin, {"prize": "codex", "codes": list(codes),
+                                        "expiresAt": expires.isoformat() if expires else None})
 
     def round(self):
         return Receipt.objects.create(community=community_id(), source_key=f"round-{Receipt.objects.count()}",
@@ -109,6 +111,7 @@ class ArcadePrizeTests(TestCase):
             self.assertIn("SYNTHETIC-PRIZE", part)
             self.assertIn(CODEX_PREFIX + "SYNTHETIC-PRIZE", part)
             self.assertIn("same", part)
+            self.assertNotIn("Redeem before", part)
         self.assertNotIn("SYNTHETIC", payload["subject"])
         self.assertNotIn("SYNTHETIC", str(list(SystemEmail.objects.values())) + str(list(CrmAuditEvent.objects.values())))
         self.assertEqual(Receipt.objects.get(pk=awarded["stockId"]).status, "sent")
@@ -129,3 +132,43 @@ class ArcadePrizeTests(TestCase):
         self.assertEqual(send.call_count, 2)
         self.assertEqual(stock_summary()["delivery"]["needsReview"], 1)
         self.assertEqual(stock_summary()["codex"]["available"], 0)
+
+    @patch("system_email.transport_resend.send")
+    def test_expiry_before_first_delivery_and_prior_acceptance_recovery(self, send):
+        now = timezone.now()
+        expiry = now + timedelta(minutes=3)
+        self.stock("TEST-EXPIRES", expires=expiry)
+        stock_id = reserve_prize(self.round(), "codex_credits", now)["stockId"]
+        # Even if the scheduler's original timestamp is before expiry, a slow
+        # previous delivery or a lock wait cannot make an expired code eligible.
+        with patch("crm.arcade_delivery.timezone.now", return_value=expiry):
+            _deliver(stock_id, now)
+        stock = Receipt.objects.get(pk=stock_id)
+        self.assertEqual((stock.status, stock.error), ("needs_review", "code_expired_before_dispatch"))
+        self.assertEqual(stock_summary()["codex"]["available"], 0)
+        send.assert_not_called()
+
+        # Model a worker restart after provider acceptance, before CRM persists it.
+        SystemEmail.objects.create(message_key="arcade_codex_prize", to_email=self.winner.email,
+                                   idempotency_key="arcade-codex/" + stock_id,
+                                   provider_message_id="mock-accepted", status="sent")
+        Receipt.objects.filter(pk=stock_id).update(status="email_pending")
+        _deliver(stock_id, expiry)
+        stock.refresh_from_db()
+        self.assertEqual((stock.status, stock.error), ("sent", ""))
+        send.assert_not_called()
+
+    @patch("system_email.transport_resend.send", side_effect=SystemEmailRetryable("timeout"))
+    def test_expiry_between_attempts_is_shown_in_first_email_and_stops_retry(self, send):
+        now = timezone.now()
+        expiry = now + timedelta(minutes=3)
+        self.stock("TEST-RETRY", expires=expiry)
+        stock_id = reserve_prize(self.round(), "codex_credits", now)["stockId"]
+        _deliver(stock_id, now)
+        payload = send.call_args.args[0]
+        deadline = expiry.astimezone(ZoneInfo("Australia/Melbourne")).strftime("%-d %B %Y at %-I:%M %p %Z")
+        for part in (payload["html"], payload["text"]):
+            self.assertIn(f"Redeem before {deadline}.", part)
+        _deliver(stock_id, expiry)
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(Receipt.objects.get(pk=stock_id).error, "code_expired_before_dispatch")

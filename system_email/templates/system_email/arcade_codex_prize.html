@@ -10,6 +10,7 @@
     <div style="font-size:13px;font-weight:bold;color:#17564d">Your Codex code</div>
     <div style="margin-top:4px;font:700 19px/1.4 Menlo,Consolas,monospace;color:#15181a;word-break:break-all">{{ activation_code }}</div>
   </td></tr></table>
+  {% if expiry_display %}<p style="margin:12px 0 0;color:#17564d;font-size:14px">Redeem before {{ expiry_display }}.</p>{% endif %}
   <p style="margin:20px 0 12px">Sign in to the ChatGPT account you use for Codex, review the offer terms and confirm redemption. Then open Codex with that same account.</p>
   <table role="presentation" cellpadding="0" cellspacing="0"><tr><td bgcolor="#075f55" style="border-radius:7px;background:#075f55">
     <a href="{{ activation_url }}" style="display:inline-block;padding:13px 22px;color:#ffffff;font-size:16px;font-weight:bold;text-decoration:none">Activate my credits</a>
