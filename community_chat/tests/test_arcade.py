@@ -32,7 +32,9 @@ class ArcadeOddsTests(SimpleTestCase):
     def test_cutoffs_and_all_real_prizes(self):
         with patch.object(arcade.secrets, "randbelow", side_effect=range(100)):
             self.assertEqual(Counter(arcade.draw_prize() for _ in range(100)),
-                             {"codex_credits": 1, "event_ticket": 8, "roo_points": 56, "none": 35})
+                             {("codex_credits", 0): 1, ("event_ticket", 0): 8,
+                              ("roo_points", 10): 7, ("roo_points", 5): 19,
+                              ("roo_points", 1): 30, ("none", 0): 35})
 
 
 @override_settings(**FLAGS)
@@ -69,7 +71,7 @@ class ArcadeTests(TestCase):
         rounds = arcade.rounds_for(self.member).order_by("source__level")
         self.assertEqual([row.source for row in rounds],
                          [{"trigger": "level", "level": 1}, {"trigger": "level", "level": 2}])
-        with patch.object(arcade, "draw_prize", return_value="roo_points"):
+        with patch.object(arcade, "draw_prize", return_value=("roo_points", 5)):
             arcade.spin(self.member, rounds[0].pk)
         self.assertEqual(contribution_total(self.member), 25_000_000)
         self.assertEqual(rounds.count(), 2)
@@ -88,7 +90,7 @@ class ArcadeTests(TestCase):
                          [{"id": str(row.pk), "trigger": "pulse", "prize": None}])
         self.assertEqual(self.client.post(f"{API}{other.pk}/spin/").status_code, 404)
         self.assertEqual(self.client.post(f"{API}{row.pk}/acknowledge/").status_code, 409)
-        with patch.object(arcade, "draw_prize", return_value="roo_points") as draw:
+        with patch.object(arcade, "draw_prize", return_value=("roo_points", 5)) as draw:
             first = self.client.post(f"{API}{row.pk}/spin/", {"prize": "codex_credits"})
             again = self.client.post(f"{API}{row.pk}/spin/")
             self.assertEqual((first.status_code, again.data), (200, first.data))
@@ -104,10 +106,24 @@ class ArcadeTests(TestCase):
         self.client.force_authenticate(user=None)
         self.assertIn(self.client.get(API).status_code, (401, 403))
 
+    def test_each_roo_prize_credits_its_exact_amount_and_replays(self):
+        with patch.object(arcade.secrets, "randbelow", side_effect=[9, 16, 35]) as draw:
+            for draft_id, points in enumerate((10, 5, 1)):
+                row = arcade.earn_pulse_round(self.member, draft_id)
+                path = f"{API}{row.pk}/spin/"
+                result = self.client.post(path)
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual((result.data["prize"], result.data["points"]), ("roo_points", points))
+                self.assertEqual(self.client.post(path).data, result.data)
+        self.assertEqual(draw.call_count, 3)
+        self.assertEqual(PointsAccount.objects.get(user=self.member).balance, 16)
+
     def test_missing_stock_substitutes_wallet_credit_and_a_miss_pays_nothing(self):
-        with patch.object(arcade, "draw_prize", side_effect=["codex_credits", "event_ticket", "none"]):
+        with patch.object(arcade, "draw_prize",
+                          side_effect=[("codex_credits", 0), ("event_ticket", 0), ("none", 0)]):
             results = [arcade.spin(self.member, arcade.earn_pulse_round(self.member, i).pk) for i in range(3)]
         self.assertEqual([r["prize"] for r in results], ["roo_points", "roo_points", "none"])
+        self.assertEqual([r.get("points") for r in results], [5, 5, None])
         self.assertEqual(PointsAccount.objects.get(user=self.member).balance, 10)
 
     @override_settings(SYSTEM_EMAIL_RESEND_API_KEY="synthetic-test-only",
@@ -132,7 +148,7 @@ class ArcadeTests(TestCase):
         earned, = self.client.get(API).data["rounds"]
         self.assertEqual((earned["trigger"], earned["level"], earned["prize"]), ("level", 1, None))
         spin_url = f"{API}{earned['id']}/spin/"
-        with patch.object(arcade, "draw_prize", return_value="codex_credits") as draw:
+        with patch.object(arcade, "draw_prize", return_value=("codex_credits", 0)) as draw:
             result = self.client.post(spin_url)
             self.assertEqual(result.data, {**earned, "prize": "codex_credits"})
             self.assertEqual(self.client.post(spin_url).data, result.data)
@@ -159,7 +175,7 @@ class ArcadeTests(TestCase):
                                   "eventName": "MLAI demo night", "eventUrl": "https://lu.ma/demo",
                                   "expiresAt": (timezone.now() + timedelta(days=7)).isoformat()})
         row = arcade.earn_pulse_round(self.member, 700)
-        with patch.object(arcade, "draw_prize", return_value="event_ticket"):
+        with patch.object(arcade, "draw_prize", return_value=("event_ticket", 0)):
             result = self.client.post(f"{API}{row.pk}/spin/")
             self.assertEqual(result.data["ticketCode"], "SYNTHETIC-HALF")
             self.assertEqual(result.data["eventUrl"], "https://lu.ma/demo")
@@ -172,7 +188,7 @@ class ArcadeTests(TestCase):
 
     def test_failed_wallet_write_preserves_entitlement(self):
         row = arcade.earn_pulse_round(self.member, 124)
-        with patch.object(arcade, "draw_prize", return_value="roo_points"), \
+        with patch.object(arcade, "draw_prize", return_value=("roo_points", 5)), \
              patch.object(PointsService, "award", side_effect=ValueError("Unavailable")), \
              self.assertRaises(ValueError):
             arcade.spin(self.member, row.pk)
@@ -196,7 +212,7 @@ class ConcurrentArcadeTests(TransactionTestCase):
             finally:
                 connections.close_all()
 
-        with patch.object(arcade, "draw_prize", return_value="roo_points"), ThreadPoolExecutor(2) as pool:
+        with patch.object(arcade, "draw_prize", return_value=("roo_points", 5)), ThreadPoolExecutor(2) as pool:
             tickets = [pool.submit(pull) for _ in range(2)]
             self.assertEqual(tickets[0].result(timeout=15), tickets[1].result(timeout=15))
         self.assertEqual(Ledger.objects.filter(user=member, reference_type="MLAI_ARCADE").count(), 1)
@@ -224,7 +240,7 @@ class ConcurrentArcadeTests(TransactionTestCase):
             finally:
                 connections.close_all()
 
-        with patch.object(arcade, "draw_prize", return_value="codex_credits"), ThreadPoolExecutor(2) as pool:
+        with patch.object(arcade, "draw_prize", return_value=("codex_credits", 0)), ThreadPoolExecutor(2) as pool:
             draws = [pool.submit(pull, entry) for entry in entries]
             self.assertCountEqual([draw.result(timeout=15) for draw in draws], ["codex_credits", "roo_points"])
         self.assertEqual(stock_summary()["codex"], {"available": 1, "reserved": 1})

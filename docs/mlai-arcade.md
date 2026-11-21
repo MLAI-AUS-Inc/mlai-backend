@@ -25,12 +25,15 @@ acknowledged. Cross-account UUIDs return 404.
 
 | Draw | Initial chance | What the member receives |
 | --- | --- | --- |
-| `roo_points` | 56% | Five spendable Roo points, credited once to their account. The payload includes `points`. |
-| `event_ticket` | 8% | A stocked one-use half-price event ticket code. The payload includes `eventName`, `eventUrl`, and `ticketCode`. |
+| `roo_points` | 7% | 10 Roo points, credited to the member's wallet. |
+| `roo_points` | 19% | 5 Roo points, credited to the member's wallet. |
+| `roo_points` | 30% | 1 Roo point, credited to the member's wallet. |
+| `event_ticket` | 8% | One use of a stocked half-price ticket code for an MLAI event. The payload includes `eventName`, `eventUrl`, and `ticketCode`. |
 | `codex_credits` | 1% | A $50 Codex credit code, emailed to the winner's verified account address. The API never returns a Codex code. |
 | `none` | 35% | No prize. |
 
-An unavailable ticket or Codex draw pays five Roo points. Codex eligibility also
+The points payload includes the awarded amount in `points`. An unavailable
+ticket or Codex draw pays 5 Roo points. Codex eligibility also
 requires an eligible recipient, configured sender, available stock and at least
 36 hours since the previous Codex award. At capacity the first and twentieth
 awards fall at least 28½ days apart. Lower activity stretches the stock further.

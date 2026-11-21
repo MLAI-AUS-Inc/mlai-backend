@@ -14,7 +14,7 @@ from .volunteer.ladder import level_for
 from .volunteer.models import VolunteerSourceReceipt
 
 ORIGIN = "mlai_arcade"
-POINTS = 5
+FALLBACK_POINTS = 5
 
 
 def _earn_round(user, key, source):
@@ -85,16 +85,20 @@ def round_payload(round_):
     return result
 
 
-def draw_prize():
-    """A one-percent Codex draw precedes the stock and cadence checks."""
+def draw_prize() -> tuple[str, int]:
+    """Draw the prize and its Roo amount before applying availability rules."""
     draw = secrets.randbelow(100)
     if draw < 1:
-        return "codex_credits"
+        return "codex_credits", 0
     if draw < 9:
-        return "event_ticket"
+        return "event_ticket", 0
+    if draw < 16:
+        return "roo_points", 10
+    if draw < 35:
+        return "roo_points", 5
     if draw < 65:
-        return "roo_points"
-    return "none"
+        return "roo_points", 1
+    return "none", 0
 
 
 @transaction.atomic
@@ -106,12 +110,12 @@ def spin(user, round_id):
     member = get_object_or_404(get_user_model().objects.select_for_update(), pk=user.pk, is_active=True)
     row = get_object_or_404(rounds_for(member).select_for_update(), pk=round_id)
     if row.status == "ready":
-        prize = draw_prize()
+        prize, points = draw_prize()
         result = {}
         if prize in ("codex_credits", "event_ticket"):
             stock = reserve_prize(row, prize, timezone.now())
             if stock is None:
-                prize = "roo_points"
+                prize, points = "roo_points", FALLBACK_POINTS
             else:
                 result.update(stock)
         if prize == "roo_points":
@@ -119,11 +123,11 @@ def spin(user, round_id):
             # Establish a fresh member's opening before this wallet-only credit.
             state_for(member)
             ledger, _ = PointsService.award(
-                user=member, delta=POINTS, source="EVENT", description="MLAI Arcade prize",
+                user=member, delta=points, source="EVENT", description="MLAI Arcade prize",
                 created_by_slack_id="mlai-arcade", idempotency_key=f"arcade:points:{row.pk}",
                 reference_type="MLAI_ARCADE", reference_id=str(row.pk),
             )
-            result.update(points=POINTS, ledgerId=ledger.pk)
+            result.update(points=points, ledgerId=ledger.pk)
         row.metadata = {**result, "prize": prize}
         row.status = "revealed"
         row.save(update_fields=("metadata", "status", "updated_at"))
