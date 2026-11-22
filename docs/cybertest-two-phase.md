@@ -61,7 +61,9 @@ All required substantive checks plus a saved report meet minimum delivery.
 Finding count is irrelevant. Optional omissions produce partial coverage and
 do not force refunds. Below-minimum basic delivery retains only verified model
 usage using the receipt's conversion snapshot, capped at the basic price paid. Unknown
-usage leaves settlement pending rather than guessing. Below-minimum upgrades
+usage leaves paid basic settlement pending. With sponsored basic delivery below
+the minimum, the receipt settles with zero points charged or refunded even if
+provider usage is unavailable. Below-minimum upgrades
 refund the full 24 or 100 point difference even if usage is unknown; the parent
 receipt is untouched. Replaying identical settlement is safe; contradictory
 evidence is rejected. Disabling new billing does not disable compensation.
