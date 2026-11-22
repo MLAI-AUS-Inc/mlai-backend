@@ -1,0 +1,10 @@
+[Unit]
+Description=Run a scheduled discovery tick inside the isolated MLAI Chat staging API
+After=docker.service mlai-staging-network-policy.service mlai-backend-staging-api.service
+Requires=docker.service mlai-staging-network-policy.service
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/usr/bin/python3 /etc/mlai-backend-staging-auto-deploy/scheduler-tick.py
+TimeoutStartSec=3min
