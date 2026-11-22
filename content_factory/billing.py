@@ -218,6 +218,53 @@ def _points(count: int) -> str:
     return "point" if count == 1 else "points"
 
 
+# Payload keys that make Content Factory judge a discovery run as island
+# research (CF main.py ``_content_island_payload_from_request``), or that send
+# it to the island-research endpoint. Those gates accept the paid charge
+# itself; every other topic research is gated as ``topic_discovery`` on the
+# 6-point floor against the balance left after the backend's charge.
+_ISLAND_RESEARCH_KEYS = (
+    "content_island_slug", "contentIslandSlug", "content_island_name", "contentIslandName",
+    "content_island_keyword", "contentIslandKeyword", "content_island_icon_key", "contentIslandIconKey",
+    "content_island_color_key", "contentIslandColorKey", "content_island_context", "island_research_brief",
+)
+
+
+def research_needs_minimum_balance(payload) -> bool:
+    """Whether Content Factory checks the 6-point floor before this paid research starts.
+
+    A granted free first topic batch never reaches this check: it carries an
+    'entitled' stamp that Content Factory accepts at any balance.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+
+    def present(value):
+        return bool(value) if isinstance(value, (dict, list)) else bool(str(value or "").strip())
+
+    return not any(present(payload.get(key)) for key in _ISLAND_RESEARCH_KEYS)
+
+
+def build_research_minimum_balance_payload(*, domain: Optional[str], current_balance: Optional[int],
+                                           cost_points: int, already_charged: bool = False) -> dict:
+    """The 402 body for paid research that Content Factory would refuse on its floor.
+
+    ``required_points`` is the balance needed before the charge: the price
+    plus the floor that must still be left when Content Factory checks. A
+    replay whose charge already happened needs only the floor.
+    """
+    minimum = CONTENT_FACTORY_MINIMUM_AI_AGENT_POINTS
+    cost = int(cost_points or 0)
+    required = minimum + (0 if already_charged else cost)
+    balance = int(current_balance or 0)
+    payload = build_roo_points_payload(domain=domain, action=CONTENT_FACTORY_ACTION_CONTENT_ISLAND_TOPIC_GENERATION,
+        current_balance=balance, required_points=required, cost_points=cost)
+    message = (f"Finding topics uses {cost} {_points(cost)}, and research needs {minimum} points left to start. "
+               f"You have {balance}.")
+    payload.update(error=message, detail=message, message=message, minimum_balance_points=minimum,
+                   shortfall_points=max(1, required - balance))
+    return payload
+
+
 def build_roo_points_payload(
     *,
     domain: Optional[str],

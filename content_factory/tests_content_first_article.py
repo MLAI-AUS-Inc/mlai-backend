@@ -75,10 +75,7 @@ class CardFixture:
                                                            self.built.company, self.built.config)
 
     def make_org(self, domain=None, *, email=None):
-        built = make_new_journey_org(domain)
-        if email:
-            built.owner.email = email
-            built.owner.save(update_fields=["email"])
+        built = make_new_journey_org(domain, owner_email=email)
         if self.one_liner:
             StartupProfile.objects.update_or_create(organization=built.organization,
                                                     defaults={"short_description": self.one_liner})

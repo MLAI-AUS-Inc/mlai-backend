@@ -17,7 +17,7 @@ class SourceCapabilityTests(SimpleTestCase):
         for provider in lifecycle.UPDATE_PROVIDERS:
             source = lifecycle.source_capabilities({"key": provider, "configured": True, "status": "not_connected"})
             self.assertEqual(source["connectMode"], "api_key" if provider in {"luma", "humanitix"} else "oauth")
-            self.assertTrue(source["canConnect"])
+            self.assertEqual(source["canConnect"], provider not in lifecycle.HIDDEN_PULSE_PROVIDERS)
             self.assertFalse(source["canDisconnect"])
             self.assertFalse(source["usableForUpdates"])
 
@@ -81,11 +81,14 @@ class ConnectionActionsTests(SimpleTestCase):
         view = connections.ConnectView()
         view.company = Obj(pk="company")
         request = Obj(user=Obj(pk=7), auth=Obj(pk="session"), build_absolute_uri=lambda path: "https://api.example" + path)
-        for provider in connections.PROVIDERS:
+        for provider in connections.PROVIDERS - lifecycle.HIDDEN_PULSE_PROVIDERS:
             response = view.post(request, provider)
             ticket = parse_qs(urlsplit(response.data["authorizationUrl"]).query)["ticket"][0]
             payload = signing.loads(ticket, salt=connections.SALT)
             self.assertEqual((payload["company"], payload["provider"], payload["session"]), ("company", provider, "session"))
+        for provider in ("google_drive", "google-drive"):
+            with self.subTest(provider=provider), self.assertRaises(ValidationError):
+                view.post(request, provider)
 
     def test_api_key_connectors_delegate_to_existing_validated_scoped_views(self):
         view = connections.ConnectView()

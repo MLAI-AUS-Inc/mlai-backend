@@ -506,7 +506,7 @@
       "identity": "content_factory/failure_policy_engine.py:_execute_run:9dafb5e1e6a42ea00eca1cb80c500dba33bc4beac02348091989e208f5012c33:1",
       "path": "content_factory/failure_policy_engine.py",
       "function": "_execute_run",
-      "line": 409,
+      "line": 545,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -518,13 +518,14 @@
         "operation"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "96876e7cc79986959cd3707eab0d9232f209b110908194bf611b0b46e6c41ac0",
+      "function_sha256": "7bdd28ae8cba769eb682842cf742bca615bbc9e9fba4cda938f42b974ef3cba2",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
-        "content_factory/tests_failure_policy.py"
+        "content_factory/tests_failure_policy.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "This newly inferred save is WebsiteConnectionOperation receipt/payload/state, not Run; the enclosing legacy policy executor freshly refuses owned Run before effects.",
+      "reason": "This newly inferred save is WebsiteConnectionOperation receipt/payload/state, not Run; the enclosing legacy policy executor freshly refuses owned Run before effects. A capped stop records the engine stop under self_heal_v1.stop beside the unchanged original error_code (B2, flagged).",
       "guard": "_fresh_owned_run early return; decide/apply/scheduler owned-goal child defer; operation queryset/type.",
       "pending_owner": null
     },
@@ -532,7 +533,7 @@
       "identity": "content_factory/founder_journey_alerts.py:queue_founder_journey_alerts_batch:5adbb928cf9ff656c8d707d2d99bb4b0f42e21b84fa7ad4138037ebea720ca8f:1",
       "path": "content_factory/founder_journey_alerts.py",
       "function": "queue_founder_journey_alerts_batch",
-      "line": 277,
+      "line": 330,
       "kind": "model_bulk_update",
       "fields": [],
       "statement_sha256": "5adbb928cf9ff656c8d707d2d99bb4b0f42e21b84fa7ad4138037ebea720ca8f",
@@ -540,12 +541,14 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "f2b13d3b4c1a449546dc903f63dd7826a384c1985c5c91ec3402256dd219283c",
+      "function_sha256": "c2177b8cedf585cc1b466db6aff04dd54f1c80aa489aa0c71f6b01e0844dc7d4",
       "classification": "owned_backend_observation",
       "test_refs": [
-        "content_factory/tests_founder_journey_alerts.py"
+        "content_factory/tests_founder_journey_alerts.py",
+        "content_factory/tests_background_alert_audience.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Bulk target writes only ops-alert result receipts on fresh locked Run rows, never status/approval/request/clocks.",
+      "reason": "Bulk target writes only ops-alert result receipts on fresh locked Run rows, never status/approval/request/clocks; scheduler runs are skipped and get no receipt (A2). run_terminal and self_heal_capped default to the run incident slot (B5); the written fields are unchanged. F1 review: a marked test organisation is skipped before any receipt or Run mirror write, so the change only removes writes and adds no ContentFactoryRun state.",
       "guard": "Independent backend alert receipt namespace; bulk_update fields exactly result.",
       "pending_owner": null
     },
@@ -1444,7 +1447,7 @@
       "identity": "content_factory/run_ownership.py:reserve_admitted_run:6d456f927b6ca4618878d69efe45c83b07714799f1258c7c4d1c62105c2b3fde:1",
       "path": "content_factory/run_ownership.py",
       "function": "reserve_admitted_run",
-      "line": 370,
+      "line": 408,
       "kind": "model_get_or_create",
       "fields": [],
       "statement_sha256": "6d456f927b6ca4618878d69efe45c83b07714799f1258c7c4d1c62105c2b3fde",
@@ -1452,7 +1455,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "0eb37a174c838d00f384722e150d51d52219457f825090139922a23269cdce7f",
+      "function_sha256": "15865b67cbbdd17d96823a80d90678a6e8473423f2d035dbd827acd2566c1534",
       "classification": "new_admission",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
@@ -1513,7 +1516,7 @@
       "identity": "content_factory/service_views.py:_sync_generation_callback_to_run:cc48be87c6fa708e91aeb7e30727cefc8ec9440cfc2087ca01dea10125975a8b:1",
       "path": "content_factory/service_views.py",
       "function": "_sync_generation_callback_to_run",
-      "line": 2370,
+      "line": 2382,
       "kind": "model_update_or_create",
       "fields": [],
       "statement_sha256": "cc48be87c6fa708e91aeb7e30727cefc8ec9440cfc2087ca01dea10125975a8b",
@@ -1521,7 +1524,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "57f85e38f71632f6b4f223a7e56d0c96143bb59eb7ca1b8e0cdbe4d5b6a10b5f",
+      "function_sha256": "579864e0f5aa010053903539c465fd14e38727a44cb3a3530f23bd187b4932ee",
       "classification": "upstream_legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_retired_writers.py",
@@ -1582,7 +1585,7 @@
       "identity": "content_factory/service_views.py:_sync_generation_callback_to_run:0c3203e7fb433b0688a3107b99417c9aee70dab15ade328f72cddb23ca12c1d6:1",
       "path": "content_factory/service_views.py",
       "function": "_sync_generation_callback_to_run",
-      "line": 2394,
+      "line": 2406,
       "kind": "model_update_or_create",
       "fields": [],
       "statement_sha256": "0c3203e7fb433b0688a3107b99417c9aee70dab15ade328f72cddb23ca12c1d6",
@@ -1590,7 +1593,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "57f85e38f71632f6b4f223a7e56d0c96143bb59eb7ca1b8e0cdbe4d5b6a10b5f",
+      "function_sha256": "579864e0f5aa010053903539c465fd14e38727a44cb3a3530f23bd187b4932ee",
       "classification": "upstream_legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_retired_writers.py",
@@ -1670,12 +1673,12 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "e578815f9c01991ddb9d32e0bde28736400b8f7d6f80f12f09d20be7d783b0b5",
+      "function_sha256": "593d0459a0f95e81ae00e30366d99ad66f5400294261d69a85af71fe0b7efe4a",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_retired_writers.py"
       ],
-      "reason": "Old Valley telemetry refuses actual event owner with409 before serializer/meta/history/clocks.",
+      "reason": "Job bookkeeping runs under the same run-row lock as execution claims so stale tracking cannot replace a successor fence. The typed-owner early return remains in place.",
       "guard": "Fresh actual Run authoritative_run check before mutation; c3aa1ede.",
       "pending_owner": null
     },
@@ -1773,7 +1776,7 @@
       "identity": "content_factory/service_views.py:_sync_content_factory_run_snapshot:c736ee99721570dc19466f8bd927879f1f9368291d2c0aaf51c569cb6651e265:1",
       "path": "content_factory/service_views.py",
       "function": "_sync_content_factory_run_snapshot",
-      "line": 9139,
+      "line": 9248,
       "kind": "model_get_or_create",
       "fields": [],
       "statement_sha256": "c736ee99721570dc19466f8bd927879f1f9368291d2c0aaf51c569cb6651e265",
@@ -1783,12 +1786,12 @@
         "locked_runs"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "3dedb617dbe7a3508003014067826a5c609d74ed35ec1e77b5a21c5b87e1e313",
+      "function_sha256": "58b5fbd2e2cd43283a231f80dbcf49545b3555c1897aae69228f4f4f9af7ee1f",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
       ],
-      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority.",
+      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority. A worker snapshot that is blocked only for founder factual review (result.review_required) is stored as completed with resume_available false, so the saved draft does not hold an open run that blocks the next Pulse draft; this happens after the authoritative early return and does not change the guard.",
       "guard": "Fresh locked authoritative_run(existing_run) early return; backend-private keys stripped/preserved.",
       "pending_owner": null
     },
@@ -1796,7 +1799,7 @@
       "identity": "content_factory/service_views.py:_sync_content_factory_run_snapshot:9658931d6d53055eee98af491523a9fdefd04dfbcab343675a7105cb3d5ebd7e:1",
       "path": "content_factory/service_views.py",
       "function": "_sync_content_factory_run_snapshot",
-      "line": 9231,
+      "line": 9345,
       "kind": "model_update_or_create",
       "fields": [],
       "statement_sha256": "9658931d6d53055eee98af491523a9fdefd04dfbcab343675a7105cb3d5ebd7e",
@@ -1804,12 +1807,12 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "3dedb617dbe7a3508003014067826a5c609d74ed35ec1e77b5a21c5b87e1e313",
+      "function_sha256": "58b5fbd2e2cd43283a231f80dbcf49545b3555c1897aae69228f4f4f9af7ee1f",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
       ],
-      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority.",
+      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority. A worker snapshot that is blocked only for founder factual review (result.review_required) is stored as completed with resume_available false, so the saved draft does not hold an open run that blocks the next Pulse draft; this happens after the authoritative early return and does not change the guard.",
       "guard": "Fresh locked authoritative_run(existing_run) early return; backend-private keys stripped/preserved.",
       "pending_owner": null
     },
@@ -1817,7 +1820,7 @@
       "identity": "content_factory/service_views.py:_sync_content_factory_run_snapshot:eb8e3160ac24440e1adcedc82dc3d63ab1d882e4828e51493f88dce3eccb93dc:1",
       "path": "content_factory/service_views.py",
       "function": "_sync_content_factory_run_snapshot",
-      "line": 9235,
+      "line": 9349,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -1829,12 +1832,12 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "3dedb617dbe7a3508003014067826a5c609d74ed35ec1e77b5a21c5b87e1e313",
+      "function_sha256": "58b5fbd2e2cd43283a231f80dbcf49545b3555c1897aae69228f4f4f9af7ee1f",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
       ],
-      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority.",
+      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority. A worker snapshot that is blocked only for founder factual review (result.review_required) is stored as completed with resume_available false, so the saved draft does not hold an open run that blocks the next Pulse draft; this happens after the authoritative early return and does not change the guard.",
       "guard": "Fresh locked authoritative_run(existing_run) early return; backend-private keys stripped/preserved.",
       "pending_owner": null
     },
@@ -1842,7 +1845,7 @@
       "identity": "content_factory/service_views.py:_sync_content_factory_run_snapshot:af11c36f9a6d10b772242707fadaad759efadf45fe07524f7b03c35a26e84460:1",
       "path": "content_factory/service_views.py",
       "function": "_sync_content_factory_run_snapshot",
-      "line": 9268,
+      "line": 9382,
       "kind": "model_delete",
       "fields": [],
       "statement_sha256": "af11c36f9a6d10b772242707fadaad759efadf45fe07524f7b03c35a26e84460",
@@ -1852,12 +1855,12 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "3dedb617dbe7a3508003014067826a5c609d74ed35ec1e77b5a21c5b87e1e313",
+      "function_sha256": "58b5fbd2e2cd43283a231f80dbcf49545b3555c1897aae69228f4f4f9af7ee1f",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
       ],
-      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority.",
+      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority. A worker snapshot that is blocked only for founder factual review (result.review_required) is stored as completed with resume_available false, so the saved draft does not hold an open run that blocks the next Pulse draft; this happens after the authoritative early return and does not change the guard.",
       "guard": "Fresh locked authoritative_run(existing_run) early return; backend-private keys stripped/preserved.",
       "pending_owner": null
     },
@@ -1865,7 +1868,7 @@
       "identity": "content_factory/service_views.py:ContentFactoryCallbackView._dispatch_ordered_callback:d2e429d50e840f3fd3b78c5061b113b972ab7ed3903ef0585638d93fd73836a1:1",
       "path": "content_factory/service_views.py",
       "function": "ContentFactoryCallbackView._dispatch_ordered_callback",
-      "line": 3932,
+      "line": 3956,
       "kind": "model_get_or_create",
       "fields": [],
       "statement_sha256": "d2e429d50e840f3fd3b78c5061b113b972ab7ed3903ef0585638d93fd73836a1",
@@ -1873,7 +1876,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "07de3594b43c54d6877146a02bb39085b76eb012a38a0990ea331e32ed708585",
+      "function_sha256": "2fafb8f0719183b6cff5e1c8f0f6fae3ec9db66d93dfe7ff4f3d6cbaf86a8a0e",
       "classification": "upstream_legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_event_callback.py",
@@ -1889,7 +1892,7 @@
       "identity": "content_factory/service_views.py:ContentFactoryCallbackView._dispatch_ordered_callback:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:1",
       "path": "content_factory/service_views.py",
       "function": "ContentFactoryCallbackView._dispatch_ordered_callback",
-      "line": 3945,
+      "line": 3969,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -1901,7 +1904,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "07de3594b43c54d6877146a02bb39085b76eb012a38a0990ea331e32ed708585",
+      "function_sha256": "2fafb8f0719183b6cff5e1c8f0f6fae3ec9db66d93dfe7ff4f3d6cbaf86a8a0e",
       "classification": "upstream_legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_event_callback.py",
@@ -1917,7 +1920,7 @@
       "identity": "content_factory/service_views.py:_sync_content_factory_run_snapshot:da0d7c616ae6a1c5835d56850ae0983c99bad7f33731172fc294909113dd3b9a:1",
       "path": "content_factory/service_views.py",
       "function": "_sync_content_factory_run_snapshot",
-      "line": 9245,
+      "line": 9359,
       "kind": "model_create",
       "fields": [],
       "statement_sha256": "da0d7c616ae6a1c5835d56850ae0983c99bad7f33731172fc294909113dd3b9a",
@@ -1925,12 +1928,12 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "3dedb617dbe7a3508003014067826a5c609d74ed35ec1e77b5a21c5b87e1e313",
+      "function_sha256": "58b5fbd2e2cd43283a231f80dbcf49545b3555c1897aae69228f4f4f9af7ee1f",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
       ],
-      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority.",
+      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority. A worker snapshot that is blocked only for founder factual review (result.review_required) is stored as completed with resume_available false, so the saved draft does not hold an open run that blocks the next Pulse draft; this happens after the authoritative early return and does not change the guard.",
       "guard": "Fresh locked authoritative_run(existing_run) early return; backend-private keys stripped/preserved.",
       "pending_owner": null
     },
@@ -1962,7 +1965,7 @@
       "identity": "content_factory/service_views.py:_sync_content_factory_run_snapshot:9c242e937382cdb29a1d60bc83cef8504e97c62ffa1b377bd3fe3ac902833b01:1",
       "path": "content_factory/service_views.py",
       "function": "_sync_content_factory_run_snapshot",
-      "line": 9260,
+      "line": 9374,
       "kind": "model_create",
       "fields": [],
       "statement_sha256": "9c242e937382cdb29a1d60bc83cef8504e97c62ffa1b377bd3fe3ac902833b01",
@@ -1970,12 +1973,12 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "3dedb617dbe7a3508003014067826a5c609d74ed35ec1e77b5a21c5b87e1e313",
+      "function_sha256": "58b5fbd2e2cd43283a231f80dbcf49545b3555c1897aae69228f4f4f9af7ee1f",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
       ],
-      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority.",
+      "reason": "Worker snapshots return current owned projection before defaults, lifecycle, request, Step or Attempt writes. Snapshots cannot enroll authority. A worker snapshot that is blocked only for founder factual review (result.review_required) is stored as completed with resume_available false, so the saved draft does not hold an open run that blocks the next Pulse draft; this happens after the authoritative early return and does not change the guard.",
       "guard": "Fresh locked authoritative_run(existing_run) early return; backend-private keys stripped/preserved.",
       "pending_owner": null
     },
@@ -2035,7 +2038,7 @@
       "identity": "content_factory/setup_delivery_receiver.py:receive_setup_delivery:b8e720fb0eea1b9882d577e62eccfe00941ac3979926d06f7f96b07cff42a077:1",
       "path": "content_factory/setup_delivery_receiver.py",
       "function": "receive_setup_delivery",
-      "line": 445,
+      "line": 447,
       "kind": "model_create",
       "fields": [
         "run_request"
@@ -2045,7 +2048,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "19882ee1bcb322ba8da3d79d56c7c301c39aa12bcd75ef31db928311dfe712a6",
+      "function_sha256": "af3330c87d2681c9a81107f990f07031fd539bff3a837d9a04dc09af9bfb08a1",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
@@ -2058,7 +2061,7 @@
       "identity": "content_factory/setup_delivery_receiver.py:receive_setup_delivery:fc0841298ead88bb8c5b0c7b14c704e80362c2198a09c314b9e51e23f5f501b3:1",
       "path": "content_factory/setup_delivery_receiver.py",
       "function": "receive_setup_delivery",
-      "line": 451,
+      "line": 453,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -2070,7 +2073,7 @@
         "operation"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "19882ee1bcb322ba8da3d79d56c7c301c39aa12bcd75ef31db928311dfe712a6",
+      "function_sha256": "af3330c87d2681c9a81107f990f07031fd539bff3a837d9a04dc09af9bfb08a1",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_verified_delivery.py"
@@ -2118,12 +2121,12 @@
         "locked"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "235249971042aa74927dd80af7b312193438dde4de61c8b2f44498a323e27200",
+      "function_sha256": "2c8911862a3d69f89a0ccf99b788c9cac6dc6a0d986464b71b7b4a341ef3078b",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_source_operation_control.py"
       ],
-      "reason": "Owned source change delegates to strict backend source-repin control/ticket path; legacy request mutation is below owned early return.",
+      "reason": "Owned source change delegates to strict backend source-repin control/ticket path; legacy request mutation is below owned early return. Re-reviewed 21 Nov 2026 (owner approved, backend #1399): ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED (default off) routes the moved-head decision through resolve_run_source; with it off the existing path is unchanged.",
       "guard": "_repin_owned_source and immutable original digest/current scope/budget/source proof.",
       "pending_owner": null
     },
@@ -2977,7 +2980,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:a1a285a9d42b926c2996cce6d69065829e73c1dc4a8de28e218ec2483e708f5e:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 21252,
+      "line": 21408,
       "kind": "inferred_run_save",
       "fields": [
         "approval_state",
@@ -2994,7 +2997,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
+      "function_sha256": "927c6465c0af8e0f79e0d307ffd61baaf9987aa61ea9b20a2690753ff81043cb",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3002,9 +3005,10 @@
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
         "content_factory/tests_founder_run_commands.py",
-        "content_factory/tests_founder_library_commands.py"
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged. A resume of a refunded or released run is refused with 409 before any write or dispatch (B1, D16).",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3089,7 +3093,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:6a7c9391187a262de03d7c2cb786c5c72bbdf212a8f9913b0b15ea15ce44683d:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15456,
+      "line": 15564,
       "kind": "inferred_run_save",
       "fields": [
         "run_request",
@@ -3102,13 +3106,14 @@
         "portable_reservation"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
+      "function_sha256": "3b5cefca8cabe186ea0a2eae9263c4ca75db30571e3b1528cb43e2cb8f8720f1",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
-        "content_factory/tests_run_ownership.py"
+        "content_factory/tests_run_ownership.py",
+        "content_factory/tests_research_minimum_balance.py"
       ],
-      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation.",
+      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation. A CF 4xx refusal that is not an explicit dispatch_rejected now records only its own error_code on remote_data (A18); status, ownership and refund paths are unchanged.",
       "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback. Retain dispatch-key lookup and refund reconciliation. Reserve fresh research for reset companies and stop new dispatch on a changed workspace.",
       "pending_owner": null
     },
@@ -3116,7 +3121,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 20868,
+      "line": 21024,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3128,7 +3133,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
+      "function_sha256": "927c6465c0af8e0f79e0d307ffd61baaf9987aa61ea9b20a2690753ff81043cb",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3136,9 +3141,10 @@
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
         "content_factory/tests_founder_run_commands.py",
-        "content_factory/tests_founder_library_commands.py"
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged. A resume of a refunded or released run is refused with 409 before any write or dispatch (B1, D16).",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3146,7 +3152,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:2",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 20918,
+      "line": 21074,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3158,7 +3164,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
+      "function_sha256": "927c6465c0af8e0f79e0d307ffd61baaf9987aa61ea9b20a2690753ff81043cb",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3166,9 +3172,10 @@
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
         "content_factory/tests_founder_run_commands.py",
-        "content_factory/tests_founder_library_commands.py"
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged. A resume of a refunded or released run is refused with 409 before any write or dispatch (B1, D16).",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3176,7 +3183,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:3418387b1f3686713bd20e8926e5824cf845c9fb6b6b0eff05d165df49eadd92:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 20957,
+      "line": 21113,
       "kind": "inferred_run_save",
       "fields": [
         "status",
@@ -3190,7 +3197,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
+      "function_sha256": "927c6465c0af8e0f79e0d307ffd61baaf9987aa61ea9b20a2690753ff81043cb",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3198,9 +3205,10 @@
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
         "content_factory/tests_founder_run_commands.py",
-        "content_factory/tests_founder_library_commands.py"
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged. A resume of a refunded or released run is refused with 409 before any write or dispatch (B1, D16).",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3339,7 +3347,7 @@
       "identity": "content_factory/vibe_marketing_views.py:VibeMarketingRunCommentsSubmitView.post:497664c76285a8ac5ec448437a38ab9a5651d3b19e7a5c9f0652aa1a6ba8ea0a:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "VibeMarketingRunCommentsSubmitView.post",
-      "line": 19559,
+      "line": 19890,
       "kind": "model_update",
       "fields": [
         "status",
@@ -3353,7 +3361,7 @@
         "draft_comments"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "247aaa7d6c0f1776c659305597145e8f3721c2aab2e55bb60047e6f22fc17137",
+      "function_sha256": "fe69abff7e8bb6f29df0f9b1f5c558203ea3d6fbbf11afd248428954df924e72",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_revision_child_admission.py"
@@ -3394,7 +3402,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:359df41f8947d95120db2d04df6fef4134183028112abfcb58bdac6bb37fb2b6:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15489,
+      "line": 15597,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3406,13 +3414,14 @@
         "run"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
+      "function_sha256": "3b5cefca8cabe186ea0a2eae9263c4ca75db30571e3b1528cb43e2cb8f8720f1",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
-        "content_factory/tests_run_ownership.py"
+        "content_factory/tests_run_ownership.py",
+        "content_factory/tests_research_minimum_balance.py"
       ],
-      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation.",
+      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation. A CF 4xx refusal that is not an explicit dispatch_rejected now records only its own error_code on remote_data (A18); status, ownership and refund paths are unchanged.",
       "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback. Retain dispatch-key lookup and refund reconciliation. Reserve fresh research for reset companies and stop new dispatch on a changed workspace.",
       "pending_owner": null
     },
@@ -3448,7 +3457,7 @@
       "identity": "content_factory/vibe_marketing_views.py:control_article_run:f4ff89e68ed66f9063658270eb03abec69d12cda8deea5e3abe011406ddb0f95:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "control_article_run",
-      "line": 21205,
+      "line": 21361,
       "kind": "model_create",
       "fields": [
         "status",
@@ -3462,7 +3471,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "6c94df5a648420ca93d3fb326772b0a84e27498be13e89d5a74fbca53f41f7aa",
+      "function_sha256": "927c6465c0af8e0f79e0d307ffd61baaf9987aa61ea9b20a2690753ff81043cb",
       "classification": "canonical_control_before_legacy_projection",
       "test_refs": [
         "content_factory/tests_run_policy_retirement.py",
@@ -3470,9 +3479,10 @@
         "content_factory/tests_run_retired_writers.py",
         "content_factory/tests_run_execution_control.py",
         "content_factory/tests_founder_run_commands.py",
-        "content_factory/tests_founder_library_commands.py"
+        "content_factory/tests_founder_library_commands.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ],
-      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged.",
+      "reason": "Owned approve/resume/deny responses return through exact canonical control/history before raw legacy lifecycle projection. Daily automation retains backend-only consent with ticket CAS and preserves clocks. Keyed owned approve/deny/cancel enter the private durable command wrapper before all prior-consent noops; the legacy writer path remains behind the existing owned response return. Keyed original group/library commands retain target identities before external effects; discard uses the original authority guard and commits its minimal receipt atomically with local deletion. Owned lifecycle writes remain bypassed. Current rights and the captured target are checked again around local group metadata; both cancelled and kept sibling PR cleanup use the original URL allowlist. Founder conflict copy now comes from founder_blocker() over the same stored blocker; the stored staff diagnostics, run write, response status and control authority are unchanged. A resume of a refunded or released run is refused with 409 before any write or dispatch (B1, D16).",
       "guard": "prepare_owned_control; owned_control_response; daily automation owned result-only current-ticket CAS.",
       "pending_owner": null
     },
@@ -3480,7 +3490,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:f40fe594d02b001537d58480ad7cc8611166a2e9c9572bc73dbde6978a15712e:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15353,
+      "line": 15454,
       "kind": "model_update",
       "fields": [
         "status"
@@ -3492,13 +3502,14 @@
         "remote_data"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
+      "function_sha256": "3b5cefca8cabe186ea0a2eae9263c4ca75db30571e3b1528cb43e2cb8f8720f1",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
-        "content_factory/tests_run_ownership.py"
+        "content_factory/tests_run_ownership.py",
+        "content_factory/tests_research_minimum_balance.py"
       ],
-      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation.",
+      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation. A CF 4xx refusal that is not an explicit dispatch_rejected now records only its own error_code on remote_data (A18); status, ownership and refund paths are unchanged.",
       "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback. Retain dispatch-key lookup and refund reconciliation. Reserve fresh research for reset companies and stop new dispatch on a changed workspace.",
       "pending_owner": null
     },
@@ -3506,7 +3517,7 @@
       "identity": "content_factory/vibe_marketing_views.py:_queue_content_factory_run_authorized:669eb9f79164a269775fb125857f46dd8931706566e619e175a0bbd750be355e:1",
       "path": "content_factory/vibe_marketing_views.py",
       "function": "_queue_content_factory_run_authorized",
-      "line": 15295,
+      "line": 15396,
       "kind": "model_update",
       "fields": [
         "run_request"
@@ -3518,37 +3529,37 @@
         "acknowledged"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "1c3b546ec5ce7023f51ffacdbca094c5dad1a48c6208a7389639203c1e76fd4c",
+      "function_sha256": "3b5cefca8cabe186ea0a2eae9263c4ca75db30571e3b1528cb43e2cb8f8720f1",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_research_workspace_database.py",
-        "content_factory/tests_run_ownership.py"
+        "content_factory/tests_run_ownership.py",
+        "content_factory/tests_research_minimum_balance.py"
       ],
-      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation.",
+      "reason": "Owned admission/dispatch acceptance early branch returns before portable legacy reservation/request/status mutation. A CF 4xx refusal that is not an explicit dispatch_rejected now records only its own error_code on remote_data (A18); status, ownership and refund paths are unchanged.",
       "guard": "admission_enabled or retained wire admission -> reserve+post/accept before fallback. Retain dispatch-key lookup and refund reconciliation. Reserve fresh research for reset companies and stop new dispatch on a changed workspace.",
       "pending_owner": null
     },
     {
-      "identity": "content_factory/website_connections.py:transition_connection:c015f1e23dc16b994af400455b8710daccdee1d3ffe3eaedab72a2bff5f9ef58:1",
+      "identity": "content_factory/website_connections.py:transition_connection:85aa82ff6cfa862782d00e212631b6c8cdf066891f47a27eac4b501d6bb20ca6:1",
       "path": "content_factory/website_connections.py",
       "function": "transition_connection",
-      "line": 1030,
-      "kind": "model_update",
+      "line": 1242,
+      "kind": "inferred_run_save",
       "fields": [
         "status",
         "error",
         "resume_available",
         "updated_at"
       ],
-      "statement_sha256": "c015f1e23dc16b994af400455b8710daccdee1d3ffe3eaedab72a2bff5f9ef58",
+      "statement_sha256": "85aa82ff6cfa862782d00e212631b6c8cdf066891f47a27eac4b501d6bb20ca6",
       "duplicate_ordinal": 1,
-      "direct_model_chain": true,
+      "direct_model_chain": false,
       "inferred_receivers": [
-        "active_runs",
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "11a783478dd8b1d2319d716709f00f592518e917a8426c4e180370261e2cddd6",
+      "function_sha256": "5b2de2b5099125b424c164f5b2fa5372109856470ffc89d8de21cf47ac967a04",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_owned_cancellation.py"
@@ -3586,7 +3597,7 @@
       "identity": "content_factory/website_connections.py:record_denied_terminal_callback:660ec4e52f6ff2ee33699fb83b3cc3dcea605af5f32855e792cd4c7a02223179:1",
       "path": "content_factory/website_connections.py",
       "function": "record_denied_terminal_callback",
-      "line": 1669,
+      "line": 2065,
       "kind": "inferred_run_save",
       "fields": [
         "status",
@@ -3601,12 +3612,12 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "9261c08c7639c3edd3ff56da5ef101dd682b33156bf601a5b3fa2c5df9d93206",
+      "function_sha256": "26a67884ba5e05fef6419fcb09ae8e7462f2baa6844c2e5f3e9edc94b7c712a9",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_retired_writers.py"
       ],
-      "reason": "Authenticated old denied callback cannot record failure, terminal lifecycle or clock for owned Run.",
+      "reason": "Authenticated old denied callback cannot record failure, terminal lifecycle or clock for owned Run. Re-reviewed 21 Nov 2026 (owner approved, backend #1399): ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED (default off) routes the moved-head decision through resolve_run_source; with it off the existing path is unchanged.",
       "guard": "authoritative_run early return before writes.",
       "pending_owner": null
     },
@@ -3614,7 +3625,7 @@
       "identity": "content_factory/website_connections.py:guarded_service_write.decorate.wrapped:8bb0750b0de2ad47b399c13f699efd876458b4d44dc8dde729a69d9d61990bcb:1",
       "path": "content_factory/website_connections.py",
       "function": "guarded_service_write.decorate.wrapped",
-      "line": 664,
+      "line": 744,
       "kind": "inferred_run_save",
       "fields": [
         "run_request",
@@ -3627,12 +3638,13 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "ba2a3a920e010161d305e87266b1162df960b2281b2d29051944c40e6757392e",
+      "function_sha256": "f061e042422e8fa48a1e83f9c9c8e4ae66b97126463edf94813ae06ce768becb",
       "classification": "legacy_fenced",
       "test_refs": [
-        "content_factory/tests_run_retired_writers.py"
+        "content_factory/tests_run_retired_writers.py",
+        "content_factory/tests_callback_contract_from_run.py"
       ],
-      "reason": "Old worker-owned writes refuse event-owned Run before handler/original-request enrichment. Read/observation/control seams have separately scoped authority.",
+      "reason": "Old worker-owned writes refuse event-owned Run before handler/original-request enrichment. Read/observation/control seams have separately scoped authority. Callback consent fill (18 Nov 2026): before authority_guard, a config_write payload with no connection tuple takes only missing keys from its own run's saved request (fill_callback_contract_from_run); no Run write.",
       "guard": "Actual canonical current/admitted lookup, authoritative_run refusal; not inferred from worker JSON.",
       "pending_owner": null
     },
@@ -3936,7 +3948,7 @@
       "identity": "content_factory/website_operations.py:cancel_operation:945bbeec34877b9c02a4202238daafdedb7dc0800bf23e82250995fca3a83346:1",
       "path": "content_factory/website_operations.py",
       "function": "cancel_operation",
-      "line": 447,
+      "line": 473,
       "kind": "model_update",
       "fields": [
         "status",
@@ -3952,7 +3964,7 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "3afba8b66539afe576af888a1e303ce4c81899b2f515a4c7c42bce729564c73f",
+      "function_sha256": "7693cc278df4f4643502ee31907d06fc117da8815f5046bce2cc4e8539ac81e3",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_run_owned_cancellation.py"
@@ -3965,7 +3977,7 @@
       "identity": "content_factory/website_operations.py:advance_workflow_attempt:f0f4db58b1730239a66449bf3f7531a3e24e96686cc337dab5570ec3d0c2e8a7:1",
       "path": "content_factory/website_operations.py",
       "function": "advance_workflow_attempt",
-      "line": 542,
+      "line": 578,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -3977,12 +3989,12 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "4655e38b594ce637f56847697200e64be28ba0f56b27474eb4fccfa4ed3d2f44",
+      "function_sha256": "0a3e076e324f02f7032b1015d7dab1829424bc1f3a33e522c1693abe8300cb9b",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_r3_source_operation_control.py"
       ],
-      "reason": "This save is the website Operation ledger, not canonical Run.",
+      "reason": "This save is the website Operation ledger, not canonical Run. Re-pinned when #1383 (moved-preview fence) merged into the any-founder branch; neither side adds a ContentFactoryRun write here.",
       "guard": "WebsiteConnectionOperation query/argument.",
       "pending_owner": null
     },
@@ -3990,7 +4002,7 @@
       "identity": "content_factory/website_operations.py:advance_workflow_attempt:3a90e99d2c1f8748f4f48f9375199a6fbfb6723adb0c18534689e18f15cb173a:1",
       "path": "content_factory/website_operations.py",
       "function": "advance_workflow_attempt",
-      "line": 561,
+      "line": 597,
       "kind": "inferred_run_save",
       "fields": [
         "run_request",
@@ -4004,12 +4016,12 @@
         "run"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "4655e38b594ce637f56847697200e64be28ba0f56b27474eb4fccfa4ed3d2f44",
+      "function_sha256": "0a3e076e324f02f7032b1015d7dab1829424bc1f3a33e522c1693abe8300cb9b",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_source_operation_control.py"
       ],
-      "reason": "Owned resume issues exact current backend execution ticket and returns before original request save. Other inferred aliases are Operation rows.",
+      "reason": "Owned resume issues exact current backend execution ticket and returns before original request save. Other inferred aliases are Operation rows. Re-pinned when #1383 (moved-preview fence) merged into the any-founder branch; neither side adds a ContentFactoryRun write here.",
       "guard": "Typed owner.event_protocol1 branch with current ticket/fresh principal; legacy request path only else.",
       "pending_owner": null
     },
@@ -4043,7 +4055,7 @@
       "identity": "content_factory/website_operations.py:cancel_operation:8d09fa2359a09ade3a8b4dd5fa44a6ff827c638855ac297955ff5881116b0be0:1",
       "path": "content_factory/website_operations.py",
       "function": "cancel_operation",
-      "line": 441,
+      "line": 467,
       "kind": "model_update",
       "fields": [
         "updated_at"
@@ -4055,7 +4067,7 @@
         "child_operations"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "3afba8b66539afe576af888a1e303ce4c81899b2f515a4c7c42bce729564c73f",
+      "function_sha256": "7693cc278df4f4643502ee31907d06fc117da8815f5046bce2cc4e8539ac81e3",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_run_owned_cancellation.py"
@@ -4068,7 +4080,7 @@
       "identity": "content_factory/website_operations.py:advance_workflow_attempt:ba478e226c73c65413f78d91902e3238b6de8a0fca58f0c470a44e5625639b1f:1",
       "path": "content_factory/website_operations.py",
       "function": "advance_workflow_attempt",
-      "line": 560,
+      "line": 596,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -4080,12 +4092,12 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "4655e38b594ce637f56847697200e64be28ba0f56b27474eb4fccfa4ed3d2f44",
+      "function_sha256": "0a3e076e324f02f7032b1015d7dab1829424bc1f3a33e522c1693abe8300cb9b",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_r3_source_operation_control.py"
       ],
-      "reason": "This save is the website Operation ledger, not canonical Run.",
+      "reason": "This save is the website Operation ledger, not canonical Run. Re-pinned when #1383 (moved-preview fence) merged into the any-founder branch; neither side adds a ContentFactoryRun write here.",
       "guard": "WebsiteConnectionOperation query/argument.",
       "pending_owner": null
     },
@@ -4171,7 +4183,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:59a558ca649a0f901fe6ee3928fed748c5bfa5405967c2b3e6a15d82f619b69a:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 952,
+      "line": 1168,
       "kind": "model_update",
       "fields": [
         "status"
@@ -4183,13 +4195,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
-        "content_factory/tests_prepare_journey_unit.py"
+        "content_factory/tests_prepare_journey_unit.py",
+        "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4197,7 +4210,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:4758533f8b3da0df3160a618e903ebdf6827677f3217dbf1b86c5831d943d64f:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 964,
+      "line": 1180,
       "kind": "model_update",
       "fields": [
         "status",
@@ -4210,13 +4223,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
-        "content_factory/tests_prepare_journey_unit.py"
+        "content_factory/tests_prepare_journey_unit.py",
+        "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4224,7 +4238,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:e0f6dc9a8b4e36827f0f0b6dd598f821f3c7219a519e129bd5d062ff6a2c438a:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1095,
+      "line": 1361,
       "kind": "model_update",
       "fields": [
         "current_step",
@@ -4237,13 +4251,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
-        "content_factory/tests_prepare_journey_unit.py"
+        "content_factory/tests_prepare_journey_unit.py",
+        "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4251,7 +4266,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:a8cabcadb8e0fa3cb68cc74238cfdb2c6b9b1e84dcd32c57caa5e8bc9ac13304:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1008,
+      "line": 1239,
       "kind": "model_update",
       "fields": [
         "status"
@@ -4263,13 +4278,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
-        "content_factory/tests_prepare_journey_unit.py"
+        "content_factory/tests_prepare_journey_unit.py",
+        "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4277,7 +4293,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:d422bdb8d43e50d6cf617d30aaa5bdd656e9c8ecd495c20a6cf44abd04f4d81e:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1083,
+      "line": 1315,
       "kind": "model_update",
       "fields": [
         "current_step"
@@ -4289,13 +4305,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
-        "content_factory/tests_prepare_journey_unit.py"
+        "content_factory/tests_prepare_journey_unit.py",
+        "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4303,7 +4320,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:4758533f8b3da0df3160a618e903ebdf6827677f3217dbf1b86c5831d943d64f:2",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1122,
+      "line": 1393,
       "kind": "model_update",
       "fields": [
         "status",
@@ -4316,13 +4333,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
-        "content_factory/tests_prepare_journey_unit.py"
+        "content_factory/tests_prepare_journey_unit.py",
+        "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4330,7 +4348,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:7df6aacf491799a4394ea8be30fd75d393e852241163057d8b859237c1d3aabe:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1034,
+      "line": 1265,
       "kind": "model_update",
       "fields": [
         "status"
@@ -4342,13 +4360,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
-        "content_factory/tests_prepare_journey_unit.py"
+        "content_factory/tests_prepare_journey_unit.py",
+        "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4356,7 +4375,7 @@
       "identity": "content_factory/website_prepare.py:_advance_claimed_prepare:ef4dffd46122ec23aeb6f61b7685382377b67a830b501d53bae43c712ab415d0:1",
       "path": "content_factory/website_prepare.py",
       "function": "_advance_claimed_prepare",
-      "line": 1053,
+      "line": 1285,
       "kind": "model_update",
       "fields": [
         "status",
@@ -4369,13 +4388,14 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "6b48d173e4d7786a60dee79312586658228ccad9ea02788dbc100d6d86cc1e56",
+      "function_sha256": "d3b96e818e81ff3f1836fe31358f452da5c8ad1cbc319c64690d93308fdbf291",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_website_first_article_billing_unit.py",
-        "content_factory/tests_prepare_journey_unit.py"
+        "content_factory/tests_prepare_journey_unit.py",
+        "content_factory/tests_prepare_setup_cap.py"
       ],
-      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact.",
+      "reason": "All reported .update sites are op.receipt Python dictionary updates, not ContentFactoryRun ORM updates. Separate goal/doctor/prepare execution-controller retirement still needs its own behavioral proof. Blog hosting no longer cancels repository setup; remaining receipt dictionary writes and normal setup consent stay unchanged. Late approval reconciliation changes only the original prepare receipt after exact approved-child/PR and current company/connection/generation/repository/branch/root checks; no new control, run or merge authority. Existing compare-and-set persistence and retry history remain intact. Setup dispatch cap (16 Nov 2026): counts dispatched setup run ids in the same op.receipt dictionary and stops with prepare_no_progress; no ORM run write. Phase 2 (19 Nov 2026): C7 content-files settle and C15 CMS stop only update the same op.receipt dictionary and finish the prepare; no ORM run write. C15 stop is limited to repository selection (permissions or setup step, no earlier setup run, open or settled setup PR, or verified integration); read-only checks, no ORM run write.",
       "guard": "Receiver is WebsiteConnectionOperation.receipt, not .objects queryset.",
       "pending_owner": null
     },
@@ -4383,7 +4403,7 @@
       "identity": "content_factory/website_support.py:owner_support_operation:b9f310e276da4fd372497513c0969de176946d78ba21ef8881b300a3a6051ccb:1",
       "path": "content_factory/website_support.py",
       "function": "owner_support_operation",
-      "line": 245,
+      "line": 246,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -4395,7 +4415,7 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "1dfba5b8f46672c8aa09c14045c82bf1ab313b93903882058968a2475c5dae4d",
+      "function_sha256": "55c111bef69d075ae8fd11a389831a0b8ec38c8e45ee021ec644ae65994ceea9",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_named_admission.py"
@@ -4408,7 +4428,7 @@
       "identity": "content_factory/website_support.py:owner_support_operation:371dc4f0ca633dd241ef03a63989e314cc391480ff4cdfba52a73a19cbb6ff5a:1",
       "path": "content_factory/website_support.py",
       "function": "owner_support_operation",
-      "line": 250,
+      "line": 251,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -4420,7 +4440,7 @@
         "op"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "1dfba5b8f46672c8aa09c14045c82bf1ab313b93903882058968a2475c5dae4d",
+      "function_sha256": "55c111bef69d075ae8fd11a389831a0b8ec38c8e45ee021ec644ae65994ceea9",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_named_admission.py"
@@ -4458,7 +4478,7 @@
       "identity": "content_factory/website_support.py:owner_support_operation:254bdf8f112131efee27f143f555413684bd87752152e1bd62ffea345f39184b:1",
       "path": "content_factory/website_support.py",
       "function": "owner_support_operation",
-      "line": 156,
+      "line": 157,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -4470,7 +4490,7 @@
         "child"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "1dfba5b8f46672c8aa09c14045c82bf1ab313b93903882058968a2475c5dae4d",
+      "function_sha256": "55c111bef69d075ae8fd11a389831a0b8ec38c8e45ee021ec644ae65994ceea9",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_named_admission.py"
@@ -4483,7 +4503,7 @@
       "identity": "content_factory/website_support.py:owner_support_operation:adef8e4c5bfd1a48239181cc1c562d25640b3bf081ec49707e6c38c579f795ce:1",
       "path": "content_factory/website_support.py",
       "function": "owner_support_operation",
-      "line": 159,
+      "line": 160,
       "kind": "model_get_or_create",
       "fields": [],
       "statement_sha256": "adef8e4c5bfd1a48239181cc1c562d25640b3bf081ec49707e6c38c579f795ce",
@@ -4491,7 +4511,7 @@
       "direct_model_chain": true,
       "inferred_receivers": [],
       "local_guard_mentioned": true,
-      "function_sha256": "1dfba5b8f46672c8aa09c14045c82bf1ab313b93903882058968a2475c5dae4d",
+      "function_sha256": "55c111bef69d075ae8fd11a389831a0b8ec38c8e45ee021ec644ae65994ceea9",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_named_admission.py"
@@ -4504,7 +4524,7 @@
       "identity": "content_factory/website_support.py:owner_support_operation:a0204f4f6ff2ee8a8565e708bd69a5ea3f261ecab850e92ed8d42412f9a3a111:1",
       "path": "content_factory/website_support.py",
       "function": "owner_support_operation",
-      "line": 230,
+      "line": 231,
       "kind": "inferred_run_save",
       "fields": [
         "updated_at"
@@ -4516,7 +4536,7 @@
         "existing"
       ],
       "local_guard_mentioned": true,
-      "function_sha256": "1dfba5b8f46672c8aa09c14045c82bf1ab313b93903882058968a2475c5dae4d",
+      "function_sha256": "55c111bef69d075ae8fd11a389831a0b8ec38c8e45ee021ec644ae65994ceea9",
       "classification": "legacy_fenced",
       "test_refs": [
         "content_factory/tests_r3_named_admission.py"
@@ -5231,10 +5251,10 @@
         "metric"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "999a8a121fc7cd6d2009af61fe2fd55f9665df681a90b3d7051e4a48b0bc22eb",
+      "function_sha256": "20a4cddaeb4f2bd9899ee557652cfd8caecbb98aae3d16cccafdde06eb228eab",
       "classification": "non_cf_model",
       "test_refs": [],
-      "reason": "metric is FinancialMetric, not ContentFactoryRun.",
+      "reason": "metric is FinancialMetric, not ContentFactoryRun. Selected sources now come from effective_input_sources(run_request, result), so a Xero left out of the run does not suppress Stripe revenue; read-only.",
       "guard": "FinancialMetric query/constructor assignment.",
       "pending_owner": null
     },
@@ -5364,7 +5384,7 @@
       "identity": "integrations/services/notification_adapters.py:send_topic_selection:b5709788bb00ad47ce2f09ff5efc13a4288c05818e5ef1615a2d43b6afeb406d:1",
       "path": "integrations/services/notification_adapters.py",
       "function": "send_topic_selection",
-      "line": 1202,
+      "line": 1293,
       "kind": "run_named_save",
       "fields": [
         "status",
@@ -5375,7 +5395,7 @@
       "direct_model_chain": false,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "8502ba9f70406e1363a4dda53785aefab26e55f98bcd605bfa373eb30cc589de",
+      "function_sha256": "03f7c7dbdcf13da092acc44cb7acbe4787b52cd7f19ea393c430dc7694093072",
       "classification": "non_cf_model",
       "test_refs": [
         "tests/test_research_automations.py"
@@ -5460,7 +5480,7 @@
       "identity": "integrations/services/notification_adapters.py:send_error:b492a556406246b17f6ae51cc40ad924c4aec8aa212edeb4122436ace62e777f:1",
       "path": "integrations/services/notification_adapters.py",
       "function": "send_error",
-      "line": 1351,
+      "line": 1537,
       "kind": "run_named_save",
       "fields": [
         "status",
@@ -5471,7 +5491,7 @@
       "direct_model_chain": false,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "59014f529d5c8bf361910a107790107fc2642ce28c9af00be510643b6bfe3415",
+      "function_sha256": "02f0897f01151a9af3a77276fff270547e68ed6fef138f60ef506d1dcdcc277c",
       "classification": "non_cf_model",
       "test_refs": [
         "tests/test_research_automations.py"
@@ -5608,7 +5628,7 @@
       "identity": "integrations/services/research_automations.py:dispatch_automation_run:9eba0cd4a78083688890106451e819ba82d4c4c70342b0eaa6f5165b7ed8529f:1",
       "path": "integrations/services/research_automations.py",
       "function": "dispatch_automation_run",
-      "line": 281,
+      "line": 284,
       "kind": "run_named_save",
       "fields": [
         "status",
@@ -5619,7 +5639,7 @@
       "direct_model_chain": false,
       "inferred_receivers": [],
       "local_guard_mentioned": false,
-      "function_sha256": "44993c3aad1d5e4488eb70dfaaf70e581977f781fcf6e96dd7a0b9067b9a023f",
+      "function_sha256": "4294d0d0cf5331c878e7ef66beeffbacceba0557b4f6141e249bc05642cd10d5",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_research_automation_billing_unit.py",
@@ -5651,6 +5671,153 @@
       "reason": "Saved run is AutomationRun, not CF execution. Dispatch child admission is separately audited at actual CF callers.",
       "guard": "AutomationRun constructor/query/type and status enum.",
       "pending_owner": null
+    },
+    {
+      "identity": "content_factory/website_superseded_setup_prs.py:_mark_closed:b7ccf51d6c918910b7eae23ef9489643acf992a8e495faa5fc2b0a7b2f23b5cd:1",
+      "path": "content_factory/website_superseded_setup_prs.py",
+      "function": "_mark_closed",
+      "line": 186,
+      "kind": "model_update",
+      "fields": [
+        "status"
+      ],
+      "statement_sha256": "b7ccf51d6c918910b7eae23ef9489643acf992a8e495faa5fc2b0a7b2f23b5cd",
+      "duplicate_ordinal": 1,
+      "direct_model_chain": false,
+      "inferred_receivers": [
+        "item"
+      ],
+      "local_guard_mentioned": false,
+      "function_sha256": "75a04282cb985cb2172be548758d4faaeb507f34f12a0f36fe2669e1720181ab",
+      "classification": "retired_to_owned_backend_fact_api",
+      "test_refs": [
+        "content_factory/tests_prepare_setup_cap.py"
+      ],
+      "reason": "The reported .update is a Python dict update on a copied run.result; persistence is save_provider_result with a deep baseline, recording only that MLAI's own superseded setup PR was closed (pr_closed, superseded_by_run_id). No lifecycle, request or control field changes.",
+      "guard": "Receiver is a local dict copy; persisted through save_provider_result with deep baseline after a DB recheck of the connection generation, repository and branch.",
+      "pending_owner": null
+    },
+    {
+      "identity": "content_factory/website_setup_merge_proof.py:carry_setup_merge_proof:51a5152e7e06fb160848afb6389e04820d94762714aa47a79948a84b1b11df99:1",
+      "path": "content_factory/website_setup_merge_proof.py",
+      "function": "carry_setup_merge_proof",
+      "line": 120,
+      "kind": "inferred_run_save",
+      "fields": [],
+      "statement_sha256": "51a5152e7e06fb160848afb6389e04820d94762714aa47a79948a84b1b11df99",
+      "duplicate_ordinal": 1,
+      "direct_model_chain": false,
+      "inferred_receivers": [
+        "locked"
+      ],
+      "local_guard_mentioned": false,
+      "function_sha256": "29dce05f1add073029c83a55ede9ac760f5e8f642de5fb9c47e537da95a06af5",
+      "classification": "non_cf_model",
+      "test_refs": [
+        "content_factory/tests_setup_merge_proof.py"
+      ],
+      "reason": "Writes the build proof on WebsiteConnectionTarget. The setup Run supplies read-only evidence.",
+      "guard": "The active Prepare lease, original setup scope, verified render, selected target, observed head and identical Git trees fence promotion under the connection authority lock.",
+      "pending_owner": null
+    },
+    {
+      "identity": "content_factory/system_stopped_runs.py:_record:2739f54264330505b1745254cbd2a456a82dbaf01a08471d960d0932d3209729:1",
+      "path": "content_factory/system_stopped_runs.py",
+      "function": "_record",
+      "line": 213,
+      "kind": "inferred_run_save",
+      "fields": [
+        "updated_at"
+      ],
+      "statement_sha256": "2739f54264330505b1745254cbd2a456a82dbaf01a08471d960d0932d3209729",
+      "duplicate_ordinal": 1,
+      "direct_model_chain": false,
+      "inferred_receivers": [
+        "current"
+      ],
+      "local_guard_mentioned": true,
+      "function_sha256": "1b69e5bc4662678c0e67532c32bffd0ceb3afffaa2f53f69e756f082b90b6881",
+      "classification": "owned_backend_command_metadata",
+      "test_refs": [
+        "content_factory/tests_system_stopped_runs.py"
+      ],
+      "reason": "B24 follow-up record: the one follow-up decision for a system-stopped run is a single result key written under the run's row lock; status, clocks and execution fields are untouched, and an event-owned run saves result only.",
+      "guard": "select_for_update on the run row; FOLLOWUP_KEY claim checked under the lock; event_owned(current) update_fields split.",
+      "pending_owner": null
+    },
+    {
+      "identity": "content_factory/system_stopped_runs.py:_replace:2739f54264330505b1745254cbd2a456a82dbaf01a08471d960d0932d3209729:1",
+      "path": "content_factory/system_stopped_runs.py",
+      "function": "_replace",
+      "line": 227,
+      "kind": "inferred_run_save",
+      "fields": [
+        "updated_at"
+      ],
+      "statement_sha256": "2739f54264330505b1745254cbd2a456a82dbaf01a08471d960d0932d3209729",
+      "duplicate_ordinal": 1,
+      "direct_model_chain": false,
+      "inferred_receivers": [
+        "current"
+      ],
+      "local_guard_mentioned": true,
+      "function_sha256": "7ab411775e33ec90a7f794d987dda16b423fa102b55e7c512d34c3618eb67519",
+      "classification": "owned_backend_command_metadata",
+      "test_refs": [
+        "content_factory/tests_system_stopped_runs.py"
+      ],
+      "reason": "B24 follow-up outcome: records the outcome of the restart this pass already claimed in _record, as one result key under the run's row lock; event-owned runs save result only.",
+      "guard": "select_for_update on the run row after the _record claim; event_owned(current) update_fields split.",
+      "pending_owner": null
+    },
+    {
+      "identity": "integrations/services/daily_research_policy.py:record_empty_night:47f2f36faf37bc6f602dd3753cd0186a14f0c53153f2208bc2172f5c7236cb96:1",
+      "path": "integrations/services/daily_research_policy.py",
+      "function": "record_empty_night",
+      "line": 194,
+      "kind": "inferred_run_save",
+      "fields": [
+        "updated_at"
+      ],
+      "statement_sha256": "47f2f36faf37bc6f602dd3753cd0186a14f0c53153f2208bc2172f5c7236cb96",
+      "duplicate_ordinal": 1,
+      "direct_model_chain": false,
+      "inferred_receivers": [
+        "automation"
+      ],
+      "local_guard_mentioned": false,
+      "function_sha256": "17cac462e19ca563703e25129c5b7288a1eb950f403e6662f8648b40c706b5bc",
+      "classification": "non_cf_model",
+      "test_refs": [
+        "tests/test_research_automations.py"
+      ],
+      "reason": "The saved automation receiver is ResearchAutomation (empty-night streak memory, B23), not ContentFactoryRun.",
+      "guard": "ResearchAutomation query assignment under its own lock; inferred alias over-approximation.",
+      "pending_owner": null
+    },
+    {
+      "identity": "integrations/services/notification_adapters.py:send_research_empty:b5709788bb00ad47ce2f09ff5efc13a4288c05818e5ef1615a2d43b6afeb406d:1",
+      "path": "integrations/services/notification_adapters.py",
+      "function": "send_research_empty",
+      "line": 1472,
+      "kind": "run_named_save",
+      "fields": [
+        "status",
+        "updated_at"
+      ],
+      "statement_sha256": "b5709788bb00ad47ce2f09ff5efc13a4288c05818e5ef1615a2d43b6afeb406d",
+      "duplicate_ordinal": 1,
+      "direct_model_chain": false,
+      "inferred_receivers": [],
+      "local_guard_mentioned": false,
+      "function_sha256": "a57a3739e006b4ebe767daaa3dc6572cd14eb0913063d2a0882d088d7da6d47f",
+      "classification": "non_cf_model",
+      "test_refs": [
+        "tests/test_research_automations.py"
+      ],
+      "reason": "Saved run is AutomationRun in notification automation domain, not ContentFactoryRun.",
+      "guard": "AutomationRun from resolve_automation_run; research_empty_applies checks slot, job id and delivered topics first.",
+      "pending_owner": null
     }
   ],
   "control_contexts": [
@@ -5666,20 +5833,23 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_decide",
-      "function_sha256": "d5d3c1523d148c5011a49247fb46c80a329e0ed666606dd4b83bf3246a26b4d6",
+      "function_sha256": "510fd654ad3d7b6eea3104787bf1d921be73b22dd7be95ae277550e89ede66eb",
       "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
       "test_refs": [
-        "content_factory/tests_run_policy_retirement.py"
+        "content_factory/tests_run_policy_retirement.py",
+        "content_factory/tests_background_alert_audience.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ]
     },
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "apply",
-      "function_sha256": "f2945748568cebbe3456a977c08510ae0bc1e4b67ad61c396ec70ba7b3f7e792",
+      "function_sha256": "699122f4eb2b5834b3a8092c373eead931effdbe96cb3f3a07f32d07aa4b674f",
       "reason": "Private policy metadata writes use the already locked fresh Run, retain event-owner refusal and unrelated result fields, preserve the worker clock, and keep every original authority and decision check in apply. All five apply call sites and the lock-acquiring compatibility wrapper were manually reviewed.",
       "test_refs": [
         "content_factory/tests_p2_policy.py",
-        "content_factory/tests_run_policy_retirement.py"
+        "content_factory/tests_run_policy_retirement.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ]
     },
     {
@@ -5705,10 +5875,11 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_execute_run",
-      "function_sha256": "96876e7cc79986959cd3707eab0d9232f209b110908194bf611b0b46e6c41ac0",
+      "function_sha256": "7bdd28ae8cba769eb682842cf742bca615bbc9e9fba4cda938f42b974ef3cba2",
       "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
       "test_refs": [
-        "content_factory/tests_run_policy_retirement.py"
+        "content_factory/tests_run_policy_retirement.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ]
     },
     {
@@ -5741,10 +5912,12 @@
     {
       "path": "content_factory/failure_policy_engine.py",
       "function": "_candidates",
-      "function_sha256": "4520ca46ed97cfdd6660e0a601f00489a7257647308947f0cee99700d7d2601f",
-      "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch.",
+      "function_sha256": "a84065199cccbb99c447a836bdc17ac9f619cba46b49fb336623b661f77106e0",
+      "reason": "Separately reviewed execution-effect policy selector and entrypoint excludes current owners or saved owned goal children before attempts or dispatch. F1 review: the selector also excludes marked test organisations; it stays read-only and writes no ContentFactoryRun state.",
       "test_refs": [
-        "content_factory/tests_run_policy_retirement.py"
+        "content_factory/tests_run_policy_retirement.py",
+        "content_factory/tests_background_alert_audience.py",
+        "content_factory/tests_self_heal_class_before_wall.py"
       ]
     },
     {
@@ -5825,8 +5998,8 @@
     {
       "path": "content_factory/founder_article_controls.py",
       "function": "article_controls",
-      "function_sha256": "97172735502f40bf2b21f2987fa60cad03276a55256ae1ff44efe6773c164fb5",
-      "reason": "Pure current active owner/rights/article scope and stop/settlement/publication checks offer only commands; conditional original-obligation copy cannot promise a refund or mutate money.",
+      "function_sha256": "f5ab496a291dbdb4c6fdb53459a35c4619e4fd481c59cda9403b80fa654fde26",
+      "reason": "Offers controls only for the original article and startup after rereading active actor and startup access. Shared access uses the exact current membership, and the existing command rights, settlement checks and publication checks still apply.",
       "test_refs": [
         "content_factory.tests_founder_article_controls"
       ]
@@ -5843,8 +6016,8 @@
     {
       "path": "content_factory/founder_journey_contract.py",
       "function": "enrich_journey",
-      "function_sha256": "27658d82b3e2d57eff2e1cd30c156aa187e8010fd22dbda28ee55386a94f1773",
-      "reason": "Canonical current article DTO calls the read-only rights, verified review/resume and stop-control projections; no local lifecycle or monetary effects. Retired hosted delivery maps to contentOnly and emits no hosting capabilities. The website step reads has_connected_website (read-only) to stay pending until the site is connected when ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE is on.",
+      "function_sha256": "b0223b7acba42f1175310c3835c3596be14231f4b5492b60989fb88c8f6e2e73",
+      "reason": "Canonical current article DTO calls the read-only rights, verified review/resume and stop-control projections; no local lifecycle or monetary effects. Retired hosted delivery maps to contentOnly and emits no hosting capabilities. The website step reads has_connected_website (read-only) to stay pending until the site is connected when ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE is on. Re-reviewed 21 Nov 2026 (owner approved, backend #1399): adds the read-only repoHealth projection (ARTICLES_REPO_HEALTH_ENABLED, default off); no lifecycle or monetary effect.",
       "test_refs": [
         "content_factory.tests_founder_article_contract",
         "content_factory.tests_founder_article_controls"
@@ -5960,7 +6133,7 @@
       "path": "content_factory/paid_article_commands.py",
       "function": "_exact",
       "function_sha256": "84f38e4c51a32bdd8c89244b09ee9b0319cc405b44e3f1c1129234f5d3e46924",
-      "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
+      "reason": "Rechecks the fresh active actor, its profile and the exact company and organization under the debit lock. A shared workspace requires active membership of the canonical company. Legacy member use still requires both explicit cost proof and an active opted-in founder payer inside the trusted portable command. Receipt and outbox bindings are unchanged.",
       "test_refs": [
         "content_factory/tests_paid_article_http_replay.py"
       ]
@@ -5995,7 +6168,7 @@
     {
       "path": "content_factory/paid_article_commands.py",
       "function": "_current_user",
-      "function_sha256": "0336f384aa69ab33fdeb8525ee30457e70349911339f12706a53d8e8498c67c0",
+      "function_sha256": "0f69dbd2a304b69cd2c52fdaf0400725dbc3be963d9b2624e820f035a1798fa8",
       "reason": "Paid HTTP original-body/key/company/principal receipt and created-only outbox binding prevent new replay effects. Fresh active actor, write/spend and active opted-in founder payer are checked under the debit lock. The member fallback additionally requires original raw exact-true cost confirmation, positive quote and a source-free confirmed portable scope inside the trusted paid HTTP claim; all other activation contexts retain owner authority.",
       "test_refs": [
         "content_factory/tests_paid_article_http_replay.py"
@@ -6326,8 +6499,8 @@
     {
       "path": "content_factory/vibe_marketing_views.py",
       "function": "VibeMarketingSettingsView.put",
-      "function_sha256": "eea8018f76a6c58f2c6e44f14cf988a4915d7a547bb6ef01e2ceefdaf7ccb4ec",
-      "reason": "Only keyed new-journey first-author bodies enter the retained command boundary; accepted receipt and existing settings writes commit together. Existing no-key/general settings semantics and validation remain intact.",
+      "function_sha256": "1b28ffa0e3652a98e363d4042e4b26addd8ab4a5a4ba2a29da56e518488e243b",
+      "reason": "Only keyed new-journey first-author bodies enter the retained command boundary; accepted receipt and existing settings writes commit together. Existing no-key/general settings semantics and validation remain intact. Re-reviewed 21 Nov 2026 (owner approved, backend #1399): after the settings write commits, an advisory author-bio check (ARTICLES_AUTHOR_BIO_CHECK_ENABLED, default off) reads the site's About page and returns warnings; it never blocks or changes the save.",
       "test_refs": [
         "content_factory/tests_founder_library_commands.py",
         "content_factory/tests_author_photos_unit.py",
@@ -6348,8 +6521,8 @@
     {
       "path": "content_factory/founder_library_commands.py",
       "function": "settings_candidate",
-      "function_sha256": "f329aebb8dbe2a4af6a878da1b95af58fb10d112a3f0fc4033e07f19dc45800e",
-      "reason": "Only author-only bodies or already-retained exact headers enter this command path. General first-domain settings keep their original validation/write behavior; a retained header cannot escape into unrelated settings.",
+      "function_sha256": "4b607b9598055fbaf6bc7719c9b1ea1505b54c260d705d8e39b038080da5f883",
+      "reason": "Only author-only bodies or already-retained exact headers enter this command path. The scoped company query permits active membership only on the canonical shared startup. General first-domain settings retain the original validation and write path.",
       "test_refs": [
         "content_factory/tests_founder_library_commands.py",
         "content_factory/tests_startup_settings_unit.py"
@@ -6358,11 +6531,12 @@
     {
       "path": "content_factory/editorial_views.py",
       "function": "mutate_catalog_response",
-      "function_sha256": "f7d4715990535b3c67d4c6357be0d835e78523482a04fd667450efc5b17d610e",
-      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "function_sha256": "d95f4f525112ad6d941f5167c4dacda79086140bb48f79487db220bc4f30ba12",
+      "reason": "Under the organisation lock, require current active membership of the canonical shared startup or current legacy founder ownership before reading or writing the catalogue. Validate the revision and bind any keyed receipt to the authorized company, caller and exact body. The service path remains draft-only. The transaction grants no Run, Job or billing authority. Plan B9 (any-founder branch, merged with #1382) only adds an advisory read of in-flight article runs after the save commits; it writes no ContentFactoryRun state.",
       "test_refs": [
         "content_factory/tests_catalog_commands.py",
-        "content_factory/tests_catalog_brief_commands.py"
+        "content_factory/tests_catalog_brief_commands.py",
+        "content_factory/tests_editorial_catalog_api_unit.py"
       ]
     },
     {
@@ -6408,11 +6582,12 @@
     {
       "path": "content_factory/editorial_first_audience.py",
       "function": "_keyed_first_audience_response",
-      "function_sha256": "6d708ec8fc986a6b9752c6de0127fa172ecaa0668ce53928996515a72e54974b",
-      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "function_sha256": "8d7cd906975b024bcb217e079c21aec412ba0033a94e8de5e925687d30f297b0",
+      "reason": "Recheck active shared membership or legacy founder ownership under the organisation lock and lock the catalogue configuration. Commit the local approval and exact actor-bound command receipt together. Replay validates the saved audience version and content hash. This path grants no Run, Job or billing authority.",
       "test_refs": [
         "content_factory/tests_catalog_commands.py",
-        "content_factory/tests_catalog_brief_commands.py"
+        "content_factory/tests_catalog_brief_commands.py",
+        "content_factory/tests_editorial_first_audience.py"
       ]
     },
     {
@@ -6467,9 +6642,9 @@
     },
     {
       "path": "content_factory/catalog_commands.py",
-      "function": "_require_current_owner",
-      "function_sha256": "9aabe9b0d9f16870ab3bb27dab100405bed9a3f71f4486a1a23ffd18f134df04",
-      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "function": "_require_command_actor",
+      "function_sha256": "77971c4159c2b9ff2b950d1da654b4f5be8ea5a2fef1e9633ceacc4293062ad3",
+      "reason": "Callers supply the company authorized under the organisation lock. Shared startups use their current canonical membership check. Legacy commands also require the current active owner and reject a frozen or malformed legacy roster. This check grants no Run, Job or billing authority.",
       "test_refs": [
         "content_factory/tests_catalog_commands.py",
         "content_factory/tests_catalog_brief_commands.py"
@@ -6478,11 +6653,12 @@
     {
       "path": "content_factory/catalog_commands.py",
       "function": "prepare_command",
-      "function_sha256": "b433e69bad5562a72e9dbfa265a5603922346283006a9fee1f16bf616492a020",
-      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "function_sha256": "3f47171273968183afdcc462dcf2c470fc3d60ff014d8d195afd8a40fe25c6bb",
+      "reason": "Bind the command to the startup company authorized under the organisation lock, the current caller, action, exact key and request body. Replay requires that same actor and verifies the retained catalogue revision. Retained namespaces reject unseen keys when admission is disabled. Command preparation grants no Run, Job or billing authority.",
       "test_refs": [
         "content_factory/tests_catalog_commands.py",
-        "content_factory/tests_catalog_brief_commands.py"
+        "content_factory/tests_catalog_brief_commands.py",
+        "content_factory/tests_editorial_catalog_api_unit.py"
       ]
     },
     {
@@ -6528,8 +6704,8 @@
     {
       "path": "content_factory/catalog_brief_commands.py",
       "function": "_locked",
-      "function_sha256": "2f808fb62b243d032f24f436f577b69cef01d85dafcd47e77c92395c8bb36093",
-      "reason": "Current active owner, exact raw body/key/company and locked catalogue revision bind durable local catalogue changes or a committed at-most-once suggestion claim. Retained namespaces reject unseen keys after admission is disabled; response validation and fresh authority/catalogue rechecks hold unknown external outcomes. No Run, Job or billing authority is granted.",
+      "function_sha256": "3078d65a5770d8641c5be6ceeac5294e4ee042086b40b5c59dc812574e448b66",
+      "reason": "Lock the organisation, recheck canonical shared membership or legacy ownership, then lock the current configuration and apply the command actor guard. The caller repeats this check after remote suggestion work before accepting the retained actor-bound claim. No HTTP, Run, Job or billing effect occurs inside this helper.",
       "test_refs": [
         "content_factory/tests_catalog_commands.py",
         "content_factory/tests_catalog_brief_commands.py"
@@ -6893,6 +7069,15 @@
       "reason": "Bounded reconciliation of a lost setup approval response: exact approved child, current parent generation, original immutable repository/branch/root and existing PR required. Only active error projection is superseded; no independent database writer, repeated consent, dispatch or merge authority; prior counters and retry window are retained.",
       "test_refs": [
         "content_factory/tests_prepare_journey_unit.py"
+      ]
+    },
+    {
+      "path": "content_factory/vibe_marketing_views.py",
+      "function": "_record_setup_verification_refusal",
+      "function_sha256": "8da095f8ad6b162b378d9ab7d3ddc56c520dccb17fd1bd23cd9ea4d0fa2cb8e1",
+      "reason": "Records a final setup merge refusal with the existing provider fact writer. The row lock and attempt comparison protect concurrent proof, approval and merge updates.",
+      "test_refs": [
+        "content_factory/tests_setup_merge_proof.py"
       ]
     }
   ],

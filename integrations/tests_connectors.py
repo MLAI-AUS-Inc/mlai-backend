@@ -172,7 +172,7 @@ def _xero_balance_sheet_report(*, total_bank: str, as_of: str = "30 Apr 2026") -
     SLACK_OAUTH_REDIRECT_URI="http://localhost:8000/integrations/callback/slack",
     LINEAR_CLIENT_ID="linear-client-id",
     LINEAR_CLIENT_SECRET="linear-client-secret",
-    LINEAR_OAUTH_REDIRECT_URI="http://localhost:8000/integrations/callback/linear",
+    LINEAR_OAUTH_REDIRECT_URI="https://api.example.test/integrations/callback/linear",
     BASIQ_API_KEY="YXBwLWtleS1mb3ItYmFzaXEtc2FuZGJveA==",
     BASIQ_API_BASE_URL="https://au-api.basiq.io",
     BASIQ_CONSENT_UI_URL="https://consent.basiq.io/home",
@@ -737,7 +737,7 @@ class ConnectorEndpointTests(TestCase):
             if slug == "linear":
                 self.assertEqual(params["response_type"], ["code"])
                 self.assertEqual(params["client_id"], ["linear-client-id"])
-                self.assertEqual(params["redirect_uri"], ["http://localhost:8000/integrations/callback/linear"])
+                self.assertEqual(params["redirect_uri"], ["https://api.example.test/integrations/callback/linear"])
                 self.assertEqual(params["scope"], ["read"])
             if slug == "google-analytics":
                 self.assertEqual(params["response_type"], ["code"])
@@ -1491,7 +1491,8 @@ class ConnectorEndpointTests(TestCase):
         self.assertTrue(response.data["errors"])
         connection.refresh_from_db()
         self.assertEqual(connection.status, ExternalServiceConnectionStatus.ERROR)
-        self.assertIn("Refresh token expired", connection.last_error)
+        # A refused refresh asks the founder to reconnect; the provider text stays in logs.
+        self.assertIn("Xero needs to be reconnected", connection.last_error)
 
     def test_xero_preview_and_invoices_endpoints_return_normalized_data(self):
         connection = ExternalServiceConnection.objects.create(
@@ -1747,7 +1748,8 @@ class ConnectorEndpointTests(TestCase):
         self.assertEqual(mock_post.call_count, 3)
         connection = ExternalServiceConnection.objects.get(user=self.user, provider=ExternalServiceProvider.BANK_FEED)
         self.assertEqual(connection.external_account_id, "basiq-user-123")
-        self.assertEqual(connection.status, ExternalServiceConnectionStatus.SYNCING)
+        # Not connected until Basiq confirms the founder's consent.
+        self.assertEqual(connection.status, ExternalServiceConnectionStatus.DISCONNECTED)
 
     def test_bank_feed_connect_reuses_existing_basiq_user_for_additional_bank(self):
         ExternalServiceConnection.objects.create(

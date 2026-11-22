@@ -415,9 +415,12 @@ def begin_callback(request) -> Optional[ChatCallback]:
         oauth_state = validate_github_oauth_state(raw_state, request=request)
     except ValueError:
         return _bad_state(raw_state)
-    from founder_tools.models import VibeRaisingCompany
-    company = VibeRaisingCompany.objects.select_related("organization").filter(
-        pk=context["chat_company_id"], profile__user_id=context["user_id"],
+    from django.contrib.auth import get_user_model
+    from founder_tools.membership import companies_for_user
+
+    actor = get_user_model().objects.filter(pk=context["user_id"], is_active=True).first()
+    company = companies_for_user(actor).filter(
+        pk=context["chat_company_id"],
         organization__domain=oauth_state.domain,
     ).first()
     flow = ChatCallback(oauth_state=oauth_state, company=company, organization=organization,
@@ -434,7 +437,7 @@ def begin_callback(request) -> Optional[ChatCallback]:
                 # The founder's GitHub login lets the owner's approval be matched
                 # to this founder (GitHub names them as the requester), and to no one else.
                 logins = owner_requests.founder_github_logins(
-                    company.profile.user, owner_requests.login_from_code(request.GET.get("code")))
+                    actor, owner_requests.login_from_code(request.GET.get("code")))
                 owner_requests.record_request(organization=company.organization, user_id=context["user_id"],
                                               company_id=company.pk, github_logins=logins)
             except Exception:

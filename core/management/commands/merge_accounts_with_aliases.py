@@ -36,6 +36,8 @@ MOVABLE = {
 PROFILES = {'community_chat.CommunityMemberProfile', 'founder_tools.VibeRaisingProfile'}
 SPECIAL = {(label, 'user') for label in PROFILES | {'roo.PointsAccount'}} | {
     ('roo.CoworkingBookingOperation', 'subjects'),
+    ('founder_tools.StartupMembership', 'user'),
+    ('founder_tools.StartupMembership', 'admitted_by'),
 }
 
 
@@ -55,6 +57,8 @@ class Command(BaseCommand):
     @transaction.atomic
     def handle(self, *args, **options):
         from core.slack_users import validate_slack_id
+        from founder_tools.membership import merge_account_memberships
+        from founder_tools.models import VibeRaisingCompany
 
         if not validate_slack_id(options['slack_id'])[0] or options['slack_id'] == 'system':
             raise CommandError('A real Slack user ID is required.')
@@ -114,7 +118,10 @@ class Command(BaseCommand):
                     if profile is None:
                         continue
                     for rel in model._meta.related_objects:
-                        if rel.related_model.objects.filter(**{rel.field.name: profile}).exists():
+                        records = rel.related_model.objects.filter(**{rel.field.name: profile})
+                        if rel.related_model is VibeRaisingCompany:
+                            records = records.exclude(membership_policy=VibeRaisingCompany.SHARED_ACCESS)
+                        if records.exists():
                             raise CommandError(f'Source profile has dependent data: {label}')
                     primary = model.objects.filter(user=target).first()
                     if primary:
@@ -169,6 +176,7 @@ class Command(BaseCommand):
         apps.get_model('community_chat', 'CommunityChatEmailCodeChallenge').objects.filter(user__in=sources).update(invalidated_at=now, encrypted_signup_email='')
 
         for source in sources:
+            merge_account_memberships(source, target, actor=actor)
             for label in PROFILES:
                 model = apps.get_model(label)
                 profile = model.objects.filter(user=source).first()

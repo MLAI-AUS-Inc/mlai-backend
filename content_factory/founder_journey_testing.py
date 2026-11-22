@@ -215,11 +215,11 @@ def make_history_free_org(domain=None, *, owner=True, created_at=LEGACY_CREATED_
     return FounderJourneyOrg(organization=org, config=config, owner=user, company=company)
 
 
-def make_new_journey_org(domain=None, *, marker=True, create_key_sha256=None) -> FounderJourneyOrg:
+def make_new_journey_org(domain=None, *, marker=True, create_key_sha256=None, owner_email=None) -> FounderJourneyOrg:
     """A startup created after :data:`LAUNCHED_AT`, with a ``create`` marker (or none, for launch-window only)."""
     org, config = _organization(domain or f"new-{uuid4().hex[:8]}.example.test", "New journey",
                                 created_at=timezone.now())
-    user, company = _owner(org)
+    user, company = _owner(org, email=owner_email)
     if marker:
         fresh = cohort_module._base_marker(cohort_module.NEW_JOURNEY, "create", ["created_after_launch"])
         fresh.update(createKeySha256=create_key_sha256, createdCompanyId=str(company.pk))

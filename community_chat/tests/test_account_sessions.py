@@ -15,6 +15,7 @@ from community_chat.account_sessions import issue_account_session
 from community_chat.adapter import RelayMembership
 from community_chat.authentication import TOKEN_PREFIX
 from community_chat.models import (
+    AccountDeletionRequest,
     CommunityChatAccountSession,
     CommunityChatBootstrapToken,
     CommunityChatChallenge,
@@ -84,6 +85,31 @@ class CommunityChatAccountSessionTests(TestCase):
         client = APIClient()
         client.cookies["mlai_chat_access"] = credentials.access_token
         return challenge, credentials, client
+
+    def test_roo_points_default_and_explicit_preference_across_session_keys(self):
+        url = reverse("community_chat_roo_points_mute")
+        mobile = self.bearer_client()
+        web_challenge, _, web = self.web_session()
+        headers = {"HTTP_ORIGIN": ORIGIN, "HTTP_X_MLAI_PUBLIC_KEY": web_challenge.public_key}
+        self.assertNotEqual(web_challenge.public_key, self.challenge.public_key)
+        self.assertEqual(APIClient().get(url).status_code, 401)
+        self.assertEqual(mobile.get(url).json(), {"muted": True, "explicit": False})
+        self.assertEqual(web.get(url, **headers).json(), {"muted": True, "explicit": False})
+        self.assertEqual(
+            mobile.put(url, {"muted": False}, format="json").json(),
+            {"muted": False, "explicit": True},
+        )
+        self.assertEqual(web.get(url, **headers).json(), {"muted": False, "explicit": True})
+        self.assertEqual(
+            web.put(url, {"muted": True, "initialize": True}, format="json", **headers).json(),
+            {"muted": False, "explicit": True},
+        )
+        self.assertEqual(
+            web.put(url, {"muted": True}, format="json", **headers).json(),
+            {"muted": True, "explicit": True},
+        )
+        self.assertEqual(mobile.get(url).json(), {"muted": True, "explicit": True})
+        self.assertEqual(mobile.put(url, {"muted": "false"}, format="json").status_code, 400)
 
     def test_tokens_are_hashed_and_account_endpoint_returns_own_profile(self):
         session = self.credentials.session
@@ -305,6 +331,35 @@ class CommunityChatAccountSessionTests(TestCase):
             response.data["profiles"][verified_key]["public_id"],
             response.data["profiles"][revoked_verified_key]["public_id"],
         )
+
+    def test_public_profile_batch_hides_keys_during_and_after_chat_deletion(self):
+        member = get_user_model().objects.create_user(email="departing@example.com", first_name="Departing")
+        old_key, new_key = public_key(71), public_key(72)
+        now = timezone.now()
+        CommunityChatDevice.objects.create(
+            user=member, public_key=old_key, status=DeviceBindingStatus.REVOKED,
+            verified_at=now - timedelta(days=1), revoked_at=now,
+        )
+        request = AccountDeletionRequest.objects.create(
+            user=member, scope=AccountDeletionRequest.Scope.CHAT, policy_version="synthetic",
+        )
+        client = self.bearer_client()
+        url = reverse("community_chat_public_profiles_batch")
+        pending = client.post(url, {"public_keys": [old_key]}, format="json")
+        self.assertEqual(pending.status_code, status.HTTP_200_OK)
+        self.assertEqual(pending.data, {"profiles": {}, "missing": [old_key]})
+
+        request.status = AccountDeletionRequest.Status.COMPLETED
+        request.completed_at = timezone.now()
+        request.save(update_fields=("status", "completed_at"))
+        CommunityChatDevice.objects.create(
+            user=member, public_key=new_key, status=DeviceBindingStatus.VERIFIED,
+            verified_at=request.completed_at + timedelta(seconds=1),
+        )
+        rejoined = client.post(url, {"public_keys": [old_key, new_key]}, format="json")
+        self.assertEqual(rejoined.status_code, status.HTTP_200_OK)
+        self.assertEqual(rejoined.data["missing"], [old_key])
+        self.assertEqual(list(rejoined.data["profiles"]), [new_key])
 
     def test_public_profile_batch_requires_an_account_session(self):
         response = APIClient().post(

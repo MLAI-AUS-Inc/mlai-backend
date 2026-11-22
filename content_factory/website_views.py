@@ -114,7 +114,8 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                             app_root=requested_root, branch=requested_branch, expected=request.data)
                         newly_bound = True
                     if current is None:
-                        raise WebsiteAuthorityError("website_connection_required", "Connect this website before continuing.")
+                        from .website_connection_codes import not_connected
+                        raise not_connected("Connect this website before continuing.")
                     if not expected and not newly_bound:
                         raise WebsiteAuthorityError("website_connection_required", "Reload the web app or update MLAI, then reconnect this website.")
                     payload = contract_for(current) if newly_bound else expected
@@ -122,7 +123,10 @@ def guarded_owner_operation(action, *, bind_selected=False, run_operation=False,
                 effective_action = action
                 if run_operation and run_action:
                     effective_action = run_action_authority(run, run_action)
-                with authority_guard(payload, action=effective_action):
+                # The owner's preview retry may follow a moved site commit;
+                # Content Factory re-pins the run before it builds.
+                follow = {"follow_moved_preview": True} if run_operation and effective_action == "preview" else {}
+                with authority_guard(payload, action=effective_action, **follow):
                     if local_only:
                         return invoke()
                 # The worker synchronously reauthorizes dispatch and mutations.
@@ -235,7 +239,8 @@ class WebsiteConnectionActionView(APIView):
             elif action == "reconnect":
                 current = config.website_connection
                 if current is None:
-                    raise WebsiteAuthorityError("website_connection_required", "Select a website repository first.")
+                    from .website_connection_codes import not_connected
+                    raise not_connected("Select a website repository first.")
                 bind_website(config, user=request.user, repo=current.github_repo, app_root=current.app_root,
                     branch=current.branch, site_url=current.site_url, reconnect=True, expected=request.data,
                     repository_id=current.repository_id)

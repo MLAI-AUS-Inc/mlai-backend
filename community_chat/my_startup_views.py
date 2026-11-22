@@ -18,7 +18,7 @@ from content_factory import notification_channel_views as notifications
 from content_factory import website_views as websites
 from content_factory.github_repository_views import VibeMarketingGitHubRepositoryView
 from core.views import CurrentUserView
-from founder_tools import views as founder
+from founder_tools import membership, views as founder
 from founder_tools.models import VibeRaisingCompany
 from founder_tools.services import user_may_use_organization
 from integrations.api_views_connectors import ConnectorSourcesStatusView
@@ -84,8 +84,7 @@ class MyStartupAccess(MyStartupViewMixin):
                 raise ValidationError({"companyId": "Choose a startup."})
             return
         try:
-            self.company = get_object_or_404(VibeRaisingCompany.objects.select_related("organization"),
-                pk=next(iter(ids)), profile__user=request.user)
+            self.company = get_object_or_404(membership.companies_for_user(request.user), pk=next(iter(ids)))
         except (ValueError, TypeError, DjangoValidationError, Http404):
             from founder_tools import startup_team as teams
             identity = (type(self).__module__, type(self).__name__)
@@ -165,7 +164,7 @@ class ProfileView(MyStartupAccess, founder.FounderToolsProfileView):
             payload = {**payload, "founderJourney": journey}
         response = Response(payload, status=200)
         from founder_tools.startup_team import enabled
-        if enabled() and response.status_code == 200 and isinstance(response.data, dict):
+        if (enabled() or any(row.get("accessPolicy") == "shared" for row in payload["companies"])) and response.status_code == 200 and isinstance(response.data, dict):
             response.data = {**response.data, 'teamAvailable': True}
         return response
 

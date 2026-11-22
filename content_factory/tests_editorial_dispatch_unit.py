@@ -28,7 +28,7 @@ if not settings.configured:
 from rest_framework import status
 from rest_framework.response import Response
 from .article_voice import article_voice_for_dispatch
-from .editorial_catalog import approve_catalog, article_brief_for_catalog, update_catalog
+from .editorial_catalog import approve_catalog, article_brief_for_catalog, update_catalog, upgrade_superseded_brief
 from .tests_editorial_catalog_unit import approval_payload
 from .tests_editorial_catalog_unit import approved_catalog, draft_catalog, edit_payload
 
@@ -170,6 +170,7 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
             "_quoted_price_response": lambda *args, **kwargs: None,
             "uuid": uuid, "status": status, "Response": Response, "DatabaseError": DatabaseError,
             "OrganizationContentConfig": self.config_model, "article_brief_for_catalog": article_brief_for_catalog,
+            "upgrade_superseded_brief": upgrade_superseded_brief, "settings": settings,
             "logger": Mock(), "timezone": SimpleNamespace(now=lambda: datetime(2026, 9, 10, tzinfo=dt_timezone.utc)),
             "ContentFactoryRunStatus": SimpleNamespace(FAILED="failed", BLOCKED="blocked", DENIED="denied"),
             "RESTARTABLE_ARTICLE_WORKFLOWS": {"article_generation", "content_factory_article", "direct_generate", "confirmed_topic"},
@@ -208,8 +209,8 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
         from content_factory.commands import ContentCommand
         self.ns["ContentCommand"] = ContentCommand
         names = {"start_article_generation", "_run_mapping", "_request_value", "_bool_from_request", "_normalize_portable_article_payload", "_refresh_article_editorial_payload", "_friendly_content_factory_error", "_blocked_worker_payload",
-                 "_restart_article_payload_from_run", "_reserve_article_restart", "_restart_article_run", "_charge_roo_points_for_article", "_queue_content_factory_run", "_queue_content_factory_run_authorized",
-                 "_run_result_from_remote", "_resolve_dispatch_token_run", "_fail_unconfirmed_dispatch_run"}
+                 "_restart_article_payload_from_run", "_restart_editorial_brief", "_reserve_article_restart", "_restart_article_run", "_charge_roo_points_for_article", "_queue_content_factory_run", "_queue_content_factory_run_authorized",
+                 "_run_result_from_remote", "content_factory_refusal_code", "_resolve_dispatch_token_run", "_fail_unconfirmed_dispatch_run"}
         tree = ast.parse(Path(__file__).with_name("vibe_marketing_views.py").read_text())
         nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
         self.assertEqual({node.name for node in nodes}, names)
@@ -301,7 +302,11 @@ class ArticleDispatchControlFlowTests(unittest.TestCase):
     def test_actual_start_handler_does_not_downgrade_an_empty_configured_catalog(self):
         self.strategy = {"editorial_catalog": {}}
         self.config.pillar_strategy = deepcopy(self.strategy)
-        self.assertEqual(self.start({"topic": "Delivery"}).status_code, 400)
+        # Plan B19: one founder question (no approved customer profile yet), not a bare 400.
+        response = self.start({"topic": "Delivery"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual((response.data["code"], response.data["action"]["id"]),
+                         ("editorial_brief_required", "describe_customer"))
         self.charge.assert_not_called()
         self.http.post.assert_not_called()
 

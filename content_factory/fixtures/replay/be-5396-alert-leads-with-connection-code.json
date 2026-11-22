@@ -1,0 +1,41 @@
+{
+  "schema": "replay-record-v1",
+  "id": "be-5396-alert-leads-with-connection-code",
+  "source": {
+    "run_pk": 5396,
+    "org_id": 173,
+    "catalogue": "founder issues catalogue 2026-11-18, section 3.3",
+    "synthetic": true
+  },
+  "workflow": "confirmed_topic",
+  "step": "await_review",
+  "code": "website_connection_required",
+  "framework_fingerprint": null,
+  "http": [],
+  "inputs": {
+    "run": {
+      "status": "approval_required",
+      "result": {
+        "generation": 0,
+        "failure": {
+          "code": "website_connection_required",
+          "requires_user_action": true
+        },
+        "article_preview_quality": {
+          "status": "blocking_findings",
+          "self_heal_exhausted": true,
+          "escalation": "quality_review",
+          "findings": [
+            "style:2_mismatches"
+          ]
+        }
+      }
+    }
+  },
+  "replay": {
+    "repo": "be",
+    "handler": "alerts.run_blocking_code"
+  },
+  "expected": "code:website_connection_required",
+  "notes": "The run was held for quality review and also carried website_connection_required. The alert named only the quality hold; it now leads with the blocking code (A3)."
+}

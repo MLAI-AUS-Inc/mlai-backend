@@ -119,9 +119,10 @@ class StartupConnectionBridgeTests(SimpleTestCase):
         with patch.object(connections, 'consume_ticket', return_value={"uid": 7, "company": COMPANY, "session": "session-1", "provider": "slack", "return_to": "mobile"}), \
              patch.object(connections.CommunityChatAccountSession.objects, 'select_related') as sessions, \
              patch.object(connections, '_valid_session', return_value=True), \
-             patch.object(connections.VibeRaisingCompany.objects, 'get', return_value=self.company), \
+             patch.object(connections, 'companies_for_user') as companies, \
              patch.object(connections, 'connector_connect', return_value=HttpResponseRedirect('https://provider.example.test/oauth')) as start:
             sessions.return_value.filter.return_value.first.return_value = session
+            companies.return_value.get.return_value = self.company
             response = connections.connect_browser(request)
         self.assertEqual(response.status_code, 302)
         self.assertEqual(request.GET['next'], 'mlaichat://connections?company_id=' + COMPANY + '&provider=slack')
@@ -135,7 +136,8 @@ class StartupConnectionBridgeTests(SimpleTestCase):
 
 class SourcePreferenceStorageTests(SimpleTestCase):
     def setUp(self):
-        self.company = Obj(pk=COMPANY, organization_id=9, profile=Obj(user_id=7))
+        self.company = Obj(pk=COMPANY, organization_id=9, profile_id=1, profile=Obj(user_id=7),
+                           membership_policy=prefs.VibeRaisingCompany.LEGACY_ACCESS)
         self.strategy = {"pillars": ["culture"], "editorial_catalog": {"version": 4},
                          prefs.PREFERENCE_KEY: {COMPANY + ":7": {"slack": True}, COMPANY + ":8": {"luma": False}, "other:7": {"stripe": False}}}
 
@@ -173,12 +175,34 @@ class SourcePreferenceStorageTests(SimpleTestCase):
             self.assertFalse(prefs.source_capabilities({"key": provider, "status": status_value, "selected": selected})["usableForUpdates"])
         self.assertTrue(prefs.source_capabilities({"key": "slack", "status": "connected", "selected": True}, preferences={"slack": False})["usableForUpdates"])
 
-    def test_default_inclusion_requires_saved_connection_but_explicit_choice_survives_revoke(self):
-        for status_value in ("not_connected", "unavailable"):
-            self.assertFalse(prefs.source_capabilities({"key": "slack", "status": status_value})["enabled"])
-        for status_value in ("connected", "syncing", "needs_reauth", "expired"):
+    def test_default_inclusion_requires_working_connection_but_explicit_choice_survives_revoke(self):
+        for status_value in ("not_connected", "unavailable", "needs_reauth", "expired", "error"):
+            source = prefs.source_capabilities({"key": "slack", "status": status_value, "connectionId": 4})
+            self.assertFalse(source["enabled"])
+            self.assertFalse(source["usableForUpdates"])
+        for status_value in ("connected", "syncing"):
             self.assertTrue(prefs.source_capabilities({"key": "slack", "status": status_value})["enabled"])
         self.assertTrue(prefs.source_capabilities({"key": "slack", "status": "not_connected"}, preferences={"slack": True})["enabled"])
+        revoked = prefs.source_capabilities({"key": "slack", "status": "needs_reauth"}, preferences={"slack": True})
+        self.assertTrue(revoked["enabled"])
+        self.assertFalse(revoked["usableForUpdates"])
+
+    def test_broken_connection_reads_as_reconnect_in_chat_vocabulary(self):
+        for provider in ("gmail", "xero", "bank_feed"):
+            source = prefs.source_capabilities({"key": provider, "status": "error", "connectionId": 4, "configured": True})
+            self.assertEqual(source["status"], "needs_reauth")
+            self.assertEqual(source["connectionStatus"], "error")
+            self.assertTrue(source["needsReconnect"])
+            self.assertTrue(source["canConnect"])
+            self.assertTrue(source["canDisconnect"])
+        healthy = prefs.source_capabilities({"key": "xero", "status": "connected", "connectionId": 4})
+        self.assertFalse(healthy["needsReconnect"])
+        self.assertNotIn("connectionStatus", healthy)
+
+    def test_xero_with_several_organisations_needs_a_choice_before_use(self):
+        source = prefs.source_capabilities({"key": "xero", "status": "connected", "connectionId": 4, "accountChoiceRequired": True})
+        self.assertFalse(source["usableForUpdates"])
+        self.assertEqual(source["status"], "connected")
 
 
 class NativeOAuthBoundaryTests(SimpleTestCase):
@@ -194,13 +218,16 @@ class NativeOAuthBoundaryTests(SimpleTestCase):
     def test_revoked_session_or_changed_company_cannot_complete_callback(self):
         payload = {"chat_session_id": "session-1", "chat_company_id": COMPANY, "organization_id": 9}
         with patch("community_chat.startups.oauth_context.CommunityChatAccountSession.objects.select_related") as sessions, \
-             patch("community_chat.startups.oauth_context.VibeRaisingCompany.objects.filter") as companies, \
+             patch("community_chat.startups.oauth_context.companies_for_user") as companies, \
              patch("community_chat.startups.oauth_context._valid_session", return_value=True):
-            sessions.return_value.filter.return_value.first.return_value = Obj()
-            companies.return_value.exists.return_value = True
+            user = Obj(pk=7)
+            sessions.return_value.filter.return_value.first.return_value = Obj(user=user)
+            scoped = companies.return_value.filter
+            scoped.return_value.exists.return_value = True
             self.assertTrue(valid_chat_oauth_context(payload, 7))
-            companies.assert_called_with(pk=COMPANY, profile__user_id=7, organization_id=9)
-            companies.return_value.exists.return_value = False
+            companies.assert_called_with(user)
+            scoped.assert_called_with(pk=COMPANY, organization_id=9)
+            scoped.return_value.exists.return_value = False
             self.assertFalse(valid_chat_oauth_context(payload, 7))
         with patch("community_chat.startups.oauth_context.CommunityChatAccountSession.objects.select_related"), \
              patch("community_chat.startups.oauth_context._valid_session", return_value=False):
@@ -220,3 +247,225 @@ class NativeOAuthBoundaryTests(SimpleTestCase):
         with patch("community_chat.startups.oauth_context.valid_chat_oauth_context", return_value=False):
             with self.assertRaises(ValueError):
                 github.validate_github_oauth_state(state.raw)
+
+
+def _token_response(status, payload):
+    import json
+    from requests import Response as HttpResponse
+    value = HttpResponse()
+    value.status_code = status
+    value.url = "https://identity.example/token"
+    value._content = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+    return value
+
+
+@override_settings(XERO_CLIENT_ID="synthetic", XERO_CLIENT_SECRET="synthetic",
+    GOOGLE_OAUTH_CLIENT_ID="synthetic", GOOGLE_OAUTH_CLIENT_SECRET="synthetic",
+    CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
+class ExpiredCredentialTests(SimpleTestCase):
+    """Expired or revoked Xero and Google grants read as Reconnect, never "try again shortly"."""
+
+    def connection(self, provider, **extra):
+        from django.utils import timezone
+        return Obj(pk=8, id=8, user_id=2, organization_id=4, provider=provider, refresh_token="synthetic-refresh",
+            updated_at=timezone.now(), provider_metadata={}, status="connected", last_error="", **extra)
+
+    def refresh(self, provider, response):
+        from integrations.services import external_connectors as external
+        refresh = (external._refresh_xero_connection_unlocked if provider == "xero"
+            else external._refresh_google_analytics_connection)
+        connection = self.connection(provider)
+        with patch.object(external.requests, "post", return_value=response), \
+                patch.object(external.ExternalServiceConnection, "objects") as rows:
+            try:
+                refresh(connection)
+            except Exception as exc:  # noqa: BLE001 - the test inspects the raised contract
+                return exc, connection, rows
+        self.fail("refresh should not succeed")
+
+    def test_invalid_grant_marks_xero_and_analytics_for_reconnect(self):
+        from integrations.services import external_connectors as external
+        from startup_updates.preflight import source_failure_check
+        for provider, message in (("xero", external.XERO_RECONNECT_MESSAGE),
+                                  ("google_analytics", external.GOOGLE_ANALYTICS_RECONNECT_MESSAGE)):
+            with self.subTest(provider=provider):
+                exc, connection, rows = self.refresh(provider, _token_response(400, {"error": "invalid_grant"}))
+                self.assertIsInstance(exc, external.ConnectorReconnectRequired)
+                self.assertEqual(str(exc), message)
+                self.assertEqual(connection.status, "error")
+                rows.filter.return_value.update.assert_called_once()
+                self.assertEqual(rows.filter.return_value.update.call_args.kwargs["last_error"], message)
+                self.assertIn(message, external.RECONNECT_MESSAGES[provider])
+                self.assertEqual(source_failure_check(provider, exc)["status"], "needs_reconnect")
+
+    def test_missing_refresh_token_also_needs_reconnect(self):
+        from integrations.services import external_connectors as external
+        connection = self.connection("xero")
+        connection.refresh_token = ""
+        with patch.object(external.ExternalServiceConnection, "objects"), \
+                self.assertRaises(external.ConnectorReconnectRequired):
+            external._refresh_xero_connection_unlocked(connection)
+
+    def test_app_credential_or_outage_failures_stay_temporary(self):
+        import requests
+        from integrations.services import external_connectors as external
+        for status, payload in ((400, {"error": "invalid_client"}), (400, {"error": "unauthorized_client"}),
+                (403, b"<html>Access denied</html>"), (401, {}), (503, {})):
+            with self.subTest(status=status, payload=payload):
+                exc, connection, rows = self.refresh("xero", _token_response(status, payload))
+                self.assertIsInstance(exc, requests.HTTPError)
+                self.assertEqual(connection.status, "connected")
+                rows.filter.return_value.update.assert_not_called()
+
+    def test_gmail_revoked_grant_reads_as_reconnect_until_reconnected(self):
+        from google.auth.exceptions import RefreshError
+        from integrations.services import gmail
+        from startup_updates.preflight import source_failure_check
+        connection = Obj(pk=5, user_id=2, refresh_token="synthetic-old")
+        credentials = MagicMock()
+        credentials.refresh.side_effect = RefreshError("invalid_grant: Token has been expired or revoked.", {})
+        with patch.object(gmail, "get_refreshed_credentials", return_value=credentials):
+            with self.assertRaises(gmail.GmailReconnectRequired) as raised:
+                gmail.build_gmail_service(connection)
+        self.assertEqual(source_failure_check("gmail", raised.exception)["status"], "needs_reconnect")
+        self.assertTrue(gmail.gmail_needs_reconnect(connection))
+        self.assertFalse(gmail.gmail_needs_reconnect(Obj(pk=5, user_id=2, refresh_token="synthetic-new")))
+        credentials.refresh.side_effect = RefreshError("temporarily unavailable", {})
+        with patch.object(gmail, "get_refreshed_credentials", return_value=credentials), self.assertRaises(RefreshError):
+            gmail.build_gmail_service(Obj(pk=6, user_id=2, refresh_token="other"))
+        self.assertFalse(gmail.gmail_needs_reconnect(Obj(pk=6, user_id=2, refresh_token="other")))
+
+    def test_gmail_status_reports_needs_reauth_for_a_refused_grant(self):
+        from integrations.services import external_connectors as external, gmail
+        connection = Obj(pk=5, id=5, user_id=2, refresh_token="synthetic-old", google_email="founder@example.test")
+        with patch.object(external, "google_connection_for_org", return_value=connection), \
+                patch.object(external, "is_provider_configured", return_value=True), \
+                patch.object(external, "gmail_scope_status_payload", return_value={"hasGmailScope": True}), \
+                patch.object(external, "has_gmail_read_scope", return_value=True), \
+                patch.object(external, "_scope_org", return_value=Obj(pk=4)), \
+                patch.object(external.GoogleConnection, "objects"), \
+                patch("integrations.services.source_accounts.serialize_accounts", return_value={}), \
+                patch.object(gmail, "gmail_needs_reconnect", return_value=True):
+            source = external._serialize_google_source(Obj(pk=2), Obj(pk=4))
+        self.assertEqual(source["status"], "needs_reauth")
+        self.assertEqual(source["warning"], gmail.GMAIL_REVOKED_WARNING)
+        self.assertEqual(prefs.source_capabilities(source)["enabled"], False)
+
+
+@override_settings(BASIQ_API_BASE_URL="https://basiq.example", BASIQ_CONSENT_UI_URL="https://consent.basiq.example")
+class BankFeedConsentTests(SimpleTestCase):
+    """A bank feed is not shown as connected until the founder consents at Basiq."""
+
+    def start(self, rows):
+        from integrations.services import external_connectors as external
+        request = Obj(user=Obj(pk=7, id=7, email="founder@example.test"))
+        organization = Obj(pk=9, id=9)
+        with patch.object(external, "_basiq_token", return_value={"access_token": "synthetic"}), \
+                patch.object(external.requests, "post") as post, \
+                patch.object(external, "_save_state", return_value="state"), \
+                patch.object(external.ExternalServiceConnection, "objects") as manager, \
+                patch.object(external, "_upsert_connection") as upsert:
+            post.return_value.json.return_value = {"id": "basiq-user"}
+            manager.filter.return_value.exclude.return_value.order_by.return_value.__getitem__.return_value = rows
+            manager.filter.return_value.order_by.return_value.first.return_value = rows[0] if rows else None
+            url = external._build_basiq_consent_url(request, next_url="https://chat.example", organization=organization)
+        return url, upsert.call_args.kwargs
+
+    def test_first_consent_waits_disconnected(self):
+        url, saved = self.start([])
+        self.assertTrue(url.startswith("https://consent.basiq.example?"))
+        self.assertEqual(saved["status"], "disconnected")
+        self.assertTrue(saved["provider_metadata"]["consent_pending"])
+
+    def test_abandoned_consent_reuses_basiq_user_and_stays_pending(self):
+        pending = Obj(status="disconnected", external_account_id="basiq-user", provider_metadata={"consent_pending": True, "basiq_user": {"id": "basiq-user"}})
+        url, saved = self.start([pending])
+        self.assertIn("action=connect", url)
+        self.assertEqual(saved["external_account_id"], "basiq-user")
+        self.assertEqual(saved["status"], "disconnected")
+
+    def test_reconsent_keeps_a_working_feed_connected(self):
+        working = Obj(status="connected", external_account_id="basiq-user", provider_metadata={})
+        _url, saved = self.start([working])
+        self.assertEqual(saved["status"], "connected")
+        self.assertFalse(saved["provider_metadata"]["consent_pending"])
+
+    def test_consent_callback_clears_the_pending_marker(self):
+        from integrations.services import external_connectors as external
+        class Session(dict):
+            modified = False
+        request = Obj(user=Obj(pk=7, id=7), session=Session(), GET={})
+        state = external._save_state(request, "bank_feed", "https://chat.example/my-startup/connections?company_id=" + COMPANY,
+            {"organization_id": 9, "basiq_user_id": "basiq-user"})
+        from django.test import RequestFactory
+        callback = RequestFactory().get("/cb", {"state": state})
+        callback.session, callback.user = Session(), request.user
+        record = Obj(provider_metadata={"consent_pending": True}, status="disconnected", last_error="", save=MagicMock())
+        with patch.object(external.Organization, "objects") as orgs, patch.object(external.ExternalServiceConnection, "objects") as rows:
+            orgs.filter.return_value.first.return_value = Obj(pk=9, id=9)
+            rows.filter.return_value.first.return_value = record
+            external.complete_oauth_callback(callback, "bank_feed")
+        self.assertEqual(record.status, "connected")
+        self.assertFalse(record.provider_metadata["consent_pending"])
+
+
+class ConnectOrganizationTests(SimpleTestCase):
+    """Connect stores tokens on the selected startup's own organisation (the one Sources reads)."""
+
+    def resolve(self, company, *, ensure):
+        from integrations.services import external_connectors as external
+        with patch("founder_tools.services.ensure_company_organization", **ensure) as ensured, \
+                patch.object(external, "resolve_or_create_profile") as profile, \
+                patch.object(external, "bind_user_to_startup") as bind, \
+                patch.object(external, "google_connection_for_org", return_value=None):
+            try:
+                return external.resolve_connector_organization(Obj(pk=7), company=company), ensured, profile, bind
+            except Exception as exc:  # noqa: BLE001 - returned for assertions
+                return exc, ensured, profile, bind
+
+    def test_startup_without_website_uses_its_own_organisation_not_a_sibling(self):
+        own = Obj(pk=31, id=31, domain="startup-5.invalid")
+        company = Obj(pk=5, domain="", organization=None, organization_id=None)
+        organization, ensured, profile, bind = self.resolve(company, ensure={"return_value": own})
+        self.assertIs(organization, own)
+        ensured.assert_called_once_with(company)
+        profile.assert_called_once_with(domain="startup-5.invalid")
+        self.assertIs(bind.call_args.kwargs["organization"], own)
+
+    def test_domain_claimed_by_another_founder_refuses_with_plain_words(self):
+        from founder_tools.services import CompanyDomainClaimedError
+        from integrations.services import external_connectors as external
+        company = Obj(pk=5, domain="taken.example", organization=None, organization_id=None)
+        error, _ensured, _profile, bind = self.resolve(company, ensure={"side_effect": CompanyDomainClaimedError()})
+        self.assertIsInstance(error, external.ConnectorOAuthError)
+        self.assertEqual(str(error), external.CONNECT_DOMAIN_CLAIMED_MESSAGE)
+        bind.assert_not_called()
+
+
+class XeroAccountChoiceTests(SimpleTestCase):
+    def serialize(self, *, accounts, choice):
+        from integrations.services import external_connectors as external
+        connection = Obj(pk=3, id=3, status="connected", last_error="", scopes=[], account_label="A",
+            external_account_id="tenant-a", last_synced_at=None)
+        with patch.object(external.ExternalServiceConnection, "objects") as rows, \
+                patch.object(external, "_scope_org", return_value=Obj(pk=4)), \
+                patch("integrations.services.source_accounts.report_connection", return_value=connection), \
+                patch("integrations.services.source_accounts.report_account_id", return_value=choice), \
+                patch("integrations.services.source_accounts.serialize_accounts", return_value={}), \
+                patch.object(external, "_provider_configuration_error", return_value=None), \
+                patch.object(external, "_xero_can_request_report_scopes", return_value=True), \
+                patch.object(external, "xero_has_report_scope", return_value=True):
+            rows.filter.return_value.exclude.return_value.filter.return_value.count.return_value = accounts
+            return external._serialize_external_source(Obj(pk=2), "xero", Obj(pk=4))
+
+    def test_several_organisations_without_a_choice_ask_for_one(self):
+        from integrations.services import external_connectors as external
+        source = self.serialize(accounts=2, choice=None)
+        self.assertTrue(source["accountChoiceRequired"])
+        self.assertEqual(source["warning"], external.XERO_ACCOUNT_CHOICE_WARNING)
+        self.assertFalse(prefs.source_capabilities(source)["usableForUpdates"])
+        for accounts, choice in ((1, None), (2, 3)):
+            with self.subTest(accounts=accounts, choice=choice):
+                source = self.serialize(accounts=accounts, choice=choice)
+                self.assertFalse(source["accountChoiceRequired"])
+                self.assertTrue(prefs.source_capabilities(source)["usableForUpdates"])

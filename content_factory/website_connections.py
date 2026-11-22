@@ -4,6 +4,7 @@ from .website_contract import RunCommandConflict
 
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import wraps
 import hashlib
 import logging
@@ -125,7 +126,9 @@ def setup_merge_observation_guard(run):
     if not connection_contract(original):
         if OrganizationContentConfig.objects.filter(organization__domain__iexact=run.domain,
                 website_connection__isnull=False).exists():
-            raise WebsiteAuthorityError("website_connection_required", "This setup has no original website consent.")
+            # B12: a run without saved consent on a connected site is not a
+            # disconnect; retrying cannot help and there is nothing to reconnect.
+            raise WebsiteAuthorityError("invalid_connection_contract", "This setup has no original website consent.")
         yield None
         return
     if run.workflow != "article_system_setup":
@@ -269,6 +272,12 @@ def summary_for(config, *, company_id=None):
         actions = [action for action in actions if action not in {"setup", "publish", "preview"}]
         if any(item.get("code") == ACCESS_BLOCKER for item in connection.blockers) and "reconnect" not in actions:
             actions.append("reconnect")
+    # The stored deletion epoch must outlive every reset. Once a target in
+    # this generation verifies, the old deletion is no longer a user blocker.
+    blockers = connection.blockers
+    if (selected and selected.verified_at and connection.verified_sha == selected.source_sha
+            and capabilities["publishingReady"]):
+        blockers = [row for row in blockers if row.get("code") != "website_data_deleted"]
     latest = connection.operations.exclude(action__in=["goal-usage", "goal-alert", "usage-refresh"]).order_by("-created_at").first()
     summary = {
         "latestOperation": {"id": str(latest.pk), "action": latest.action, "state": latest.state, "receipt": latest.receipt} if latest else None,
@@ -277,7 +286,7 @@ def summary_for(config, *, company_id=None):
         "repositoryId": connection.repository_id, "githubRepo": connection.github_repo,
         "appRoot": connection.app_root, "branch": connection.branch, "siteUrl": connection.site_url,
         "status": connection.state, "capabilities": capabilities, "allowedActions": actions,
-        "blockers": connection.blockers, "verifiedSha": connection.verified_sha or None,
+        "blockers": blockers, "verifiedSha": connection.verified_sha or None,
         "scannedSha": getattr(config, "last_scanned_sha", "") or None, "observedSha": observed_source_sha(connection) or None,
         "configurationVersion": connection.configuration_version,
     }
@@ -428,12 +437,20 @@ def require_run_not_stopped(payload, *, lock=False):
 
 @contextmanager
 def authority_guard(data, *, action="read", domain="", github_repo="", require_selected=True,
-                    require_current_head=False):
+                    require_current_head=False, follow_moved_preview=False):
     """Verify provider evidence outside locks, then conditionally fence persistence.
 
     The second phase repeats consent and operation checks. A concurrent revoke,
     source observation or rebind invalidates the provider snapshot before any
     local write. A provider read never grants a transferable mutation lease.
+
+    ``follow_moved_preview`` is for the owner's own preview retry only. With
+    the source follow switch on, a site commit newer than the run's pin does
+    not refuse it: Content Factory finds the moved branch when it lays the
+    preview commit, re-pins the run through ``source_repin.repin_source``
+    (which checks the current head itself) and builds on the new commit.
+    Refusing here stranded a draft whose site was fixed after its build
+    failed (La Vie run 30c8dadc, 20 Nov 2026).
     """
     from .website_operations import validate_operation
     from .website_rollout import require_repository_write_policy
@@ -450,7 +467,9 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
                 payload.setdefault(key, inventory[key])
     contract = connection_contract(payload)
     if not contract:
-        raise WebsiteAuthorityError("website_connection_required", "Reconnect this website to continue.")
+        # B12: decided from the saved run and the connection's real state.
+        from .website_connection_codes import missing_contract_error
+        raise missing_contract_error(payload)
     domain = str(domain or payload.get("domain") or "").lower().strip()
     github_repo = str(github_repo or payload.get("github_repo") or "").strip()
     candidate = WebsiteConnection.objects.select_related("organization").filter(pk=contract["website_connection_id"]).first()
@@ -462,12 +481,15 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         if revision is not None and str(revision) != str(candidate.configuration_version):
             raise WebsiteAuthorityError("website_configuration_changed", "Refresh the reviewed website configuration.")
         cleanup = action in {"worker_cleanup", "restoration", "restoration_read", "cancel_operation", "cancel_receipt"}
+        source_action = (guard_source_action(action, payload, follow_moved_preview=follow_moved_preview)
+                         if not cleanup and single_source_resolver_enabled() else None)
         if cleanup:
             validate_operation(candidate, {**payload, "action": action}, worker_cleanup=action == "worker_cleanup",
                 restoration=action in {"restoration", "restoration_read"}, cancellation=action == "cancel_operation", cancellation_receipt=action == "cancel_receipt")
             if domain.casefold() != candidate.organization.domain.casefold() or (github_repo and github_repo.casefold() != candidate.github_repo.casefold()):
                 raise WebsiteAuthorityError("worker_cleanup_scope_mismatch", "Cleanup does not belong to this company and repository.")
         else:
+            github_repo = followed_repository_name(source_action, payload, contract, candidate, github_repo)
             validate_authority(candidate, payload, action=action, domain=domain, github_repo=github_repo)
             validate_operation(candidate, payload)
             require_repository_write_policy(action=action, domain=candidate.organization.domain)
@@ -504,8 +526,17 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
             require_unlocked_remote_call()
         if needs_native:
             verify_repository_native_target(candidate)
+        followed = False
         if needs_head and reviewed_source is None:
-            verify_repository_head(candidate, expected or candidate.verified_sha)
+            try:
+                verify_repository_head(candidate, expected or candidate.verified_sha)
+            except WebsiteAuthorityError as exc:
+                if not proceed_past_moved_head(exc, action=action, source_action=source_action, payload=payload,
+                        connection=candidate, pinned_sha=expected or candidate.verified_sha,
+                        follow_moved_preview=follow_moved_preview):
+                    raise
+                # The run's pin is now stale: never record it as GitHub's head.
+                followed = True
         with transaction.atomic():
             Organization.objects.select_for_update().get(pk=candidate.organization_id)
             connection = WebsiteConnection.objects.select_for_update().select_related("organization").get(pk=candidate.pk)
@@ -551,18 +582,255 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
                 from .activation import live_deployment_verified
                 if not live_deployment_verified(connection, target):
                     raise WebsiteAuthorityError("deployment_verification_required", "Verify the current public articles integration before publishing.")
-            heads_token = _verified_heads.set(_verified_heads.get() | {(str(connection.pk), connection.generation, expected)} if needs_head else _verified_heads.get())
+            heads_token = _verified_heads.set(_verified_heads.get() | {(str(connection.pk), connection.generation, expected)} if needs_head and not followed else _verified_heads.get())
             native_token = _verified_native_targets.set(_verified_native_targets.get() | {(str(connection.pk), connection.generation)} if needs_native else _verified_native_targets.get())
             depth_token = _authority_depth.set(_authority_depth.get() + 1)
             try:
                 with reviewed_source_scope(payload, connection, reviewed_source):
-                    if needs_head and reviewed_source is None and observed and expected != observed:
+                    if needs_head and not followed and reviewed_source is None and observed and expected != observed:
                         check_source_identity(connection, payload)
                     yield connection
             finally:
                 _authority_depth.reset(depth_token)
                 _verified_heads.reset(heads_token)
                 _verified_native_targets.reset(native_token)
+
+
+# One decision for "the founder's branch moved" (build plan workstream 4).
+# Six guards used to answer it six ways (BE #1364, #1375, #1383; CF #1255,
+# #1263, #1264). With ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED on, every caller
+# asks resolve_run_source; off, each keeps its old path.
+
+#: Run actions whose source decision is made here.
+SOURCE_ACTIONS = ("read", "preview_retry", "repin", "terminal_callback", "publish")
+#: What happened to the selected branch since the run's pinned commit.
+SOURCE_STATES = ("unchanged", "fast_forward", "setup_files_changed", "repo_renamed",
+                 "repo_unreachable", "history_rewritten", "unverified")
+SOURCE_OUTCOMES = ("follow", "refuse", "unchanged")
+
+# Each cell is (outcome, reason code). ``follow`` moves the run to the current
+# head (or name), ``unchanged`` keeps its pin and lets it carry on, ``refuse``
+# stops this action. A new action or state without a full row fails
+# tests_single_source_resolver.
+_FF = ("follow", "head_fast_forward")
+_SETUP = ("refuse", "setup_files_changed")
+_RENAMED = ("follow", "repository_renamed")
+_UNREACHABLE = ("refuse", "repository_unreachable")
+_REWRITTEN = ("refuse", "history_rewritten")
+SOURCE_DECISIONS = {
+    "read": {
+        "unchanged": ("unchanged", "head_unchanged"), "fast_forward": _FF, "setup_files_changed": _SETUP,
+        "repo_renamed": _RENAMED, "repo_unreachable": _UNREACHABLE, "history_rewritten": _REWRITTEN,
+        # GitHub's compare could not be read: follow as the switch-on path did before.
+        "unverified": ("follow", "head_moved_unverified"),
+    },
+    "preview_retry": {
+        "unchanged": ("unchanged", "head_unchanged"), "fast_forward": _FF, "setup_files_changed": _SETUP,
+        "repo_renamed": _RENAMED, "repo_unreachable": _UNREACHABLE, "history_rewritten": _REWRITTEN,
+        "unverified": ("follow", "head_moved_unverified"),
+    },
+    "repin": {
+        "unchanged": ("unchanged", "head_unchanged"), "fast_forward": _FF, "setup_files_changed": _SETUP,
+        "repo_renamed": _RENAMED, "repo_unreachable": _UNREACHABLE, "history_rewritten": _REWRITTEN,
+        # Re-pin re-reads GitHub's head itself (require_current_head).
+        "unverified": ("follow", "head_moved_unverified"),
+    },
+    "terminal_callback": {
+        # A callback reports work done on the pinned commit. It is recorded
+        # whatever the branch did since; it never moves the pin itself.
+        "unchanged": ("unchanged", "head_unchanged"),
+        "fast_forward": ("unchanged", "callback_keeps_pin"),
+        "setup_files_changed": ("unchanged", "callback_keeps_pin"),
+        "repo_renamed": _RENAMED, "repo_unreachable": _UNREACHABLE,
+        "history_rewritten": ("unchanged", "callback_keeps_pin"),
+        "unverified": ("unchanged", "callback_keeps_pin"),
+    },
+    "publish": {
+        # The founder approved the exact preview commit: publish never follows
+        # a moved head (the preview is rebuilt first), only a rename.
+        "unchanged": ("unchanged", "head_unchanged"),
+        "fast_forward": ("refuse", "reviewed_source_moved"),
+        "setup_files_changed": _SETUP,
+        "repo_renamed": _RENAMED, "repo_unreachable": _UNREACHABLE, "history_rewritten": _REWRITTEN,
+        "unverified": ("refuse", "reviewed_source_moved"),
+    },
+}
+
+
+def single_source_resolver_enabled():
+    """ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED, default off."""
+    from django.conf import settings
+    return bool(getattr(settings, "ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED", False))
+
+
+@dataclass(frozen=True)
+class SourceObservation:
+    """What the selected branch did since the run's pin; ``state`` is one of SOURCE_STATES."""
+    state: str
+    pinned_sha: str = ""
+    detail: tuple = ()
+
+
+@dataclass(frozen=True)
+class SourceDecision:
+    """``outcome`` is follow, refuse or unchanged; ``reason`` is a stable code."""
+    outcome: str
+    reason: str
+    action: str
+    state: str
+
+    @property
+    def proceeds(self):
+        return self.outcome != "refuse"
+
+
+def decide_run_source(action, observation):
+    """Pure table lookup; an unknown action or state refuses."""
+    row = SOURCE_DECISIONS.get(action)
+    if row is None:
+        return SourceDecision("refuse", "unknown_source_action", action, getattr(observation, "state", ""))
+    cell = row.get(observation.state)
+    if cell is None:
+        return SourceDecision("refuse", "unknown_source_state", action, observation.state)
+    outcome, reason = cell
+    from .source_repin import follow_enabled
+    if outcome == "follow" and action in {"read", "preview_retry"} and observation.state != "repo_renamed" and not follow_enabled():
+        # As before, reads and the owner's retry follow a push only with
+        # ARTICLES_SOURCE_FOLLOW_ENABLED; re-pin keeps its own cohort checks.
+        return SourceDecision("refuse", "source_follow_disabled", action, observation.state)
+    return SourceDecision(outcome, reason, action, observation.state)
+
+
+def classify_source_comparison(comparison, *, setup_cache=None, article_run=True):
+    """Map one GitHub compare (pinned...head) to a SOURCE_STATES value, without network.
+
+    Setup files are judged only for article runs: a setup run installs them.
+    Changes to the article registry and content folder are not setup changes.
+    """
+    from .website_source_carry import decide, setup_paths
+    if not isinstance(comparison, dict):
+        return "unverified"
+    status = comparison.get("status")
+    if status == "identical":
+        return "unchanged"
+    if status != "ahead":
+        return "history_rewritten" if status in {"diverged", "behind"} else "unverified"
+    # The article list itself (registry_path) gains entries as articles land,
+    # so only the files around it count.
+    cache = {key: value for key, value in setup_cache.items() if key != "registry_path"} if isinstance(setup_cache, dict) else {}
+    if not article_run or not setup_paths(cache):
+        return "fast_forward"
+    verdict = decide(cache, comparison, owned_merge=True)
+    if verdict.get("reason") == "setup_files_changed":
+        return "setup_files_changed"
+    return "fast_forward" if verdict.get("carry") else "unverified"
+
+
+def observe_run_source(run, connection, *, pinned_sha="", head_ref="", github_repo=""):
+    """Read what the branch did since ``pinned_sha`` (one GitHub compare, outside locks)."""
+    from .website_repository_identity import has_pausing_blocker
+    claimed = str(github_repo or getattr(run, "github_repo", "") or "").strip()
+    if claimed and claimed.casefold() != str(connection.github_repo or "").casefold():
+        # The connection is matched by the permanent repository id, so a
+        # different name here is a rename or transfer (D3).
+        return SourceObservation("repo_unreachable" if has_pausing_blocker(connection) else "repo_renamed", pinned_sha)
+    if has_pausing_blocker(connection):
+        return SourceObservation("repo_unreachable", pinned_sha)
+    if not pinned_sha:
+        return SourceObservation("unverified", pinned_sha)
+    if head_ref and head_ref == pinned_sha:
+        return SourceObservation("unchanged", pinned_sha)
+    from .source_repin import ARTICLE_WORKFLOWS
+    from .website_source_carry import compare_sources, setup_paths
+    config = OrganizationContentConfig.objects.filter(website_connection=connection).first()
+    cache = getattr(config, "article_system_setup_cache", None)
+    article_run = getattr(run, "workflow", "") in ARTICLE_WORKFLOWS
+    comparison = compare_sources(connection, pinned_sha, head_ref or connection.branch,
+        setup_files=setup_paths(cache) if article_run else None)
+    return SourceObservation(classify_source_comparison(comparison, setup_cache=cache, article_run=article_run), pinned_sha)
+
+
+def resolve_run_source(run, action, *, observation=None, connection=None, pinned_sha="", head_ref="", github_repo=""):
+    """The one answer to "the founder's branch moved": follow, refuse or unchanged, with a reason.
+
+    ``action`` is one of SOURCE_ACTIONS. Pass ``observation`` when the caller
+    already knows the branch state; otherwise it is read from GitHub.
+    """
+    if observation is None:
+        if connection is None:
+            raise ValueError("resolve_run_source needs a connection or an observation.")
+        pinned = pinned_sha or str((getattr(run, "run_request", None) or {}).get("expected_source_sha") or "")
+        observation = observe_run_source(run, connection, pinned_sha=pinned, head_ref=head_ref, github_repo=github_repo)
+    decision = decide_run_source(action, observation)
+    logger.info("run_source_resolved run_id=%s action=%s state=%s outcome=%s reason=%s",
+                getattr(run, "run_id", ""), action, observation.state, decision.outcome, decision.reason)
+    return decision
+
+
+def guard_source_action(action, payload, *, follow_moved_preview=False):
+    """Which SOURCE_ACTIONS row an authority_guard call is, or None for the old path."""
+    if follow_moved_preview and action in {"preview", "read"}:
+        return "preview_retry"
+    if action == "read":
+        return "read"
+    if action in {"publish", "merge"}:
+        return "publish"
+    if action == "config_write" and is_terminal_callback(payload):
+        return "terminal_callback"
+    return None
+
+
+#: Worker events that end a run (also what record_denied_terminal_callback records).
+TERMINAL_CALLBACK_EVENTS = frozenset({"generation_failed", "generation_blocked", "error", "article_system_setup_failed",
+    "generation_pr_opened", "article_complete", "article_system_setup_complete", "article_system_setup_completed",
+    "scan_complete", "scaffold_complete", "publish_bundle_ready", "content_ready", "article_system_setup_preview_failed"})
+
+
+def is_terminal_callback(payload):
+    """A terminal worker event, or an event-less terminal status snapshot."""
+    payload = payload if isinstance(payload, dict) else {}
+    event = str(payload.get("event_type") or payload.get("event") or "")
+    return event in TERMINAL_CALLBACK_EVENTS or (not event and payload.get("status") in {"failed", "blocked", "completed"})
+
+
+def proceed_past_moved_head(exc, *, action, source_action, payload, connection, pinned_sha, follow_moved_preview=False):
+    """Whether authority_guard may carry on after GitHub's head no longer matches the pin.
+
+    ``source_action`` is set only with ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED
+    (see guard_source_action); then the resolver's table decides. Otherwise
+    the old rule stays: only the owner's preview retry follows, and only with
+    ARTICLES_SOURCE_FOLLOW_ENABLED.
+    """
+    if source_action is not None:
+        if exc.authority_code != "website_source_changed":
+            return False
+        return resolve_run_source(_source_run(payload), source_action, connection=connection,
+            pinned_sha=pinned_sha, github_repo=connection.github_repo).proceeds
+    from .source_repin import follow_enabled as source_follow_enabled
+    # "read" covers the retry's own attempt fence (advance_workflow_attempt).
+    return bool(follow_moved_preview and action in {"preview", "read"} and exc.code == "website_source_changed"
+                and source_follow_enabled())
+
+
+def followed_repository_name(source_action, payload, contract, connection, github_repo):
+    """The repository name authority_guard checks: the connection's, when the resolver follows a rename.
+
+    Only the same permanent repository id qualifies, and only with the
+    resolver switched on (``source_action`` set). Otherwise ``github_repo``
+    is returned unchanged and validate_authority refuses a mismatch as before.
+    """
+    if (not source_action or not github_repo or github_repo.casefold() == str(connection.github_repo or "").casefold()
+            or not contract.get("repository_id") or contract["repository_id"] != connection.repository_id):
+        return github_repo
+    decision = resolve_run_source(_source_run(payload), source_action, connection=connection, github_repo=github_repo)
+    return connection.github_repo if decision.outcome == "follow" else github_repo
+
+
+def _source_run(payload):
+    from workflow_runs.models import ContentFactoryRun
+    identifier = str(payload.get("run_id") or payload.get("job_id") or "")
+    return ContentFactoryRun.objects.filter(run_id=identifier).first() if identifier else None
+
 
 
 def scoped_run_contract(run):
@@ -588,6 +856,51 @@ def run_action_authority(run, action):
             return "setup"
         return "publish"
     return "setup"
+
+
+RUN_CONTRACT_FILL_FIELDS = (*CONNECTION_FIELDS, "operation_id", "operation_attempt", "deletion_epoch")
+
+
+def fill_callback_contract_from_run(payload, run_id):
+    """Bind a worker callback that omitted its consent tuple to its own run's saved consent.
+
+    La Vie run 73887ea8 (18 Nov 2026): a review-time callback for a bound run
+    carried no connection fields, so authority_guard answered
+    website_connection_required ("Reconnect this website") although the run's
+    saved request named the live connection exactly, and the worker then
+    blocked a run that was ready for review. Only the run's own saved request
+    is read (never today's selected connection), only missing keys are added,
+    and every authority check still runs on the result.
+    """
+    from django.conf import settings
+    if not getattr(settings, "ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED", True):
+        return payload
+    try:
+        if connection_contract(_payload_with_context(payload)):
+            return payload
+    except WebsiteAuthorityError:
+        return payload
+    if not run_id:
+        return payload
+    from workflow_runs.models import ContentFactoryRun
+    run = ContentFactoryRun.objects.filter(run_id=run_id).first()
+    if run is None:
+        return payload
+    saved = scoped_run_contract(run)
+    try:
+        if not connection_contract(saved):
+            return payload
+    except WebsiteAuthorityError:
+        return payload
+    for key, expected in (("domain", run.domain), ("github_repo", run.github_repo)):
+        claimed = str(payload.get(key) or "").strip()
+        if claimed and expected and claimed.casefold() != str(expected).strip().casefold():
+            return payload
+    filled = dict(payload)
+    for key in RUN_CONTRACT_FILL_FIELDS:
+        if key not in filled and saved.get(key) not in (None, ""):
+            filled[key] = saved[key]
+    return filled
 
 
 def guarded_service_write(action, *, only_repository=False, remote_actions=(), portable=False, cancellation_receipts=False, observation_fallback=False):
@@ -633,6 +946,9 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         return method(self, request, *args, **kwargs)
             if only_repository and not needs_repository_authority(payload):
                 return method(self, request, *args, **kwargs)
+            if action == "config_write" and request.method != "GET":
+                payload = fill_callback_contract_from_run(
+                    payload, str(kwargs.get("run_id") or payload.get("run_id") or payload.get("job_id") or ""))
             cancellation_receipt_attempt = (cancellation_receipts and payload.get("status") == "cancelled"
                 and not payload.get("event_type") and not payload.get("event"))
             try:
@@ -708,7 +1024,8 @@ def guarded_service_write(action, *, only_repository=False, remote_actions=(), p
                         from .service_views import _apply_run_snapshot
                         safe = observation_payload(payload, original)
                         refusals = list((safe.get("result") or {}).get("authority_refusals") or [])
-                        refusals.append({"at": timezone.now().isoformat(), "code": exc.code})
+                        refusals.append({"at": timezone.now().isoformat(), "code": exc.code,
+                            **({"raise_site": exc.raise_site} if getattr(exc, "raise_site", None) else {})})
                         safe["result"] = {**(safe.get("result") or {}), "authority_refusals": refusals[-100:]}
                         response = _apply_run_snapshot(run_id, safe)
                         if response.status_code < 300:
@@ -750,19 +1067,31 @@ def queue_website_followup(kind, *, data, arguments):
 
 
 def needs_repository_authority(data):
-    """Research-only callbacks remain independent of website publishing consent."""
+    """Research-only callbacks remain independent of website publishing consent.
+
+    B12: decided from the saved run's workflow and binding, not from the
+    callback's event name. Connection or repository-config fields in the
+    payload, a repository workflow claimed by the payload, or a repository
+    without a workflow always require the guard. Event-name prefixes are read
+    only for a callback whose run is not saved here.
+    """
     if any(key in data for key in CONNECTION_FIELDS) or REPOSITORY_CONFIG_FIELDS.intersection(data) or (data.get("github_repo") and not data.get("workflow")):
         return True
     if str(data.get("workflow") or "") in REPOSITORY_WORKFLOWS:
         return True
-    event = str(data.get("event_type") or data.get("event") or "")
-    if event.startswith(("scan_", "scaffold_", "article_system_setup_", "generation_", "preview_", "publish_", "article_")):
-        return True
     run_id = data.get("run_id") or data.get("job_id")
     if run_id:
         from workflow_runs.models import ContentFactoryRun
-        return ContentFactoryRun.objects.filter(run_id=run_id, workflow__in=REPOSITORY_WORKFLOWS).exists()
-    return False
+        run = ContentFactoryRun.objects.filter(run_id=run_id).only("run_id", "workflow", "run_request", "domain", "github_repo").first()
+        if run is not None:
+            if run.workflow in REPOSITORY_WORKFLOWS:
+                return True
+            try:
+                return bool(connection_contract(_payload_with_context(getattr(run, "run_request", None) or {})))
+            except WebsiteAuthorityError:
+                return True
+    event = str(data.get("event_type") or data.get("event") or "")
+    return event.startswith(("scan_", "scaffold_", "article_system_setup_", "generation_", "preview_", "publish_", "article_"))
 
 
 def archive_repository_templates(config, connection=None):
@@ -890,6 +1219,23 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
     ``repository_id`` names an already linked repository by its permanent id,
     so a stored name that GitHub has since renamed or moved still verifies.
     """
+    prepared = prepare_website_binding(config, user=user, repo=repo, app_root=app_root, branch=branch,
+                                       site_url=site_url, repository_id=repository_id)
+    return bind_verified_website(config, prepared, user=user, reconnect=reconnect, expected=expected)
+
+
+@dataclass(frozen=True)
+class PreparedWebsiteBinding:
+    """Server-verified GitHub metadata and the validated destination."""
+
+    metadata: dict
+    app_root: str
+    branch: str
+    site_url: str
+
+
+def prepare_website_binding(config, *, user, repo, app_root="", branch="", site_url="", repository_id=None):
+    """Validate the target and read GitHub evidence before taking write locks."""
     repo = str(repo or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repo) or repo.split("/")[-1] in {".", ".."}:
         raise WebsiteAuthorityError("invalid_github_repository", "Choose a GitHub owner/repository.", status=400)
@@ -915,9 +1261,24 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
             metadata = verify_repository_access(user=user, repo=repo, organization=config.organization, **by_id)
         else:
             metadata = verify_repository_access(user=user, repo=repo, **by_id)
+    prior = config.website_connection
+    selecting = prior is None or prior.repository_id != metadata["repository_id"]
+    if selecting:
+        # Plan E8: a grant without contents access fails here, at selection,
+        # with the missing permission named, not later inside a paid setup.
+        from .website_repository_selection import permission_check
+        permission_check(metadata["installation_id"])
     if new_journey and branch and branch.removeprefix("refs/heads/") == metadata["branch"]:
         # D-09: naming the repository's default branch is the same as leaving it empty.
         branch = ""
+    return PreparedWebsiteBinding(metadata=metadata, app_root=app_root, branch=branch, site_url=site_url)
+
+
+def bind_verified_website(config, prepared, *, user, reconnect=False, expected=None):
+    """Persist the result of prepare_website_binding without calling GitHub."""
+    metadata = prepared.metadata
+    repo = metadata["github_repo"]
+    app_root, branch, site_url = prepared.app_root, prepared.branch, prepared.site_url
     with transaction.atomic():
         Organization.objects.select_for_update().get(pk=config.organization_id)
         config.refresh_from_db()
@@ -941,6 +1302,13 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
         if same and current.state != "connected" and not reconnect:
             # Choosing the same repository again is the explicit reconnect.
             reconnect = True
+        if same and current.state == "paused" and _same_owner(current, metadata, user):
+            # B20: resume keeps generation, proof, targets and runs. Pushes were
+            # tracked while paused, so the verified source is still current.
+            return _resume_paused(config, current, metadata, user=user)
+        restorable = revoked_proof(current, metadata, user) if same else None
+        kept_config = ({name: getattr(config, name) for name in REPOSITORY_CONFIG_FIELDS if hasattr(config, name)}
+            if restorable else None)
         if current:
             archive_repository_templates(config, current)
         elif any(getattr(config, key) for key in ("article_template", "design_guide", "resource_prompt")):
@@ -972,7 +1340,34 @@ def bind_website(config, *, user, repo, app_root="", branch="", site_url="", rec
         config.github_repo = metadata["github_repo"]
         config.github_installation_id = metadata["installation_id"]
         config.save(update_fields=["website_connection", "github_repo", "github_installation_id", "updated_at"])
-        return connection
+    if restorable:
+        # D17: the same repository, installation and owner reconnected after a
+        # revoke. Proof comes back only after a fresh head read; runs never do.
+        _restore_after_reconnect(config, connection, restorable, kept_config)
+    if not same:
+        # Plan E8: can the founder merge alone? Advice for the journey's ask
+        # only; every merge still re-reads the live policy (never raises).
+        from .website_repository_selection import record_merge_ability
+        record_merge_ability(connection, user=user)
+    return connection
+
+
+def _restore_after_reconnect(config, connection, restorable, kept_config):
+    """Put back the revoked proof and its repository settings, or keep the fresh scan (never raises)."""
+    try:
+        if kept_config:
+            config.refresh_from_db()
+            fields = [name for name in kept_config if name not in {"publish_targets", "default_publish_target_id"}]
+            for name in fields:
+                setattr(config, name, kept_config[name])
+            restored = restore_revoked_proof(config, connection, restorable)
+            if restored and fields:
+                OrganizationContentConfig.objects.filter(pk=config.pk).update(
+                    **{name: kept_config[name] for name in fields}, updated_at=timezone.now())
+            config.refresh_from_db()
+            connection.refresh_from_db()
+    except Exception:
+        logger.exception("website_reconnect_proof_restore_failed connection=%s", connection.pk)
 
 
 def _refresh_same_repository(config, connection, metadata, *, user, reconnect):
@@ -1014,8 +1409,11 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
     with transaction.atomic():
         Organization.objects.select_for_update().get(pk=config.organization_id)
         config.refresh_from_db()
-        if not config.website_connection_id or not contract:
-            raise WebsiteAuthorityError("website_connection_required", "Connect this website before changing its lifecycle.")
+        if not config.website_connection_id:
+            from .website_connection_codes import not_connected
+            raise not_connected("Connect this website before changing its lifecycle.")
+        if not contract:
+            raise WebsiteAuthorityError("website_connection_required", "Reload the web app or update MLAI, then change this website's lifecycle.")
         connection = WebsiteConnection.objects.select_for_update().get(pk=config.website_connection_id)
         key = f"{connection.pk}:{idempotency_key or uuid.uuid4()}"
         existing = WebsiteConnectionOperation.objects.filter(idempotency_key=key).first()
@@ -1027,6 +1425,12 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
             raise WebsiteAuthorityError("website_configuration_changed", "Refresh the reviewed website configuration.")
         if str(connection.pk) != contract["website_connection_id"] or connection.generation != contract["connection_generation"]:
             raise WebsiteAuthorityError("website_connection_changed", "The website connection changed. Refresh and retry.")
+        if action == "pause":
+            # B20: pausing holds repository writes (validate_authority refuses
+            # every write action while paused) and nothing else. Generation,
+            # verified source, targets, settings and in-flight runs are kept,
+            # so resume continues where pause stopped.
+            return _pause_connection(config, connection, key=key)
         if action == "cleanup":
             # A cleanup request proposes a patch; it is never authority to push
             # after disconnection or to delete untracked customer files.
@@ -1035,6 +1439,7 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
                     "setup_run_ids": list(connection.repository_mutations.exclude(run_id="").values_list("run_id", flat=True)), "attempt": 1},
                 receipt={"status": "proposal_requested", "requires_review": True, "repository_modified": False})
         old_generation = connection.generation
+        restorable = _restorable_proof(config, connection) if action == "revoke" else None
         from .website_first_article_billing import cancel_held_goals
         cancel_held_goals(connection)
         connection.operations.filter(generation=old_generation).exclude(
@@ -1121,18 +1526,179 @@ def transition_connection(config, *, action, expected, idempotency_key="", verif
         # cancellation, not a claim that an already-issued remote write vanished.
         from .website_cancellation_retirement import bindings_for
         cancel_bindings = bindings_for(scoped_run_rows)
-        ContentFactoryRun.objects.filter(pk__in=[run.pk for run in active_runs if not authoritative_run(run)]).update(
-            status="cancelled", error="Website connection changed.", resume_available=False, updated_at=timezone.now())
+        for run in active_runs:
+            if authoritative_run(run):
+                continue
+            # B24: a transition, not the founder, stopped this run; record who
+            # and why so its follow-up restarts it or tells the founder once.
+            run.status, run.error, run.resume_available = "cancelled", "Website connection changed.", False
+            run.result = {**(run.result if isinstance(run.result, dict) else {}), "cancellation_reason": "system_stop",
+                "cancelled_by": "system", "cancellation_transition": action, "cancellation_generation": old_generation}
+            run.save(update_fields=["status", "error", "resume_available", "result", "updated_at"])
         return WebsiteConnectionOperation.objects.create(connection=connection, generation=connection.generation, idempotency_key=key,
             action=action, state="pending", payload={"cancel_run_ids": runs, "stop_preview_run_ids": stop_preview_runs, "previous_generation": old_generation, "disable_auto_merge_prs": sorted(set(pending_auto_merge_prs)), "attempt": 1, "deletion_epoch": watermark,
                 "cancel_run_bindings": cancel_bindings,
-                "preserve_published_articles": True},
+                "preserve_published_articles": True,
+                **({"restorable_proof": restorable} if restorable else {})},
             receipt={"authority_revoked": action != "reconnect", "repository_modified": False,
                 "retained": ["published_articles", "website_files", "company_details", "editorial_policy", "history"],
                 "artifact_retention": {"status": "retained", "erasure_performed": False,
                     "categories": ["worker_run_artifacts", "worker_checkpoints", "generated_media", "repository_copies"]},
                 "remote_cleanup_pending": True})
 
+
+
+def _pause_connection(config, connection, *, key):
+    """Hold writes without wiping proof, targets, settings or runs (B20); inside the lifecycle lock."""
+    if connection.state == "paused":
+        existing = connection.operations.filter(action="pause", generation=connection.generation).order_by("-created_at").first()
+        if existing is not None:
+            return existing
+    connection.state = "paused"
+    connection.save(update_fields=["state", "updated_at"])
+    return WebsiteConnectionOperation.objects.create(connection=connection, generation=connection.generation,
+        idempotency_key=key, action="pause", state="completed", payload={"attempt": 1, "kept": PAUSE_KEEPS},
+        receipt={"status": "paused", "authority_revoked": False, "repository_modified": False, "retained": list(PAUSE_KEEPS)})
+
+
+# What a pause keeps; only repository writes wait for resume.
+PAUSE_KEEPS = ("generation", "verified_source", "publish_targets", "settings", "runs")
+
+
+def _restorable_proof(config, connection):
+    """The proof a revoke may hand back to a reconnect of the very same repository (D17).
+
+    Only a build-proof target (one whose Ready rests on MLAI's own build, not
+    the founder's sealed CI) is restorable: its proof needs no operation of
+    the old generation. Returns None when nothing may be restored.
+    """
+    from .website_contract import SHA_PATTERN
+    key = str(config.default_publish_target_id or "")
+    target = connection.targets.filter(generation=connection.generation, target_key=key).first() if key else None
+    if (target is None or not target.verified_at or not SHA_PATTERN.fullmatch(connection.verified_sha or "")
+            or target.source_sha != connection.verified_sha or not (connection.capabilities or {}).get("publishingReady")):
+        return None
+    from .website_source_carry import carriable
+    if not carriable(connection, target):
+        return None
+    return {"generation": connection.generation, "target_key": key, "verified_sha": connection.verified_sha,
+        "repository_id": connection.repository_id, "installation_id": str(connection.installation_id or ""),
+        "authorized_by_id": connection.authorized_by_id, "branch": connection.branch, "app_root": connection.app_root,
+        "capabilities": dict(connection.capabilities or {}),
+        "last_verified_at": connection.last_verified_at.isoformat() if connection.last_verified_at else None,
+        "publish_targets": list(config.publish_targets or [])}
+
+
+def _resume_paused(config, connection, metadata, *, user):
+    """Resume a paused website in place: same repository, installation and owner (B20)."""
+    connection.state = "connected"
+    connection.disconnected_at = None
+    connection.github_repo = metadata["github_repo"]
+    connection.save(update_fields=["state", "disconnected_at", "github_repo", "updated_at"])
+    WebsiteConnectionOperation.objects.create(connection=connection, generation=connection.generation,
+        idempotency_key=f"{connection.pk}:resume:{uuid.uuid4()}", action="reconnect", state="completed",
+        payload={"attempt": 1, "resumed_from": "paused"},
+        receipt={"status": "resumed", "authority_revoked": False, "repository_modified": False, "retained": list(PAUSE_KEEPS)})
+    if config.github_repo != metadata["github_repo"]:
+        config.github_repo = metadata["github_repo"]
+        config.save(update_fields=["github_repo", "updated_at"])
+    return connection
+
+
+def _same_owner(connection, metadata, user):
+    """Same installation and same consenting owner as the saved connection."""
+    owner = getattr(user, "pk", None)
+    return (owner is not None and str(connection.installation_id or "") == str(metadata.get("installation_id") or "")
+        and connection.authorized_by_id == owner)
+
+
+def revoked_proof(connection, metadata, user):
+    """The proof the latest revoke of this connection kept, if this reconnect may restore it (D17).
+
+    Same repository id, installation and owner as at revoke time, on the
+    generation the revoke created. Anything else starts from a fresh scan.
+    """
+    if connection.state != "revoked":
+        return None
+    revoke = connection.operations.filter(action="revoke").order_by("-created_at").first()
+    saved = (revoke.payload or {}).get("restorable_proof") if revoke else None
+    if (not isinstance(saved, dict) or revoke.generation != connection.generation
+            or saved.get("repository_id") != metadata.get("repository_id")
+            or saved.get("repository_id") != connection.repository_id
+            or saved.get("installation_id") != str(metadata.get("installation_id") or "")
+            or saved.get("authorized_by_id") is None or saved.get("authorized_by_id") != getattr(user, "pk", None)
+            or saved.get("branch") != connection.branch or saved.get("app_root") != connection.app_root):
+        return None
+    return saved
+
+
+def restore_revoked_proof(config, connection, saved):
+    """After a reconnect, restore the revoked proof only once GitHub's head is read again (D17).
+
+    The head is read fresh. At the saved verified commit the proof is restored
+    as it was; past it, only when one GitHub compare shows the articles setup
+    files untouched (the same carry rule a push uses). Runs are never revived:
+    the revoke cancelled them and only their "start again" notice remains.
+    Returns the restored source, or "" when the reconnect keeps its fresh scan.
+    """
+    from datetime import datetime
+    from .website_source_sync import read_head
+    from . import website_source_carry as carry
+    try:
+        require_unlocked_remote_call()
+    except RuntimeError:
+        return ""
+    head = read_head(connection)
+    if not head:
+        return ""
+    old_sha = saved["verified_sha"]
+    decision = {"carry": True, "from_sha": old_sha}
+    if head != old_sha:
+        cache = getattr(config, "article_system_setup_cache", None)
+        comparison = carry.compare_sources(connection, old_sha, head)
+        decision = {**carry.decide(cache, comparison, owned_merge=False), "from_sha": old_sha} if comparison else {"carry": False}
+        if not decision.get("carry"):
+            return ""
+    with transaction.atomic():
+        Organization.objects.select_for_update().get(pk=config.organization_id)
+        website = WebsiteConnection.objects.select_for_update().get(pk=connection.pk)
+        old = website.targets.filter(generation=saved["generation"], target_key=saved["target_key"]).first()
+        if (website.state != "connected" or website.generation <= saved["generation"] or old is None
+                or old.source_sha != old_sha or website.verified_sha
+                or website.targets.filter(generation=website.generation).exists()):
+            return ""
+        target = WebsiteConnectionTarget.objects.create(connection=website, target_key=old.target_key,
+            generation=website.generation, version=old.version, adapter=old.adapter, adapter_version=old.adapter_version,
+            source_sha=old.source_sha, contract=dict(old.contract or {}),
+            capabilities={**(old.capabilities or {}), "restoredFromGeneration": saved["generation"]}, verified_at=old.verified_at)
+        if not carry.carriable(website, target):
+            target.delete()
+            return ""
+        website.verified_sha = old_sha
+        if head != old_sha and not carry.apply_carry(website, target.target_key, head, decision):
+            target.delete()
+            return ""
+        website.capabilities = {**(website.capabilities or {}), **{key: value for key, value in saved["capabilities"].items()
+            if key in CAPABILITY_KEYS}}
+        website.blockers = [item for item in website.blockers or [] if not (isinstance(item, dict)
+            and item.get("code") in {"scan_required", "repository_source_changed"})]
+        stamp = saved.get("last_verified_at")
+        website.last_verified_at = datetime.fromisoformat(stamp) if stamp else old.verified_at
+        website.save(update_fields=["verified_sha", "capabilities", "blockers", "last_verified_at", "updated_at"])
+        WebsiteScanSnapshot.objects.get_or_create(connection=website, generation=website.generation,
+            run_id=f"github-head:{head}", fingerprint=evidence_digest({"source_sha": head}),
+            defaults={"source_sha": head, "detector_version": "github_head", "evidence": {"source": "reconnect_head_read",
+                "branch": website.branch}})
+        current = OrganizationContentConfig.objects.select_for_update().get(pk=config.pk)
+        current.default_publish_target_id = saved["target_key"]
+        current.publish_targets = saved.get("publish_targets") or []
+        current.save(update_fields=["default_publish_target_id", "publish_targets", "updated_at"])
+        WebsiteConnectionOperation.objects.create(connection=website, generation=website.generation,
+            idempotency_key=f"{website.pk}:restore-proof:{website.generation}", action="reconnect", state="completed",
+            payload={"attempt": 1, "restored_from_generation": saved["generation"], "head_sha": head, "carried_from": old_sha if head != old_sha else ""},
+            receipt={"status": "proof_restored", "authority_revoked": False, "repository_modified": False, "runs_revived": False})
+    logger.info("website_reconnect_proof_restored connection=%s generation=%s head=%s", connection.pk, website.generation, head)
+    return head
 
 
 def offboard_website_connections(organization, *, user=None, purge=False):
@@ -1228,8 +1794,15 @@ def record_scan_evidence(connection, data):
         if inventory.get("discovery_complete") is True or any(key in data for key in ("tech_stack", "article_system")):
             caps["inventoryReady"] = True
             # Reset/reconnect asks for a scan; this scan of the current
-            # generation answers it, so the prompt must not outlive it.
-            connection.blockers = [item for item in connection.blockers if item.get("code") != "scan_required"]
+            # generation answers it, so the prompt must not outlive it. On a
+            # website never verified, a source-changed lock left by an older
+            # push guards nothing either.
+            # Same conservative test as the push handler
+            # (website_reconciliation._never_verified).
+            never_verified = (not connection.verified_sha and not caps.get("publishingReady")
+                and not connection.targets.filter(generation=connection.generation, verified_at__isnull=False).exists())
+            stale = {"scan_required", "repository_source_changed"} if never_verified else {"scan_required"}
+            connection.blockers = [item for item in connection.blockers if item.get("code") not in stale]
         # Direct publishing needs an adapter's verification evidence at this SHA;
         # a detected file/legacy scaffold cache alone is not verification.
         targets = data.get("publish_targets") if isinstance(data.get("publish_targets"), list) else []
@@ -1365,7 +1938,8 @@ def dispatch_contract(domain, payload, *, action="read", source_run_id=""):
     else:
         config = OrganizationContentConfig.objects.select_related("website_connection__organization").filter(organization__domain=domain).first()
         if not config or not config.website_connection:
-            raise WebsiteAuthorityError("website_connection_required", "Connect the selected website before repository work.")
+            from .website_connection_codes import not_connected
+            raise not_connected("Connect the selected website before repository work.")
         supplied = connection_contract(payload)
         binding = dict(payload) if supplied else contract_for(config.website_connection)
     binding = {**binding, "domain": domain, "github_repo": payload.get("github_repo") or binding.get("github_repo")}
@@ -1488,18 +2062,25 @@ def settled_setup_run(connection, *, source_sha):
     Another setup on that head would only re-stamp its own marker and open a new
     PR; the next step is the branch's own CI proof. A setup without the kit
     (native CI needed configuration) is not settled: installing the kit is next.
+
+    A website verified by its live URL (``website_live_verification.selected``)
+    never gets a kit: MLAI's build proof plus the live page prove it. Its merged
+    setup is settled without one. Requiring the kit there sent every such merge
+    back to a second full setup and pull request (La Vie, 16 Nov 2026).
     """
     from workflow_runs.models import ContentFactoryRun
+    from .website_live_verification import selected as live_url_selected
     if not source_sha:
         return None
+    kit_optional = live_url_selected(getattr(connection, "organization", None))
     rows = ContentFactoryRun.objects.filter(_current_run_scope_filter(connection),
         organization_id=connection.organization_id, workflow="article_system_setup",
         status="completed").order_by("-updated_at")[:10]
-    return next((row for row in rows if setup_settled_at(row, source_sha) and setup_installed_kit(row)
+    return next((row for row in rows if setup_settled_at(row, source_sha) and (kit_optional or setup_installed_kit(row))
         and str(row.github_repo or "").casefold() == str(connection.github_repo or "").casefold()), None)
 
 
-def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False):
+def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False, merged=False):
     """Read the worker's exact approved setup proof before a target exists."""
     from .website_contract import SHA_PATTERN
     saved = scoped_run_contract(run)
@@ -1513,7 +2094,13 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
     base_sha = str(saved.get("expected_source_sha") or "")
     generation = result.get("resume_generation")
     from .website_hosted_build import enabled as hosted_enabled, current_scan_source, valid_hosted_build
-    if not base_sha and not website.verified_sha:
+    if merged and not base_sha:
+        # After the merge the branch points at a new commit. Its generation's
+        # historical observation still pins the first setup's original base.
+        recorded = str(result.get("source_sha") or "")
+        if _source_observed(website, recorded):
+            base_sha = recorded
+    if not merged and not base_sha and not website.verified_sha:
         # A first-time site has no verified source for Prepare to pin, so its setup
         # is dispatched without expected_source_sha and every merge was refused as
         # "changed" (PawShare setup ccd3ea22, 23 Oct 2026). Such a setup is built
@@ -1523,20 +2110,29 @@ def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False
         recorded = str(result.get("source_sha") or "")
         if recorded and recorded == current_scan_source(website):
             base_sha = recorded
+        elif (recorded and not hosted_enabled(website)
+                and recorded == observed_source_sha(website)):
+            # La Vie setup 6b19e4b1 (16 Nov 2026): the only scan for the generation
+            # had incomplete discovery, so current_scan_source was None and every
+            # Publish answered 409 although the PR head was the verified preview.
+            # The server-observed branch head is the same identity the scan would
+            # pin; the caller still requires GitHub's branch head to equal it.
+            base_sha = recorded
     hosted = hosted_enabled(website)
     source_matches = base_sha == current_scan_source(website) if hosted else not website.verified_sha or website.verified_sha == base_sha
     build_passed = gates.get("local_build") is True and gates.get("local_build_skipped") is False
     if hosted and gates.get("local_build_skipped") is True:
         build_passed = valid_hosted_build(run, preview, head_sha, website)
-    approved_setup = (run.approval_state == "approved" and result.get("status") in SETUP_PR_OPEN_STATUSES
-        and setup.get("status") in SETUP_PR_OPEN_STATUSES)
+    approved_statuses = {"merged"} if merged else SETUP_PR_OPEN_STATUSES
+    approved_setup = (run.approval_state == "approved" and result.get("status") in approved_statuses
+        and setup.get("status") in approved_statuses)
     pending_setup = (automatic_approval and run.status == "awaiting_approval" and run.approval_state == "approval_required"
         and result.get("status") == "preview_ready" and setup.get("status") == "preview_ready")
     # The preview platform could not run the app, so Content Factory parked the
     # setup for code review and the founder approved the branch diff itself (La Vie
     # setup c12e1329, 23 Oct 2026). That approval stands in for the browser proof;
     # source, local build, source-quality and exact-head checks still apply.
-    code_review_setup = bool(approved_setup and result.get("preview_runtime_unsupported") is True
+    code_review_setup = bool(not merged and approved_setup and result.get("preview_runtime_unsupported") is True
         and setup.get("preview_runtime_unsupported") is True and proof.get("status") == "code_review_ready")
     adopted_kit = (run.approval_state == "not_required" and result.get("status") == "adopted"
         and setup.get("status") == "adopted" and result.get("adopted") is True and setup.get("adopted") is True
@@ -1714,9 +2310,7 @@ def record_denied_terminal_callback(payload, denial):
     revival. Old consent, old attempts and completed runs remain immutable.
     """
     event = str(payload.get("event_type") or payload.get("event") or "")
-    terminal_event = event in {"generation_failed", "generation_blocked", "error", "article_system_setup_failed",
-        "generation_pr_opened", "article_complete", "article_system_setup_complete", "article_system_setup_completed",
-        "scan_complete", "scaffold_complete", "publish_bundle_ready", "content_ready", "article_system_setup_preview_failed"}
+    terminal_event = event in TERMINAL_CALLBACK_EVENTS
     terminal_snapshot = not event and payload.get("status") in {"failed", "blocked", "completed"}
     if denial.retryable or not (terminal_event or terminal_snapshot):
         return False
@@ -1756,7 +2350,8 @@ def record_denied_terminal_callback(payload, denial):
         failure = {**failure, "code": failure.get("code") or payload.get("error_code") or denial.code,
             "callback_denial_code": denial.code, "retryable": False}
         run.result = {**merge_reliability_fields(run.result or {}, payload), "failure": failure,
-            "error_code": failure["code"], "callback_rejection": {"code": denial.code, "detail": str(denial)}}
+            "error_code": failure["code"], "callback_rejection": {"code": denial.code, "detail": str(denial),
+                **({"raise_site": denial.raise_site} if getattr(denial, "raise_site", None) else {})}}
         run.status = "blocked" if event == "generation_blocked" or payload.get("status") == "blocked" else "failed"
         run.resume_available = False
         run.error = str(payload.get("error") or payload.get("error_message") or str(denial))

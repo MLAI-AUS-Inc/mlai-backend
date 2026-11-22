@@ -1,6 +1,6 @@
 from django.urls import path
 from . import views
-from .agent_connections import AgentConnectionView, AgentAuthorizationView
+from .agent_connections import AgentConnectionView, AgentAuthorizationView, AgentDraftTaskView
 from .public_views import PublicUpdateView
 from .connections import ConnectView, DisconnectView, connect_browser
 
@@ -9,6 +9,7 @@ urlpatterns = [
     path("financial-refresh/<str:refresh_id>/", views.RefreshFinancialsStatusView.as_view()),
     path("agent-connection/", AgentConnectionView.as_view(), name="chat_startups_agent_connection"),
     path("agent-connection/authorization/<str:request_id>/", AgentAuthorizationView.as_view(), name="chat_startups_agent_authorization"),
+    path("agent-draft-task/", AgentDraftTaskView.as_view(), name="chat_startups_agent_draft_task"),
     path("public/<int:update_id>/", PublicUpdateView.as_view(), name="chat_startups_public_update"),
     path("connect/browser/", connect_browser, name="chat_startups_connect_browser"),
     path("connect/<str:provider>/", ConnectView.as_view()),

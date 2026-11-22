@@ -21,6 +21,10 @@ class ReconcilerAlertTests(SimpleTestCase):
         self.addCleanup(self.fixture.doCleanups)
         self.fixture.website.branch, self.fixture.website.app_root = "main", ""
         self.fixture.website.configuration_version = 1
+        # SimpleTestCase has no database; the fixture org is not a test org (F1).
+        test_org = patch("content_factory.founder_test_orgs.is_test_org", return_value=False)
+        test_org.start()
+        self.addCleanup(test_org.stop)
 
     def incidents(self):
         return [row for row in WebsiteConnectionOperation.objects.rows if row.action == delivery.ACTION]

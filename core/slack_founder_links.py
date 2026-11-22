@@ -458,6 +458,7 @@ def assign_direct_slack_identity(
     slack_id: str,
     *,
     allow_reassignment: bool = False,
+    matching_email: str | None = None,
 ) -> User:
     """Atomically assign a direct Slack identity without crossing link boundaries."""
     normalized_slack_id = str(slack_id or "").strip()
@@ -468,6 +469,18 @@ def assign_direct_slack_identity(
     if locked_user.slack_id == normalized_slack_id:
         return locked_user
 
+    if matching_email is not None:
+        from community_chat.models import CommunityChatEmailChange, EmailChangeStatus
+
+        if (
+            locked_user.email != User.objects.normalize_email(matching_email)
+            or CommunityChatEmailChange.objects.filter(
+                user=locked_user, status=EmailChangeStatus.COMPLETED,
+            ).exists()
+        ):
+            raise ConflictingSlackFounderLinkError(
+                "Connect this Slack account using the verified linking flow."
+            )
     ensure_user_can_accept_direct_slack_identity(locked_user)
     if locked_user.slack_id and not allow_reassignment:
         raise ConflictingSlackFounderLinkError(

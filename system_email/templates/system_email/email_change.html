@@ -1,0 +1,11 @@
+{% extends "system_email/base.html" %}
+{% block content %}
+{% if verification_code %}
+<p>Enter this code in MLAI Chat to approve the sign-in email change to {{ new_email_masked }}.</p>
+<p><strong>{{ verification_code }}</strong></p>
+<p>Return to Settings to finish. If you didn't start this request, you can ignore this email.</p>
+{% else %}
+<p>Your MLAI sign-in email changed to {{ new_email_masked }}. Use the new address when you sign in again.</p>
+{% endif %}
+<p>If this activity is unexpected, contact hi@mlai.au. MLAI staff will never ask for your code.</p>
+{% endblock %}

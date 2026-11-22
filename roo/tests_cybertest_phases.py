@@ -322,3 +322,62 @@ class PhaseSyntheticLedgerTests(TestCase):
         self.assertEqual(self.account.earned_balance_microroo, 820_000_000)
         self.assertEqual(Ledger.objects.filter(user=self.user, kind='REFUND').count(), 1)
         self.assertEqual(Ledger.objects.filter(user=self.user, kind='SPEND').count(), 2)
+
+
+
+FREE_REPOSITORY = '1319031949'
+
+
+@override_settings(CYBERTEST_BILLING_MODE='live', CYBERTEST_LIVE_BILLING_ENABLED=True,
+                   CYBERTEST_ENTRY_STAGING_ENABLED=False, CYBERTEST_PHASED_SCANS_ENABLED=True,
+                   CYBERTEST_USD_PER_AUD='0.5', CYBERTEST_AUD_PER_POINT='2',
+                   CYBERTEST_FREE_REPOSITORY_IDS=['747450323', FREE_REPOSITORY])
+class FreeRepositoryCheckTests(TestCase):
+    """MLAI's own repositories keep their price on the receipt but never touch the ledger."""
+    purchase = PhaseCheckoutTests.purchase
+    start = PhaseCheckoutTests.start
+    result = PhaseCheckoutTests.result
+
+    def setUp(self):
+        PhaseCheckoutTests.setUp(self)
+        self.intent['repository_id'] = FREE_REPOSITORY
+        # An empty account: a paid check would fail with INSUFFICIENT_ROO_POINTS.
+        self.account = PointsAccount.objects.create(user=self.user, microroo_initialized=True)
+
+    def test_free_basic_and_upgrade_cost_nothing_and_settle_without_ledger_rows(self):
+        quote, audit, _ = self.start(basic(), 24)
+        receipt = checkout.status(quote)
+        self.assertTrue(receipt['sponsored'])
+        self.assertEqual((receipt['points'], receipt['due_points']), (24, 0))
+        checkout.settle_delivery(quote, audit, self.result(audit, basic()), None)
+        contract = {**upgrade('large'), 'parentCheckoutId': str(quote)}
+        upgrade_quote, upgrade_audit, _ = self.start(contract, 100)
+        checkout.settle_delivery(upgrade_quote, upgrade_audit,
+                                 self.result(upgrade_audit, contract, missing_required=True), None)
+        self.assertFalse(Ledger.objects.filter(user=self.user).exists())
+        self.assertIsNone(CybertestCheckout.objects.get(pk=quote).spend_ledger_id)
+        self.assertEqual(checkout.balance(self.user, test_mode=False), 0)
+
+    def test_free_start_failure_refund_writes_no_ledger_row(self):
+        quote, audit, token = uuid.uuid4(), uuid.uuid4(), secrets.token_urlsafe(32)
+        intent = self.purchase(basic())
+        checkout.create_quote(quote, token, intent)
+        checkout.confirm(quote, token, self.user, expected_points=24)
+        checkout.charge(quote, audit, intent)
+        self.assertEqual(checkout.refund_start_failure(quote, audit, 'PREPARATION_FAILED')['status'], 'refunded')
+        self.assertFalse(Ledger.objects.filter(user=self.user).exists())
+
+    def test_every_other_repository_is_paid(self):
+        self.intent['repository_id'] = '999'
+        quote, token = uuid.uuid4(), secrets.token_urlsafe(32)
+        self.assertFalse(checkout.create_quote(quote, token, self.purchase(basic()))['sponsored'])
+        with self.assertRaises(CheckoutError) as raised:
+            checkout.confirm(quote, token, self.user, expected_points=24)
+        self.assertEqual(raised.exception.code, 'INSUFFICIENT_ROO_POINTS')
+
+    def test_the_default_list_is_the_five_mlai_repositories(self):
+        import mlai.settings as configured
+        self.assertEqual(set(configured.CYBERTEST_FREE_REPOSITORY_IDS),
+                         {'747450323', '918452761', '1319031949', '1112644407', '1190194664'})
+        with override_settings(CYBERTEST_FREE_REPOSITORY_IDS=None):
+            self.assertEqual(checkout.free_repository_ids(), set())

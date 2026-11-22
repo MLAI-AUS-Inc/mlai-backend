@@ -5,6 +5,12 @@ from urllib.parse import quote
 from integrations import http_client
 
 
+# Recorded as the run's merge_blocked_reason when GitHub requires a review; the
+# founder journey then asks the founder to send the pull request to a reviewer
+# (plan E8, send_pr_to_reviewer) instead of "merge it on GitHub".
+REVIEW_REQUIRED_REASON = "GitHub requires a reviewer for this setup pull request."
+
+
 class GitHubResponseError(ValueError):
     """Keep provider status available when a GitHub JSON error has a message."""
 
@@ -82,7 +88,7 @@ def setup_merge_policy(website, pr, *, token, checks, requires_review=False):
                 return {"decision": "wait", "reason": "Waiting for GitHub branch policy."}
             if any(rule.get("type") == "pull_request" and _reviews_required(rule.get("parameters") or {})
                     for rule in inventory):
-                return {"decision": "needs_user", "reason": "GitHub requires a reviewer for this setup pull request."}
+                return {"decision": "needs_user", "reason": REVIEW_REQUIRED_REASON}
             if len(inventory) < 100:
                 break
         else:
@@ -96,7 +102,7 @@ def setup_merge_policy(website, pr, *, token, checks, requires_review=False):
             if not isinstance(payload, dict):
                 return {"decision": "wait", "reason": "Waiting for GitHub branch policy."}
             if _reviews_required(payload.get("required_pull_request_reviews") or {}):
-                return {"decision": "needs_user", "reason": "GitHub requires a reviewer for this setup pull request."}
+                return {"decision": "needs_user", "reason": REVIEW_REQUIRED_REASON}
     except (http_client.RequestException, ValueError, TypeError):
         return {"decision": "wait", "reason": "GitHub branch policy is temporarily unavailable."}
     if str(checks.get("state") or "").lower() in {"pending", "queued", "in_progress", "waiting"}:

@@ -1,8 +1,7 @@
 """The 200-level volunteer ladder (policy v6). Pure; no Django or database.
 
-Nothing reads this module in a request path yet. Today's members still see
-the seven levels in ``policy.py``. This holds the ladder's numbers so the
-preview command and the later switch-over share one definition.
+The member profile and preview command share this
+policy. Legacy wallet milestone rules live in ``policy.py``.
 
 The curve is the owner's proposal of 15 November 2026: moving from Level L
 to Level L + 1 costs 12 + L points, so reaching Level L takes

@@ -8,8 +8,9 @@ A founder can be stuck in three ways that the cohort-gated alerts miss:
   (La Vie's reconnect sat pending after 21 attempts); a deployment or policy wait
   is left out, because it has its own 24-hour deadline that ends in a stop;
 * the founder's latest article or setup run stopped (failed, blocked, stopped or
-  denied) more than six hours ago with no founder action and no scheduled
-  self-heal retry.
+  denied) more than six hours ago (two hours with
+  ``ARTICLES_STAFF_ESCALATION_LADDER_ENABLED``, the plan 7.6 escalation
+  ladder) with no founder action and no scheduled self-heal retry.
 
 Each condition queues one ``founder_stuck`` receipt through the shared
 founder-journey alert store, keyed by the operation or run and the kind of stop,
@@ -67,7 +68,26 @@ OPERATION_RETRY_ATTEMPTS = 10
 # A setup that keeps progressing can legitimately be pending for a day (steps,
 # then a deployment wait of up to 24 hours), so only twice that reads as stuck.
 OPERATION_PENDING_AFTER = timedelta(hours=48)
-RUN_STUCK_AFTER = timedelta(hours=6)
+# Plan 7.6 escalation ladder: a failed run reaches staff within two hours once
+# ARTICLES_STAFF_ESCALATION_LADDER_ENABLED is on. Until then (shadow, plan 7.5
+# rule 7) the earlier six-hour wait holds; see run_stuck_after().
+RUN_STUCK_AFTER = timedelta(hours=2)
+SHADOW_RUN_STUCK_AFTER = timedelta(hours=6)
+
+
+def escalation_ladder_enabled() -> bool:
+    """``ARTICLES_STAFF_ESCALATION_LADDER_ENABLED`` (plan F10, default off: shadow).
+
+    Off, the sweep keeps the six-hour failed-run wait and only logs the owner
+    escalations it would queue. On, a failed run alerts after two hours and a
+    stop still waiting on us after 48 hours queues one owner escalation.
+    """
+    return bool(getattr(settings, "ARTICLES_STAFF_ESCALATION_LADDER_ENABLED", False))
+
+
+def run_stuck_after() -> timedelta:
+    """How long a stopped run waits before its stuck alert, under the current switch."""
+    return RUN_STUCK_AFTER if escalation_ladder_enabled() else SHADOW_RUN_STUCK_AFTER
 CURSOR_KEY = "founder_stuck_alerts:cursor:{kind}"
 PENDING_ORGS_KEY = "founder_stuck_alerts:pending_organizations"
 CURSOR_TIMEOUT_SECONDS = 7 * 24 * 3600
@@ -107,6 +127,7 @@ STEP_LABELS = {
     "ci-verify": "Checking the website build",
     "publish-pr": "Publishing an article",
     "live-status": "Waiting for the live website to update",
+    "article-live": "Waiting for a merged article to appear on the live website",
     SETUP_WORKFLOW: "Website setup run",
     "article_generation": "Writing an article",
     "article_revision": "Revising an article",
@@ -118,6 +139,9 @@ KIND_DESCRIPTIONS = {
     "operation_stopped": "The website step stopped and will not retry by itself.",
     "operation_retrying": "The website step keeps retrying without finishing.",
     "run_stopped": "The latest run stopped and the founder has nothing to press.",
+    "operation_retired_ask": "The website step waits on an ask the founder's journey does not show.",
+    "operation_budget": "Automatic website checks reached their budget; nothing more is dispatched until staff look.",
+    "article_not_live": "An article merged on GitHub but its page is not on the founder's live website; it is not counted as published.",
 }
 MAX_NAME_LENGTH = 80
 
@@ -143,10 +167,21 @@ def run_founder_stuck_alert_sweep(now=None) -> dict:
     if not cache.add(THROTTLE_KEY, now.isoformat(), SWEEP_INTERVAL_SECONDS):
         return {"status": "throttled"}
     conditions = find_stuck_conditions(now=now)
+    # Plan 7.6: anything still waiting on us after 48 hours escalates to the owner once, on this channel.
+    from .staff_escalation import owner_escalations
+    owner = owner_escalations(conditions, now=now)
+    shadow = {}
+    if escalation_ladder_enabled():
+        conditions = [*conditions, *owner]
+    else:
+        # Shadow (plan 7.5 rule 7): count what would be sent; queue nothing new.
+        shadow = {"owner_escalations_shadow": len(owner)}
+        if owner:
+            logger.info("founder_stuck_owner_escalation_shadow count=%s", len(owner))
     organization_ids = {condition.organization_id for condition in conditions}
     queued = _queue(conditions, organization_ids=organization_ids)
     delivered = _deliver_pending(now=now, organization_ids=organization_ids)
-    return {"status": "completed", "candidates": len(conditions), "queued": queued, **delivered}
+    return {"status": "completed", "candidates": len(conditions), "queued": queued, **shadow, **delivered}
 
 
 def _deliver_pending(*, now, organization_ids) -> dict:
@@ -174,14 +209,24 @@ class Scope:
     """How far detection looks. Alerts wait and page through 90 days; the staff console sees every stop now."""
 
     organization_ids: frozenset | None = None
-    run_stuck_after: timedelta = RUN_STUCK_AFTER
+    # None: the switch decides (run_stuck_after()); the console passes zero.
+    run_stuck_after: timedelta | None = None
     lookback: timedelta | None = LOOKBACK
     limit: int | None = QUERY_LIMIT
+    # Plan F1: marked test organisations, never read as stuck founders.
+    excluded_organization_ids: frozenset = frozenset()
+    # False reads the newest page only and never moves the alert sweep's cursor
+    # (the daily founder-health report, F9).
+    cursor: bool = True
+    # When a list is given, each kind whose bounded head page came back full is
+    # appended to it (the report's truncation line). Never part of equality.
+    full_pages: list | None = field(default=None, compare=False, hash=False)
 
 
 def find_stuck_conditions(*, now) -> list[StuckCondition]:
     """The stuck conditions in this pass's bounded pages: the newest rows plus the cursor's next page, per kind."""
-    return _find(now=now, scope=Scope())
+    from .founder_test_orgs import test_organization_ids
+    return _find(now=now, scope=Scope(excluded_organization_ids=test_organization_ids()))
 
 
 def stuck_conditions_by_organization(organization_ids, *, now) -> dict[int, list[StuckCondition]]:
@@ -215,6 +260,10 @@ def _pages(queryset, scope, *, kind, pk_field) -> list[dict]:
     if scope.limit is None:
         return list(queryset.order_by("-updated_at", pk_field))
     head = list(queryset.order_by("-updated_at", f"-{pk_field}")[:scope.limit])
+    if scope.full_pages is not None and len(head) >= scope.limit:
+        scope.full_pages.append(kind)
+    if not scope.cursor:
+        return head
     key = CURSOR_KEY.format(kind=kind)
     cursor = _cursor(cache.get(key))
     tail = queryset
@@ -251,7 +300,8 @@ def stuck_alert_id(condition: StuckCondition) -> str:
 
 OPERATION_FIELDS = ("id", "connection__organization_id", "action", "state", "attempts", "created_at", "updated_at",
                     "receipt__reason_code", "receipt__error_code", "receipt__failure__code", "receipt__code",
-                    "receipt__last_error")
+                    "receipt__last_error", "receipt__user_action__id", "receipt__status",
+                    "receipt__staff_fixing__since", "receipt__staff_fixing__owner__user_id")
 # Prepare records its code as reason_code (sometimes error_code or failure.code);
 # other operations use code or last_error. The first safe code wins.
 OPERATION_CODE_FIELDS = ("receipt__reason_code", "receipt__error_code", "receipt__failure__code", "receipt__code",
@@ -266,6 +316,8 @@ def _current_operations(*, scope):
     rows = WebsiteConnectionOperation.objects.filter(action__in=FOUNDER_OPERATION_ACTIONS, generation=F("connection__generation"))
     if scope.organization_ids is not None:
         rows = rows.filter(connection__organization_id__in=scope.organization_ids)
+    if scope.excluded_organization_ids:
+        rows = rows.exclude(connection__organization_id__in=sorted(scope.excluded_organization_ids))
     return rows.exclude(connection__state="disconnected").exclude(Exists(newer))
 
 
@@ -277,10 +329,24 @@ def _operation_code(row) -> str:
 
 
 def _operation_condition(row, *, kind, stuck_since) -> StuckCondition:
+    details = {"website_operation_id": str(row["id"]), "operation_state": row["state"], "attempts": row["attempts"]}
+    action = row.get("receipt__user_action__id")
+    if kind == "retired_ask" and isinstance(action, str) and alerts.SAFE_CODE.fullmatch(action):
+        details["action"] = action
+    if row.get("receipt__status") == "staff_fixing" and isinstance(row.get("receipt__staff_fixing__since"), str):
+        # B25's bounded life; the escalation ladder reads it (plan F10).
+        details["staff_fixing_since"] = row["receipt__staff_fixing__since"][:40]
+        if row.get("receipt__staff_fixing__owner__user_id") is not None:
+            details["staff_fixing_owner"] = True
     return StuckCondition(
         organization_id=row["connection__organization_id"], slot=f"op-{row['id']}-{kind}", kind=f"operation_{kind}",
-        step=row["action"], code=_operation_code(row), stuck_since=stuck_since,
-        details={"website_operation_id": str(row["id"]), "operation_state": row["state"], "attempts": row["attempts"]})
+        step=row["action"], code=_operation_code(row), stuck_since=stuck_since, details=details)
+
+
+def _retired_actions():
+    """Owner actions the new journey retired; an operation resting on one waits unseen (plan A9)."""
+    from .founder_journey import retired_actions
+    return sorted(retired_actions())
 
 
 def _stuck_operations(*, now, scope) -> list[StuckCondition]:
@@ -293,10 +359,22 @@ def _stuck_operations(*, now, scope) -> list[StuckCondition]:
                 & ~(Q(receipt__has_key="status") & Q(receipt__status__in=WAITING_RECEIPT_STATUSES))
                 & ((Q(attempts__gte=OPERATION_RETRY_ATTEMPTS) & (~Q(action__in=POLLING_OPERATION_ACTIONS) | _failure_recorded()))
                    | Q(created_at__lte=now - OPERATION_PENDING_AFTER)))
-    rows = _pages(_current_operations(scope=scope).filter(stopped | retrying).values(*OPERATION_FIELDS), scope,
+    # Any cohort: an operation parked on a retired owner action is shown to no
+    # founder on the new journey, so staff hear of it at once (Lilia, 9 Nov 2026).
+    retired = Q(state="needs_user") & Q(receipt__user_action__id__in=_retired_actions())
+    # A page choice parked under the founder's "I choose" consent is rendered
+    # (plan A9 follow-up), so it is not a hidden ask.
+    from .website_models import WebsiteConnectionOperation
+    rendered = WebsiteConnectionOperation.objects.filter(state="needs_user", receipt__user_action__id="choose_articles_page",
+                                                         receipt__goal__consent__answers__page_policy="pick")
+    retired &= ~Q(id__in=rendered.values("id"))
+    if scope.lookback is not None:
+        retired &= Q(updated_at__gte=now - scope.lookback)
+    rows = _pages(_current_operations(scope=scope).filter(stopped | retrying | retired).values(*OPERATION_FIELDS), scope,
                   kind="operations", pk_field="id")
     return [_operation_condition(row, kind="retrying", stuck_since=row["created_at"])
             if row["state"] in RETRYING_OPERATION_STATES
+            else _operation_condition(row, kind="retired_ask", stuck_since=row["updated_at"]) if row["state"] == "needs_user"
             else _operation_condition(row, kind="stopped", stuck_since=row["updated_at"]) for row in rows]
 
 
@@ -312,25 +390,27 @@ def _failure_recorded() -> Q:
 RUN_FIELDS = ("pk", "run_id", "organization_id", "workflow", "status", "updated_at",
               "result__error_code", "result__failure_code", "result__failure__code", "result__authority_denied__code",
               "result__failure__action__id", "result__failure__action_id", "result__action_id",
-              "result__self_heal_v1__next_at", "result__self_heal_v1__capped")
+              "result__self_heal_v1__next_at", "result__self_heal_v1__capped", "result__self_heal_v1__stop__code")
 
 
 def _stopped_runs(*, now, scope) -> list[StuckCondition]:
     newer = ContentFactoryRun.objects.filter(organization_id=OuterRef("organization_id"), workflow__in=RUN_WORKFLOWS,
                                              created_at__gt=OuterRef("created_at"))
+    wait = run_stuck_after() if scope.run_stuck_after is None else scope.run_stuck_after
     rows = ContentFactoryRun.objects.filter(workflow__in=RUN_WORKFLOWS, status__in=RUN_STOP_STATUSES,
-                                            organization__isnull=False, updated_at__lte=now - scope.run_stuck_after)
+                                            organization__isnull=False, updated_at__lte=now - wait)
     if scope.lookback is not None:
         rows = rows.filter(updated_at__gte=now - scope.lookback)
     if scope.organization_ids is not None:
         rows = rows.filter(organization_id__in=scope.organization_ids)
-    rows = _pages(rows.filter(~Q(run_request__has_key="request_source")
-                              | ~Q(run_request__request_source=alerts.SCHEDULER_REQUEST_SOURCE))
+    if scope.excluded_organization_ids:
+        rows = rows.exclude(organization_id__in=sorted(scope.excluded_organization_ids))
+    rows = _pages(rows.filter(alerts.founder_run_q())
                   .exclude(Exists(newer)).values(*RUN_FIELDS), scope, kind="runs", pk_field="pk")
     conditions = []
     for row in rows:
         code = _run_code(row)
-        if _founder_has_next_action(row, code) or _self_heal_scheduled(row, now=now):
+        if _founder_has_next_action(row, code) or _self_heal_scheduled(row, now=now) or _self_heal_stopped(row):
             continue
         conditions.append(StuckCondition(
             organization_id=row["organization_id"], slot=f"run-{row['pk']}-{row['status']}", kind="run_stopped",
@@ -365,6 +445,12 @@ def _self_heal_scheduled(row, *, now) -> bool:
     """Self-heal has a future retry booked and is not capped, so the run is not stuck yet."""
     moment = alerts._timestamp(row.get("result__self_heal_v1__next_at"))
     return bool(moment and moment > now and not row.get("result__self_heal_v1__capped"))
+
+
+def _self_heal_stopped(row) -> bool:
+    """Self-heal recorded its own capped stop and already raised ``self_heal_capped`` for it (B2)."""
+    value = row.get("result__self_heal_v1__stop__code")
+    return isinstance(value, str) and bool(value)
 
 
 def _registry_entry(code):
@@ -402,6 +488,91 @@ def _queue(conditions, *, organization_ids) -> int:
     return queued
 
 
+def queue_operation_stopped_alert(op, *, code, now=None) -> int:
+    """Queue the stopped-operation alert for ``op`` now, instead of on the next sweep.
+
+    It is the same receipt the sweep would queue for this ``needs_attention``
+    operation (same slot), so staff get one alert, not two. Honours
+    ``ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED``. Returns how many were queued.
+    """
+    if not getattr(settings, "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED", True):
+        return 0
+    now = now or timezone.now()
+    organization_id = op.connection.organization_id
+    condition = _operation_condition({"id": op.pk, "connection__organization_id": organization_id, "action": op.action,
+                                      "state": op.state, "attempts": op.attempts, "receipt__reason_code": code},
+                                     kind="stopped", stuck_since=now)
+    return _queue([condition], organization_ids={organization_id})
+
+
+def queue_budget_alert(connection, op, *, scope, count, limit, now=None) -> int:
+    """Queue one alert when automatic scans reach their budget (plan B3).
+
+    The slot is the operation for an operation budget, and the website and UTC
+    day for the daily budget, so a loop of pushes raises one alert, not one
+    per push. Honours ``ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED``.
+    """
+    if not getattr(settings, "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED", True):
+        return 0
+    now = now or timezone.now()
+    organization_id = connection.organization_id
+    slot = (f"op-{op.pk}-budget" if scope == "operation"
+            else f"website-{connection.pk}-budget-{now.date().isoformat()}")
+    condition = StuckCondition(organization_id=organization_id, slot=slot, kind="operation_budget",
+                               step=getattr(op, "action", "") or "prepare", code="prepare_no_progress", stuck_since=now,
+                               details={"website_operation_id": str(op.pk), "attempts": int(count),
+                                        "budget_scope": str(scope), "budget_limit": int(limit)})
+    return _queue([condition], organization_ids={organization_id})
+
+
+def _article_not_live_slot(article) -> str:
+    """The alert slot for ``article``'s current merge: one alert per article and merge commit."""
+    merge = re.sub(r"[^a-f0-9]", "", str(article.on_main_commit_sha or article.merge_commit_sha or "").lower())[:12]
+    return f"article-{article.pk}-not-live-{merge or 'unknown'}"
+
+
+def article_not_live_alerted(article) -> bool:
+    """Whether staff hold the ``article_not_live`` alert for ``article``'s current merge.
+
+    The founder copy says "Our team has been told" only when this is true, so
+    the line is never a claim the alert queue cannot back.
+    """
+    if article is None or not getattr(article, "organization_id", None):
+        return False
+    alert_id = alerts.founder_journey_alert_id(organization_id=article.organization_id, alert_reason=STUCK_REASON,
+                                               slot=_article_not_live_slot(article))
+    return any(alert_id in receipts for _, receipts in alerts._receipt_index({article.organization_id}))
+
+
+def queue_article_not_live_alert(article, *, observation=None, since=None, now=None) -> int:
+    """Queue one alert for a merged article whose page is still not live (plan C14).
+
+    The slot is the article and its merge commit, so later re-checks of the
+    same merge never alert again, and a new merge (a republish) alerts once
+    more. Honours ``ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED``.
+    """
+    if not getattr(settings, "ARTICLES_FOUNDER_STUCK_ALERTS_ENABLED", True):
+        return 0
+    now = now or timezone.now()
+    observation = observation if isinstance(observation, dict) else {}
+    reason = str(observation.get("reason") or "")
+    check = ("content_mismatch" if observation.get("state") == "content_mismatch"
+             else "not_found" if "HTTP 404" in reason else "unavailable")
+    condition = StuckCondition(organization_id=article.organization_id,
+                               slot=_article_not_live_slot(article), kind="article_not_live",
+                               step="article-live", code="live_route_unavailable", stuck_since=since or now,
+                               details={"run_id": str(article.source_run_id or "")[:100],
+                                        "live_check": check})
+    queued = _queue([condition], organization_ids={article.organization_id})
+    if queued:
+        # Queued outside the sweep: remember the organisation so the next pass
+        # delivers it even while the pending set is warm.
+        remembered = cache.get(PENDING_ORGS_KEY)
+        if isinstance(remembered, list) and article.organization_id not in remembered:
+            cache.set(PENDING_ORGS_KEY, [*remembered, article.organization_id][-MAX_PENDING_ORGANIZATIONS:], None)
+    return queued
+
+
 # --- Plain descriptions ------------------------------------------------------
 
 def describe(condition: StuckCondition, *, now) -> dict:
@@ -428,12 +599,17 @@ def stuck_alert_text(receipt, context) -> str:
     entry = _registry_entry(code)
     description = (entry or {}).get("user_message") or KIND_DESCRIPTIONS.get(str(details.get("kind")), "")
     step = STEP_LABELS.get(str(details.get("step") or ""), str(details.get("step") or "Unknown step"))
-    parts = [f"Founder stuck: {founder} at {startup}" + (f" ({context['domain']})." if context.get("domain") else ".")]
+    parts = [("Escalated to the owner after 48 hours. " if details.get("escalation") == "owner" else "")
+             + f"Founder stuck: {founder} at {startup}" + (f" ({context['domain']})." if context.get("domain") else ".")]
     parts.append(f"Step: {step}.")
     parts.append(f"Reason: {code + ': ' if code else ''}{description or 'No failure code was reported.'}")
     since = alerts._timestamp(details.get("stuck_since_at"))
     if since:
         parts.append(f"Stuck for {_duration(timezone.now() - since)}.")
+    if details.get("action"):
+        parts.append(f"Waiting on the retired ask {alerts._safe(details['action'])}.")
+    if details.get("live_check"):
+        parts.append(f"Live check: {alerts._safe(details['live_check'])}.")
     if details.get("attempts"):
         parts.append(f"Attempts {details['attempts']}.")
     if details.get("run_id"):

@@ -95,16 +95,16 @@
     "retry_policy": "await_owner_action",
     "retryable": false
   },
+  "NO_OPPORTUNITIES": {
+    "action_id": null,
+    "failure_class": "unsupported",
+    "retry_policy": "stop_contract",
+    "retryable": false
+  },
   "PORTABLE_REVIEW_PROTECTED": {
     "action_id": "review_setup",
     "failure_class": "needs_user",
     "retry_policy": "await_owner_action",
-    "retryable": false
-  },
-  "PROFILE_DRAFT_UNAVAILABLE": {
-    "action_id": null,
-    "failure_class": "unsupported",
-    "retry_policy": "stop_contract",
     "retryable": false
   },
   "PUBLISH_TARGET_ACTION_REQUIRED": {
@@ -203,6 +203,18 @@
     "action_id": "review_setup",
     "failure_class": "needs_user",
     "retry_policy": "await_owner_action",
+    "retryable": false
+  },
+  "editorial_catalog_policy_changed": {
+    "action_id": null,
+    "failure_class": "strategy",
+    "retry_policy": "advance_strategy",
+    "retryable": false
+  },
+  "editorial_catalog_selection_not_current": {
+    "action_id": null,
+    "failure_class": "strategy",
+    "retry_policy": "advance_strategy",
     "retryable": false
   },
   "github_ci_evidence_permission_required": {

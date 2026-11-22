@@ -199,7 +199,8 @@ class OwnerSetupMergeWebhookTests(OwnerSetupMergeFixture):
         self.assertTrue(self.website.capabilities["publishingReady"])
         self.assertEqual(self.website.blockers, [])
         # The stopped preparation reopens for an owned current-generation setup.
-        wake.assert_called_once_with(self.website.pk, organization_id=4, owned_merge_run_id="owner-setup")
+        wake.assert_called_once_with(self.website.pk, organization_id=4, owned_merge_run_id="owner-setup",
+            source_sha="b" * 40, carried=False)
         self.assertEqual(self.reads, ["pulls/40", f"git/commits/{MERGED}", f"git/commits/{HEAD}"])
         self.assertEqual(self.mint.call_args.kwargs["permission_mode"], "read")
         self.assertEqual(self.revoke.call_args.kwargs["headers"]["Authorization"], "Bearer synthetic-read-token")
@@ -212,7 +213,8 @@ class OwnerSetupMergeWebhookTests(OwnerSetupMergeFixture):
         self.assertEqual((payload["owned_merge_run_id"], payload["scan_required"]), ("", True))
         self.assertFalse(self.website.capabilities["publishingReady"])
         self.assertEqual([item["code"] for item in self.website.blockers], ["repository_source_changed"])
-        wake.assert_called_once_with(self.website.pk, organization_id=4, owned_merge_run_id="")
+        wake.assert_called_once_with(self.website.pk, organization_id=4, owned_merge_run_id="",
+            source_sha="b" * 40, carried=False)
         # One pull request read and no commit reads or logs for an ordinary push.
         self.assertEqual(self.reads, ["pulls/40"])
         self.revoke.assert_called_once()
@@ -663,7 +665,8 @@ class OwnerSetupMergeRecordGuardTests(OwnerSetupMergeFixture):
         self.assertEqual((payload["owned_merge_run_id"], payload["scan_required"]), ("owner-setup", False))
         self.assertTrue(self.website.capabilities["publishingReady"])
         self.assertEqual(self.website.blockers, [])
-        wake.assert_called_once_with(self.website.pk, organization_id=4, owned_merge_run_id="owner-setup")
+        wake.assert_called_once_with(self.website.pk, organization_id=4, owned_merge_run_id="owner-setup",
+            source_sha="b" * 40, carried=False)
         # Only the recording's savepoint rolled back; the webhook's transaction committed.
         self.assertEqual(blocks, ["RuntimeError", "committed"])
         self.assertEqual(self.logged("warning"), ["website_owner_setup_merge_unrecorded"])

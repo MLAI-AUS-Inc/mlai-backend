@@ -35,7 +35,7 @@ def article_controls(*, organization, company, user, run):
     Every command rechecks its original current scope and permission.
     """
     from django.contrib.auth import get_user_model
-    from founder_tools.models import VibeRaisingCompany
+    from founder_tools.membership import companies_for_user
     from workflow_runs.models import ContentFactoryRun
     from .models import OrganizationContentConfig
     from .run_state import ARTICLE_WORKFLOWS
@@ -50,8 +50,7 @@ def article_controls(*, organization, company, user, run):
     current = ContentFactoryRun.objects.filter(pk=run.pk, organization_id=organization.pk).first()
     if (fresh_user is None or config is None or current is None or current.workflow not in ARTICLE_WORKFLOWS
             or current.run_id != run.run_id or current.domain != organization.domain
-            or not VibeRaisingCompany.objects.filter(pk=company.pk, organization_id=organization.pk,
-                profile__user_id=fresh_user.pk).exists()):
+            or not companies_for_user(fresh_user).filter(pk=company.pk, organization_id=organization.pk).exists()):
         return empty
     _, writable, _, owner = _rights(organization, company, config, fresh_user)
     if not owner or not writable:

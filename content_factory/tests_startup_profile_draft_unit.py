@@ -84,6 +84,7 @@ class StartupProfileDraftUnitTests(unittest.TestCase):
             "founder_actor_id_for_user": lambda user: "actor",
             "actor_ids_for_user": lambda user: {"actor"},
             "_is_synthetic_actor_id": lambda actor: False,
+            "membership": SimpleNamespace(shared_workspace=lambda _: None, companies_for_user=lambda _: self.profile.companies),
             "normalize_company_linkedin_url": lambda value: str(value or "").strip(),
         }
         load_bodies(ROOT / "founder_tools/services.py", {

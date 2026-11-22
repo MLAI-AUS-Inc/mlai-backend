@@ -6,6 +6,7 @@ from uuid import UUID
 from django.db import transaction
 from django.utils import timezone
 
+from .system_stopped_runs import raise_site
 from .website_contract import WebsiteAuthorityError, connection_contract, evidence_digest
 from .website_models import WebsiteConnectionOperation
 
@@ -44,6 +45,17 @@ def workflow_operation_state(run):
 def deletion_epoch(connection):
     """Return the retained erasure watermark; reconnect never resets it."""
     return max((int(row.get("deletion_epoch", 0)) for row in (connection.blockers or []) if isinstance(row, dict)), default=0)
+
+
+# The row that stores the deletion epoch above. It is bookkeeping every
+# operation and worker proof compares, never something blocking the website.
+DELETION_EPOCH_BLOCKER = "website_data_deleted"
+
+
+def staff_visible_blockers(blockers):
+    """A connection's blockers for staff views, without the deletion-epoch storage row."""
+    return [row for row in (blockers if isinstance(blockers, list) else [])
+        if not (isinstance(row, dict) and row.get("code") == DELETION_EPOCH_BLOCKER)]
 
 
 def _approved_publish_child_continuation(connection, operation, run):
@@ -174,7 +186,9 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
             review_replay = processed_setup_review_replay(payload, child_id=run_id)
         publish_continuation = _approved_publish_child_continuation(connection, op, run)
         if not review_replay and not publish_continuation and not same_failure and ((incoming_status and incoming_status != op.state) or (event and event not in terminal_events[op.state])):
-            raise WebsiteAuthorityError("website_operation_terminal", "This operation is terminal. Start a new reviewed attempt.")
+            # B24: a stale-operation protocol fault; see system_stopped_runs.TERMINAL_RAISE_SITES.
+            raise raise_site(WebsiteAuthorityError("website_operation_terminal", "This operation is terminal. Start a new reviewed attempt."),
+                "website_operations.validate_operation")
     if cancellation_receipt:
         if (op.action != "workflow" or op.state not in {"pending", "running", "failed", "blocked", "cancelled"}
                 or op.generation != connection.generation or str(payload.get("connection_generation")) != str(connection.generation)
@@ -324,11 +338,21 @@ def prepare_receipt(op):
     The returned copy also corrects historical terminal receipts on read;
     it never mutates the persisted receipt or writes the operation.
     """
+    from .website_prepare_counters import at_cap, owner_can_retry, same_failure_stops
     receipt = dict(op.receipt or {})
+    if receipt.get("status") in {"staff_fixing", "cant_be_done_yet", "delivered_not_live"}:
+        # B11/B25: ours to fix, or an honest closed-list answer; never "Try again".
+        # C7: delivered as content files, not yet live; a retry cannot change that.
+        # Project the B4 owner flag too: the stored failure envelope can still
+        # say retryable, and clients read owner_can_retry to hide Try again.
+        receipt["owner_can_retry"] = False
+        return receipt
     message = str(receipt.get("message") or "")
     scheduled = op.state == "pending" and getattr(op, "next_attempt_at", None) is not None
     if scheduled:
         return receipt
+    # Beside ``retryable`` (the system retries by itself), never instead of it.
+    receipt["owner_can_retry"] = owner_can_retry(op.state, receipt)
     retry_promise = r"will\s+(?:automatically\s+)?(?:retry|be retried)|retry\s+automatically|automatically\s+retry"
     promise = re.search(retry_promise, message, flags=re.IGNORECASE)
     stopped = op.state in {"needs_attention", "stopped"}
@@ -346,9 +370,13 @@ def prepare_receipt(op):
     if stopped and not reason.startswith("We stopped"):
         failures = receipt.get("step_failures")
         failures = failures if isinstance(failures, dict) else {}
-        counts = [*failures.values(), receipt.get("deployment_attempts")]
+        # Step failures reset on every new attempt; the stop streak does not
+        # (plan B4), so the third identical stop says 3.
+        counts = [*failures.values(), receipt.get("deployment_attempts"), same_failure_stops(receipt)]
         attempts = max([value for value in counts if type(value) is int and value > 0] + [1])
-        reason = f"We stopped after {attempts} {'attempt' if attempts == 1 else 'attempts'}: {reason.rstrip('.')}. Use Try again when you're ready."
+        follow = ("We've told the MLAI team, who will pick it up from here." if at_cap(receipt)
+                  else "Use Try again when you're ready." if receipt["owner_can_retry"] else "")
+        reason = f"We stopped after {attempts} {'attempt' if attempts == 1 else 'attempts'}: {reason.rstrip('.')}. {follow}".rstrip()
     if stopped:
         receipt["status"] = "needs_attention" if op.state == "needs_attention" else "stopped"
     receipt["message"] = reason
@@ -393,10 +421,12 @@ def cancel_operation(config, *, data, idempotency_key):
         if attempt != op.payload.get("attempt", 1) or str(data.get("deletion_epoch", 0)) != str(deletion_epoch(connection)):
             raise WebsiteAuthorityError("website_operation_changed", "Refresh this operation before cancelling it.")
         if op.state in {"completed", "failed", "denied", "deleted"} or (op.action == "prepare" and op.state not in {"pending", "running", "needs_user", "needs_attention", "cancelled"}):
-            raise WebsiteAuthorityError("website_operation_terminal", "This operation has finished. Review its recorded effects or prepare a removal proposal.")
+            raise raise_site(WebsiteAuthorityError("website_operation_terminal", "This operation has finished. Review its recorded effects or prepare a removal proposal."),
+                "website_operations.cancel_operation_finished")
         run = ContentFactoryRun.objects.filter(run_id=op.payload.get("run_id"), organization=connection.organization).first()
         if op.action != "prepare" and run and workflow_operation_state(run) in {"completed", "failed", "denied", "blocked"}:
-            raise WebsiteAuthorityError("website_operation_terminal", "The worker has finished this operation. Review its recorded effects.")
+            raise raise_site(WebsiteAuthorityError("website_operation_terminal", "The worker has finished this operation. Review its recorded effects."),
+                "website_operations.cancel_operation_worker_finished")
         effects = list(connection.repository_mutations.filter(run_id=op.payload.get("run_id", "")).values("pr_url", "branch", "head_sha", "status"))
         op.state = "cancelled"
         op.next_attempt_at = None
@@ -493,14 +523,19 @@ def observe_workflow_status(run, payload=None):
         wake_prepare_after_commit(op.connection_id)
 
 
-def advance_workflow_attempt(run, *, preserve_run_clock=False):
-    """Fence a resumed attempt; policy commands keep the original activity clock."""
+def advance_workflow_attempt(run, *, preserve_run_clock=False, follow_moved_preview=False):
+    """Fence a resumed attempt; policy commands keep the original activity clock.
+
+    ``follow_moved_preview`` is only for the owner's preview retry, which
+    Content Factory re-pins to a moved site commit (see authority_guard).
+    """
     from .website_connections import authority_guard, scoped_run_contract, contract_for, extend_owner_operation_contract
     binding = scoped_run_contract(run)
     from .run_ownership import owner_receipt
     owned = (owner_receipt(run) or {}).get("authority", {}).get("event_protocol") == 1
     original_run = run
-    with authority_guard(binding, action="read") as website:
+    follow = {"follow_moved_preview": True} if follow_moved_preview else {}
+    with authority_guard(binding, action="read", **follow) as website:
         if owned:
             from workflow_runs.models import ContentFactoryRun
             from .run_ownership import current_execution_ticket, RunOwnershipConflict
@@ -528,7 +563,8 @@ def advance_workflow_attempt(run, *, preserve_run_clock=False):
                 fields = {key: run.run_request[key] for key in OPERATION_FIELDS}
                 extend_owner_operation_contract(fields)
                 return fields
-            raise WebsiteAuthorityError("website_operation_terminal", "Completed website work cannot be resumed.")
+            raise raise_site(WebsiteAuthorityError("website_operation_terminal", "Completed website work cannot be resumed."),
+                "website_operations.resume_completed")
         if op.state not in {"failed", "blocked", "running", "pending"}:
             raise WebsiteAuthorityError("website_operation_cancelled", "This operation cannot be resumed.")
         previous_attempt = int(op.payload.get("attempt", 1))

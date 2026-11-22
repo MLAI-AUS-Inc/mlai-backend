@@ -37,6 +37,7 @@ from .models import (
     VolunteerSourceReceipt,
 )
 from .policy import VERSION, levels, microroo, roo
+from .point_history import contribution_rows, wallet_page
 from .serializers import (
     AttendanceInput,
     BatchInput,
@@ -203,6 +204,29 @@ class VolunteerView(APIView):
 class JourneyView(VolunteerView):
     def get(self, request):
         return Response(journey(request.user))
+
+
+class PointHistoryView(VolunteerView):
+    """Show the signed-in member the credits behind their level and wallet."""
+
+    def get(self, request):
+        scope = request.query_params.get("scope", "contribution")
+        offset, limit = pagination_window(request)
+        if scope == "contribution":
+            total, rows = contribution_rows(request.user)
+            rows = rows[offset:offset + limit + 1]
+        elif scope == "wallet":
+            total, rows = wallet_page(request.user, offset, limit)
+        else:
+            raise VolunteerError("invalid_filter")
+        return Response(
+            dict(
+                total_roo=total,
+                results=rows[:limit],
+                next_offset=offset + limit if len(rows) > limit else None,
+            ),
+            headers={"Cache-Control": "private, no-store"},
+        )
 
 
 class PolicyView(VolunteerView):

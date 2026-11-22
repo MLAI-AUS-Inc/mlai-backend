@@ -168,6 +168,8 @@ class LumaAttendeeReportServiceTests(SimpleTestCase):
                     "entries": [
                         {
                             "id": "evt-later",
+                            "platform": "luma",
+                            "access": "view",
                             "name": "Later event",
                             "url": "https://lu.ma/later",
                             "start_at": "2026-05-08T08:00:00Z",
@@ -179,6 +181,8 @@ class LumaAttendeeReportServiceTests(SimpleTestCase):
                         },
                         {
                             "id": "evt-sooner",
+                            "platform": "luma",
+                            "access": "manage",
                             "name": "Sooner event",
                             "url": "https://lu.ma/sooner",
                             "start_at": "2026-05-06T08:00:00Z",
@@ -230,6 +234,7 @@ class LumaAttendeeReportServiceTests(SimpleTestCase):
             [
                 {
                     "id": "evt-sooner",
+                    "mlai_managed": True,
                     "cover_url": "",
                     "name": "Sooner event",
                     "url": "https://lu.ma/sooner",
@@ -240,6 +245,7 @@ class LumaAttendeeReportServiceTests(SimpleTestCase):
                 },
                 {
                     "id": "evt-later",
+                    "mlai_managed": False,
                     "cover_url": "",
                     "name": "Later event",
                     "url": "https://lu.ma/later",

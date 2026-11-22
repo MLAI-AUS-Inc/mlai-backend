@@ -21,6 +21,8 @@ from community_chat.admin_access import AdminError, require_mlai_admin
 from . import registry_policy
 from .models import OrganizationContentConfig
 from .staff_alert_rules import mapping, failure_code, open_alert, overdue, global_alerts
+from .staff_escalation import ask_since, ladder as escalation_ladder
+from .website_capability_record import TIERS as SITE_TIERS, staff_tier
 
 ACTIONS = {"retry_now", "switch_to_draft", "release_or_refund", "resolve_and_notify", "verify_safety_claims"}
 RECEIPT_KEYS = ("self_heal_v1", "points_v1", "channel_v1", "re_pin_v1", "model_spend", "snapshot_drift_v1", "event_progress")
@@ -123,7 +125,12 @@ def startup_row(org, company, run, *, now, stuck=()):
             "lastTransitions": [{k: t.get(k) for k in ("at", "from", "to")} for t in transitions[-3:] if isinstance(t, dict)],
             "openAlerts": len(alerts), "oldestOpenAlertAt": min((r.get("queued_at", "") for r in alerts), default=None),
             "overdueAlerts": sum(overdue(r, now) for r in alerts), "ownerEmail": getattr(owner, "email", None),
-            "supportCode": hashlib.sha256(str(getattr(run, "run_id", org.pk)).encode()).hexdigest()[:10]}
+            "supportCode": hashlib.sha256(str(getattr(run, "run_id", org.pk)).encode()).hexdigest()[:10],
+            # C10: the website's last observed setup tier (stored on the preloaded connection; no query).
+            "siteTier": staff_tier(getattr(config, "website_connection", None) if config else None),
+            # F10: where this startup is on the escalation ladder (data only; the existing senders act on it).
+            "escalation": escalation_ladder(now=now, stuck=() if state == "your_turn" else stuck, ask=ask if state == "your_turn" else None,
+                                            ask_since=ask_since(config, ask) if state == "your_turn" else None)}
 
 
 def startup_list(params, *, now=None):
@@ -149,9 +156,18 @@ def startup_list(params, *, now=None):
             for org in orgs]
     if params.get("state"):
         rows = [r for r in rows if r["state"] == params["state"]]
+    # C10: staff see sites by tier; "unknown" is a site with no observed tier yet.
+    tier_counts = {tier: 0 for tier in (*SITE_TIERS, "unknown")}
+    for r in rows:
+        tier_counts[r["siteTier"] or "unknown"] += 1
+    tier = params.get("tier")
+    if tier:
+        if tier not in tier_counts:
+            raise ValueError("Unknown tier.")
+        rows = [r for r in rows if (r["siteTier"] or "unknown") == tier]
     page = rows[offset:offset+50]
     cursor = signing.dumps({"offset": offset+50}, salt="staff-startups") if len(rows) > offset+50 else None
-    return {"results": page, "next": cursor, "overdueAlerts": overdue_count}
+    return {"results": page, "next": cursor, "overdueAlerts": overdue_count, "tierCounts": tier_counts}
 
 
 def startup_detail(organization_id, *, now=None):
@@ -167,11 +183,14 @@ def startup_detail(organization_id, *, now=None):
     config = _config(org)
     website = config.website_connection if config else None
     row["runs"] = [{"runId": r.run_id, "status": r.status, "code": failure_code(r),
-                    **{k: mapping(r.result).get(k) for k in RECEIPT_KEYS}} for r in runs]
+                    **{k: mapping(r.result).get(k) for k in RECEIPT_KEYS}, **_quality_findings(r)} for r in runs]
     row["website"] = ({"id": str(website.pk), "state": website.state, "verifiedSha": website.verified_sha,
                        "repository": website.github_repo, "siteUrl": website.site_url,
                        "targets": list(website.targets.filter(generation=website.generation).values("target_key", "source_sha", "adapter", "contract")),
                        "doctor": None} if website else None)
+    if website:
+        from .website_capability_record import build as capability_record
+        row["website"]["capability"] = capability_record(website, now=now)
     receipts = _alerts(org)
     row["alerts"] = [a for a in receipts if open_alert(a)] + sorted([a for a in receipts if not open_alert(a)], key=lambda a: a.get("acknowledged_at", ""), reverse=True)[:20]
     if website and company:
@@ -181,12 +200,33 @@ def startup_detail(organization_id, *, now=None):
             action="prepare", payload__company_id=str(company.pk)).order_by("-created_at", "-pk").first()
         if op:
             row["website"]["doctor"] = read_doctor(op, scope=scope_for(website, company.pk), source_sha=website.verified_sha)
+    if website:
+        # F10: the current preparation with the operation actions the server offers and its audit trail.
+        from .staff_operation_actions import operation_summary
+        current = website.operations.select_related("connection__organization", "connection__authorized_by").filter(
+            generation=website.generation, action="prepare").order_by("-created_at", "-pk").first()
+        row["website"]["operation"] = operation_summary(current, now=now) if current else None
     row["owner"] = {"userId": company.profile.user_id, "email": company.profile.user.email,
                     "name": company.profile.user.full_name} if company else None
     # Explicit allow-list: credentials and provider tokens never leave the config object.
     strategy = mapping(getattr(config, "pillar_strategy", None))
     row["support"] = {key: strategy.get(key) for key in ("website_support", "website_goal", "website_doctor", "self_heal")}
     return row
+
+
+def _quality_findings(run) -> dict:
+    """A held article's final-check findings, shown beside Retry now (workstream 5).
+
+    Only when Content Factory sent its findings list or removed sentences, so a
+    run without them keeps exactly today's row.
+    """
+    quality = mapping(mapping(run.result).get("article_preview_quality"))
+    if "findings_detail" not in quality and not quality.get("self_heal_removed_claims"):
+        return {}
+    from .article_quality_record import quality_record
+    record = quality_record(run)
+    return {"qualityFindings": record["findings"], "qualityHoldOwner": record["holdOwner"],
+            "qualityRemovedClaims": record["removedClaims"], "qualityHistory": record["history"]}
 
 
 def alert_list(*, state="open", now=None):
@@ -456,6 +496,10 @@ def perform_action(organization_id, data, *, by_user):
     from founder_tools import idempotency as idem
     from uuid import uuid4
     require_staff(by_user)
+    if "operationId" in data:
+        # F10: operation-scoped actions for a stuck setup or prepare operation.
+        from .staff_operation_actions import perform_operation_action
+        return perform_operation_action(organization_id, data, by_user=by_user)
     action = data.get("action")
     if action not in ACTIONS or not isinstance(data.get("runId"), str):
         raise ValueError("Choose an action and runId.")

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, override_settings
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from community_chat import onboarding
 from community_chat.onboarding_views import MemberOnboardingSerializer
@@ -16,6 +16,11 @@ from community_chat.onboarding_views import MemberOnboardingSerializer
     COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION="test-v1",
 )
 class RequiredOnboardingNamesTests(SimpleTestCase):
+    def setUp(self):
+        pending = patch.object(onboarding, "deletion_pending", return_value=False)
+        self.deletion_pending = pending.start()
+        self.addCleanup(pending.stop)
+
     def basics(self):
         return {
             "step": "basics",
@@ -43,11 +48,11 @@ class RequiredOnboardingNamesTests(SimpleTestCase):
             }
         )
 
-    def service(self, profile, *, existing_access=False):
+    def service(self, profile):
         stack = ExitStack()
         self.addCleanup(stack.close)
         user = SimpleNamespace(
-            first_name="Alex", last_name="Member", email="test@example.com"
+            pk=1, is_active=True, first_name="Alex", last_name="Member", email="test@example.com"
         )
         stack.enter_context(patch.object(onboarding.transaction, "atomic"))
         stack.enter_context(
@@ -57,14 +62,10 @@ class RequiredOnboardingNamesTests(SimpleTestCase):
                 return_value=(user, SimpleNamespace(client_id="mlai-chat-web")),
             )
         )
-        stack.enter_context(
-            patch.object(
-                onboarding, "has_community_access", return_value=existing_access
-            )
-        )
         manager = stack.enter_context(
             patch.object(onboarding.CommunityMemberProfile, "objects")
         )
+        manager.filter.return_value.first.return_value = profile
         manager.select_for_update.return_value.get_or_create.return_value = (
             profile,
             False,
@@ -100,13 +101,11 @@ class RequiredOnboardingNamesTests(SimpleTestCase):
         self.assertTrue(serializer.is_valid(), serializer.errors)
 
     def test_resumed_application_needs_both_names(self):
-        user = SimpleNamespace(email="test@example.com")
+        user = SimpleNamespace(pk=1, is_active=True, email="test@example.com")
         for surname, complete in (("", False), ("  ", False), ("Member", True)):
             with self.subTest(surname=surname), patch.object(
                 onboarding.CommunityMemberProfile, "objects"
-            ) as manager, patch.object(
-                onboarding, "has_community_access", return_value=False
-            ):
+            ) as manager:
                 manager.filter.return_value.first.return_value = self.profile(
                     last_name=surname
                 )
@@ -142,9 +141,19 @@ class RequiredOnboardingNamesTests(SimpleTestCase):
             )
         profile.save.assert_not_called()
 
+    def test_open_deletion_blocks_onboarding_changes(self):
+        profile = self.profile(status="approved")
+        user, consent = self.service(profile)
+        self.deletion_pending.return_value = True
+        with self.assertRaises(PermissionDenied):
+            onboarding.save_onboarding(authenticated_session=object(), values=self.basics())
+        self.deletion_pending.assert_called_once_with(user.pk)
+        profile.save.assert_not_called()
+        consent.assert_not_called()
+
     def test_approved_members_can_keep_using_optional_preferences(self):
         profile = self.profile(last_name="", status="approved")
-        user, consent = self.service(profile, existing_access=True)
+        user, consent = self.service(profile)
         result = onboarding.save_onboarding(
             authenticated_session=object(),
             values={"step": "complete", "skip_personalisation": True},

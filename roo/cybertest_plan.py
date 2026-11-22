@@ -6,6 +6,10 @@ import re
 from .cybertest_delivery import purchase_contract
 from .cybertest_policy import CheckoutError
 
+# Size-based basic plans list every source range; about 15 blocks of small
+# files need roughly 600 KB. Kept under the scanner history's 2 MB request limit.
+BASIC_PLAN_BYTES = 1_500_000
+
 
 def public_purchase_scope(snapshot):
     """Return customer-reviewable scope, never internal model or runner settings."""
@@ -96,7 +100,7 @@ def execution_plan(value, contract):
             require(number(part['start'], 16000000, integer=True, zero=True)
                     and number(part['end'], 16000000, integer=True, zero=True)
                     and 0 <= part['end']-part['start'] <= 48000)
-    require(len(json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()) <= 500000)
+    require(len(json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode()) <= BASIC_PLAN_BYTES)
     return copy.deepcopy(value)
 
 

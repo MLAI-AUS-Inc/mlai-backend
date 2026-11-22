@@ -25,6 +25,18 @@ again. A startup that is already connected, an event without a matching
 requester, an ambiguous match and a request older than :data:`REQUEST_DAYS`
 are left alone.
 
+Plan E13: the wait is a named founder ask (``waiting_github_owner_approval``)
+with a copyable link for the owner (:func:`owner_link`) and 24 and 72-hour
+reminders (``content_factory.founder_transitions``). When the founder's own
+request was approved but the pickup could not pick one repository (no
+repository or several named like the domain, or a repository two pending
+startups claim), the request is marked ``pickup: ambiguous`` and the
+installation is registered for that founder (the same requester proof the
+exact match binds on), so the founder chooses the repository in the picker
+instead of waiting in silence. A request older than the window is
+``expired`` and also falls back to the picker (:func:`wait_status`). Nothing
+is bound without the founder choosing it.
+
 ``ARTICLES_GITHUB_OWNER_APPROVAL_PICKUP_ENABLED`` (default on) is the kill switch.
 """
 import logging
@@ -120,6 +132,93 @@ def clear_request(config) -> None:
     config.article_system = locked.article_system
 
 
+#: The ask while the owner has not approved yet, and the picker fallback (plan E13).
+WAIT_ASK = "waiting_github_owner_approval"
+PICKER_ASK = "choose_repository"
+
+
+def owner_link() -> str:
+    """The copyable link a founder sends their GitHub organisation owner (plan E13).
+
+    The app's public installation page: the owner opens it signed in to
+    GitHub and approves MLAI for the organisation. It carries no MLAI state,
+    no founder identity and no token, so forwarding it grants nothing.
+    """
+    from integrations.services.github_connections import GITHUB_APP_SLUG
+    return f"https://github.com/apps/{GITHUB_APP_SLUG}/installations/new"
+
+
+def _moment(value):
+    try:
+        parsed = parse_datetime(str(value or ""))
+    except ValueError:
+        return None
+    return parsed if parsed is not None and not timezone.is_naive(parsed) else None
+
+
+def wait_status(config, now=None):
+    """Where a founder's owner request stands, for the journey and reminders (plan E13).
+
+    ``None`` when there is no request, the kill switch is off or the
+    startup's website is already connected. Otherwise ``{"ask", "state",
+    "since", "user_id"}``: ``state`` is ``waiting`` (inside the window, no
+    pickup yet; ``ask`` is :data:`WAIT_ASK`), ``ambiguous`` (the owner
+    approved but no single repository matched) or ``expired`` (older than
+    :data:`REQUEST_DAYS`); both fallbacks ask :data:`PICKER_ASK`. ``since``
+    is when that ask began.
+    """
+    if not enabled() or config is None or getattr(config, "website_connection_id", None):
+        return None
+    request = (getattr(config, "article_system", None) or {}).get(KEY)
+    if not isinstance(request, dict):
+        return None
+    now = now or timezone.now()
+    requested_at = _moment(request.get("requested_at"))
+    if requested_at is None or requested_at > now + timedelta(minutes=5):
+        return None
+    pickup = request.get("pickup") if isinstance(request.get("pickup"), dict) else {}
+    picked_at = _moment(pickup.get("at"))
+    if pickup.get("state") == "ambiguous" and picked_at is not None:
+        return {"ask": PICKER_ASK, "state": "ambiguous", "since": picked_at, "user_id": request.get("user_id")}
+    expires_at = requested_at + timedelta(days=REQUEST_DAYS)
+    if now > expires_at:
+        return {"ask": PICKER_ASK, "state": "expired", "since": expires_at, "user_id": request.get("user_id")}
+    return {"ask": WAIT_ASK, "state": "waiting", "since": requested_at, "user_id": request.get("user_id")}
+
+
+def _mark_ambiguous(config, request, *, installation_id, account, now) -> bool:
+    """Record an approved request the pickup could not match to one repository (plan E13).
+
+    The installation is registered for the founder GitHub named as the
+    requester, so their repository picker lists it; nothing is bound.
+    """
+    from django.contrib.auth import get_user_model
+    from django.db import transaction
+    from founder_tools.membership import companies_for_user
+    from integrations.services.github_installations import upsert_github_installation
+    user = get_user_model().objects.filter(pk=request.get("user_id"), is_active=True).first()
+    if user is None or not companies_for_user(user).filter(pk=request.get("company_id"),
+                                                           organization=config.organization).exists():
+        return False
+    with transaction.atomic():
+        locked = type(config).objects.select_for_update().get(pk=config.pk)
+        system = dict(locked.article_system or {})
+        current = system.get(KEY)
+        if (not isinstance(current, dict) or locked.website_connection_id
+                or current.get("requested_at") != request.get("requested_at")):
+            return False
+        if (current.get("pickup") or {}).get("state") == "ambiguous":
+            return False
+        system[KEY] = {**current, "pickup": {"state": "ambiguous", "at": now.isoformat(),
+                                             "installation_id": str(installation_id)}}
+        locked.article_system = system
+        locked.save(update_fields=["article_system", "updated_at"])
+    upsert_github_installation(user=user, installation_id=str(installation_id),
+                               account_login=str(account.get("login") or ""), account_type=str(account.get("type") or ""))
+    logger.info("github_owner_request_ambiguous org=%s installation_id=%s", config.organization_id, installation_id)
+    return True
+
+
 def _pending(config, now):
     request = (config.article_system or {}).get(KEY)
     if not isinstance(request, dict):
@@ -138,10 +237,13 @@ def _named_like(domain, repositories):
             and _normalised(str(repo["full_name"]).split("/", 1)[1]) in keys]
 
 
-def match_requests(repositories, *, requester="", now=None):
+def match_requests(repositories, *, requester="", now=None, ambiguous=None):
     """``[(config, request, repo)]``: each pending startup asked for by ``requester``
     with exactly one repository named like its domain, where no other pending
-    startup claims that repository."""
+    startup claims that repository.
+
+    ``ambiguous``, when a list, receives ``(config, request)`` for every other
+    pending startup asked for by ``requester`` (plan E13)."""
     from content_factory.models import OrganizationContentConfig
     now = now or timezone.now()
     requester = str(requester or "").strip().casefold()
@@ -162,10 +264,14 @@ def match_requests(repositories, *, requester="", now=None):
         matches = _named_like(config.organization.domain, repositories)
         if len(matches) == 1:
             candidates.append((config, request, matches[0]))
+        elif ambiguous is not None:
+            ambiguous.append((config, request))
     claimed = {}
     for _, _, repo in candidates:
         name = str(repo["full_name"]).casefold()
         claimed[name] = claimed.get(name, 0) + 1
+    if ambiguous is not None:
+        ambiguous.extend((row[0], row[1]) for row in candidates if claimed[str(row[2]["full_name"]).casefold()] != 1)
     return [row for row in candidates if claimed[str(row[2]["full_name"]).casefold()] == 1]
 
 
@@ -207,20 +313,27 @@ def pick_up(event_type, payload) -> int:
         return 0
     repositories = _installation_repositories(installation_id, payload, added=action == "added")
     connected = 0
-    for config, request, repo in match_requests(repositories, requester=requester_login):
+    ambiguous = []
+    for config, request, repo in match_requests(repositories, requester=requester_login, ambiguous=ambiguous):
         connected += _connect(config, request, repo, installation_id=str(installation_id), account=account)
+    if repositories:
+        now = timezone.now()
+        for config, request in ambiguous:
+            try:
+                _mark_ambiguous(config, request, installation_id=installation_id, account=account, now=now)
+            except Exception:
+                logger.exception("github_owner_request_ambiguous_failed org=%s", config.organization_id)
     return connected
 
 
 def _connect(config, request, repo, *, installation_id, account) -> int:
     from django.contrib.auth import get_user_model
-    from founder_tools.models import VibeRaisingCompany
+    from founder_tools.membership import companies_for_user
     from integrations.services import github_callback_reasons as reasons
     from integrations.services.github_installations import upsert_github_installation
     organization = config.organization
     user = get_user_model().objects.filter(pk=request.get("user_id")).first()
-    company = VibeRaisingCompany.objects.filter(pk=request.get("company_id"), profile__user=user,
-                                                organization=organization).first() if user else None
+    company = companies_for_user(user).filter(pk=request.get("company_id"), organization=organization).first()
     if company is None:
         logger.info("github_owner_request_unmatched org=%s reason=founder_changed", organization.pk)
         return 0

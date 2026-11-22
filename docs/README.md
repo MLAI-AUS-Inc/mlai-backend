@@ -98,7 +98,7 @@ subsystem-specific contracts and runbooks.
 - [`community-chat-home.md`](community-chat-home.md)
 - [`community-chat-roo-dm.md`](community-chat-roo-dm.md) — owner-scoped Slack Roo chat
 - [`community-chat-coworking.md`](community-chat-coworking.md) — signed booking handoff to Public Roo
-- [Roo avatar account contract](community-chat-roo-avatar.md) — persistent outfits and current verified rank unlocks
+- [Roo avatar account contract](community-chat-roo-avatar.md) — persistent outfits, fur colour and current verified rank unlocks
 - [`volunteer-api.md`](volunteer-api.md) — gated member journey, recognition and Roo contracts
 
 - [Startup settings profile contract](startup-settings-profile-contract.md) — sparse profile saves, reviewed research, logo branding and scoped Chat facade
@@ -154,6 +154,7 @@ rollout sequence.
 
 ## Roo
 
+- [MLAI Arcade](mlai-arcade.md) — Pulse and level-up pulls, prize policy and account API.
 - [Roo awards to members without Slack](roo-chat-only-points.md)
 
 - [Roo event discounts](roo-event-discounts.md) — private quotes, general-point holds, one-use Luma coupons and supervised reconciliation.
@@ -176,6 +177,19 @@ requester-bound proposals, expire after
 approved work to the existing idempotent Linear issue writer. Deploy migration
 `integrations.0042_linear_meeting_action_batches` and these endpoints before
 the Roo release that renders durable review buttons.
+
+For meeting proposals, Roo sends `recheck_project_work` with the analysed
+snapshot and proposed outcome. Approval re-reads the project issue inventory
+before creating work. An existing match returns `alreadyTracked`. Review
+responses break approved items down into `counts.created` and
+`counts.alreadyTracked`.
+
+`POST /api/v1/integrations/linear/project-updates` requires an explicit
+`health` value of `onTrack`, `atRisk`, or `offTrack`. Roo supplies a compatible
+64-character hex `idempotency_key`. A repeat returns the original update when
+verified. Uncertain writes are checked against project update history before
+any retry. These changes use the existing receipt table. Deploy the backend
+before Roo sends the new guarded requests.
 
 ## Document status
 

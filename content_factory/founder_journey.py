@@ -34,9 +34,20 @@ logger = logging.getLogger(__name__)
 
 VERSION = 1
 
-# The 8 asks (contract section 3). Nothing else is ever sent as action.id.
+# The asks (contract section 3). Nothing else is ever sent as action.id.
+# ``choose_articles_page`` is sent only when the founder's recorded consent
+# says they choose the page (plan A9, decision D3); otherwise MLAI picks it.
+# ``deploy_site`` is sent only while the deploy link is on (plan C14,
+# ``ARTICLES_LIVE_URL_VERIFICATION_ENABLED``), worded for the founder's host.
+# ``waiting_github_owner_approval`` and its fallback ``choose_repository`` are
+# the founder's GitHub organisation-owner request (plan E13).
+# ``send_pr_to_reviewer`` replaces ``approve_on_github`` when the founder
+# cannot merge alone: a required review or read-only access (plan E8).
 FOUNDER_ASKS = ("review_draft", "describe_customer", "agree_terms", "authorize_github", "approve_setup",
-                "approve_on_github", "buy_points", "approve_join_request")
+                "approve_on_github", "buy_points", "approve_join_request", "choose_articles_page", "deploy_site",
+                "waiting_github_owner_approval", "choose_repository", "send_pr_to_reviewer", "confirm_profile")
+# Asks sent only to clients that opt in with ?onboarding=3 (startup_onboarding).
+ONBOARDING_ASKS = frozenset({"confirm_profile"})
 NEXT_KINDS = ("add_website", "write_first_article", "write_article", "view_progress", "view_draft", "view_article")
 STAGES = ("website", "first_article", "writing", "review", "setup", "publishing", "done")
 HOLDING_REASONS = ("slow", "website_update", "busy_today")
@@ -55,7 +66,29 @@ REGISTRY_ASKS = {
 # Working on it (slow) and log one founder_journey_retired_action line.
 RETIRED_ACTIONS = frozenset({"choose_articles_page", "configure_website", "deploy_site", "remove_setup_example",
                              "provide_credentials"})
+# Retired unless the founder's recorded consent says they choose the page
+# (``page_policy == "pick"``): then Home shows the ask (plan A9, D3).
+PAGE_CHOICE_ACTION = "choose_articles_page"
+# Un-retired while the deploy link is on (plan C14): merging that does not
+# reach the live site is one named ask, worded for the host class.
+DEPLOY_ACTION = "deploy_site"
+# Plan E8: a protected branch or a founder without merge rights gets a share
+# link for their reviewer, never a stuck "approve it on GitHub".
+REVIEWER_ACTION = "send_pr_to_reviewer"
+
+
+def retired_actions(*, page_policy=None) -> frozenset:
+    """The retired owner actions for an operation whose consent records ``page_policy``."""
+    from .website_deploy_link import enabled as deploy_link_enabled
+    retired = RETIRED_ACTIONS - {PAGE_CHOICE_ACTION} if page_policy == "pick" else RETIRED_ACTIONS
+    return retired - {DEPLOY_ACTION} if deploy_link_enabled() else retired
+
+
 SETUP_ASKS = frozenset({"approve_setup", "authorize_github", "approve_on_github"})
+# Plan E13: a pending GitHub organisation-owner request, and its picker fallback.
+OWNER_WAIT_ACTION = "waiting_github_owner_approval"
+REPOSITORY_PICKER_ACTION = "choose_repository"
+OWNER_REQUEST_ASKS = frozenset({OWNER_WAIT_ACTION, REPOSITORY_PICKER_ACTION})
 
 POLL_AFTER_MS = {"working": 5000, "publishing": 15000, "your_turn": 30000, None: 30000, "done": 60000,
                  "legacy": 60000}
@@ -94,10 +127,17 @@ COPY = {
     "failed_refund_pending": ("Your articles", "We couldn't write this one. We're returning your points.",
                               "Write an article · {price} points"),
     "failed": ("Your articles", "We couldn't write this one.", "Write an article · {price} points"),
+    # B10: a generic stop (no, generic or unregistered code) is ours to fix.
+    "fixing_free": ("We're fixing this", "Your free article is still waiting for you.", "Write my first article · free"),
+    "fixing_refunded": ("We're fixing this", "Your points are back.", "Write an article · {price} points"),
+    "fixing_refund_pending": ("We're fixing this", "We're returning your points.", "Write an article · {price} points"),
+    "fixing": ("We're fixing this", "Our team has been told.", "Write an article · {price} points"),
     "describe_customer": ("Who is your typical customer?", "We'll write your first article for them.",
                           "Describe your customer"),
     "buy_points": ("This article uses {price} points. You have {balance}.", None, "Get {shortfall} more points"),
     "agree_terms": ("Our terms were just updated", "Please tick to agree again.", "Review the terms"),
+    "confirm_profile": ("Confirm your startup's name and what you do",
+                        "We've filled in what we could from your website. It takes about a minute.", "Check details"),
     "writing_queued": ("Working on it", "You're {ordinal} in line · about {minutes} minutes.", "See progress"),
     "writing_queued_no_eta": ("Working on it", "You're {ordinal} in line.", "See progress"),
     "writing_running": ("Working on it", "Usually about {minutes} minutes.", "See progress"),
@@ -107,12 +147,35 @@ COPY = {
     "review": ("Your draft is ready", "Tap anything to suggest a change, then copy it to your website.",
                "Review your draft"),
     "approve_setup": ("Your blog page is ready", "Take a look, then add it to your website.", "Take a look"),
+    "choose_articles_page": ("Choose your articles page",
+                             "We found more than one page on your website that could hold your articles. Pick the one to use.",
+                             "Choose a page"),
     "authorize_github": ("We need permission to read your website on GitHub", None, "Give access on GitHub"),
     "approve_on_github": ("Your change is waiting on GitHub", "Approve it on GitHub when you're ready.",
                           "Open on GitHub"),
     "publishing": ("Publishing…", "Waiting for your website to update.", None),
     "done_live": ("Your article is live!", None, "View article"),
+    # Plan C14 fallback; the ask itself carries the host class's copy.
+    "deploy_site": ("Your live site hasn't updated yet",
+                    "Your change is merged on GitHub, but your website hasn't picked it up.", "How to fix this"),
+    # Plan E8 fallback; the ask itself carries the reviewer's name when known.
+    "send_pr_to_reviewer": ("Send this change to your reviewer",
+                            "Your website's GitHub settings need someone with review rights to approve this pull "
+                            "request before it goes live. Open it and send them the link. If you can review it "
+                            "yourself, approve it on GitHub.", "Open the pull request"),
     "done_copy_ready": ("Your article is ready to post", None, "Open your article"),
+    # Plan E13: the founder asked their GitHub organisation owner to approve MLAI.
+    "waiting_github_owner_approval": ("Waiting for your GitHub owner to approve MLAI",
+                                      "Send your GitHub organisation owner this link to approve MLAI, "
+                                      "or invite your developer to your team to do it.",
+                                      "Copy the link for your owner"),
+    "choose_repository_ambiguous": ("Where is your website's code on GitHub?",
+                                    "Your GitHub owner approved MLAI. Choose the repository that holds your website.",
+                                    "Choose your repository"),
+    "choose_repository_expired": ("Where is your website's code on GitHub?",
+                                  "Your request to your GitHub owner has expired. "
+                                  "Choose your website's repository, or connect GitHub again.",
+                                  "Choose your repository"),
     # Shared fallback for an unknown or retired action (contract section 11.1).
     "still_working": ("Working on it", "Still working.", "See progress"),
 }
@@ -177,15 +240,23 @@ def _with_etag(payload: dict) -> dict:
     return payload
 
 
-def legacy_payload(company_id) -> dict:
-    """The legacy short-circuit body (no reads beyond the cohort)."""
-    return _with_etag({
+def legacy_payload(company_id, setup=None) -> dict:
+    """The legacy short-circuit body (no reads beyond the cohort and, when asked for, the setup facts).
+
+    ``setup`` is the E6 server-owned setup state (decision D15: every cohort
+    gets it). It is added only when the client asked for it, so a client
+    that never asks reads exactly the body it always did.
+    """
+    payload = {
         "version": VERSION, "companyId": str(company_id), "cohort": cohorts.LEGACY, "stage": "legacy",
         "state": None, "headline": None, "body": None, "holdingReason": None, "action": None, "next": None,
         "runId": None, "etaSeconds": None, "queuePosition": None, "draftReadyNotifications": False,
         "switchTopicAvailable": False, "githubReturn": None, "website": None, "firstArticle": None,
         "pollAfterMs": POLL_AFTER_MS["legacy"], "supportCode": None,
-    })
+    }
+    if setup is not None:
+        payload["setup"] = setup
+    return _with_etag(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -306,13 +377,10 @@ def is_owner_cancel(run) -> bool:
 
 def is_retrying(run) -> bool:
     """A failed or blocked run that Content Factory will run again (not terminal)."""
-    from .run_state import active_retry_signal
     if run.status not in FAILED_STATUSES:
         return False
-    result = _result(run)
-    if _mapping(result.get("recovery")).get("state") == "pending":
-        return True
-    return active_retry_signal(result)
+    from .run_state import reliability_presentation
+    return reliability_presentation(_result(run), status=run.status).get("nextAction") == "automatic_retry"
 
 
 def latest_article_run(organization):
@@ -457,6 +525,13 @@ def _setup_run(organization, run_id=None):
     return runs.order_by("-created_at", "-id").first()
 
 
+def _page_policy(receipt):
+    """The page policy the founder's recorded setup consent names, or None."""
+    answers = _mapping(_mapping(_mapping(_mapping(receipt).get("goal")).get("consent")).get("answers"))
+    policy = answers.get("page_policy")
+    return policy if policy in {"pick", "explicit", "auto"} else None
+
+
 def _website_journey_facts(*, organization, company, config, user, connection, latest_run_at):
     """The few website-journey facts the founder journey needs, cached per org for 15 s.
 
@@ -486,7 +561,8 @@ def _website_journey_facts(*, organization, company, config, user, connection, l
         pull_request = _mapping(journey.get("setupPullRequest"))
         facts = {
             "operation": {"state": operation.get("state"), "failureClass": receipt.get("failure_class"),
-                          "actionId": user_action.get("id"), "url": _https_or_none(user_action.get("url"))}
+                          "actionId": user_action.get("id"), "url": _https_or_none(user_action.get("url")),
+                          "pagePolicy": _page_policy(receipt)}
             if operation else None,
             "setupPullRequest": {"runId": pull_request.get("runId"), "prUrl": _https_or_none(pull_request.get("prUrl"))}
             if pull_request else None,
@@ -579,22 +655,46 @@ def _decide(stage, state, case, *, action=None, next_kind=None, run_id=None, hol
 # The projection
 
 
+def _staff_fixing_quality(run) -> bool:
+    """True while the run's exhausted hosted quality hold is staff-owned (staff_fixing).
+
+    Only while staff alerts are on: without them nobody is told to fix it, and
+    the founder keeps their review with the unalerted copy.
+    """
+    from .hosted_quality_state import staff_fixing
+    if not getattr(settings, "ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED", False):
+        return False
+    return staff_fixing(_mapping(getattr(run, "result", None)).get("article_preview_quality"))
+
+
 def _audience_known(organization, config, facts) -> bool:
     from .content_first_article import audience_for
     return audience_for(organization, config, facts) is not None
 
 
-def project_founder_journey(organization, *, user, company, now=None, run_id=None) -> dict:
+def project_founder_journey(organization, *, user, company, now=None, run_id=None, include_setup=False,
+                            onboarding=False) -> dict:
     """The IF-P1-03 journey body for this company, with its ``etag``.
 
+    ``onboarding`` (the client sent ``?onboarding=3``) adds the v3 onboarding
+    block and the ``confirm_profile`` ask while ``MY_STARTUP_ONBOARDING_V3_ENABLED``
+    is on; otherwise the body is unchanged.
+
     A legacy organisation (``is_new_journey`` false) returns the legacy body
-    before any read beyond the cohort marker.
+    before any read beyond the cohort marker. With ``include_setup`` (the
+    client sent ``?setup=1``) both bodies carry the E6 ``setup`` state; the
+    legacy one reads only the setup facts for it, never the article or
+    entitlement state.
     """
     company_id = str(getattr(company, "pk", "") or "")
     if organization is None or not cohorts.is_new_journey(organization):
         from .p2_foundation import p2_applies
         if organization is None or not p2_applies(organization):
-            payload = legacy_payload(company_id)
+            setup = None
+            if include_setup and organization is not None:
+                from .founder_setup_state import setup_state
+                setup = setup_state(organization, company=company, user=user)
+            payload = legacy_payload(company_id, setup=setup)
             if getattr(user, "is_staff", False) and getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False):
                 payload["staffConsole"] = True
                 return _with_etag(payload)
@@ -663,6 +763,17 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
     if decision is None and terms_out_of_date(user):
         decision = _decide("first_article", "your_turn", "agree_terms", action="agree_terms")
 
+    from . import startup_onboarding
+    onboarding = bool(onboarding and startup_onboarding.enabled())
+    unconfirmed = bool(onboarding and startup_onboarding.is_unconfirmed(
+        organization, config=config, run=run, setup_run=setup_run, connection=connection,
+        one_liner=_one_liner(organization)))
+    # Members never confirm the owner's details.
+    unconfirmed = unconfirmed and _viewer_is_owner(user, organization)
+    if decision is None and unconfirmed:
+        decision = _decide("website", "your_turn", "confirm_profile", action="confirm_profile",
+                           url=f"/my-startup/start?company_id={company_id}")
+
     if decision is None and run is not None and failure_class(run) == "needs_user" \
             and run.status not in DELIVERED_STATUSES | ACTIVE_STATUSES:
         registry_action = registry_action_id(run)
@@ -678,8 +789,12 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
         elif ask is not None:
             decision = _decide("writing", "your_turn", ask, action=ask, run_id=run.run_id,
                                url=_pull_request_url(run) if ask == "approve_on_github" else None)
+        elif registry_action == DEPLOY_ACTION and DEPLOY_ACTION not in retired_actions():
+            # A run stopped on deploy_site while the deploy link is on: the
+            # host class's ask, never a silent Working on it (plan C14).
+            decision = _deploy_decision(connection, stage="publishing", run_id=run.run_id)
         else:
-            if registry_action in RETIRED_ACTIONS:
+            if registry_action in retired_actions():
                 logger.info("founder_journey_retired_action org=%s action=%s", organization.pk, registry_action)
             decision = _decide("writing", "working", "still_working", next_kind="view_progress", run_id=run.run_id,
                                holding="slow")
@@ -708,13 +823,17 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
             or (run.status == "cancelled" and not is_owner_cancel(run))):
         price, _balance = article_price_and_balance(organization, user)
         support = _support_code(run)
+        from .no_generic_stop import is_generic_stop
+        # B10: the P1 path (policy V2 off or outside the cohort) applies the
+        # same no-generic-stop rule as registry_policy.copy_id_for.
+        prefix, state = ("fixing", "working") if is_generic_stop(run, organization) else ("failed", None)
         if entitled_request(_request(run)) and first_article["status"] == "available":
-            decision = _decide("first_article", None, "failed_free", next_kind="write_first_article",
+            decision = _decide("first_article", state, f"{prefix}_free", next_kind="write_first_article",
                                support_code=support)
         else:
-            case = {"refunded": "failed_refunded", "refund_pending": "failed_refund_pending"}.get(
-                "none" if entitled_request(_request(run)) else _refund_case(run), "failed")
-            decision = _decide("first_article", None, case, next_kind="write_article", support_code=support,
+            case = {"refunded": f"{prefix}_refunded", "refund_pending": f"{prefix}_refund_pending"}.get(
+                "none" if entitled_request(_request(run)) else _refund_case(run), prefix)
+            decision = _decide("first_article", state, case, next_kind="write_article", support_code=support,
                                price=price)
 
     if decision is None and run is not None and run.status in DELIVERED_STATUSES:
@@ -725,12 +844,21 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
             # A copied or posted draft is done (rule 9), after setup and publishing.
             if not copied_or_posted(config, run.run_id):
                 decision = _decide("review", "your_turn", "review", action="review_draft", run_id=run.run_id)
+        elif not approved and _staff_fixing_quality(run):
+            # Plan A20: a quality hold on something MLAI generated, with repair
+            # exhausted, is ours to fix (staff are alerted); the founder has no turn.
+            decision = _decide("review", "working", "still_working", next_kind="view_progress",
+                               run_id=run.run_id, holding="slow")
         elif not approved:
             decision = _decide("review", "your_turn", "review", action="review_draft", run_id=run.run_id)
 
     if decision is None:
         decision = _setup_decision(organization=organization, company=company, config=config, user=user,
                                    marker=marker, connection=connection, setup_run=setup_run, run=run)
+
+    if decision is None and connection is None:
+        decision = _owner_request_decision(organization=organization, company=company, config=config,
+                                           user=user, now=now)
 
     if decision is None:
         decision = _publishing_or_done(organization=organization, config=config, marker=marker, run=run,
@@ -750,9 +878,19 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
         decision = _first_article_decision(organization=organization, company=company, config=config, user=user,
                                            first_article=first_article)
 
+    if _mapping(decision.get("action")).get("id") == "approve_on_github":
+        decided_id = decision.get("runId")
+        decided_run = next((item for item in (run, setup_run)
+                            if item is not None and decided_id and item.run_id == decided_id), setup_run)
+        decision = _reviewer_decision(decision, connection=connection, run=decided_run)
+
     if policy_v2_applies(organization) and not decision.get("copyId"):
         ask = _mapping(decision.get("action")).get("id")
-        if ask in FOUNDER_ASKS:
+        if ask in {DEPLOY_ACTION, REVIEWER_ACTION} or ask in OWNER_REQUEST_ASKS:
+            # The host class's (C14), the reviewer's (E8) or the owner
+            # request's (E13) exact copy is the line: no P2 copy id replaces it.
+            pass
+        elif ask in FOUNDER_ASKS and ask not in ONBOARDING_ASKS:
             if ask == "buy_points":
                 decision["copyId"] = "ask_buy_points"
             else:
@@ -824,6 +962,13 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
                     payload["website"]["connectedBy"] = {"firstName": name[0][:100]}
     if getattr(user, "is_staff", False) and getattr(settings, "MY_STARTUP_STAFF_CONSOLE_ENABLED", False):
         payload["staffConsole"] = True
+    if include_setup:
+        from .founder_setup_state import setup_state
+        payload["setup"] = setup_state(organization, company=company, config=config, user=user, marker=marker,
+                                       connection=connection, setup_run=_setup_run(organization), read_runs=False)
+    if onboarding:
+        payload["onboarding"] = startup_onboarding.block(organization, config=config, user=user,
+                                                         has_website=has_website, unconfirmed=unconfirmed)
     action_id = (payload["action"] or {}).get("id")
     logger.info("founder_journey_projection org=%s stage=%s state=%s action=%s", organization.pk,
                 payload["stage"], payload["state"], action_id or "")
@@ -872,6 +1017,11 @@ def _pull_request_url(run):
     return None
 
 
+def _viewer_is_owner(user, organization) -> bool:
+    from founder_tools.services import organization_owner_user_id
+    return bool(getattr(user, "pk", None)) and organization_owner_user_id(organization) == user.pk
+
+
 def _one_liner(organization) -> str:
     from startup_updates.models import StartupProfile
     profile = StartupProfile.objects.filter(organization_id=organization.pk).only("short_description").first()
@@ -908,9 +1058,97 @@ def _setup_decision(*, organization, company, config, user, marker, connection, 
             url = operation.get("url") or _mapping(facts.get("setupPullRequest")).get("prUrl")
             if ask != "approve_on_github" or url:
                 return _decide("setup", "your_turn", ask, action=ask, url=url if ask == "approve_on_github" else None)
-        elif operation.get("actionId") in RETIRED_ACTIONS:
+        elif (operation.get("actionId") == PAGE_CHOICE_ACTION
+              and PAGE_CHOICE_ACTION not in retired_actions(page_policy=operation.get("pagePolicy"))):
+            # The founder's consent says they choose the page: ask, never hide it.
+            return _decide("setup", "your_turn", PAGE_CHOICE_ACTION, action=PAGE_CHOICE_ACTION)
+        elif operation.get("actionId") == DEPLOY_ACTION and DEPLOY_ACTION not in retired_actions():
+            # A preparation parked on "deploy your site" (plan C14).
+            return _deploy_decision(connection, stage="setup")
+        elif operation.get("actionId") in retired_actions(page_policy=operation.get("pagePolicy")):
             logger.info("founder_journey_retired_action org=%s action=%s", organization.pk, operation.get("actionId"))
     return None
+
+
+def _owner_request_decision(*, organization, company, config, user, now):
+    """Plan E13: the founder's pending GitHub organisation-owner request, never silent.
+
+    Shown only to the founder who asked (another viewer keeps today's
+    journey). While the owner has not approved, the ask carries the
+    copyable owner link; an ambiguous or expired pickup falls back to the
+    repository picker on the website step.
+    """
+    from integrations.services import github_owner_requests as owner_requests
+    if getattr(config, "pk", None) is None:
+        return None
+    status = owner_requests.wait_status(config, now=now)
+    if status is None or status.get("user_id") != getattr(user, "pk", None):
+        return None
+    if status["ask"] == OWNER_WAIT_ACTION:
+        return _decide("setup", "your_turn", OWNER_WAIT_ACTION, action=OWNER_WAIT_ACTION,
+                       url=owner_requests.owner_link())
+    from urllib.parse import urlencode
+    origin = str(getattr(settings, "COMMUNITY_CHAT_FRONTEND_URL", "") or "https://chat.mlai.au").rstrip("/")
+    picker = (origin + "/my-startup/website?"
+              + urlencode({"github": "multiple_repos", "company_id": str(getattr(company, "pk", "") or "")}))
+    decision = _decide("setup", "your_turn", f"{REPOSITORY_PICKER_ACTION}_{status['state']}",
+                       action=REPOSITORY_PICKER_ACTION, url=_https_or_none(picker))
+    return decision
+
+
+def _deploy_decision(connection, *, stage, run_id=None, staff_alerted=False):
+    """The ``deploy_site`` ask with the copy for the connection's host class (plan C14)."""
+    from .website_deploy_link import deploy_ask, host_class
+    from .website_live_status import summary, watch_for
+    watch = summary(watch_for(connection)) if connection is not None else None
+    host = (watch or {}).get("hostClass") or (host_class(connection) if connection is not None else "unknown")
+    ask = deploy_ask(host, staff_alerted=staff_alerted or bool((watch or {}).get("staffAlerted")))
+    decision = _decide(stage, "your_turn", DEPLOY_ACTION, action=DEPLOY_ACTION, run_id=run_id, url=ask["url"])
+    decision.update(headline=ask["headline"], body=ask["body"])
+    decision["action"]["label"] = ask["label"]
+    return decision
+
+
+def _reviewer_decision(decision, *, connection, run):
+    """``approve_on_github`` becomes ``send_pr_to_reviewer`` when the founder cannot merge alone (plan E8).
+
+    Only the ask changes. Merging still re-reads the live branch policy and
+    merges the exact validated head; GitHub still enforces protection.
+    """
+    from .website_repository_selection import reviewer_ask, reviewer_needed
+    # P2 already worded this as GitHub's required approval (the article merge
+    # worker's BRANCH_PROTECTION_APPROVAL_REQUIRED, possibly on a published
+    # child run that is not ``run``).
+    protected = decision.get("copyId") == "ask_approve_on_github_protected"
+    if not (protected or reviewer_needed(connection, run)):
+        return decision
+    url = _mapping(decision.get("action")).get("url")
+    ask = reviewer_ask(connection, url=url)
+    if not ask["url"]:
+        return decision
+    updated = _decide(decision.get("stage") or "setup", "your_turn", REVIEWER_ACTION, action=REVIEWER_ACTION,
+                      run_id=decision.get("runId"), url=ask["url"])
+    updated.update(headline=ask["headline"], body=ask["body"])
+    updated["action"]["label"] = ask["label"]
+    return updated
+
+
+def _article_not_live(organization, run, now=None):
+    """The merged article of ``run`` whose page is still not live past the bound, or ``None``.
+
+    Only a merge into the default branch counts, so a draft, a review or an
+    open pull request is never held by the live check.
+    """
+    from .website_deploy_link import article_live_state, enabled
+    if not enabled() or run is None:
+        return None
+    from .models import ArticlePublishStatus, WrittenArticle
+    article = (WrittenArticle.objects.filter(organization_id=organization.pk, source_run_id=run.run_id)
+               .exclude(publish_status=ArticlePublishStatus.LIVE).order_by("-created_at").first())
+    if article is None:
+        return None
+    state = article_live_state(article, now=now)
+    return article if state and state["state"] == "not_live" else None
 
 
 def _manual_setup_pull_request_url(organization, run_id, facts):
@@ -972,6 +1210,14 @@ def _publishing_or_done(*, organization, config, marker, run, connection):
             and delivery_mode(run) != "content_only":
         live = _live_article(organization, run)
         if live is None:
+            not_live = _article_not_live(organization, run)
+            if not_live is not None:
+                # Plan C14: merged, but the live site has not shown it past the
+                # bound. The founder gets the host's step; "our team has been
+                # told" only once the staff alert for this merge is queued.
+                from .founder_stuck_alerts import article_not_live_alerted
+                return _deploy_decision(connection, stage="publishing", run_id=run.run_id,
+                                        staff_alerted=article_not_live_alerted(not_live))
             return _decide("publishing", "working", "publishing", holding="website_update", run_id=run.run_id)
         return _decide("done", "done", "done_live", next_kind="view_article", run_id=run.run_id,
                        url=_https_or_none(live.live_url))

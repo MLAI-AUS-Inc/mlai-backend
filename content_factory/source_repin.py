@@ -12,6 +12,7 @@ from workflow_runs.models import ContentFactoryRun
 from . import p2_foundation, registry_policy
 from .website_contract import WebsiteAuthorityError, CONNECTION_FIELDS, connection_contract
 from .website_connections import authority_guard, REPOSITORY_WORKFLOWS
+from .website_models import WebsiteConnection
 
 SHA = re.compile(r"[a-f0-9]{40}\Z")
 REASONS = frozenset({"source_changed_mid_run", "setup_start_moved", "resume_latest"})
@@ -134,6 +135,29 @@ def _precheck(run):
         raise _refuse()
 
 
+def _resolve_repin(run, before, after):
+    """With ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED, ask the one source resolver first.
+
+    Read outside any lock (one GitHub compare of from_sha...to_sha). Every
+    check below still runs; this can only refuse earlier, never allow more.
+    """
+    from .website_connections import resolve_run_source, single_source_resolver_enabled
+    if not single_source_resolver_enabled():
+        return None
+    try:
+        contract = connection_contract(_mapping(run.run_request))
+    except WebsiteAuthorityError:
+        contract = {}
+    connection = WebsiteConnection.objects.filter(pk=contract["website_connection_id"]).first() if contract else None
+    if connection is None:
+        return None
+    decision = resolve_run_source(run, "repin", connection=connection, pinned_sha=before, head_ref=after,
+                                  github_repo=connection.github_repo)
+    if not decision.proceeds:
+        raise _refuse()
+    return decision
+
+
 def repin_source(run_id, payload):
     """Re-pin a run only after fresh repository proof and locked scope checks.
 
@@ -151,6 +175,7 @@ def repin_source(run_id, payload):
     run = ContentFactoryRun.objects.select_related("organization").filter(run_id=run_id).first()
     if run is None:
         raise ContentFactoryRun.DoesNotExist
+    _resolve_repin(run, before, after)
     from .run_ownership import owner_receipt
     if (owner_receipt(run) or {}).get("authority", {}).get("event_protocol") == 1:
         return _repin_owned_source(run, payload)

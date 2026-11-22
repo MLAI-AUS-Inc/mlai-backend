@@ -229,7 +229,9 @@ def _company_for_scope(request):
 
     from founder_tools.models import VibeRaisingCompany
 
-    return VibeRaisingCompany.objects.filter(pk=company_id, profile__user=request.user).first()
+    from founder_tools.membership import companies_for_user
+
+    return companies_for_user(request.user).filter(pk=company_id).first()
 
 
 def _org_scope_or_response(request):
@@ -256,9 +258,9 @@ def _org_scope_or_response(request):
     from founder_tools.services import ensure_company_organization
 
     try:
-        company = VibeRaisingCompany.objects.select_related("organization").get(
-            pk=company_id, profile__user=request.user
-        )
+        from founder_tools.membership import companies_for_user
+
+        company = companies_for_user(request.user).get(pk=company_id)
     except (VibeRaisingCompany.DoesNotExist, ValueError, DjangoValidationError):
         return None, Response({"detail": "Company not found."}, status=status.HTTP_404_NOT_FOUND)
     # A domainless company has no organization yet: treated as "no tenant", so
@@ -317,7 +319,7 @@ class LumaConnectView(APIView):
             return error_response
         try:
             connect_luma_connection(request.user, api_key, company=_company_for_scope(request))
-        except ConnectorConfigurationError as exc:
+        except (ConnectorConfigurationError, ConnectorOAuthError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(serialize_source_status(request.user, organization=scope), status=status.HTTP_200_OK)
 
@@ -344,7 +346,7 @@ class HumanitixConnectView(APIView):
                 company=_company_for_scope(request),
                 account_label=str(request.data.get("accountLabel") or "").strip()[:255],
             )
-        except ConnectorConfigurationError as exc:
+        except (ConnectorConfigurationError, ConnectorOAuthError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(
             serialize_source_status(request.user, organization=scope),
@@ -810,6 +812,9 @@ class LinearPreviewView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        scope, error_response = _org_scope_or_response(request)
+        if error_response:
+            return error_response
         raw_limit = request.query_params.get("limit") or 5
         try:
             limit = int(raw_limit)
@@ -965,6 +970,7 @@ class LinearMeetingIssueCreateView(APIView):
         try:
             payload = create_linear_meeting_issue(request.data)
         except (
+            LinearMeetingActionConflictError,
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,
@@ -1174,6 +1180,8 @@ class LinearMeetingProjectUpdateCreateView(APIView):
             LinearMeetingConfigurationError,
             LinearMeetingRateLimitError,
             LinearMeetingGraphQLError,
+            LinearMeetingIdempotencyConflictError,
+            LinearChannelIssueWriteUncertainError,
             ValueError,
         ) as exc:
             return _linear_meeting_error_response(exc)

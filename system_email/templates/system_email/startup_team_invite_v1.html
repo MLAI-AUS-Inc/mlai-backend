@@ -1,0 +1,77 @@
+{% autoescape on %}<!doctype html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="x-apple-disable-message-reformatting">
+<meta name="color-scheme" content="light">
+<meta name="supported-color-schemes" content="light">
+<title>{{ subject }}</title>
+<!--[if mso]><noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript><![endif]-->
+<style>
+  body { margin: 0; padding: 0; background: #ffffff; -webkit-text-size-adjust: 100%; }
+  @media only screen and (max-width: 620px) {
+    .mlai-shell { padding: 24px 20px !important; }
+    .mlai-invite-title { font-size: 24px !important; line-height: 30px !important; }
+    .mlai-btn { display: block !important; width: 100% !important; text-align: center !important; }
+    .mlai-btn-row { width: 100% !important; }
+  }
+</style>
+</head>
+<body style="margin:0;padding:0;background:#ffffff">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;">{{ inviter_name }} invited you to join {{ startup_name }} on MLAI.</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff">
+  <tr>
+    <td align="center" class="mlai-shell" style="padding:40px 24px">
+      <!--[if mso]><table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
+      <table role="presentation" class="mlai-invite" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:560px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827">
+        <tr><td style="padding:0 0 14px 0"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+          <td valign="middle" style="padding:0 8px 0 0"><img src="{{ asset_base }}/mlai-roo.png" width="24" height="24" alt="" style="display:block;width:24px;height:24px;border:0;border-radius:12px;background:#2fd8bf"></td>
+          <td valign="middle" style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:16px;line-height:20px;color:#6b7280">MLAI</td>
+        </tr></table></td></tr>
+        {% if startup_logo %}
+        <tr><td style="padding:4px 0 16px 0">
+          <img src="{{ startup_logo }}" width="56" height="56" alt="{{ startup_name }} logo" style="display:block;width:56px;height:56px;border:0">
+        </td></tr>
+        {% endif %}
+        <tr><td style="font-size:24px;line-height:30px;color:#6b7280">You&rsquo;re invited to</td></tr>
+        <tr><td class="mlai-invite-title" style="font-size:30px;line-height:36px;font-weight:700;color:#111827;padding:2px 0 0">Join {{ startup_name }}</td></tr>
+        {% include "system_email/_mentor_invite_divider.html" with padding="20px 0 20px 0" %}
+        <tr><td style="font-size:16px;line-height:26px;color:#111827">
+          <p style="margin:0 0 16px">Hi there,</p>
+          <p style="margin:0 0 16px">{{ inviter_name }} invited you to work together in {{ startup_name }} on MLAI.</p>
+          {% if shared_access %}
+          <p style="margin:0 0 16px">When you join, you&rsquo;ll have full access to this startup, including billing and team settings.</p>
+          {% else %}
+          <p style="margin:0 0 16px">When you join, you&rsquo;ll be able to collaborate on the startup with your teammates.</p>
+          {% endif %}
+          <p style="margin:0">Sign in with the email address below to accept.</p>
+        </td></tr>
+        <tr><td style="padding:24px 0 0"><table role="presentation" class="mlai-btn-row" cellpadding="0" cellspacing="0" border="0"><tr>
+          <td class="mlai-btn" style="background:#2fd8bf;border-radius:8px;mso-padding-alt:12px 22px"><a href="{{ accept_url }}" style="display:inline-block;padding:12px 22px;font-size:16px;line-height:20px;font-weight:600;color:#0a0a0a;text-decoration:none;border-radius:8px">Accept invitation</a></td>
+        </tr></table></td></tr>
+        <tr><td style="padding:24px 0 0;font-size:15px;line-height:22px;color:#6b7280;overflow-wrap:anywhere">
+          This invitation is for {{ invite_email }} and expires on {{ expires_on }}. If you weren&rsquo;t expecting it, you can ignore this email.
+        </td></tr>
+        <tr><td style="padding:36px 0 0 0"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td style="border-top:1px solid #e5e7eb;font-size:0;line-height:0;height:1px">&nbsp;</td></tr></table></td></tr>
+        <tr><td style="padding:20px 0 0 0"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+          <td valign="middle" align="left"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+            <td valign="middle" style="padding:0 8px 0 0"><img src="{{ asset_base }}/mlai-roo.png" width="26" height="26" alt="" style="display:block;width:26px;height:26px;border:0;border-radius:13px;background:#2fd8bf"></td>
+            <td valign="middle" style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:20px;line-height:24px;font-weight:700;letter-spacing:-0.3px;color:#9ca3af">MLAI</td>
+          </tr></table></td>
+          <td valign="middle" align="right"><table role="presentation" cellpadding="0" cellspacing="0" border="0" align="right"><tr>
+            <td style="padding:0 0 0 16px"><a href="https://www.linkedin.com/company/mlai-aus-inc"><img src="{{ asset_base }}/social-linkedin.png" width="20" height="20" alt="MLAI on LinkedIn" style="display:block;width:20px;height:20px;border:0"></a></td>
+            <td style="padding:0 0 0 16px"><a href="https://www.instagram.com/mlai_aus/"><img src="{{ asset_base }}/social-instagram.png" width="20" height="20" alt="MLAI on Instagram" style="display:block;width:20px;height:20px;border:0"></a></td>
+          </tr></table></td>
+        </tr></table></td></tr>
+        <tr><td style="padding:14px 0 0 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:20px;color:#9ca3af">
+          You&rsquo;re receiving this because {{ inviter_name }} invited you to {{ startup_name }}.<br>
+          MLAI &middot; Suite 350, 585 Little Collins St, Melbourne VIC 3000 &middot; <a href="mailto:hi@mlai.au" style="color:#9ca3af;text-decoration:underline">hi@mlai.au</a>
+        </td></tr>
+      </table>
+      <!--[if mso]></td></tr></table><![endif]-->
+    </td>
+  </tr>
+</table>
+</body>
+</html>{% endautoescape %}

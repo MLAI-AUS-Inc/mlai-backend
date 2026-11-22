@@ -10,8 +10,14 @@ def person(data):
 
 
 def invite(data):
-    return {**fields(data, 'id status created_at expires_at used_at revoked_at'),
-            **{key: person(data.get(key)) for key in ('user', 'created_by', 'revoked_by')}}
+    # No invited address: read-only staff see whether and how the email went, not to whom.
+    result = {**fields(data, 'id status created_at expires_at used_at revoked_at '
+                             'has_account emailed_at send_count email_status'),
+              **{key: person(data.get(key)) for key in ('user', 'created_by', 'revoked_by')}}
+    if data.get('has_account') is False:
+        # An address-only invite names its person by the address; show neither.
+        result['user'] = {'id': None, 'name': 'Invited by email'}
+    return result
 
 
 def application(data):
@@ -33,4 +39,6 @@ def session(data):
     # Provider error text can contain addresses or meeting URLs. Only expose status.
     return {**fields(data, 'id status starts_at ends_at price_roo location_type meeting_status '
                      'notification_status requested_at responded_at cancelled_at flags'),
-            'mentor': person(data.get('mentor')), 'founder': person(data.get('founder'))}
+            'mentor': person(data.get('mentor')), 'founder': person(data.get('founder')),
+            # Read-only staff see the face, never the founder's words.
+            'feedback': fields(data['feedback'], 'rating rated_at suspect_scanner') if data.get('feedback') else None}

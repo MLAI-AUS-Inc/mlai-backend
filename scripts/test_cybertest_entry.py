@@ -12,6 +12,6 @@ with patch('dotenv.load_dotenv',return_value=False), patch('socket.socket.connec
     import django
     django.setup()
     with patch('django.db.backends.base.base.BaseDatabaseWrapper.ensure_connection',side_effect=AssertionError('No database in local entry tests')):
-        suite=unittest.defaultTestLoader.loadTestsFromNames(['roo.test_cybertest_entry','roo.tests_cybertest_entry_views'])
+        suite=unittest.defaultTestLoader.loadTestsFromNames(['roo.test_cybertest_entry','roo.tests_cybertest_entry_views','roo.tests_cybertest_github'])
         result=unittest.TextTestRunner(verbosity=2).run(suite)
 raise SystemExit(not result.wasSuccessful())

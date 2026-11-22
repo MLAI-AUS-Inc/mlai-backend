@@ -1127,7 +1127,8 @@ class WebsiteServiceBoundaryTests(WebsiteDatabaseFixture, TestCase):
         from .models import ContentFactoryJob
         from .website_connections import dispatch_contract
         job = ContentFactoryJob.objects.create(job_id='saved-job', domain=self.org.domain, status='queued', request_meta=self.binding)
-        transition_connection(self.config, action='pause', expected=self.binding)
+        # A pause keeps the generation (B20); a reset starts a new one.
+        transition_connection(self.config, action='reset', expected=self.binding)
         with self.assertRaises(WebsiteAuthorityError):
             dispatch_contract(self.org.domain, {}, source_run_id=job.job_id)
 
@@ -1243,6 +1244,70 @@ class WebsiteSourceFenceTests(WebsiteDatabaseFixture, TestCase):
         self.assertFalse(any(item.get('code') == 'repository_source_changed' for item in self.website.blockers))
 
 
+class NeverVerifiedPushTests(WebsiteDatabaseFixture, TestCase):
+    """A10: Examon (82), Pawshare (124), Songable (140) and Studio Narrm (194) were never verified,
+    yet every push locked them with repository_source_changed and queued a paid source check."""
+
+    def setUp(self):
+        super().setUp()
+        self.website.verified_sha = ''
+        self.website.capabilities = {'inventoryReady': True, 'previewSupported': True}
+        # The stale lock an earlier push left behind, beside the deletion epoch.
+        self.website.blockers = [{'code': 'repository_source_changed', 'source_sha': SHA, 'message': 'Changed.'},
+                                 {'code': 'website_data_deleted', 'deletion_epoch': 3}]
+        self.website.save(update_fields=['verified_sha', 'capabilities', 'blockers'])
+
+    def push(self, sha='c' * 40):
+        with patch('content_factory.website_prepare.wake_prepare_for_source') as wake:
+            result = handle_website_github_event('push', {'repository': {'id': 123}, 'ref': 'refs/heads/main', 'after': sha})
+        self.website.refresh_from_db()
+        return result, wake
+
+    def test_a_push_sets_no_blocker_and_drops_no_capability(self):
+        result, wake = self.push()
+        self.assertEqual(result['never_verified'], 1)
+        self.assertEqual([item['code'] for item in self.website.blockers], ['website_data_deleted'])
+        self.assertTrue(self.website.capabilities['previewSupported'])
+        self.assertFalse(WebsiteConnectionOperation.objects.filter(connection=self.website, action='source-reverify').exists())
+        # The observed head is recorded, and preparation is woken to scan it.
+        from .website_connections import observed_source_sha
+        self.assertEqual(observed_source_sha(self.website), 'c' * 40)
+        wake.assert_called_once()
+        self.assertEqual(wake.call_args.args[0], self.website.pk)
+
+    def test_a_scan_of_a_never_verified_site_clears_a_stale_source_lock(self):
+        record_scan_evidence(self.website, {'repository_inventory': {'source_sha': SHA, 'discovery_complete': True}})
+        self.website.refresh_from_db()
+        self.assertEqual([item['code'] for item in self.website.blockers], ['website_data_deleted'])
+
+    def test_a_scan_keeps_the_lock_on_a_site_that_was_publishing_ready(self):
+        self.website.capabilities = {**self.website.capabilities, 'publishingReady': True}
+        self.website.save(update_fields=['capabilities'])
+        record_scan_evidence(self.website, {'repository_inventory': {'source_sha': SHA, 'discovery_complete': True}})
+        self.website.refresh_from_db()
+        self.assertIn('repository_source_changed', [item['code'] for item in self.website.blockers])
+
+    def test_a_verified_site_keeps_the_push_time_lock(self):
+        self.website.verified_sha = SHA
+        self.website.save(update_fields=['verified_sha'])
+        result, _ = self.push()
+        self.assertNotIn('never_verified', result)
+        self.assertIn('repository_source_changed', [item['code'] for item in self.website.blockers])
+        self.assertFalse(self.website.capabilities['previewSupported'])
+        self.assertTrue(WebsiteConnectionOperation.objects.filter(connection=self.website, action='source-reverify').exists())
+
+    def test_a_publishing_ready_site_without_a_verified_commit_keeps_the_lock(self):
+        self.website.capabilities = {**self.website.capabilities, 'publishingReady': True}
+        self.website.save(update_fields=['capabilities'])
+        result, _ = self.push()
+        self.assertNotIn('never_verified', result)
+        self.assertFalse(self.website.capabilities['publishingReady'])
+
+    def test_staff_inspection_hides_the_deletion_epoch_row(self):
+        from .website_operations import staff_visible_blockers
+        self.assertEqual([item['code'] for item in staff_visible_blockers(self.website.blockers)], ['repository_source_changed'])
+
+
 class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
     @patch('content_factory.website_connections.verify_repository_access')
     def test_archives_old_repository_seeds_under_original_connection(self, verify):
@@ -1279,7 +1344,23 @@ class WebsiteReviewRegressionTests(WebsiteDatabaseFixture, TestCase):
         self.assertTrue(self.website.capabilities['publishingReady'])
 
     @patch('content_factory.website_connections.verify_repository_access')
-    def test_reconnecting_a_paused_website_still_starts_a_new_generation(self, verify):
+    def test_resuming_a_paused_website_keeps_its_generation(self, verify):
+        from django.contrib.auth import get_user_model
+        owner = get_user_model().objects.create_user(email='paused-owner@example.test', password='synthetic-password')
+        self.website.authorized_by = owner
+        self.website.save(update_fields=['authorized_by'])
+        verify.return_value = {'repository_id': 123, 'github_repo': 'example/site', 'installation_id': '45', 'branch': 'main'}
+        transition_connection(self.config, action='pause', expected=self.binding)
+        self.website.refresh_from_db()
+        paused_generation = self.website.generation
+        bind_website(self.config, user=owner, repo='example/site', app_root=self.website.app_root, branch=self.website.branch,
+            site_url=self.website.site_url, reconnect=True, expected=contract_for(self.website))
+        self.website.refresh_from_db()
+        # B20: same repository, installation and owner resume in place.
+        self.assertEqual((self.website.state, self.website.generation), ('connected', paused_generation))
+
+    @patch('content_factory.website_connections.verify_repository_access')
+    def test_reconnecting_a_paused_website_without_a_known_owner_starts_a_new_generation(self, verify):
         verify.return_value = {'repository_id': 123, 'github_repo': 'example/site', 'installation_id': '45', 'branch': 'main'}
         transition_connection(self.config, action='pause', expected=self.binding)
         self.website.refresh_from_db()

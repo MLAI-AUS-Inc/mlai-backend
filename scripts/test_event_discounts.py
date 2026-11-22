@@ -28,6 +28,11 @@ def main(labels):
         "DATABASE_URL": "sqlite:///:memory:", "ALLOWED_HOSTS": "testserver,localhost",
         "DJANGO_SETTINGS_MODULE": "mlai.settings",
     }
+    # CI reuses one migrated copy of the in-memory test database per job
+    # (mlai/test_runner.py). The switch is not a credential, and the dedicated
+    # PostgreSQL run always builds its own database.
+    if os.environ.get("MLAI_TEST_DATABASE_TEMPLATE") and not arguments.postgres_socket:
+        environment["MLAI_TEST_DATABASE_TEMPLATE"] = "1"
     with (
         patch.dict(os.environ, environment, clear=True),
         patch("dotenv.load_dotenv", return_value=False),

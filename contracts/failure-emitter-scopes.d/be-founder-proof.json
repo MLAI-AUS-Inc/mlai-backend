@@ -1,0 +1,52 @@
+{
+  "nonfailure_sites": [
+    {
+      "path": "content_factory/article_quality_record.py",
+      "function": "findings",
+      "field": "code",
+      "expression": "_text(item.get('code')) or 'finding'",
+      "site_sha256": "b54ff32315f6bfcde09e317a05524e95849aa0f7242d9d73d1aa8ecc9507f3a0",
+      "adapter": "nonfailure_category",
+      "owner": "backend.article_quality",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Content Factory's final-check finding codes, re-validated and capped on read for the staff console and manage.py article_quality; a staff diagnostic of the visible review, never a run failure code or recovery policy.",
+      "test": "content_factory.tests_ws5_final_check_unit.QualityRecordTests.test_record_carries_the_findings_history_and_hold_owner"
+    },
+    {
+      "path": "content_factory/repo_health.py",
+      "function": "items",
+      "field": "code",
+      "expression": "code",
+      "site_sha256": "af38d74d55e528df620483d7fdf93d8ae9b0144208138e7d565b1c41c7059a8a",
+      "adapter": "nonfailure_category",
+      "owner": "backend.repo_health",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "Repo-health checklist reasons (build probe codes, host_not_deploying, checks_permission_missing, sitemap_unreachable) shown to the founder at connect; a setup checklist label, never a run failure code.",
+      "test": "content_factory.tests_repo_health_unit.ProjectionTests.test_stale_lockfile_blocks_with_its_plain_message_and_no_charge"
+    },
+    {
+      "path": "content_factory/repo_health.py",
+      "function": "require_green_build",
+      "field": "error_code",
+      "expression": "'repo_health_build_not_green'",
+      "site_sha256": "6e63c0d0e930e1711ca8154bed556bb3a2f5c8fc3629b71f2602a4a72f674615",
+      "adapter": "nonfailure_category",
+      "owner": "backend.repo_health",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "A pre-charge command refusal (default off, ARTICLES_REPO_HEALTH_ENABLED): the founder's own repository has no green build probe for its head, so no article is charged or dispatched; a local command outcome, not a producer execution failure.",
+      "test": "content_factory.tests_repo_health_unit.WebhookAndChargeWiringTests.test_charge_is_refused_before_debit_without_a_green_build"
+    },
+    {
+      "path": "content_factory/repo_health.py",
+      "function": "require_green_build",
+      "field": "error_code",
+      "expression": "'repo_health_blocked'",
+      "site_sha256": "f44f928d341cd647f8cc63e6da1eb5a8b0c8c1972da74f53192d9c56cd41b10f",
+      "adapter": "nonfailure_category",
+      "owner": "backend.repo_health",
+      "allowed_codes_ref": "contracts/failure-codes.json#/codes",
+      "source": "A pre-charge command refusal (default off, ARTICLES_REPO_HEALTH_ENABLED): the founder's host is not deploying, so no article is charged or dispatched; a local command outcome, not a producer execution failure.",
+      "test": "content_factory.tests_repo_health_unit.ProjectionTests.test_host_not_deploying_blocks_even_with_a_green_build"
+    }
+  ]
+}

@@ -88,3 +88,26 @@ class CompactKeepsAiInsightFieldsTest(TestCase):
         self.assertEqual(ai["citedPages"][0]["citations"], 3)
         self.assertEqual(ai["articleCitations"]["citedCount"], 1)
         self.assertNotIn("queries", ai)
+
+
+class ContentFilesNotLiveTest(TestCase):
+    """Plan C7: a content file merged onto main is neither citable nor a published article."""
+
+    def setUp(self):
+        self.organization = Organization.objects.create(domain="files.example", name="Files")
+
+    def _article(self, slug, status, **values):
+        return WrittenArticle.objects.create(
+            organization=self.organization, title=f"Article {slug}", slug=slug, category="guides",
+            publish_status=status, content_path=f"mlai-content-files/{slug}/index.md",
+            article_url=f"https://files.example/articles/{slug}/", **values)
+
+    def test_a_merged_content_file_is_not_citable_until_live(self):
+        self._article("merged", ArticlePublishStatus.MERGED, on_main_verified_at=timezone.now())
+        self.assertEqual(_baseline_published_articles(self.organization), [])
+        from content_factory.founder_journey_cohort import _published_articles
+        self.assertFalse(_published_articles(self.organization).exists())
+        self._article("live", ArticlePublishStatus.LIVE, live_url="https://files.example/articles/live/")
+        self.assertEqual([item["url"] for item in _baseline_published_articles(self.organization)],
+                         ["https://files.example/articles/live/"])
+        self.assertEqual(list(_published_articles(self.organization).values_list("slug", flat=True)), ["live"])

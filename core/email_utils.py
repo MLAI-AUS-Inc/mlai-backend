@@ -26,6 +26,8 @@ def generate_magic_link(user, base_url="https://www.med-hack.com"):
     return _generate_magic_link_from_payload(
         {
             'kind': MAGIC_LINK_KIND_USER,
+            'user_id': user.pk,
+            'auth_version': user.auth_version,
             'email': user.email,
         },
         base_url=base_url,

@@ -45,6 +45,23 @@ of the metrics selected for sharing. Community and public projections never
 include the snapshot. Refreshing historical reporting evidence creates a separate
 private approved update, preserving shared revisions and approval receipts.
 
+## Founder titles, kept introductions and feed order — 19 November 2026
+
+Founder saves accept optional `updateTitle` (at most 120 characters). It is stored
+on the revision as `custom_title`, so a published revision keeps its approved
+title while an edit awaits approval. Reads return it as `updateTitle` (and
+`customTitle` for the editor); blank restores the numbered "<Month> update" title.
+Generation and saves that omit it keep the previous title.
+
+Generation no longer rewrites `startupOverview`. A generated draft keeps, in order:
+the overview frozen on the run (a deliberate blank stays blank), the update's saved
+overview, or the startup's `short_description` from when it was added. Generated
+text is used only when none exists. Own-AI saves follow the same rule.
+
+The community feed orders by reporting month, then `update_date`, then first
+publication, never by the last re-publish. Community payloads include
+`updateDate`, `datePrecision` and `firstPublishedAt`.
+
 ## Plain-language context and own-AI drafts — 25 October 2026
 
 `startupOverview` is optional text of at most 2,000 characters in founder saves,
@@ -106,7 +123,7 @@ adds no model changes or migrations.
 
 The source catalog contains `gmail`, `stripe`, `humanitix`, `xero`, `bank_feed`, `notion`, `google_drive`, `slack`, `linear`, `google_analytics`, and `luma`. Existing fields are preserved; each source adds `connectMode` (`oauth` or `api_key`), `canConnect`, `canDisconnect`, and `usableForUpdates`. Chat discovers accessible Analytics properties automatically when a draft starts. The separate `connect/google/` handoff requests website/Search Console consent; it is not a Valley input. GitHub remains a separate publishing connection.
 
-- `POST connect/<provider>/` returns `authorizationUrl` for OAuth. The browser redeems the one-use ticket and creates its own OAuth session, avoiding native API-cookie/browser-cookie mismatches. Luma/Humanitix instead accept `apiKey` through their existing scoped validators. The server chooses the return URL: `/my-startup/connections?company_id=<owned-id>&connected=<provider>` on the configured Chat origin. Native clients refresh when the founder returns to the app.
+- `POST connect/<provider>/` returns `authorizationUrl` for OAuth. The browser redeems the one-use ticket and creates its own OAuth session, avoiding native API-cookie/browser-cookie mismatches. Luma/Humanitix instead accept `apiKey` through their existing scoped validators. The server chooses the return URL: `/my-startup/connections?company_id=<owned-id>&connected=<provider>` on the configured Chat origin (since November 2026 also `from`, `update_id` and `error`; see "Connecting tools for Pulse" below). Native clients refresh when the founder returns to the app.
 - `DELETE sources/<provider>/` requires the explicit company and disconnects only the owned `connectionId`. Omitting the ID is supported only when exactly one account is connected.
 - `DELETE updates/<id>/` takes `companyId`, `revisionId`, and `revisionHash`. A changed revision or active generation returns 409. Deletion removes its community publication, revisions, approval receipts, and unreferenced snapshots. Shared evidence and connected accounts remain.
 - `generate/` requires explicit `inputSources`. An empty selection with notes/documents becomes manual-only; an empty selection without evidence returns 400 instead of silently enabling Gmail. Existing independent-update identity and persisted step-progress contracts are unchanged.
@@ -357,6 +374,12 @@ keeps Xero/Stripe financial evidence server-owned and requires founder review.
 See [the MCP contract and rollout guide](valley-mcp.md). Local implementation is
 not evidence of deployment or a ChatGPT directory approval.
 
+An untouched AI-supplied draft is approved with the ordinary publish call:
+`reviewed: true` with the exact `revisionId`, `revisionHash` and the saved
+`audienceVisibility`. The consent, connection and own-AI request endpoints added
+on 16 November 2026 are described in
+[Own-AI connections that last](valley-mcp.md#own-ai-connections-that-last--16-november-2026).
+
 ## Financial disclosure policy
 
 - Community responses disclose financial information only as `financialChart: {revenue, costs}`: two relative values between 0 and 1, normalized to the larger aggregate total (both are 0 when both totals are 0). The chart requires selected canonical `revenue` and `monthlyCosts`/`monthly_costs` values with compatible currency, provenance and accepted quality. Missing, conflicting, partial or unverified totals produce no chart. Amounts, currency strings, custom metrics and financial line items are never returned: `metrics` and `metricEvidence` are empty and both `displayConfig` lists are empty. Raw evidence, attachment metadata, storage paths, provider identifiers, exact financial charts and private analysis stay private.
@@ -451,3 +474,81 @@ It adds a nullable verified Google subject and replaces the one-mailbox constrai
 with per-account uniqueness. Existing IDs/tokens remain intact; no data backfill
 or external calls occur in the migration. The local approval and exact test
 inventory are in `plans/multiple-source-accounts/`.
+
+## Connecting tools for Pulse — November 2026
+
+Additive changes only; no schema migration.
+
+### Pulse source status vocabulary
+
+`sources/` (and the MCP account) send each Pulse source with one of these
+`status` values. Chat renders them as shown; anything else reads as not
+connected.
+
+| `status` | Meaning | Chat shows | Included by default |
+|---|---|---|---|
+| `connected` | Working connection | Connected | Yes |
+| `syncing` | Connected, first import still running | Connected · importing | Yes |
+| `needs_reauth` | The provider refused the stored sign-in (expired or revoked), or the connection broke (`connectionStatus: "error"` keeps the stored value) | Reconnect | No |
+| `not_connected` | Nothing connected | Connect | No |
+| `unavailable` | MLAI cannot offer this tool here (configuration, including a localhost redirect URI outside DEBUG) | Not available yet | No |
+
+Chat no longer receives `error`: it becomes `needs_reauth`. New fields:
+`needsReconnect` (true for `needs_reauth`, `needs_action`, `expired`,
+`auth_required`), `connectionStatus` (only when the stored status was
+`error`), and for Xero `accountChoiceRequired` (several organisations from one
+sign-in and no choice yet; the source is not usable until the founder picks one
+with the existing `reportAccountId` choice). An explicit Included/Not included
+choice is still respected, but a source that is not `connected`/`ready` is
+never `usableForUpdates`.
+
+Expired or revoked grants: Xero and Google Analytics refresh replies of HTTP
+400/401/403 (other than `invalid_client`) or `invalid_grant` mark the exact
+connection with the shared reconnect message (`ConnectorReconnectRequired`),
+and preflight reports `needs_reconnect`. Xero also marks sibling tenants that
+share the refused grant. Gmail has no status column: a refused refresh sets a
+cache marker keyed by the stored refresh token (cleared by reconnecting, which
+stores a new token) and raises `GmailReconnectRequired`.
+
+Google Drive is not offered in Pulse until MLAI reads it: it is left out of
+`sources/` unless a Drive connection already exists (shown so it can be
+disconnected), and `connect/google_drive/` is refused.
+
+The bank feed is saved as a disconnected row marked `consent_pending` when the
+founder is sent to Basiq, so it never shows as connected before consent. The
+consent callback sets `syncing` or `connected`.
+
+Connect resolves the startup's organisation with
+`ensure_company_organization` for the selected company (the organisation
+`sources/` reads), and refuses with a plain message if the website belongs to
+another MLAI account.
+
+### Return URL
+
+`POST connect/<provider>/` accepts `from: "updates"` and `updateId` (positive
+integer) and signs them into the ticket. On the web the provider returns to:
+
+```
+/my-startup/connections?company_id=<id>&connected=<provider>[&from=updates&update_id=<id>][&error=<reason>]
+```
+
+`error` is present only when the connection did not finish. `connected`
+always names the provider the return is about; with `error` it is not
+connected. Reasons:
+
+| `error` | When |
+|---|---|
+| `cancelled` | The founder pressed Cancel or refused at the provider (`access_denied` and similar) |
+| `expired` | The connection link expired or was already used, or the Chat session ended |
+| `unavailable` | MLAI cannot offer this connection right now (not configured, feature off) |
+| `domain_claimed` | The startup's website is linked to another MLAI account |
+| `failed` | Anything else |
+
+Every Chat-started failure redirects there (no plain-text page on the API
+host), including Gmail, whose `?error` is read before its one-time state is
+used. The native return stays exactly
+`mlaichat://connections?company_id=<id>&provider=<provider>` because the
+installed desktop and mobile apps reject other parameters; the app refreshes
+and finds the source not connected. Adding `error` there needs those parsers
+to accept it first.
+

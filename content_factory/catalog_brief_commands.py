@@ -18,7 +18,7 @@ from rest_framework.response import Response
 
 from organizations.models import Organization
 from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
-from .catalog_commands import KEY, MAX_COMMANDS, CatalogCommandConflict, _digest, _receipts, _require_current_owner
+from .catalog_commands import KEY, MAX_COMMANDS, CatalogCommandConflict, _digest, _receipts, _require_command_actor
 from .editorial_catalog import CatalogConflict, article_brief_for_catalog, review_payload
 from .models import OrganizationContentConfig
 
@@ -83,14 +83,14 @@ def _validate_body(body):
 
 def _locked(context, user_id):
     # The same lock order as local catalogue commands; HTTP is never inside it.
-    from .editorial_views import _lock_catalog_owner
+    from .editorial_views import _lock_catalog_actor
     org = Organization.objects.select_for_update().get(pk=context.organization.pk)
-    _lock_catalog_owner(context, user_id, org)
+    company = _lock_catalog_actor(context, user_id, org)
     config = OrganizationContentConfig.objects.select_for_update().filter(organization=org).first()
     strategy = config.pillar_strategy if config else {}
     if not isinstance(strategy, dict):
         raise CatalogCommandConflict("Stored catalogue requests cannot be verified.")
-    _require_current_owner(organization=org, context=context, user_id=user_id, strategy=strategy)
+    _require_command_actor(organization=org, company=company, user_id=user_id, strategy=strategy)
     return org, config, strategy
 
 

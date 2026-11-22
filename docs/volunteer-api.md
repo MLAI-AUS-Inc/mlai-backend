@@ -90,7 +90,8 @@ recognition history remains available.
 
 | Route | Contract |
 | --- | --- |
-| GET `journey/` | `account_id`, `community_id`, `relay_url`, `policy_version`, `contribution_roo`, `wallet_balance`, `current_level`, `next_level`, `levels`, `points_to_next`, `progress`, `attendance`, `suggestions`, `actions`, `capabilities`, `feature_flags`, `history_reconciled`, `updated_at` |
+| GET `journey/` | `account_id`, `community_id`, `relay_url`, `policy_version`, `contribution_roo`, `wallet_balance`, `profile_rank`, `current_level`, `next_level`, `levels`, `points_to_next`, `progress`, `attendance`, `suggestions`, `actions`, `capabilities`, `feature_flags`, `history_reconciled`, `updated_at` |
+| GET `point-history/` | Private, paginated `{total_roo, results, next_offset}` for the signed-in member. `scope=contribution` includes reviewed historical credits and changes that count toward level. `scope=wallet` lists earned wallet credits, including level bonuses. |
 | GET `policy/` | `{version, levels, actions}` |
 | GET `opportunities/`, `opportunities/:id/` | Public opportunity list/detail; optional kind/project filter |
 | GET `projects/`, `projects/:id/` | Public project list/detail |
@@ -216,6 +217,20 @@ the awards switch; repeated corrections cannot mint another first attendance.
 Conversation pagination groups persisted eligible replies by public opportunity
 root before applying limits. Continuation URLs preserve the selected filter;
 many replies in one conversation cannot hide an older joined opportunity.
+
+### Roo's Slack welcome for Chat intros
+
+Intros typed in Slack are rewarded by Public Roo, which replies in the thread.
+Intros written in MLAI Chat reach Slack through the bridge bot, so Roo ignores
+them and this pipeline awards them silently. The scheduled
+`chat_intro_welcomes` runner (`community_chat/intro_welcome.py`) closes the gap:
+for an approved `introduce_yourself` recognition from a processed Chat
+start-here post in the last 48 hours, once the bridge has posted that message to
+Slack, it replies in the thread with Roo's usual welcome using Public Roo's bot
+token. `ChatIntroWelcome` (one row per recognition) records the claim and reply,
+so each intro is welcomed at most once; Slack failures retry up to five times.
+Linked members are mentioned, others are named. The reward never depends on the
+message. Kill switch: `COMMUNITY_CHAT_INTRO_WELCOME_ENABLED` (default true).
 
 ## Disposable validation
 
@@ -346,3 +361,31 @@ The questioner marks a native MLAI answer in the advice thread useful with a che
 `COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED=true` enables this award independently of other Volunteer awards and bonuses. Configure the verified advice UUID as `COMMUNITY_CHAT_VOLUNTEER_CHANNELS["help"]`, a prospective `COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM` UTC boundary, and a separate `COMMUNITY_CHAT_VOLUNTEER_RECEIPT_TOKEN` shared only with the trusted collector. The Chat collector activation timestamp must match that boundary. Keep existing unrelated flags unchanged. There is no backend schema change or historical award backfill.
 
 Question, answer and reaction invalidations block deferred awards. Existing credits preserve their audit trail and use the established correction mechanism. Member locks are acquired in canonical account order, and recognition plus wallet credit remain atomic and idempotent.
+
+## 200-level contribution profiles
+
+The private journey returns `profile_rank` from the same ladder as the
+wardrobe and published profile, including when the member has no published
+profile. It is null while the contribution total is unknown. The journey's
+existing `current_level`, `next_level` and `levels` describe the older
+volunteer milestones and their wallet bonuses.
+
+Authenticated MLAI Chat clients can set `include_contributions: true` on
+`POST /community-chat/profiles/batch/` for up to ten verified profile keys.
+The response includes `contributions` only for published, reconciled profiles.
+It contains qualifying Roo, the `mlai-volunteer-v6` ladder position, and reviewed
+badges with member-safe descriptions and optional public event links.
+
+Preview the reviewed batch with
+`manage.py import_volunteer_badges <manifest> --reviewer-id <account>`.
+The private manifest contains `community`, `evidence_sha256`, an explicit
+`members` list of reconciled account IDs, and `grants` with `member_id`,
+`badge_id`, `reason`, `evidence_ref` and optional `public_url`. Members can
+receive a rank with an empty badge collection. Run the same command with
+`--apply` to publish the profiles and badges in one transaction. Identical
+retries reuse the existing receipts.
+
+To hide a profile, mark its publication receipt withdrawn. To hide a single
+badge, mark its grant revoked. To hide all contribution profiles, set
+`COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED=false`. This requires
+no database migration.

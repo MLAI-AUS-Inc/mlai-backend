@@ -141,6 +141,25 @@ def refund_dispatch(row, *, reason):
         article_request=row.payload["request"], resolved_domain=row.organization.domain, reason=reason)
 
 
+def _superseded_rule(row, request):
+    """Plan B9: how a delayed start treats a profile re-saved after the press.
+
+    The press is the owner's admission. When the same customer profile was only
+    re-saved as a newer approved version, the delayed start carries the brief
+    to that version (only approved entries; never a draft, a retired entry or a
+    changed offer), because the worker admits a new run against today's
+    catalogue. A request already bound to a backend admission, or one with a
+    provisional local run holding the original brief, keeps the exact rule:
+    its stored brief is part of that admission's identity and cannot change.
+    """
+    from workflow_runs.models import ContentFactoryRun
+    from .run_ownership import WIRE_REQUEST_KEY
+    from .editorial_catalog import SUPERSEDED_UPGRADE
+    if WIRE_REQUEST_KEY in request or ContentFactoryRun.objects.filter(run_id=row.client_request_id).exists():
+        return None
+    return SUPERSEDED_UPGRADE
+
+
 def _deliver(row):
     from integrations import http_client
     from .vibe_marketing_views import _content_factory_remote_config, _content_factory_headers, _lookup_content_factory_dispatch_by_key, _refresh_article_editorial_payload
@@ -170,13 +189,16 @@ def _deliver(row):
         # Discovery needs only the current owning founder/domain, plus the
         # selected approved audience when one was requested. It never inherits
         # repository permissions or grants editorial/publication approval.
-        from founder_tools.models import VibeRaisingCompany
+        from founder_tools.membership import companies_for_user
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
         from .editorial_catalog import discovery_audience_context
         from .vibe_marketing_views import _get_config
         requester = get_user_model().objects.get(pk=request["roo_points_requested_by_user_id"], is_active=True)
-        if request.get("domain") != row.organization.domain or not VibeRaisingCompany.objects.filter(
-                pk=request.get("mcp_company_id"), organization=row.organization,
-                profile__user=requester, profile__role="founder").exists():
+        current_startup = companies_for_user(requester).filter(
+            Q(membership_policy=VibeRaisingCompany.SHARED_ACCESS) | Q(profile__role=VibeRaisingProfile.ROLE_FOUNDER),
+            pk=request.get("mcp_company_id"), organization=row.organization,
+        )
+        if request.get("domain") != row.organization.domain or not current_startup.exists():
             raise WebsiteAuthorityError("research_owner_changed", "The original research startup is no longer available.")
         try:
             audience = discovery_audience_context(_get_config(row.organization).pillar_strategy, request)
@@ -188,7 +210,8 @@ def _deliver(row):
         if not portable:
             with authority_guard(request, action="read"):
                 pass
-        policy_error = _refresh_article_editorial_payload(organization=row.organization, payload=request)
+        policy_error = _refresh_article_editorial_payload(organization=row.organization, payload=request,
+                                                          superseded=_superseded_rule(row, request))
         if policy_error is not None:
             return "pending", str(policy_error.data.get("code") or "editorial_policy_recheck_required")[:100], ""
         from integrations.services.article_generation import require_article_activation

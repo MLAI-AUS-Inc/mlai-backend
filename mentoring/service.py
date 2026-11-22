@@ -37,6 +37,7 @@ from roo.services import PointsService
 from . import google, scheduling
 from .models import (
     hash_invite_token,
+    mask_email,
     NEW_MENTOR_PRICE_ROO,
     NEW_MENTOR_SESSION_MINUTES,
     LOCATION_MLAI_SPACE,
@@ -491,7 +492,27 @@ def serialize_session(session, viewer):
         'calendar_sync': public_status(session),
         'requested_at': session.requested_at.isoformat(),
         'responded_at': session.responded_at.isoformat() if session.responded_at else None,
+        # The founder's own post-session rating; a mentor never sees it.
+        'my_feedback': None if is_mentor else _my_feedback(session, viewer),
+        'can_rate': (not is_mentor) and after_acceptance and _feedback_open(session),
     }
+
+
+def _feedback_open(session):
+    from .feedback import enabled
+    return bool(enabled() and timezone.now() >= session.ends_at)
+
+
+def _my_feedback(session, viewer):
+    from .feedback import serialize_mine
+    try:
+        rows = session.feedback.all()
+    except Exception:
+        return None
+    for row in rows:
+        if row.respondent_id == viewer.pk:
+            return serialize_mine(row)
+    return None
 
 
 # ------------------------------------------------------------------- points
@@ -517,6 +538,9 @@ def _refund_charge(session, *, actor_slack_id):
 
 def _charge_founder(session):
     """Spend the price snapshot from the founder when the mentor accepts."""
+    if session.price_roo <= 0:
+        # Free session: nothing to charge, and spend() refuses a zero delta.
+        return
     _lock_users(session.founder_id)
     account = PointsAccount.objects.select_for_update().filter(user=session.founder).first()
     if account is not None:
@@ -542,6 +566,11 @@ def _charge_founder(session):
 
 
 def _pay_mentor(session):
+    # A free session (price 0) has nothing to pay. PointsService.award refuses a
+    # zero delta, and raising here made every scheduler tick fail on the same
+    # due session, so settle it without a ledger row.
+    if session.price_roo <= 0:
+        return
     ledger, _ = PointsService.award(
         user=session.mentor.user,
         delta=session.price_roo,
@@ -673,7 +702,7 @@ class MentoringService:
     @classmethod
     def list_sessions(cls, user, role, status=None):
         cls.sweep(user=user)
-        query = MentorSession.objects.select_related('mentor__user', 'founder')
+        query = MentorSession.objects.select_related('mentor__user', 'founder').prefetch_related('feedback')
         query = query.exclude(status=MentorSession.STATUS_PROVISIONING)
         if role == 'all':
             query = query.filter(Q(founder=user) | Q(mentor__user=user))
@@ -832,7 +861,13 @@ class MentoringService:
 
     @staticmethod
     def _load_invite(token, user, *, lock=False):
-        """The invite for this token, or a MentoringError. Never consumes it."""
+        """The invite for this token, or a MentoringError. Never consumes it.
+
+        An invite made for an email address (no account yet) belongs to whoever
+        signs in with that address: the first time its owner opens it, it is bound
+        to their account. Anyone else is told which address to sign in with,
+        masked.
+        """
         if not isinstance(token, str) or not 20 <= len(token) <= 200:
             raise MentoringError('invite_invalid', 'This invite link is not valid.', 404)
         query = MentorInvite.objects.select_for_update() if lock else MentorInvite.objects
@@ -840,10 +875,19 @@ class MentoringService:
             invite = query.get(token_hash=hash_invite_token(token))
         except MentorInvite.DoesNotExist:
             raise MentoringError('invite_invalid', 'This invite link is not valid.', 404)
+        if invite.user_id is None and invite.revoked_at is None and getattr(invite, 'email', ''):
+            owner = get_user_model().objects.resolve_email(invite.email)
+            if owner is not None and owner.pk == user.pk:
+                with transaction.atomic():
+                    # Bind once, under the row lock, so two tabs cannot race.
+                    MentorInvite.objects.select_for_update().filter(pk=invite.pk, user__isnull=True).update(user=user)
+                invite.user_id = user.pk
         if invite.user_id != user.pk:
+            hint = mask_email(getattr(invite, 'email', ''))
             raise MentoringError(
                 'invite_wrong_user',
-                'This invite was sent to a different account. Sign in as the invited person.', 403,
+                f'This invite was sent to {hint}. Sign in with that email address.' if hint
+                else 'This invite was sent to a different account. Sign in as the invited person.', 403,
             )
         if invite.revoked_at is not None:
             raise MentoringError('invite_revoked', 'This invite is no longer valid.', 410)

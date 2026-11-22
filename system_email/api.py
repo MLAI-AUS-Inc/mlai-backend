@@ -59,6 +59,14 @@ def _suppressed(address: str) -> bool:
     return SystemEmailSuppression.objects.filter(email=address, cleared_at__isnull=True).exists()
 
 
+def _reply_to(address: str) -> str:
+    """A single plain address or nothing: a header value can never carry a line break or a list."""
+    value = str(address or "").strip()
+    if not value or any(ch in value for ch in "\r\n,;<>\"") or value.count("@") != 1:
+        return ""
+    return value
+
+
 def send(
     message_key: str,
     *,
@@ -68,8 +76,12 @@ def send(
     prerendered: Optional[RenderedEmail] = None,
     user_id: Optional[int] = None,
     unsubscribe_url: str = "",
+    reply_to: str = "",
 ) -> SendResult:
     """Send one registered message through Resend and return its id.
+
+    ``reply_to`` replaces ``SYSTEM_EMAIL_REPLY_TO`` for this message when it is
+    one valid address; anything else falls back to the shared inbox.
 
     The same ``idempotency_key`` always maps to the same log row and the same
     Resend idempotency key, so a caller retrying after a timeout can't send twice.
@@ -116,6 +128,7 @@ def send(
         entity_ref=str(row.id),
         unsubscribe=spec.unsubscribe,
         unsubscribe_url=unsubscribe_url if spec.unsubscribe else "",
+        reply_to=_reply_to(reply_to),
     )
     try:
         provider_id = transport_resend.send(payload, idempotency_key=f"system-email/{idempotency_key}"[:256])

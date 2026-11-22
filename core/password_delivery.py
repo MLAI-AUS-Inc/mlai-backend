@@ -77,10 +77,11 @@ def deliver_password_reset_email(delivery_id):
     delivery = PasswordResetEmailDelivery.objects.select_related(
         'challenge__user'
     ).get(id=delivery_id)
+    claimed = PasswordResetEmailDelivery.objects.filter(id=delivery.id, claimed_at=delivery.claimed_at)
     now = timezone.now()
     challenge = delivery.challenge
     if challenge.consumed_at is not None or challenge.expires_at <= now:
-        PasswordResetEmailDelivery.objects.filter(id=delivery.id).update(
+        claimed.update(
             status=PasswordResetDeliveryStatus.CANCELLED,
             encrypted_reset_link='',
             claimed_at=None,
@@ -97,7 +98,7 @@ def deliver_password_reset_email(delivery_id):
             'Password reset delivery payload could not be decrypted delivery_id=%s',
             delivery.id,
         )
-        PasswordResetEmailDelivery.objects.filter(id=delivery.id).update(
+        claimed.update(
             status=PasswordResetDeliveryStatus.FAILED,
             encrypted_reset_link='',
             claimed_at=None,
@@ -108,7 +109,7 @@ def deliver_password_reset_email(delivery_id):
     except Exception as exc:
         final_attempt = delivery.attempts >= MAX_DELIVERY_ATTEMPTS
         delay_seconds = min(300, 2 ** max(0, delivery.attempts - 1))
-        PasswordResetEmailDelivery.objects.filter(id=delivery.id).update(
+        claimed.update(
             status=(
                 PasswordResetDeliveryStatus.FAILED
                 if final_attempt
@@ -130,7 +131,7 @@ def deliver_password_reset_email(delivery_id):
         )
         return 'failed' if final_attempt else 'retry'
 
-    PasswordResetEmailDelivery.objects.filter(id=delivery.id).update(
+    claimed.update(
         status=PasswordResetDeliveryStatus.SENT,
         encrypted_reset_link='',
         claimed_at=None,

@@ -1,0 +1,1004 @@
+{
+ "about": "Simulated responses for the domains in plans/founder-issues-2026-11-18.md (plan E1 acceptance). They are not live recordings: the catalogue was read from a prod dump and the cloud proxy refuses outbound site fetches. Rows the catalogue documents are modelled on what it records (the 403 at 212, the 308 hops at 206 and 173, the misspelt domain at 182, the platform hosts at 178, 179, 181, 208 and 209, the .invalid placeholders at 186 and 188, and a page with no title at 82 to exercise the name rule); every other row is a plain 200 page titled with the startup name, because nothing about those sites is known. Host fingerprints are tested on example domains, not on founders' sites. Orgs 202 and 214 (MLAI test orgs) have no domain in the catalogue and are not listed. 'resolves' lists the extra names the fake resolver answers, for the typo suggestion.",
+ "resolves": [
+  "reidandcoconsulting.com.au"
+ ],
+ "rows": [
+  {
+   "org": 195,
+   "domain": "stolenminutes.app",
+   "dns": "ok",
+   "responses": {
+    "stolenminutes.app": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Stolen Minutes</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Stolen Minutes"
+   }
+  },
+  {
+   "org": 206,
+   "domain": "lifestitch.com.au",
+   "dns": "ok",
+   "responses": {
+    "lifestitch.com.au": {
+     "status": 308,
+     "headers": {
+      "location": "https://www.lifestitch.com.au/"
+     }
+    },
+    "www.lifestitch.com.au": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Lifestitch</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Lifestitch"
+   }
+  },
+  {
+   "org": 212,
+   "domain": "platform.tailoredagents.ai",
+   "dns": "ok",
+   "responses": {
+    "platform.tailoredagents.ai": {
+     "status": 403,
+     "headers": {
+      "server": "cloudflare"
+     },
+     "html": "<title>Attention Required!</title>"
+    }
+   },
+   "expect": {
+    "reachable": "unknown",
+    "outcome": "http_status",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Tailoredagents",
+    "httpStatus": 403,
+    "note": "check_blocked"
+   }
+  },
+  {
+   "org": 173,
+   "domain": "la-vie.com.au",
+   "dns": "ok",
+   "responses": {
+    "la-vie.com.au": {
+     "status": 308,
+     "headers": {
+      "location": "https://www.la-vie.com.au/"
+     }
+    },
+    "www.la-vie.com.au": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>La Vie - Wellness</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "La Vie"
+   }
+  },
+  {
+   "org": 194,
+   "domain": "studionarrm.com",
+   "dns": "ok",
+   "responses": {
+    "studionarrm.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Studio Narrm</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Studio Narrm"
+   }
+  },
+  {
+   "org": 124,
+   "domain": "pawshareclub.com",
+   "dns": "ok",
+   "responses": {
+    "pawshareclub.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Pawshare Club</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Pawshare Club"
+   }
+  },
+  {
+   "org": 140,
+   "domain": "preforma.au",
+   "dns": "ok",
+   "responses": {
+    "preforma.au": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Songable Studio</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Songable Studio"
+   }
+  },
+  {
+   "org": 82,
+   "domain": "examon.jtutes.com",
+   "dns": "ok",
+   "responses": {
+    "examon.jtutes.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head></head><body></body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Examon"
+   }
+  },
+  {
+   "org": 209,
+   "domain": "spring-surf-fc2e.sofia-vi-lee.workers.dev",
+   "dns": "ok",
+   "responses": {
+    "spring-surf-fc2e.sofia-vi-lee.workers.dev": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Lilia Daily Planner</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "git_host",
+    "guidanceId": "cloudflare_pages",
+    "deploymentUrl": true,
+    "suggestion": null,
+    "suggestedName": "Lilia Daily Planner",
+    "note": "deployment_url"
+   }
+  },
+  {
+   "org": 30,
+   "domain": "talathrive.com",
+   "dns": "ok",
+   "responses": {
+    "talathrive.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Tala Thrive</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Tala Thrive"
+   }
+  },
+  {
+   "org": 87,
+   "domain": "vyavos.com",
+   "dns": "ok",
+   "responses": {
+    "vyavos.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Vyavos</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Vyavos"
+   }
+  },
+  {
+   "org": 175,
+   "domain": "collabmtm.com",
+   "dns": "ok",
+   "responses": {
+    "collabmtm.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Collab MTM</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Collab MTM"
+   }
+  },
+  {
+   "org": 176,
+   "domain": "scalefoundry.com.au",
+   "dns": "ok",
+   "responses": {
+    "scalefoundry.com.au": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Scale Foundry</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Scale Foundry"
+   }
+  },
+  {
+   "org": 177,
+   "domain": "gloteo.com",
+   "dns": "ok",
+   "responses": {
+    "gloteo.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>GlotEO</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "GlotEO"
+   }
+  },
+  {
+   "org": 178,
+   "domain": "lazarus-care.chalkypeach513.chatgpt.site",
+   "dns": "ok",
+   "responses": {
+    "lazarus-care.chalkypeach513.chatgpt.site": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Lazarus</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "no_export",
+    "guidanceId": "chatgpt_sites",
+    "deploymentUrl": true,
+    "suggestion": null,
+    "suggestedName": "Lazarus",
+    "note": "no_export"
+   }
+  },
+  {
+   "org": 179,
+   "domain": "find-your-way-10.emergent.host",
+   "dns": "ok",
+   "responses": {
+    "find-your-way-10.emergent.host": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>SoCo Collective</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "ai_builder",
+    "guidanceId": "emergent",
+    "deploymentUrl": true,
+    "suggestion": null,
+    "suggestedName": "SoCo Collective",
+    "note": "ai_builder"
+   }
+  },
+  {
+   "org": 180,
+   "domain": "brainrehabilitation.org",
+   "dns": "ok",
+   "responses": {
+    "brainrehabilitation.org": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>BRAC Brain Rehab Academy</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "BRAC Brain Rehab Academy"
+   }
+  },
+  {
+   "org": 181,
+   "domain": "auditmind-prod.up.railway.app",
+   "dns": "ok",
+   "responses": {
+    "auditmind-prod.up.railway.app": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>React App</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "git_host",
+    "guidanceId": "railway",
+    "deploymentUrl": true,
+    "suggestion": null,
+    "suggestedName": "Auditmind",
+    "note": "deployment_url"
+   }
+  },
+  {
+   "org": 182,
+   "domain": "reidandcoconsuliting.com.au",
+   "dns": "nxdomain",
+   "responses": {},
+   "expect": {
+    "reachable": "no",
+    "outcome": "nxdomain",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": "reidandcoconsulting.com.au",
+    "suggestedName": "Reidandcoconsuliting",
+    "note": "not_found"
+   }
+  },
+  {
+   "org": 183,
+   "domain": "xtratime.com.au",
+   "dns": "ok",
+   "responses": {
+    "xtratime.com.au": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>XTRA TIME</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "XTRA TIME"
+   }
+  },
+  {
+   "org": 184,
+   "domain": "elevenandinfinite.com",
+   "dns": "ok",
+   "responses": {
+    "elevenandinfinite.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Eleven & Infinite</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Eleven & Infinite"
+   }
+  },
+  {
+   "org": 185,
+   "domain": "safetrase.com",
+   "dns": "ok",
+   "responses": {
+    "safetrase.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>SafeTrase</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "SafeTrase"
+   }
+  },
+  {
+   "org": 186,
+   "domain": "startup-5d7facfa-0000-4000-8000-000000000186.invalid",
+   "dns": "ok",
+   "responses": {},
+   "expect": {
+    "invalid": true
+   }
+  },
+  {
+   "org": 187,
+   "domain": "1etech.com",
+   "dns": "ok",
+   "responses": {
+    "1etech.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>1E Tech Pty Ltd</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "1E Tech Pty Ltd"
+   }
+  },
+  {
+   "org": 188,
+   "domain": "startup-fc0b6c7b-0000-4000-8000-000000000188.invalid",
+   "dns": "ok",
+   "responses": {},
+   "expect": {
+    "invalid": true
+   }
+  },
+  {
+   "org": 190,
+   "domain": "phil-loney.com",
+   "dns": "ok",
+   "responses": {
+    "phil-loney.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Phil Loney</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Phil Loney"
+   }
+  },
+  {
+   "org": 191,
+   "domain": "intextec.com",
+   "dns": "ok",
+   "responses": {
+    "intextec.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Intextec</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Intextec"
+   }
+  },
+  {
+   "org": 63,
+   "domain": "dev2.au",
+   "dns": "ok",
+   "responses": {
+    "dev2.au": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>xyz startup</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "xyz startup"
+   }
+  },
+  {
+   "org": 99,
+   "domain": "rallyhealth.com.au",
+   "dns": "ok",
+   "responses": {
+    "rallyhealth.com.au": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Rally Health</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Rally Health"
+   }
+  },
+  {
+   "org": 189,
+   "domain": "prognosole.eliascorp.org",
+   "dns": "ok",
+   "responses": {
+    "prognosole.eliascorp.org": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Prognosole</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Prognosole"
+   }
+  },
+  {
+   "org": 192,
+   "domain": "hagl.au",
+   "dns": "ok",
+   "responses": {
+    "hagl.au": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>HAGL.AU PTY LTD</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "HAGL.AU PTY LTD"
+   }
+  },
+  {
+   "org": 193,
+   "domain": "viterbi.eliascorp.org",
+   "dns": "ok",
+   "responses": {
+    "viterbi.eliascorp.org": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Viterbi Ink</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Viterbi Ink"
+   }
+  },
+  {
+   "org": 197,
+   "domain": "sharekite.app",
+   "dns": "ok",
+   "responses": {
+    "sharekite.app": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Sharekite</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Sharekite"
+   }
+  },
+  {
+   "org": 198,
+   "domain": "tthuynh.com.au",
+   "dns": "ok",
+   "responses": {
+    "tthuynh.com.au": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Tthuynh</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Tthuynh"
+   }
+  },
+  {
+   "org": 199,
+   "domain": "instaquoteai.co.nz",
+   "dns": "ok",
+   "responses": {
+    "instaquoteai.co.nz": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Instaquoteai</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Instaquoteai"
+   }
+  },
+  {
+   "org": 200,
+   "domain": "maxbiz.co",
+   "dns": "ok",
+   "responses": {
+    "maxbiz.co": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Maxbiz</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Maxbiz"
+   }
+  },
+  {
+   "org": 201,
+   "domain": "prognosole.com",
+   "dns": "ok",
+   "responses": {
+    "prognosole.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Prognosole</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Prognosole"
+   }
+  },
+  {
+   "org": 205,
+   "domain": "stoneandchalk.com.au",
+   "dns": "ok",
+   "responses": {
+    "stoneandchalk.com.au": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Stoneandchalk</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Stoneandchalk"
+   }
+  },
+  {
+   "org": 207,
+   "domain": "scrumcraft.com",
+   "dns": "ok",
+   "responses": {
+    "scrumcraft.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Scrumcraft</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Scrumcraft"
+   }
+  },
+  {
+   "org": 208,
+   "domain": "orange-sea-9c9f.kienplays9.workers.dev",
+   "dns": "ok",
+   "responses": {
+    "orange-sea-9c9f.kienplays9.workers.dev": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Lilia Daily Planner</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "git_host",
+    "guidanceId": "cloudflare_pages",
+    "deploymentUrl": true,
+    "suggestion": null,
+    "suggestedName": "Lilia Daily Planner",
+    "note": "deployment_url"
+   }
+  },
+  {
+   "org": 213,
+   "domain": "redinncol.com",
+   "dns": "ok",
+   "responses": {
+    "redinncol.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Redinncol</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Redinncol"
+   }
+  },
+  {
+   "org": 216,
+   "domain": "soara.com.au",
+   "dns": "ok",
+   "responses": {
+    "soara.com.au": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Soara</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Soara"
+   }
+  },
+  {
+   "org": 217,
+   "domain": "pausentry.com",
+   "dns": "ok",
+   "responses": {
+    "pausentry.com": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>Pausentry</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "Pausentry"
+   }
+  },
+  {
+   "org": 16,
+   "domain": "mlai.au",
+   "dns": "ok",
+   "responses": {
+    "mlai.au": {
+     "status": 200,
+     "headers": {
+      "content-type": "text/html"
+     },
+     "html": "<!doctype html><html><head><title>MLAI</title></head><body>ok</body></html>"
+    }
+   },
+   "expect": {
+    "reachable": "yes",
+    "outcome": "ok",
+    "hostClass": "unknown",
+    "guidanceId": null,
+    "deploymentUrl": false,
+    "suggestion": null,
+    "suggestedName": "MLAI"
+   }
+  }
+ ]
+}

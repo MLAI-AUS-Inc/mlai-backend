@@ -536,7 +536,10 @@ class IncidentFacadeReplays(SimpleTestCase):
         token = signing.dumps({"run": run.run_id, "organization": 4, "domain": run.domain, "portable": True, "intent_digest": intent}, salt=SALT)
         view = ArticlePreviewLeaseProxyView(); view.kwargs = {"token": token}
         with patch("content_factory.article_preview_lease.views.get_object_or_404", return_value=run), \
+                patch("content_factory.article_preview_lease.Organization.objects.filter") as organizations, \
+                patch("content_factory.article_preview_lease.shared_workspace", return_value=None), \
                 patch("content_factory.article_preview_lease.authority_guard", side_effect=AssertionError("Portable preview needs no repository")):
+            organizations.return_value.first.return_value = None
             self.assertIsNone(view._resolve_run(RequestFactory().get('/preview'), run.run_id)[2])
             run.run_request = {**request, "delivery_mode": "publish_code"}
             self.assertEqual(view._resolve_run(RequestFactory().get('/preview'), run.run_id)[2].status_code, 409)

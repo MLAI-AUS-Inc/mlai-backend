@@ -23,6 +23,7 @@ class MyStartupFacadeTests(SimpleTestCase):
         self.factory = APIRequestFactory()
         self.user = Obj(pk=7, id=7, is_authenticated=True)
         self.company = Obj(pk=COMPANY, organization_id=2, organization=Obj(pk=2, domain="owned.test"))
+        self.company_scope = self.enterContext(patch.object(views.membership, "companies_for_user"))
         for target, value in (("get_object_or_404", self.company), ("user_may_use_organization", True)):
             patcher = patch.object(views, target, return_value=value)
             setattr(self, target, patcher.start())
@@ -46,7 +47,8 @@ class MyStartupFacadeTests(SimpleTestCase):
             response = self.call(views.BootstrapView)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Cache-Control"], "private, no-store")
-        self.assertEqual(self.get_object_or_404.call_args.kwargs, {"pk": COMPANY, "profile__user": self.user})
+        self.company_scope.assert_called_with(self.user)
+        self.get_object_or_404.assert_called_with(self.company_scope.return_value, pk=COMPANY)
         self.assertEqual(views.BootstrapView.authentication_classes, (MyStartupAuthentication,))
 
     def test_usage_detail_inherits_chat_auth_company_scope_and_literal_route(self):
@@ -54,7 +56,8 @@ class MyStartupFacadeTests(SimpleTestCase):
             response = self.call(views.WebsiteCostUsageView)
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response["Cache-Control"], "private, no-store")
-            self.assertEqual(self.get_object_or_404.call_args.kwargs, {"pk": COMPANY, "profile__user": self.user})
+            self.company_scope.assert_called_with(self.user)
+            self.get_object_or_404.assert_called_with(self.company_scope.return_value, pk=COMPANY)
             self.assertEqual(self.call(views.WebsiteCostUsageView, authenticated=False).status_code, 401)
             self.assertEqual(read.call_count, 1)
         for suffix in ("", "/"):

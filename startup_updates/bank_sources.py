@@ -76,10 +76,27 @@ def fetch_bank_page(run, binding, state):
     }
 
 
+def bank_row_currency(row, fallback=""):
+    """Basiq usually puts the currency on the account, not on each transaction."""
+    account = row.get("account") if isinstance(row.get("account"), dict) else {}
+    for value in (row.get("currency"), account.get("currency"), fallback):
+        currency = str(value or "").strip().upper()
+        if currency and len(currency) <= 12:
+            return currency
+    return ""
+
+
 def commit_bank_page(run, rows, state):
-    """Save dated cash facts only; bank transfers never become MRR or revenue."""
+    """Save dated cash facts only; bank transfers never become MRR or revenue.
+
+    A transaction MLAI cannot verify (no date, amount, id or currency) is
+    skipped and counted instead of failing the whole bank feed.
+    """
     zone = ZoneInfo(run.run_request.get("reporting_timezone") or "UTC")
     start, end = activity_window(run.run_request["narrative_period"])
+    fallback_currency = (run.run_request.get("reporting_config") or {}).get("currency") or ""
+    previous = ((run.result or {}).get("event_source_progress") or {}).get("bank_feed") or {}
+    skipped_rows = int(previous.get("skipped_rows") or 0)
     for row in rows:
         if str(row.get("status") or "posted").lower() != "posted":
             continue
@@ -98,7 +115,8 @@ def commit_bank_page(run, rows, state):
         if day is None and stamp is not None and stamp.tzinfo is not None:
             day = stamp.astimezone(zone).date()
         if day is None:
-            raise ValueError("A posted bank transaction has no verifiable date.")
+            skipped_rows += 1
+            continue
         # Transaction dates have day precision. The half-open reporting window
         # is applied in the startup's timezone, including its final partial day.
         if not start.astimezone(zone).date() <= day <= end.astimezone(zone).date():
@@ -108,15 +126,15 @@ def commit_bank_page(run, rows, state):
         source_id = str(row.get("id") or row.get("transactionId") or "").strip()
         amount = ec._decimal_or_none(row.get("amount"))
         if not source_id or amount is None or not amount.is_finite():
-            raise ValueError("A posted bank transaction has incomplete evidence.")
+            skipped_rows += 1
+            continue
         direction = str(
             row.get("direction") or ("debit" if amount < 0 else "credit")
         ).lower()
-        if direction not in {"debit", "credit"}:
-            raise ValueError("A bank transaction has an unknown cash direction.")
-        currency = str(row.get("currency") or "").strip().upper()
-        if not currency or len(currency) > 12:
-            raise ValueError("A bank transaction has no verifiable currency.")
+        currency = bank_row_currency(row, fallback_currency)
+        if direction not in {"debit", "credit"} or not currency:
+            skipped_rows += 1
+            continue
         fact = {
             "id": source_id,
             "date": day.isoformat(),
@@ -167,6 +185,6 @@ def commit_bank_page(run, rows, state):
         **(run.result or {}),
         "event_source_progress": {
             **((run.result or {}).get("event_source_progress") or {}),
-            "bank_feed": state,
+            "bank_feed": {**state, "skipped_rows": skipped_rows},
         },
     }

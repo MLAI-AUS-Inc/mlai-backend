@@ -2,9 +2,13 @@
 
 from django.urls import path
 from . import views
+from roo.manual_time_views import ChatManualTimeView
 
 urlpatterns = [
+    path("manual-time/", ChatManualTimeView.as_view()),
+    path("manual-time/<int:request_id>/", ChatManualTimeView.as_view()),
     path("journey/", views.JourneyView.as_view()),
+    path("point-history/", views.PointHistoryView.as_view()),
     path("policy/", views.PolicyView.as_view()),
     path("opportunities/", views.OpportunitiesView.as_view()),
     path("opportunities/<uuid:opportunity_id>/", views.OpportunitiesView.as_view()),

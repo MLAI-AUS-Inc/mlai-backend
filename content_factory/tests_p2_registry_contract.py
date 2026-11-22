@@ -22,12 +22,17 @@ from .self_heal_testing import ALL_FLAGS_ON, make_named_legacy_org, make_p2_org
 
 ROOT = Path(__file__).resolve().parents[1]
 # cf-registry's bytes, checked with cmp when vendored. Merge provenance is checked remotely.
-# Registry/envelope bytes: adds transient_memory_kill at CF bb0724ab.
+# Registry/envelope bytes: adds the SDK and sandbox fault codes (A5) and puts the
+# editorial currency codes on existing policies (B9), adds
+# the B10 codes and RUN_BUDGET_NOT_CONFIGURED (B14),
+# the research rows (B16 research_scope_invalid, B23 add_seed_topics), and
+# PROFILE_DRAFT_UNAVAILABLE back on its pre-P2 stop in both views (E12) ahead of
+# the CF pin bump, and the four deployment_* stops on "fixing" copy (F4 rule 3).
 VENDORED_SHA256 = {
-    "contracts/failure-codes.json": "2e263e31591e6559098611a412ea795f5864f15c0a14e7cad10c824ba3ac06f7",
-    "contracts/failure-envelope-v1.schema.json": "ae35222c1a028b78db20ec17b61c4d845469b680c92fc9efc0d77cd192d1d97e",
+    "contracts/failure-codes.json": "a1b8216d7921c207299f95088dbbd97b4681f9f96ea99ee18f1064779246761f",
+    "contracts/failure-envelope-v1.schema.json": "ccea15565eae9506b5f9d22f7af258edc4f1c073263b56805fbe27fef2cec97b",
     "contracts/setup-delivery-v1.schema.json": "6a604e610716ba45c6c1e8491daae94cc51ece99e8e3d6c693ac378674581069",
-    "content_factory/failure_registry_pre_p2.json": "f8ca80a13c17497fc2dab0f2bfc2cb3f8c08840c09737e6082d52022ebbd5cc2",
+    "content_factory/failure_registry_pre_p2.json": "b13710a9e61383e259226187c6a8b1a23af1b922d85d2369b830eab599b1934e",
     "content_factory/tests/fixtures/p2/failure-codes.pre-p2.json": "5dc161ae1f02212f3898ec0a2bc4bee347ccbc0cf8c26cf640ced545dd4d8b3e",
 }
 FIXTURE_PATH = ROOT / "content_factory/tests/fixtures/p2/failure-codes.pre-p2.json"
@@ -295,7 +300,7 @@ class WireActionIdTests(SimpleTestCase):
 
     LEGACY = {"approve_setup": "review_setup", "describe_customer": "review_setup", "agree_terms": "review_setup",
               "approve_on_github": "merge_pr", "authorize_github": "authorize_github", "review_draft": "review_draft",
-              "buy_points": "buy_points", "approve_join_request": None}
+              "buy_points": "buy_points", "approve_join_request": None, "add_seed_topics": None}
 
     def test_flag_off_sends_legacy_ids(self):
         self.assertEqual(registry_policy.LEGACY_WIRE_ACTION_IDS, self.LEGACY)
@@ -348,15 +353,17 @@ class UnknownCodeAndCopyIdTests(TestCase):
     def test_terminal_items_stop_unless_the_engine_will_act(self):
         from .self_heal_testing import self_heal_receipt
         org = make_p2_org().organization
-        self.assertEqual(registry_policy.copy_id_for("GITHUB_TEMPORARILY_UNAVAILABLE", organization=org,
+        # B10: a registered code stops; an unregistered one is ours to fix (below).
+        self.assertEqual(registry_policy.copy_id_for("EDITORIAL_REJECTED", organization=org,
                                                      terminal=True, self_heal=None), "stopped")
         acting = self_heal_receipt(next_at="2026-11-01T00:00:00+00:00")
         self.assertEqual(registry_policy.copy_id_for("NOT_A_CODE", organization=org, terminal=True, self_heal=acting),
                          "working")
         for receipt in (self_heal_receipt(next_at=None), self_heal_receipt(next_at="2026-11-01T00:00:00+00:00", capped=True),
                         self_heal_receipt(mode="observe", next_at="2026-11-01T00:00:00+00:00")):
+            # B10: an unregistered terminal code is ours to fix, not a plain stop.
             self.assertEqual(registry_policy.copy_id_for("NOT_A_CODE", organization=org, terminal=True,
-                                                         self_heal=receipt), "stopped")
+                                                         self_heal=receipt), "fixing")
 
     @override_settings(**ALL_FLAGS_ON)
     def test_needs_user_codes_give_their_ask(self):

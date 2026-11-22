@@ -195,6 +195,11 @@ def resolve_roo_actor(*, workspace_id, channel_id, message_id, thread_ts, bridge
     identity = verified_identity_for_buzz(
         slack_workspace_id=workspace_id, buzz_pubkey=link.source_author_id,
     )
+    if identity is None and posting_mode == "bot":
+        # Every delivery check above passed: this is a genuine Chat message by
+        # a verified MLAI account whose only gap is a Slack identity link.
+        # Roo can tell this sender how to fix it; it still cannot act for them.
+        raise BridgeActorError("bridge_actor_slack_unlinked", 403)
     if (not identity or identity.get("identity_source") != "mlai_account"
             or not identity.get("user_profile_id")
             or identity.get("user_profile_id") != account["user_profile_id"]

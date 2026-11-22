@@ -147,6 +147,20 @@ class SegmentRuleDatabaseTests(Population, TestCase):
             self.people(self.ada, self.cat, self.fay),
         )
 
+    def test_event_in_city_matches_the_event_name_or_its_luma_address(self):
+        named = make_event("evt-syd-named", start=self.now - timedelta(days=60), name="AI Night | Sydney")
+        located = make_event("evt-syd-geo", start=self.now + timedelta(days=5), name="Startup Tank")
+        located.raw_payload = {"geo_address_json": {"city": "Sydney", "full_address": "1 George St, Sydney NSW"}}
+        located.save()
+        elsewhere = make_event("evt-mel", start=self.now - timedelta(days=5), name="Melbourne Meetup")
+        register(named, self.bob)
+        register(located, self.cat)
+        register(located, self.dan, "declined")
+        register(elsewhere, self.eve)
+        self.assertEqual(self.match({"type": "event_in_city", "city": "sydney"}), self.people(self.bob, self.cat))
+        self.assertEqual(self.match({"type": "event_in_city", "city": "Melbourne"}), self.people(self.eve))
+        self.assertEqual(self.match({"type": "event_in_city", "city": "Brisbane"}), set())
+
     def test_events_attended_count(self):
         self.assertEqual(self.match({"type": "events_attended_count", "op": "gte", "value": 2}), self.people(self.ada, self.dan))
         self.assertEqual(

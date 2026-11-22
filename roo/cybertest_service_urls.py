@@ -6,6 +6,7 @@ urlpatterns=[
     path('quotes/recover/',views.RecoverQuoteView.as_view(),name='cybertest-recover-quote'),
     path('entry/exchange/',entry.ExchangeView.as_view(),name='cybertest-entry-exchange'),
     path('entry/inspect/',entry.InspectView.as_view(),name='cybertest-entry-inspect'),
+    path('entry/github/',entry.GitHubView.as_view(),name='cybertest-entry-github'),
     path('quotes/<uuid:checkout_id>/settle-failure/',views.FailedSettlementView.as_view(),name='cybertest-failed-settlement'),
     path('quotes/<uuid:checkout_id>/settle-delivery/',views.DeliverySettlementView.as_view(),name='cybertest-delivery-settlement'),
     path('quotes/',views.CreateQuoteView.as_view(),name='cybertest-quote'),

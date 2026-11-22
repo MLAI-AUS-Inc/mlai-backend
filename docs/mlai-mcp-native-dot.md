@@ -108,7 +108,8 @@ remains `24h`. Changing these defaults is a separate owner deployment action.
 | `AGENT_RUNTIME_DOT_MEMBERS_ENABLED` | `false` | true / false |
 | `AGENT_RUNTIME_DOT_MESSAGING_ENABLED` | `false` | true / false |
 | `MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED` | `false` | true / false |
-| `MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS` | `0` | 0–300 |
+| `MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS` | `60` | 0–300 (0 turns the retry window off) |
+| `MLAI_MCP_GRANT_IDLE_TTL_DAYS` | `180` | 1–730 (days an unused Pulse or Articles AI connection stays alive; each refresh restarts it) |
 
 
 Safety fixes apply independently of the later rollout switches. Scheduler stages

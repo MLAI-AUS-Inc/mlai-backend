@@ -1,0 +1,14 @@
+{% autoescape off %}Hi there,
+
+{{ inviter_name }} invited you to work together in {{ startup_name }} on MLAI.
+
+{% if shared_access %}When you join, you'll have full access to this startup, including billing and team settings.
+{% else %}When you join, you'll be able to collaborate on the startup with your teammates.
+{% endif %}
+Sign in with {{ invite_email }} to accept.
+{{ accept_url }}
+
+This invitation expires on {{ expires_on }}. If you weren't expecting it, you can ignore this email.
+
+MLAI · Suite 350, 585 Little Collins St, Melbourne VIC 3000 · hi@mlai.au
+{% endautoescape %}

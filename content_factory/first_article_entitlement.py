@@ -363,6 +363,12 @@ def _matching_attempt(rows: _Rows, request):
 
 
 def _delivered(run) -> bool:
+    # Plan C7 (D7): a run delivered as a content-files pull request is "delivered,
+    # not yet live". It is not the free article's delivery until one of its
+    # articles passes the live check of its real URL.
+    from .website_content_files import run_delivered_as_content_files, run_has_live_article
+    if run_delivered_as_content_files(run) and not run_has_live_article(run):
+        return False
     from .run_reconciliation import authoritative_run
     if authoritative_run(run):
         from .run_verified_delivery import has_verified_delivery

@@ -39,6 +39,7 @@ REFERENCE_LABELS = {
     "FIRST_CHANNEL_POST": (COUNTS, "first_channel_post"),
     "MONTHLY_UPDATE_DRAFT": (NOT_LEVEL, "startup_update"),
     "MENTOR_SESSION": (NOT_LEVEL, "mentor_payout"),
+    "MLAI_ARCADE": (NOT_LEVEL, "arcade_prize"),
     "VOLUNTEER_LEVEL_BONUS": (NOT_LEVEL, "level_bonus"),
     "VOLUNTEER_CORRECTION": (NOT_LEVEL, "correction"),
     "ACCOUNT_MERGE": (NOT_LEVEL, "account_merge"),
@@ -106,11 +107,16 @@ def recognition_level_microroo(record):
     return record.reward_microroo
 
 
-def opening_microroo(user, state):
-    """The member's opening balance, or None while their history is being checked."""
+def opening_entries(user):
+    """Return the member's reviewed historical entries, including reversals."""
     from .models import VolunteerOpeningEntry
 
-    entries = VolunteerOpeningEntry.objects.filter(community=community_id(), user=user)
+    return VolunteerOpeningEntry.objects.filter(community=community_id(), user=user)
+
+
+def opening_microroo(user, state):
+    """The member's opening balance, or None while their history is being checked."""
+    entries = opening_entries(user)
     if entries.exists():
         return (
             entries.filter(reversed_at__isnull=True).aggregate(
@@ -122,11 +128,7 @@ def opening_microroo(user, state):
 
 
 def has_opening_entries(user):
-    from .models import VolunteerOpeningEntry
-
-    return VolunteerOpeningEntry.objects.filter(
-        community=community_id(), user=user
-    ).exists()
+    return opening_entries(user).exists()
 
 
 def _later_credits(user, state):
@@ -152,36 +154,34 @@ def unlabelled_credits(user, state):
     ]
 
 
-def one_record_total(user, state):
-    """Level points: opening, plus approved records, plus counted credits.
-
-    Read-only: safe inside a READ ONLY transaction. Unlabelled credits are left
-    out here and reported by alert_unlabelled_credits on a write path.
-    """
+def rank_activity(user, state, *, with_details=False):
+    """Yield each signed change to the level total after the historical opening."""
     from .models import VolunteerRecognition
 
+    cutoff = state.historical_ledger_cutoff
+    records = VolunteerRecognition.objects.filter(community=community_id(), user=user)
+    approved = records.filter(status="approved").filter(
+        Q(ledger_id__gt=cutoff) | Q(ledger__isnull=True)
+    )
+    corrections = records.filter(status="reversed", ledger_id__lte=cutoff)
+    if with_details:
+        approved = approved.select_related("opportunity", "ledger")
+        corrections = corrections.select_related("opportunity")
+    for record in approved:
+        yield "contribution", record, recognition_level_microroo(record)
+    for record in corrections:
+        yield "correction", record, -recognition_level_microroo(record)
+    for ledger in _later_credits(user, state):
+        if classify(ledger)[0] == COUNTS:
+            yield "ledger", ledger, ledger_amount(ledger)
+
+
+def one_record_total(user, state):
+    """Return the reconciled level total without changing wallet or ledger data."""
     opening = opening_microroo(user, state)
     if opening is None:
         return None
-    cutoff = state.historical_ledger_cutoff
-    records = VolunteerRecognition.objects.filter(community=community_id(), user=user)
-    total = sum(
-        recognition_level_microroo(record)
-        for record in records.filter(status="approved").filter(
-            Q(ledger_id__gt=cutoff) | Q(ledger__isnull=True)
-        )
-    )
-    # A reversal of work inside the opening takes off what counted toward level.
-    reversed_opening = sum(
-        recognition_level_microroo(record)
-        for record in records.filter(status="reversed", ledger_id__lte=cutoff)
-    )
-    counted = sum(
-        ledger_amount(ledger)
-        for ledger in _later_credits(user, state)
-        if classify(ledger)[0] == COUNTS
-    )
-    return max(0, opening + total + counted - reversed_opening)
+    return max(0, opening + sum(amount for _, _, amount in rank_activity(user, state)))
 
 
 def alert_unlabelled_credits(user, state):
@@ -276,7 +276,7 @@ def record_wallet_credit(ledger):
         ),
     )
     if created:
-        award_milestones(user, record)
+        award_milestones(user, record, new_contribution=False)
     return record
 
 

@@ -60,6 +60,7 @@ class FrozenPrepareContextTests(SimpleTestCase):
         commit = Mock(status_code=200)
         commit.json.return_value = {"sha": website.verified_sha}
         with ExitStack() as stack:
+            stack.enter_context(patch("founder_tools.membership.companies_for_user", return_value=context.profile.companies))
             # All seams below load/store records, call providers, or contact the
             # cache. The frozen context, journey loader/projector, dispatcher,
             # request builder and guarded owner view execute their real code.
@@ -531,3 +532,163 @@ class PrepareJourneyReplayTests(SimpleTestCase):
             with self.subTest(changed=changed), patch("workflow_runs.models.ContentFactoryRun.objects.filter") as rows:
                 rows.return_value.first.return_value = SimpleNamespace(**{**valid, **changed})
                 self.assertIsNone(prepare._selected_setup_child(self.op, self.config))
+
+
+class SourceChangedRepinTests(SimpleTestCase):
+    """A11: a moved head re-reads the current source instead of stopping (MLAI's own site, 18 Nov 2026)."""
+
+    def setUp(self):
+        self.replay = PrepareJourneyReplayTests()
+        self.replay.setUp()
+        self.op = self.replay.op
+        self.op.payload.update(attempt=1)
+        self.op.receipt = {"scan_run_id": "old-scan", "setup_run_id": "old-setup", "completed_steps": ["scan"]}
+
+    def moved(self):
+        from .website_contract import WebsiteAuthorityError
+        return Mock(side_effect=WebsiteAuthorityError("website_source_changed",
+            "The repository changed since this verification. Verify the current source again."))
+
+    def test_the_backend_lower_case_code_restarts_from_a_fresh_scan(self):
+        self.replay.advance({"setup": self.moved()})
+        self.assertEqual(self.op.state, "pending")
+        self.assertIsNotNone(self.op.next_attempt_at)
+        self.assertTrue(self.op.payload["source_reverify"])
+        self.assertEqual(self.op.payload["attempt"], 2)
+        self.assertEqual(self.op.receipt["current_step"], "scan")
+        self.assertEqual(self.op.receipt["failure_class"], "waiting")
+        self.assertEqual(self.op.receipt["source_repins"], 1)
+        for stale in ("scan_run_id", "setup_run_id", "completed_steps"):
+            self.assertNotIn(stale, self.op.receipt)
+        self.assertIsNone(self.op.receipt["user_action"])
+
+    def test_the_worker_upper_case_code_from_a_setup_child_re_pins_and_queues_its_cleanup(self):
+        self.op.receipt = {"child_run_id": "refused-setup", "current_step": "setup", "scan_run_id": "old-scan"}
+        child = SimpleNamespace(run_id="refused-setup", status="failed", workflow="article_system_setup",
+            error="The repository changed.", result={"error_code": "SOURCE_CHANGED", "retryable": False})
+        with patch.object(prepare, "_queue_superseded_setup_cleanup") as cleanup:
+            self.replay.advance({"setup": Mock()}, child)
+        cleanup.assert_called_once()
+        self.assertEqual(self.op.state, "pending")
+        self.assertEqual(self.op.receipt["current_step"], "scan")
+        self.assertNotIn("scan_run_id", self.op.receipt)
+
+    def test_a_still_running_child_is_never_doubled_by_a_re_pin(self):
+        from .website_contract import WebsiteAuthorityError
+        self.op.receipt = {"child_run_id": "running-setup", "current_step": "setup", "scan_run_id": "old-scan"}
+        running = SimpleNamespace(run_id="running-setup", status="running", workflow="article_system_setup")
+        with patch("workflow_runs.models.ContentFactoryRun.objects.filter",
+                return_value=SimpleNamespace(first=lambda: running)), \
+                patch.object(prepare, "_queue_superseded_setup_cleanup") as cleanup:
+            prepare.prepare_failure(self.op, "setup", WebsiteAuthorityError("website_source_changed", "Moved."))
+        cleanup.assert_not_called()
+        self.assertNotIn("source_repins", self.op.receipt)
+        self.assertEqual(self.op.receipt["scan_run_id"], "old-scan")
+        self.assertNotEqual(self.op.state, "pending")
+
+    def test_re_pins_are_bounded_then_try_again_restarts_from_a_fresh_scan(self):
+        for repin in range(1, prepare.SOURCE_REPIN_LIMIT + 1):
+            self.op.receipt["scan_run_id"] = "stale-scan"
+            self.replay.advance({"setup": self.moved(), "scan": self.moved()})
+            self.assertEqual((self.op.state, self.op.receipt["source_repins"]), ("pending", repin))
+        self.op.receipt["scan_run_id"] = "stale-scan"
+        self.replay.advance({"setup": self.moved(), "scan": self.moved()})
+        self.assertEqual(self.op.state, "needs_attention")
+        self.assertEqual(self.op.receipt["reason_code"], "website_source_changed")
+        self.assertEqual(self.op.receipt["user_action"]["id"], "retry")
+        # "Try again" must not replay the stale scan id.
+        with patch.object(prepare, "authority_guard", return_value=nullcontext(self.op.connection)), \
+                patch.object(prepare.WebsiteConnectionOperation.objects, "get_or_create", return_value=(self.op, False)), \
+                patch.object(prepare.WebsiteConnectionOperation.objects, "filter",
+                    return_value=FrozenPrepareContextTests.rows(first=None)), \
+                patch("workflow_runs.models.ContentFactoryRun.objects.filter", return_value=[]):
+            prepare.start_prepare(self.replay.config, expected={}, retry=True)
+        self.assertEqual(self.op.state, "pending")
+        self.assertTrue(self.op.payload["source_reverify"])
+        self.assertEqual(self.op.receipt["current_step"], "scan")
+        self.assertNotIn("scan_run_id", self.op.receipt)
+        self.assertNotIn("source_repins", self.op.receipt)
+
+    def test_a_goal_owned_preparation_is_left_to_the_goal_runner(self):
+        from .website_contract import WebsiteAuthorityError
+        self.op.receipt = {"goal": {"goal_id": "g"}, "scan_run_id": "old-scan"}
+        prepare.prepare_failure(self.op, "setup", WebsiteAuthorityError("website_source_changed", "Moved."))
+        self.assertNotEqual(self.op.receipt.get("failure_class"), "waiting")
+        self.assertNotIn("source_repins", self.op.receipt)
+
+
+class AmbiguousPageChoiceTests(SimpleTestCase):
+    """A9 / D3: an ambiguous scan never parks a founder on an ask their journey does not show."""
+
+    def setUp(self):
+        self.replay = PrepareJourneyReplayTests()
+        self.replay.setUp()
+        self.op = self.replay.op
+        self.replay.facts["resolution"] = {"existence_state": "ambiguous", "ranked_candidates": {"listing_surface_candidates": [
+            {"route": "/stories"}, {"metadata": {"route_path": "/news"}}]}}
+
+    def advance(self, *, new_journey):
+        captured = []
+        with patch("content_factory.founder_journey_cohort.is_new_journey", return_value=new_journey):
+            self.replay.advance({"setup": self.replay.setup_handler(captured)})
+        return captured
+
+    def assert_dispatched_with_choice(self, captured):
+        self.assertNotEqual(self.op.state, "needs_user")
+        self.assertEqual((captured[0]["article_surface_mode"], captured[0]["article_surface_url"]), ("existing", "/stories"))
+        self.assertEqual(self.op.receipt["setup_run_id"], "setup-child")
+        self.assertEqual(self.op.receipt["article_page_choice"], {"version": 1, "chosen_by": "mlai", "mode": "existing",
+            "route": "/stories", "alternatives": ["/news"], "reason": "first_candidate", "changeable": True})
+
+    def test_new_journey_org_gets_a_setup_dispatch_not_a_silent_ask(self):
+        """Lilia Daily Planner (org 209): waiting on a page choice the new journey never showed, since 9 Nov."""
+        self.assert_dispatched_with_choice(self.advance(new_journey=True))
+
+    def test_legacy_org_with_auto_page_on_gets_a_setup_dispatch(self):
+        from django.test import override_settings
+        with override_settings(ARTICLES_AUTO_PAGE_ENABLED=True):
+            self.assert_dispatched_with_choice(self.advance(new_journey=False))
+
+    def test_legacy_org_with_auto_page_off_keeps_the_ask_its_cards_render(self):
+        self.advance(new_journey=False)
+        self.assertEqual(self.op.state, "needs_user")
+        self.assertEqual(self.op.receipt["user_action"], {"id": "choose_articles_page", "candidates": ["/stories", "/news"]})
+
+    def test_recorded_consent_to_pick_is_never_overridden(self):
+        from django.test import override_settings
+        journey = self.replay.journey()
+        organization = SimpleNamespace(pk=7)
+        for auto_page in (False, True):
+            for new_journey in (False, True):
+                with self.subTest(auto_page=auto_page, new_journey=new_journey), \
+                        override_settings(ARTICLES_AUTO_PAGE_ENABLED=auto_page), \
+                        patch("content_factory.founder_journey_cohort.is_new_journey", return_value=new_journey), \
+                        self.assertRaises(prepare.WebsiteAuthorityError) as raised:
+                    prepare._setup_surface(self.replay.config, journey, organization=organization,
+                        goal={"consent": {"answers": {"page_policy": "pick"}}})
+                self.assertEqual(raised.exception.code, "articles_page_choice_required")
+                self.assertEqual(raised.exception.user_action["id"], "choose_articles_page")
+                self.assertEqual(sorted(raised.exception.user_action["candidates"]), ["/news", "/stories"])
+
+    def test_a_listing_the_scan_prefers_is_the_one_picked(self):
+        self.replay.facts["resolution"]["listing_surface"] = {"route": "/news"}
+        choice = {}
+        with patch("content_factory.founder_journey_cohort.is_new_journey", return_value=True):
+            picked = prepare._setup_surface(self.replay.config, self.replay.journey(),
+                organization=SimpleNamespace(pk=7), choice=choice)
+        self.assertEqual(picked, ("existing", "/news"))
+        self.assertEqual((choice["alternatives"], choice["reason"]), (["/stories"], "preferred_listing"))
+
+    def test_the_new_journey_ask_for_a_page_stays_retired_only_where_a_pick_was_recorded(self):
+        """Invariant over RETIRED_ACTIONS: the page-choice emitter only raises it under recorded consent."""
+        from .founder_journey import RETIRED_ACTIONS
+        self.assertIn("choose_articles_page", RETIRED_ACTIONS)
+        organization = SimpleNamespace(pk=7)
+        resolutions = ({"existence_state": "ambiguous", "listing_surface_candidates": [{"route": f"/r{index}"} for index in range(count)]}
+            for count in range(0, 5))
+        for resolution in resolutions:
+            self.replay.facts["resolution"] = resolution
+            with self.subTest(resolution=resolution), \
+                    patch("content_factory.founder_journey_cohort.is_new_journey", return_value=True):
+                mode, route = prepare._setup_surface(self.replay.config, self.replay.journey(), organization=organization)
+                self.assertIn(mode, {"existing", "none"})

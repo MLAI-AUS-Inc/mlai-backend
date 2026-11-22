@@ -83,6 +83,7 @@ cookies.txt
 !/docs/crm-deliverability-phase-3-existing-migrations.json
 !/docs/studio-report-source.md
 !/docs/crm.md
+!/docs/mlai-arcade.md
 !/docs/system-email.md
 !/docs/roo-event-discounts.md
 !/docs/roo-event-discount-migration-proposal.md
@@ -288,3 +289,6 @@ medhack_backend/hospital/Eval_Labels.csv
 
 # Maintained Vibe Security phased purchase and settlement contract.
 !/docs/cybertest-two-phase.md
+
+# Dedicated Roo Points worker signing key
+.roo-points-worker.env

@@ -99,9 +99,9 @@ against production as part of this refactor.
 
 ## Python dependencies
 
-Python 3.11 is the supported runtime. Both requirements source files resolve into
+Python 3.11.5 is the minimum supported runtime in the 3.11 series. Both requirements source files resolve into
 [`requirements.lock`](../requirements.lock), installed with hash verification
-by CI and Docker. The framework target is Django 5.2.17 with DRF 3.16.1 and
+by CI and Docker. The framework target is Django 5.2.17 with DRF 3.18.2 and
 SimpleJWT 5.5.1. The psycopg binary distribution avoids an implicit dependency on
 a machine's locally installed libpq for Python imports.
 
@@ -113,7 +113,7 @@ hashed Django Admin and DRF assets before any deployment or migration starts.
 Regenerate the lock after intentionally editing either requirements input:
 
 ```sh
-env -u UV_INDEX_URL -u UV_EXTRA_INDEX_URL uv --no-config pip compile requirements.txt requirements-engine.txt --python-version 3.11 --universal --generate-hashes --no-emit-index-url --default-index https://pypi.org/simple --output-file requirements.lock
+env -u UV_INDEX_URL -u UV_EXTRA_INDEX_URL uv --no-config pip compile requirements.txt requirements-engine.txt --python-version 3.11.5 --universal --generate-hashes --no-emit-index-url --default-index https://pypi.org/simple --output-file requirements.lock
 python scripts/check_dependency_lock.py --record-inputs
 python scripts/check_dependency_lock.py
 ```
@@ -142,6 +142,49 @@ Tests requiring their own standalone settings should use their documented
 runner, as the editorial unit lane does. Database-backed tests still require
 specific migration approval before local execution.
 
+## CI test databases
+
+Every database lane in `.github/workflows/deploy.yml` sets
+`MLAI_TEST_DATABASE_TEMPLATE`, which selects `mlai/test_runner.py`. The first
+`manage.py test` command in a job applies the whole migration chain and saves a
+copy; each later command starts from that copy and still runs Django's own
+keep-database setup. SQLite keeps the copy as a private file and loads it into
+the in-memory test database. PostgreSQL keeps it as a template database. The
+copy is keyed on the migration files, the installed apps and the Django
+version. That key does not cover project code that migrations import, which
+cannot change within one CI job but can between two local runs, so leave the
+variable unset locally to keep Django's default runner. A command that selects
+no database test neither loads nor saves a copy.
+
+The `postgres-search` and `migration-tests` lanes hold the PostgreSQL data
+directory in memory, because emptying every table after each
+`TransactionTestCase` was bound by disk syncs. Their first step checkpoints
+often, since each emptied table leaves an empty file until the next checkpoint
+and an in-memory filesystem holds a limited number of files. The option and the
+step belong together. `p2-performance` keeps a disk-backed database so its
+timed tick is measured as before.
+
+`Run migration tests` passes `--parallel=auto`, because those tests spend their
+time planning migrations in Python on one core. Each worker runs whole test
+classes against its own clone of the migrated database. The job installs
+`tblib` from `.github/requirements-ci.lock` first, which Django needs to carry a
+failure's traceback back from a worker. The other commands stay serial: several
+of their suites depend on timing.
+
+The six Slack founder-link migration classes carry `@tag("postgres-only")`,
+like some other PostgreSQL-specific tests. The main SQLite regression command
+is the only one that excludes that tag, and the `migration-tests` lane selects
+the six classes by name. Production runs PostgreSQL only. A contract test fails
+when a class or method with that tag is not selected by a PostgreSQL command,
+so a newly tagged test cannot drop out of every lane unnoticed.
+
+Each pull request has its own run group, where a later run cancels the one in
+progress: normally a newer push replacing the commit before it. A run in
+progress on `main` or a manual release is never cancelled; a run still waiting
+for its turn there gives way to a newer one, as before. A main push reuses only
+a fully successful run on the pull request's final commit, so a cancelled run
+is never read, and a main push that finds no such run runs every lane.
+
 The proposed [26 September disposable-test inventory](refactor-release-test-migrations-2026-09-26.json)
 is enforced by `scripts/test_refactor_database.py`. The harness requires recorded
 approval, an exact file set and SHA-256 match (including the new migrations), and
@@ -158,3 +201,14 @@ compatibility, and verifies the final merge leaves both editorial content and
 encrypted credentials intact. Run the two modes in separate invocations. The
 harness rejects existing database URLs and removes its database files after
 stopping the cluster. This remains scoped test approval, not production approval.
+
+## Legacy profile avatar uploads
+
+The authenticated `PATCH /api/v1/auth/update-profile/` and
+`PATCH /api/v1/auth/update_user/` endpoints accept multipart `avatar` and
+`team_avatar` fields. Team uploads still require membership in the eligible
+team for the requested app. Each image must be at most 10 MiB, 24 million
+pixels and 8,192 pixels on either side. The stored derivative fits within
+300 × 300 pixels. Rejected images return HTTP 400 with `error` and `field`.
+Storage failures return HTTP 503 with the same fields. A failed avatar request
+leaves the saved profile and avatar URLs unchanged.

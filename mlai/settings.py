@@ -405,6 +405,12 @@ DATABASES = {
     'default': default_config
 }
 
+# CI jobs reuse one migrated test database per job instead of applying the
+# whole migration chain for every `manage.py test` call. See
+# mlai/test_runner.py; unset keeps Django's default runner.
+if os.getenv('MLAI_TEST_DATABASE_TEMPLATE'):
+    TEST_RUNNER = 'mlai.test_runner.TemplateDatabaseRunner'
+
 
 # Watt Unity session tickets must be shared across gunicorn workers: the request that MINTS a ticket
 # (unity-sessions/current/) and the one that REDEEMS it (redeem-ticket/) are typically served by
@@ -555,6 +561,10 @@ REST_FRAMEWORK = {
         'my_startup_read': os.getenv('MY_STARTUP_READ_RATE', '120/minute'),
         'my_startup_poll': os.getenv('MY_STARTUP_POLL_RATE', '120/minute'),
         'my_startup_write': os.getenv('MY_STARTUP_WRITE_RATE', '30/minute'),
+        # Plan E1: each uncached website preflight fetches a homepage and may
+        # try a few close spellings, so it has its own per-account budget.
+        'founder_website_preflight': os.getenv('FOUNDER_WEBSITE_PREFLIGHT_RATE', '20/minute'),
+        'community_chat_roo_points_mute': '120/minute',
         'community_chat_upcoming_events': os.getenv('COMMUNITY_CHAT_UPCOMING_EVENTS_RATE', '60/minute'),
         'community_chat_challenge': os.getenv('COMMUNITY_CHAT_CHALLENGE_RATE', '20/minute'),
         'community_chat_invite': os.getenv('COMMUNITY_CHAT_INVITE_RATE', '10/minute'),
@@ -590,6 +600,8 @@ COMMUNITY_CHAT_VOLUNTEER_AWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER
 COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ADVICE_REWARDS_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_INTRO_REWARDS_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM = os.getenv('COMMUNITY_CHAT_VOLUNTEER_INTRO_ACTIVE_FROM', '')
+# Roo's Slack thread welcome after an MLAI Chat intro is rewarded (community_chat/intro_welcome.py).
+COMMUNITY_CHAT_INTRO_WELCOME_ENABLED = _env_is_true('COMMUNITY_CHAT_INTRO_WELCOME_ENABLED', True)
 COMMUNITY_CHAT_VOLUNTEER_BOOST_REWARDS_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_BOOST_REWARDS_ENABLED', False)
 COMMUNITY_CHAT_VOLUNTEER_BOOST_ACTIVE_FROM = os.getenv('COMMUNITY_CHAT_VOLUNTEER_BOOST_ACTIVE_FROM', '')
 COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_BONUSES_ENABLED', False)
@@ -597,6 +609,9 @@ COMMUNITY_CHAT_VOLUNTEER_ATTENDANCE_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUN
 # One record per contribution: labelled wallet credits, opening entries and a
 # stored level (volunteer build step 2). Off until the back-fill is ready.
 COMMUNITY_CHAT_VOLUNTEER_ONE_RECORD_ENABLED = _env_is_true('COMMUNITY_CHAT_VOLUNTEER_ONE_RECORD_ENABLED', False)
+COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED = _env_is_true(
+    'COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED', True
+)
 COMMUNITY_CHAT_VOLUNTEER_COMMUNITY = os.getenv('COMMUNITY_CHAT_VOLUNTEER_COMMUNITY', '')
 COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM = os.getenv('COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM', '')
 COMMUNITY_CHAT_VOLUNTEER_RECEIPT_TOKEN = os.getenv('COMMUNITY_CHAT_VOLUNTEER_RECEIPT_TOKEN', '')
@@ -671,6 +686,8 @@ COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION = os.getenv(
     'COMMUNITY_CHAT_MEMBERSHIP_POLICY_VERSION', '2026-09-21'
 )
 
+MLAI_LEGACY_EMAIL_MAGIC_LINKS_ENABLED = _env_is_true("MLAI_LEGACY_EMAIL_MAGIC_LINKS_ENABLED", True)
+COMMUNITY_CHAT_EMAIL_CHANGE_ENABLED = _env_is_true("COMMUNITY_CHAT_EMAIL_CHANGE_ENABLED", False)
 COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED = _env_is_true(
     'COMMUNITY_CHAT_EMAIL_CODE_AUTH_ENABLED',
     True,
@@ -733,8 +750,25 @@ MEETING_ROOM_BOOKING_ENABLED = _env_is_true(
 MENTOR_BOOKING_ENABLED = _env_is_true('MENTOR_BOOKING_ENABLED', False)
 # Independent admission flag: existing request clients never charge implicitly.
 MENTOR_INSTANT_BOOKING_ENABLED = _env_is_true('MENTOR_INSTANT_BOOKING_ENABLED', False)
+# Mentoring admin emails mentor invites (system_email, Resend) instead of only
+# showing a one-time link. Off: the admin screens behave exactly as before.
+MENTOR_INVITE_EMAIL_ENABLED = _env_is_true('MENTOR_INVITE_EMAIL_ENABLED', False)
+MENTOR_INVITE_EXPLAINER_URL = os.getenv('MENTOR_INVITE_EXPLAINER_URL', 'https://mlai.au/mentors').strip()
 MENTOR_REQUEST_TTL_HOURS = int(os.getenv('MENTOR_REQUEST_TTL_HOURS', '48'))
 MENTOR_AUTO_COMPLETE_HOURS = int(os.getenv('MENTOR_AUTO_COMPLETE_HOURS', '24'))
+# Post-session feedback: an email and a Roo Slack DM to the founder a few minutes
+# after a session's booked end, with three faces. Off by default, and the runner
+# also refuses to run until MENTOR_FEEDBACK_NOT_BEFORE is set (ISO time), so
+# switching it on never asks about older sessions. See docs/mentoring.md.
+MENTOR_FEEDBACK_ENABLED = _env_is_true('MENTOR_FEEDBACK_ENABLED', False)
+MENTOR_FEEDBACK_NOT_BEFORE = os.getenv('MENTOR_FEEDBACK_NOT_BEFORE', '').strip()
+MENTOR_FEEDBACK_CHANNELS = os.getenv('MENTOR_FEEDBACK_CHANNELS', 'email,slack').strip()
+MENTOR_FEEDBACK_DELAY_MINUTES = int(os.getenv('MENTOR_FEEDBACK_DELAY_MINUTES', '5'))
+MENTOR_FEEDBACK_MAX_AGE_HOURS = int(os.getenv('MENTOR_FEEDBACK_MAX_AGE_HOURS', '24'))
+MENTOR_FEEDBACK_MAX_PER_TICK = int(os.getenv('MENTOR_FEEDBACK_MAX_PER_TICK', '20'))
+MENTOR_FEEDBACK_TOKEN_DAYS = int(os.getenv('MENTOR_FEEDBACK_TOKEN_DAYS', '30'))
+# Slack channel id for "Not great" and "Session didn't happen" alerts. Unset: no alerts.
+MENTOR_FEEDBACK_ALERT_CHANNEL = os.getenv('MENTOR_FEEDBACK_ALERT_CHANNEL', '').strip()
 # Google Meet links and free/busy for mentoring, through one MLAI-owned free
 # Google account. Off by default; secrets come only from the environment.
 MENTORING_GOOGLE_ENABLED = _env_is_true('MENTORING_GOOGLE_ENABLED', False)
@@ -1111,6 +1145,12 @@ STUDIO_REPORT_SOURCE_CONFIG = os.getenv('STUDIO_REPORT_SOURCE_CONFIG', '')
 ROO_EVENT_DISCOUNTS_ENABLED = _env_is_true('ROO_EVENT_DISCOUNTS_ENABLED', False)
 ROO_EVENT_DISCOUNT_WORKER_ENABLED = _env_is_true('ROO_EVENT_DISCOUNT_WORKER_ENABLED', False)
 ROO_EVENT_DISCOUNTS_SLACK_TEAM_ID = os.getenv('ROO_EVENT_DISCOUNTS_SLACK_TEAM_ID', '').strip()
+# Member perks on every eligible MLAI-hosted Luma event, priced from the ticket:
+# off (hand-made offers only), test (ROO_EVENT_PERKS_TEST_EVENT_IDS, staff only), on.
+ROO_EVENT_PERKS_AUTO = os.getenv('ROO_EVENT_PERKS_AUTO', 'off').strip().lower()
+ROO_EVENT_PERKS_TEST_EVENT_IDS = tuple(
+    value.strip() for value in os.getenv('ROO_EVENT_PERKS_TEST_EVENT_IDS', '').split(',') if value.strip()
+)
 # Additional report-only access for verified Roo requests in one shared chat.
 COWORKING_REPORT_SLACK_TEAM_ID = os.getenv('COWORKING_REPORT_SLACK_TEAM_ID', '').strip()
 COWORKING_REPORT_SLACK_CHANNEL_ID = os.getenv('COWORKING_REPORT_SLACK_CHANNEL_ID', '').strip()
@@ -1201,8 +1241,20 @@ CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID = os.getenv('CONTENT_FACTORY_OPS_SLACK_CHAN
 # bounds run/company created_at. The default replays every stuck run and startup
 # since 29 Sep at MAX_PER_TICK a minute; set SINCE to the flip date to start clean.
 ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_ENABLED', 'false').lower() == 'true'
+# Founder-proof plan workstream 6: a hosted quality hold staff own is projected
+# to founders as retryable=false, so no "Check again" is offered beside
+# "We're fixing this". Default off keeps today's founder payload.
+ARTICLES_HONEST_RETRY_STATUS_ENABLED = os.getenv('ARTICLES_HONEST_RETRY_STATUS_ENABLED', 'false').lower() == 'true'
 ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE = os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_SINCE', '2026-09-29').strip()
 ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK = int(os.getenv('ARTICLES_FOUNDER_JOURNEY_ALERTS_MAX_PER_TICK', '20'))
+# Workstream 5 (content_factory/staff_hold_alerts.py): one ops Slack post when an
+# article's final check is held for staff, with the run, the startup and the top
+# three finding codes, and one more if it is still held 24 hours later.
+ARTICLES_STAFF_HOLD_ALERTS_ENABLED = os.getenv('ARTICLES_STAFF_HOLD_ALERTS_ENABLED', 'false').lower() == 'true'
+# Workstream 5 (content_factory/author_bio_check.py): saving an author profile
+# checks the bio against the site's About page text and returns the phrases it
+# could not find there as a warning. It never blocks the save.
+ARTICLES_AUTHOR_BIO_CHECK_ENABLED = os.getenv('ARTICLES_AUTHOR_BIO_CHECK_ENABLED', 'false').lower() == 'true'
 # One "founder stuck" alert for every cohort (content_factory/founder_stuck_alerts.py):
 # a stopped website setup, a website step retrying for too long, or a latest article
 # run stopped with no next action. A kill switch that defaults on; the sweep runs at
@@ -1331,6 +1383,16 @@ CRM_WHATSAPP_COST_PER_MESSAGE_AUD = (
 CRM_SMS_DAILY_LIMIT = max(0, int(os.getenv('CRM_SMS_DAILY_LIMIT', '500')))
 CRM_WHATSAPP_DAILY_LIMIT = max(0, int(os.getenv('CRM_WHATSAPP_DAILY_LIMIT', '500')))
 CRM_TWILIO_SENDS_PER_TICK = max(1, int(os.getenv('CRM_TWILIO_SENDS_PER_TICK', '200')))
+# Founder daily research (content_factory ResearchAutomation). All default on;
+# each is a kill switch for one part of the founder self-serve flow.
+# GENERATION_READY_GATE: the toggle unlocks once the scans pass and the
+# articles page is ready to generate (off: the older "setup PR merged" also
+# counts). EMAIL_TOPICS: email channels receive the daily topic shortlist,
+# not only draft-ready notices. BILL_WITHOUT_SLACK: a founder with no linked
+# Slack id is charged through their MLAI account actor id (mlai_user:<id>).
+DAILY_RESEARCH_GENERATION_READY_GATE_ENABLED = _env_is_true('DAILY_RESEARCH_GENERATION_READY_GATE_ENABLED', True)
+DAILY_RESEARCH_EMAIL_TOPICS_ENABLED = _env_is_true('DAILY_RESEARCH_EMAIL_TOPICS_ENABLED', True)
+DAILY_RESEARCH_BILL_WITHOUT_SLACK_ENABLED = _env_is_true('DAILY_RESEARCH_BILL_WITHOUT_SLACK_ENABLED', True)
 NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS = int(
     os.getenv('NOTIFICATION_CHANNEL_VERIFY_MAX_AGE_SECONDS', str(3 * 24 * 60 * 60))
 )
@@ -2454,11 +2516,19 @@ COMMUNITY_CHAT_ROO_PUBLIC_KEY = os.getenv("COMMUNITY_CHAT_ROO_PUBLIC_KEY", "")
 COMMUNITY_CHAT_AI_DISCLOSURE_VERSION = os.getenv("COMMUNITY_CHAT_AI_DISCLOSURE_VERSION", "")
 COMMUNITY_CHAT_AI_PROVIDERS = json.loads(os.getenv("COMMUNITY_CHAT_AI_PROVIDERS", "[]"))
 COMMUNITY_CHAT_AI_CONSENT_REQUIRED = _env_is_true("COMMUNITY_CHAT_AI_CONSENT_REQUIRED", True)
+# Post "X is booked in for coworking today" after a Chat booking (best effort).
+COMMUNITY_CHAT_COWORKING_ANNOUNCE_ENABLED = _env_is_true("COMMUNITY_CHAT_COWORKING_ANNOUNCE_ENABLED", True)
 COMMUNITY_CHAT_DELETION_TIMEFRAME = os.getenv("COMMUNITY_CHAT_DELETION_TIMEFRAME", "")
 COMMUNITY_CHAT_DELETION_CONTACT = os.getenv("COMMUNITY_CHAT_DELETION_CONTACT", "")
+COMMUNITY_CHAT_ACCOUNT_DELETION_WORKER_ENABLED = _env_is_true("COMMUNITY_CHAT_ACCOUNT_DELETION_WORKER_ENABLED", False)
+COMMUNITY_CHAT_ACCOUNT_DELETION_NOTICE_ENABLED = _env_is_true(
+    "COMMUNITY_CHAT_ACCOUNT_DELETION_NOTICE_ENABLED", False,
+)
 # Public Roo's identity verified in the MLAI Slack workspace. Empty values pause
 # the first-party DM connection; no other bot is enabled by this setting.
 COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_WORKSPACE_ID", "T05N9C1QSJC")
+ROO_MANUAL_TIME_ENABLED = _env_is_true("ROO_MANUAL_TIME_ENABLED", False)
+ROO_POINTS_LEVEL_UP_ENABLED = _env_is_true("ROO_POINTS_LEVEL_UP_ENABLED", False)
 ROO_LINK_LOVE_SLACK_CHANNEL_ID = os.getenv("ROO_LINK_LOVE_SLACK_CHANNEL_ID", "C09BQAWJ66R")
 COMMUNITY_CHAT_ROO_SLACK_USER_ID = os.getenv("COMMUNITY_CHAT_ROO_SLACK_USER_ID", "U090FV0GTT4")
 # Personal agent bots (for example an OpenAI dot installed through OpenAI's own
@@ -2554,7 +2624,11 @@ AGENT_RUNTIME_DOT_ACCOUNTS_ENABLED = _env_is_true("AGENT_RUNTIME_DOT_ACCOUNTS_EN
 AGENT_RUNTIME_DOT_MEMBERS_ENABLED = _env_is_true("AGENT_RUNTIME_DOT_MEMBERS_ENABLED", False)
 AGENT_RUNTIME_DOT_MESSAGING_ENABLED = _env_is_true("AGENT_RUNTIME_DOT_MESSAGING_ENABLED", False)
 MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED = _env_is_true("MLAI_MCP_AGENT_GRANT_EXTENSION_ENABLED", False)
-MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS = _native_bounded_int("MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS", 0, 0, 300)
+# A refresh retried within this window (a lost response, two parallel refreshes)
+# receives the tokens already issued instead of ending the connection. 0 disables.
+MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS = _native_bounded_int("MLAI_MCP_REFRESH_REPLAY_GRACE_SECONDS", 60, 0, 300)
+# A startup AI connection ends after this many days without a token refresh.
+MLAI_MCP_GRANT_IDLE_TTL_DAYS = _native_bounded_int("MLAI_MCP_GRANT_IDLE_TTL_DAYS", 180, 1, 730)
 AGENT_RUNTIME_SLACK_WORKSPACES = _env_list("AGENT_RUNTIME_SLACK_WORKSPACES", [])
 AGENT_RUNTIME_SLACK_CHANNEL_IDS = _env_list("AGENT_RUNTIME_SLACK_CHANNEL_IDS", [])
 AGENT_RUNTIME_WORKER_KEY = os.getenv("AGENT_RUNTIME_WORKER_KEY", "")
@@ -2665,6 +2739,11 @@ MY_STARTUP_FOUNDER_JOURNEY_V2_LAUNCHED_AT = os.getenv("MY_STARTUP_FOUNDER_JOURNE
 MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS = os.getenv("MY_STARTUP_FOUNDER_JOURNEY_V2_DISABLED_ORGANIZATIONS", "").strip()
 MY_STARTUP_FOUNDER_JOURNEY_API_ENABLED = _env_is_true("MY_STARTUP_FOUNDER_JOURNEY_API_ENABLED", False)
 MY_STARTUP_FOUNDER_JOURNEY_OPT_IN_ENABLED = _env_is_true("MY_STARTUP_FOUNDER_JOURNEY_OPT_IN_ENABLED", False)
+# Plan E11, decision D14: the owner's go-ahead for the one-off re-engagement
+# email. founder_reengagement_report refuses --send without it and is still a
+# dry run with it. Set it only for the one ops shell that runs the command,
+# never as a deploy variable.
+FOUNDER_REENGAGEMENT_SEND_APPROVED = _env_is_true("FOUNDER_REENGAGEMENT_SEND_APPROVED", False)
 COMMUNITY_CHAT_ONE_STEP_JOIN_ENABLED = _env_is_true("COMMUNITY_CHAT_ONE_STEP_JOIN_ENABLED", False)
 COMMUNITY_CHAT_INVITE_TOKENS_ENABLED = _env_is_true("COMMUNITY_CHAT_INVITE_TOKENS_ENABLED", False)
 MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED = _env_is_true("MY_STARTUP_PENDING_MEMBER_ACCESS_ENABLED", False)
@@ -2672,6 +2751,12 @@ COMMUNITY_CHAT_REVIEW_CLEARED_EMAIL_ENABLED = _env_is_true("COMMUNITY_CHAT_REVIE
 COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED = _env_is_true("COMMUNITY_CHAT_DEVICE_AUTH_V2_ENABLED", False)
 MY_STARTUP_ONE_FIELD_START_ENABLED = _env_is_true("MY_STARTUP_ONE_FIELD_START_ENABLED", False)
 MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED = _env_is_true("MY_STARTUP_NO_WEBSITE_ARTICLES_ENABLED", False)
+# New startup onboarding (v3): a "Check your details" step and the journey's
+# ``onboarding`` block, sent only to clients that ask with ``?onboarding=3``.
+MY_STARTUP_ONBOARDING_V3_ENABLED = _env_is_true("MY_STARTUP_ONBOARDING_V3_ENABLED", False)
+# Startups created at or after this ISO time (with an offset) are asked to
+# confirm their details; older ones only when they have no one-liner.
+MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT = os.getenv("MY_STARTUP_ONBOARDING_V3_LAUNCHED_AT", "").strip()
 ARTICLES_FIRST_ARTICLE_CARD_ENABLED = _env_is_true("ARTICLES_FIRST_ARTICLE_CARD_ENABLED", False)
 # Guided GitHub-first onboarding: a new-journey startup writes its first article
 # only once its website is connected through GitHub with a verified articles page.
@@ -2703,6 +2788,78 @@ REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["community_chat_invite_resolve"] = COMM
 MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED = _env_is_true("MY_STARTUP_ARTICLE_IMPROVEMENTS_ENABLED", False)
 MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_CHECKS_BACKGROUND_ENABLED", False)
 
+# Startup shared access and email invites (held until their security sign-off).
+# Kept outside the P2 block, which lists only P2 cohort switches.
+MY_STARTUP_SHARED_ACCESS_ENABLED = _env_is_true("MY_STARTUP_SHARED_ACCESS_ENABLED", False)
+MY_STARTUP_EMAIL_INVITES_ENABLED = _env_is_true("MY_STARTUP_EMAIL_INVITES_ENABLED", False)
+
+# Kill switch, default on (plan step A8): the owner's Restart moves an article's
+# stored customer profile choice to the profile's newer approved version
+# instead of refusing it as an invalid brief. Never across a retired, draft or
+# unreceipted profile, a withdrawn no-offer permission or a changed offer.
+# Content Factory's CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK is the paired
+# switch that lets an admitted no-offer run continue past the newer version.
+CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK = _env_is_true("CONTENT_FACTORY_EDITORIAL_SUPERSEDED_OK", True)
+
+# B13b source sync. It sits before the P2 block because it is its own staged
+# rollout, not one of the contract's P2 switches.
+# Staged rollout, default off: one coalescing source check per connection
+# chases GitHub's current head. A push storm settles on its last commit after a
+# 60-second quiet period, an hourly head read heals a missed webhook, and the
+# rescan a changed setup needs runs as MLAI's "source_sync" service (read and
+# scan only, never setup or publish), so the founder's Roo points are neither
+# required nor charged nor refunded. Content Factory must list "source_sync"
+# among its admitted scheduler services before this goes on with
+# ARTICLES_RUN_OWNERSHIP_ENABLED.
+ARTICLES_SOURCE_SYNC_ENABLED = _env_is_true("ARTICLES_SOURCE_SYNC_ENABLED", False)
+# Plan F1: test organisations. The marker that every founder report, alert,
+# staff Slack notice, self-heal sweep and revenue number honours is
+# OrganizationContentConfig.pillar_strategy["test_organization"], written only
+# by ``manage.py mark_test_organization`` (dry run unless --apply). This list
+# of organisation ids is an operator override on top of that marker, for the
+# host's .env only (never a deploy variable): comma-separated ids, e.g. "63".
+FOUNDER_TEST_ORGANIZATION_IDS = os.getenv("FOUNDER_TEST_ORGANIZATION_IDS", "").strip()
+# Plan F9, decision D12: the daily founder-health report and its SLO lines.
+# Staged rollout, default off. Off, the scheduler posts nothing; the read-only
+# ``manage.py founder_health_report`` and the staff console view still work.
+# On, one report a Melbourne day goes to CONTENT_FACTORY_OPS_SLACK_CHANNEL_ID.
+ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED = _env_is_true("ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED", False)
+# Plan F10 escalation ladder in the stuck-founder sweep: a failed run alerts after
+# two hours (six while off) and a stop still waiting on us after 48 hours queues one
+# owner escalation. Default off: shadow, the sweep only counts and logs (plan 7.5 rule 7).
+ARTICLES_STAFF_ESCALATION_LADDER_ENABLED = _env_is_true("ARTICLES_STAFF_ESCALATION_LADDER_ENABLED", False)
+# Service rescans per connection in any 24 hours (default 6, 0 = none).
+ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP = max(0, int(os.getenv("ARTICLES_SOURCE_SYNC_DAILY_SCAN_CAP") or "6"))
+# Setup ladder lower rungs (plan steps C6, C7), a staged rollout behind owner
+# decision D4. On: a setup Content Factory delivered as a content-files pull
+# request (tier 4) is shown as "delivered, not yet live" with the pull request.
+# Off: such a setup is staff fixing. Either way it is never Ready, never counts
+# as published and never consumes the free article. Pairs with Content
+# Factory's CONTENT_FACTORY_SETUP_LADDER.
+ARTICLES_SETUP_LADDER_ENABLED = _env_is_true("ARTICLES_SETUP_LADDER_ENABLED", False)
+# Plan E1: the website preflight (POST founder-tools/website-preflight/) says
+# before a startup exists whether its address resolves, what kind of host it
+# is, what it will be called and whether the founder already added it; the
+# My Startup one-field create re-checks it. Staged rollout, code default off:
+# off, the endpoint answers 404 and clients keep today's website step.
+MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_PREFLIGHT_ENABLED", False)
+# Plan E3b: reminders and guidance-change notices for website leads (no organisation). Default off.
+MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED = _env_is_true("MY_STARTUP_WEBSITE_LEAD_REMINDERS_ENABLED", False)
+
+# Founder-proof article flow switches (outside the P2 block; all default off).
+# Default off: one decision for "the founder's branch moved". With it on, the
+# read guard, the owner preview retry, re-pin, the terminal callback and publish
+# all ask website_connections.resolve_run_source (follow, refuse or unchanged,
+# with a reason code) instead of each deciding alone. Off keeps the old paths.
+ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED = _env_is_true("ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED", False)
+# Workstream 3: repo health at connect. Stores host/build probe results on the
+# website connection, shows them in the journey, re-runs the host probe on push
+# and requires a green build probe for the current head before an article charge.
+ARTICLES_REPO_HEALTH_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_ENABLED", False)
+# Opening a fix pull request on the founder's repo (lockfile or patch bump). Held
+# off until the owner approves a write to founder repositories.
+ARTICLES_REPO_HEALTH_FIX_PR_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_FIX_PR_ENABLED", False)
+
 # P2 founder journey ("self-healing"). Every switch defaults off, so a deploy
 # alone changes nothing. New behaviour applies only to the P2 cohort
 # (content_factory.p2_foundation.p2_applies) unless the P2 contract names an
@@ -2716,6 +2873,15 @@ ARTICLES_SELF_HEAL_LEGACY_ORGANIZATIONS = os.getenv("ARTICLES_SELF_HEAL_LEGACY_O
 ARTICLES_SELF_HEAL_POLICY_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_POLICY_ENABLED", False)
 ARTICLES_SELF_HEAL_REPORT_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_REPORT_ENABLED", False)
 ARTICLES_SELF_HEAL_SWEEP_LIMIT = int(os.getenv("ARTICLES_SELF_HEAL_SWEEP_LIMIT", "50"))
+# Kill switch, default on (plan step B1): self-heal reads the failure class
+# before the 48-hour wall. A founder ask (needs_user) waits for the founder with
+# no wall; unsupported and unregistered codes stop at once; only items the
+# engine is retrying or repairing hit the wall. A refunded or released run is
+# terminal ("start again"), never resumed (owner decision D16).
+ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_CLASS_BEFORE_WALL_ENABLED", True)
+# Kill switch, default on (plan step B2): a capped self-heal stop keeps the
+# run's original error_code and records its own stop under self_heal_v1.stop.
+ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED = _env_is_true("ARTICLES_SELF_HEAL_PRESERVE_CODE_ENABLED", True)
 ARTICLES_CHANNEL_SWITCH_ENABLED = _env_is_true("ARTICLES_CHANNEL_SWITCH_ENABLED", False)
 ARTICLES_SOURCE_REPIN_ENABLED = _env_is_true("ARTICLES_SOURCE_REPIN_ENABLED", False)
 # Kill switch, on by default and for every startup (not cohort-gated): a push
@@ -2724,9 +2890,41 @@ ARTICLES_SOURCE_REPIN_ENABLED = _env_is_true("ARTICLES_SOURCE_REPIN_ENABLED", Fa
 # copy-ready run no longer stops because the site moved. Content Factory's
 # CONTENT_FACTORY_SOURCE_FOLLOW_ENABLED is the paired switch.
 ARTICLES_SOURCE_FOLLOW_ENABLED = _env_is_true("ARTICLES_SOURCE_FOLLOW_ENABLED", True)
+# Kill switch, default on: a push that leaves the articles setup files alone
+# (one GitHub compare) keeps the website Ready; the proof is re-checked in the
+# background for free and articles lock only if that re-check fails.
+ARTICLES_PROOF_CARRY_FORWARD_ENABLED = _env_is_true("ARTICLES_PROOF_CARRY_FORWARD_ENABLED", True)
+# A push to a live-URL website that left preparation finished is re-verified by
+# its own source check (setup scan + live check) instead of reopening preparation.
+ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED = _env_is_true("ARTICLES_SOURCE_CHECK_OWNS_PUSH_ENABLED", True)
+# Kill switch, default on (plan B3): a push re-opens a stopped preparation only
+# when the change can alter its outcome (transient or waiting stop, a change
+# under the stop's relevant paths or articles route, or an owned setup merge);
+# otherwise the push's paid source rescan is settled without a scan. Automatic
+# repository scans also count toward a per-operation and per-day budget.
+ARTICLES_PREPARE_STICKY_STOP_ENABLED = _env_is_true("ARTICLES_PREPARE_STICKY_STOP_ENABLED", True)
+# Kill switch, default on: a worker callback for a bound run that omits its
+# website connection fields is checked against that run's own saved consent
+# instead of being refused as "Reconnect this website" (La Vie, 18 Nov 2026).
+ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED = _env_is_true("ARTICLES_CALLBACK_CONTRACT_FROM_RUN_ENABLED", True)
+# Setup runs one website preparation may dispatch across all its attempts
+# (owner Try again and the replacement of a closed pull request included).
+# Past it, preparation waits for staff with a stuck-founder alert instead of
+# opening yet another setup pull request. A new preparation starts at zero.
+# 0 switches the cap off.
+ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT = max(0, int(os.getenv("ARTICLES_PREPARE_SETUP_DISPATCH_LIMIT") or "3"))
+# Kill switch, default on: when preparation opens a newer setup pull request,
+# MLAI's own older open setup pull requests of the same connection generation
+# are closed with a comment that links the new one.
+ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED = _env_is_true("ARTICLES_CLOSE_SUPERSEDED_SETUP_PRS_ENABLED", True)
 ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED = _env_is_true("ARTICLES_CONNECTION_REFUSAL_CODES_ENABLED", False)
 ARTICLES_DISPATCH_RELIABILITY_ENABLED = _env_is_true("ARTICLES_DISPATCH_RELIABILITY_ENABLED", False)
 ARTICLES_NO_CODELESS_TERMINAL_ENABLED = _env_is_true("ARTICLES_NO_CODELESS_TERMINAL_ENABLED", False)
+# B10 kill switch, default on: a terminal callback without a code is stored as
+# TERMINAL_CODE_MISSING (not UNCLASSIFIED), and a missing, generic or
+# unregistered code shows "We're fixing this" on both founder paths with an
+# immediate staff alert (content_factory/no_generic_stop.py). Refunds unchanged.
+ARTICLES_NO_GENERIC_STOP_ENABLED = _env_is_true("ARTICLES_NO_GENERIC_STOP_ENABLED", True)
 ARTICLES_REGISTRY_REFUNDS_ENABLED = _env_is_true("ARTICLES_REGISTRY_REFUNDS_ENABLED", False)
 MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED = _env_is_true("MY_STARTUP_IDEMPOTENT_PROFILE_SAVE_ENABLED", False)
 MY_STARTUP_STAFF_CONSOLE_ENABLED = _env_is_true("MY_STARTUP_STAFF_CONSOLE_ENABLED", False)
@@ -2782,6 +2980,11 @@ CYBERTEST_TEST_BALANCE_POINTS = int(os.getenv('CYBERTEST_TEST_BALANCE_POINTS', '
 CYBERTEST_USD_PER_AUD = os.getenv('CYBERTEST_USD_PER_AUD', '0.697')
 CYBERTEST_AUD_PER_POINT = os.getenv('CYBERTEST_AUD_PER_POINT', '1.2798')
 CYBERTEST_PERSISTENT_BINDINGS_ENABLED = False
+# GitHub repository IDs whose checks cost no Roo points, comma-separated. Defaults:
+# MLAI-AUS-Inc/mlai-au 747450323, mlai-backend 918452761, mlai-chat 1319031949,
+# content-factory 1112644407 (now drsamdonegan/content-factory), valley-backend 1190194664.
+CYBERTEST_FREE_REPOSITORY_IDS = [value.strip() for value in os.getenv(
+    'CYBERTEST_FREE_REPOSITORY_IDS', '747450323,918452761,1319031949,1112644407,1190194664').split(',') if value.strip()]
 
 # Validate effective environment/debug values; do not load a second dotenv or
 # quietly turn staging credentials into live authority. Default is unchanged.

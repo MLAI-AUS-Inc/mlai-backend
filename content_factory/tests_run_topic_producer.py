@@ -16,6 +16,11 @@ from .island_research_views import ContentIslandResearchView
 from .self_heal_testing import make_p2_org
 from .tests_run_event_authority import FLAGS
 
+# B16: the testdata/r3 recordings were made against admissions from before the
+# backend stamped organization research authority. Admit their runs as the
+# recording backend did, so the recorded worker echoes stay byte-identical.
+RECORDED_BEFORE_RESEARCH_STAMP = patch("content_factory.run_ownership.organization_research_scope", new=lambda **_: False)
+
 
 @override_settings(**FLAGS, **ALL_P1_FLAGS_ON, CONTENT_FACTORY_URL="https://topic.fixture.invalid",
                    CONTENT_FACTORY_API_KEY="synthetic-topic-key", ARTICLES_FREE_FIRST_ARTICLE_ENABLED=True,
@@ -167,6 +172,8 @@ class TopicProducerTests(TransactionTestCase):
         run.refresh_from_db()
         return value, run, grant
 
+    @RECORDED_BEFORE_RESEARCH_STAMP
+
     def test_actual_free_first_http_worker_choices_survive_cancel_without_callback_or_grant_release(self):
         from .run_topic_delivery import project_verified_topics, has_verified_topic_delivery
         from .run_event_authority import receive_authoritative_run_events
@@ -194,6 +201,8 @@ class TopicProducerTests(TransactionTestCase):
         self.assertEqual(run.created_at, before["created_at"])
         self.assertEqual(_free_obligation_state(run), "reserved")
         self.assertFalse(Ledger.objects.filter(kind__in=["SPEND", "REFUND"]).exists())
+
+    @RECORDED_BEFORE_RESEARCH_STAMP
 
     def test_actual_free_first_http_worker_empty_failure_releases_only_unchanged_original_grant(self):
         from .run_terminal_settlement import settle_authoritative_terminal, terminal_execution_closed
@@ -231,6 +240,8 @@ class TopicProducerTests(TransactionTestCase):
         run.refresh_from_db()
         return value, run, spend
 
+    @RECORDED_BEFORE_RESEARCH_STAMP
+
     def test_actual_paired_island_proposals_remain_measured_and_earned_after_cancellation(self):
         from .run_topic_delivery import project_verified_topics, has_verified_topic_delivery
         from .island_research import proposal_for_adoption
@@ -250,6 +261,8 @@ class TopicProducerTests(TransactionTestCase):
             self.assertEqual(settle_authoritative_terminal(run.run_id)["state"], "kept")
         close.assert_not_called()
         self.assertFalse(spend.service_refunds.exists())
+
+    @RECORDED_BEFORE_RESEARCH_STAMP
 
     def test_actual_paired_empty_island_failure_refunds_exact_original_one_point(self):
         from .run_terminal_settlement import settle_authoritative_terminal

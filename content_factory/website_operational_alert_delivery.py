@@ -19,13 +19,21 @@ def channel():
     return value if re.fullmatch(r"[CGD][A-Z0-9]{8,99}", value) else None
 
 
+def _delivers(connection):
+    """The operational rollout and goal cohort, and never a marked test organisation (plan F1)."""
+    if not alerts.enabled(connection):
+        return False
+    from .founder_test_orgs import is_test_org
+    return not is_test_org(connection.organization_id)
+
+
 def reserve(op, alert, *, now):
     """Capture the first incident snapshot with an accepted prepare transition."""
     if alert is None:
         return None
     from .website_models import WebsiteConnectionOperation
     scope = deepcopy(op.receipt["goal"]["scope"])
-    if not alerts.enabled(op.connection) or not alerts.valid(alert, scope) or alert["goal_id"] != str(op.pk):
+    if not _delivers(op.connection) or not alerts.valid(alert, scope) or alert["goal_id"] != str(op.pk):
         return None
     row, _ = WebsiteConnectionOperation.objects.get_or_create(idempotency_key="articles:ops-alert:" + alert["id"], defaults={
         "connection": op.connection, "generation": op.generation, "action": ACTION, "state": "pending",
@@ -39,7 +47,7 @@ def reserve(op, alert, *, now):
 
 def reserve_repair(connection, run, envelope, *, now):
     """Reserve with B5's accepted projection; missing lineage stays unattributed."""
-    if not alerts.enabled(connection):
+    if not _delivers(connection):
         return None
     from .website_models import WebsiteConnectionOperation
     from . import website_cost_usage as costs
@@ -72,7 +80,7 @@ def reserve_repair(connection, run, envelope, *, now):
 
 def reserve_cleanup(op, *, now):
     """Reserve one incident atomically with an accepted lifecycle deadline stop."""
-    if not alerts.enabled(op.connection):
+    if not _delivers(op.connection):
         return None
     from .website_models import WebsiteConnectionOperation
     scope = goals.scope_for(op.connection, goals.mapping(op.payload).get("company_id") or "unattributed")
@@ -111,7 +119,7 @@ def advance(identifier, *, now=None):
         if row.next_attempt_at and row.next_attempt_at > now:
             return None
         scope, alert = goals.mapping(payload.get("scope")), payload.get("alert")
-        if (connection is None or not alerts.enabled(connection) or not alerts.valid(alert, scope)
+        if (connection is None or not _delivers(connection) or not alerts.valid(alert, scope)
                 or type(payload.get("version")) is not int or payload["version"] != 1
                 or payload.get("goal_operation_id") != alert["goal_id"] or row.generation != scope["connection_generation"]
                 or scope["connection_id"] != str(connection.pk) or scope["organization_id"] != str(connection.organization_id)
