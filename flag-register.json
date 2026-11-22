@@ -857,6 +857,18 @@
       "expiry": "2027-02-28"
     },
     {
+      "name": "COMMUNITY_CHAT_ACCOUNT_DELETION_NOTICE_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "COMMUNITY_CHAT_ACCOUNT_DELETION_WORKER_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
       "name": "COMMUNITY_CHAT_COWORKING_ANNOUNCE_ENABLED",
       "default": "true",
       "owner": "platform",
