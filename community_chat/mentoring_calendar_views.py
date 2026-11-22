@@ -45,7 +45,8 @@ class MentorCalendarAuthorizeView(MentorCalendarBaseView):
     def post(self,request):
         data=_body(request)
         return Response(service.begin_authorization(request.user,data.get('return_path','/mentoring/settings'),
-            account_session=getattr(request,'community_chat_account_session',None)))
+            account_session=getattr(request,'community_chat_account_session',None),
+            native_return=data.get('native_return') is True))
 
 
 class MentorCalendarListView(MentorCalendarBaseView):
@@ -79,6 +80,10 @@ class MentorSettingsView(MentorCalendarBaseView):
         return self.get(request)
 
 
+class _NativeCalendarReturn(HttpResponseRedirect):
+    allowed_schemes = ['mlaichat']
+
+
 @method_decorator(transaction.non_atomic_requests, name='dispatch')
 class MentorCalendarCallbackView(APIView):
     """Google returns outside app auth; one-use state carries the original actor."""
@@ -92,17 +97,24 @@ class MentorCalendarCallbackView(APIView):
         raw=request.query_params.get('state','')
         if not isinstance(raw,str) or not raw or len(raw)>4096:
             return Response({'code':'invalid_oauth_state','detail':'Start the connection again from Mentoring settings.'},status=400)
+        state = None
         try:
-            service.finish_authorization(raw,request.query_params.get('code',''),denied=bool(request.query_params.get('error')))
+            state = service.consume_authorization(raw)
+            service.finish_authorization(state,request.query_params.get('code',''),denied=bool(request.query_params.get('error')))
             result={'calendar':'connected'}
         except CalendarError as exc:
             result={'calendar':'error','code':exc.code}
         origin=str(getattr(settings,'MENTOR_CALENDAR_CHAT_ORIGIN','https://chat.mlai.au')).rstrip('/')
         parsed=urlparse(origin)
         local=bool(getattr(settings,'IS_LOCAL_ENV',False))
-        if (parsed.scheme!='https' and not(local and parsed.scheme=='http' and parsed.hostname in ('localhost','127.0.0.1'))) or not parsed.netloc or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
+        if state and state.get('native_return') is True:
+            response = _NativeCalendarReturn(
+                'mlaichat://connections?' + urlencode({'intent':'mentoring_calendar', **result})
+            )
+        elif (parsed.scheme!='https' and not(local and parsed.scheme=='http' and parsed.hostname in ('localhost','127.0.0.1'))) or not parsed.netloc or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
             return Response({'code':'invalid_return_origin','detail':'Return to Mentoring settings.'},status=400)
-        response=HttpResponseRedirect(origin+'/mentoring/settings?'+urlencode(result))
+        else:
+            response=HttpResponseRedirect(origin+'/mentoring/settings?'+urlencode(result))
         response['Cache-Control']='private, no-store'
         response['Referrer-Policy']='no-referrer'
         return response
