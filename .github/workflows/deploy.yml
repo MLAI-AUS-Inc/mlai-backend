@@ -640,6 +640,8 @@ jobs:
           content_factory.tests_admin_metrics \
           tests.test_community_bridge_adapter_url \
           roo.tests_native_points_requests \
+          roo.tests_manual_time \
+          roo.tests_manual_time_rules \
           community_chat.tests.test_account_sessions \
           community_chat.tests.test_device_management \
           community_chat.tests.test_session_device_binding \
@@ -1469,6 +1471,7 @@ jobs:
         ROO_API_KEY: ${{ secrets.ROO_API_KEY }}
         ROO_POINTS_LEVEL_UP_ENABLED: ${{ vars.ROO_POINTS_LEVEL_UP_ENABLED || 'false' }}
         ROO_POINTS_NATIVE_ACTIVE_FROM: ${{ vars.ROO_POINTS_NATIVE_ACTIVE_FROM || '' }}
+        ROO_MANUAL_TIME_ENABLED: ${{ vars.ROO_MANUAL_TIME_ENABLED || 'false' }}
         INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
         LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
         LINEAR_MEETING_REQUIRED_TEAM_KEYS: ${{ vars.LINEAR_MEETING_REQUIRED_TEAM_KEYS || 'TECH,STU,MLA' }}

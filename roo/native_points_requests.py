@@ -259,7 +259,7 @@ def prepare_event(relay, delivery):
 def deliver_ready(relay):
     pending = PointsRequestDelivery.objects.filter(
         delivered_at__isnull=True, available_at__lte=timezone.now(),
-    ).exclude(stage=SLACK_CONFIRMATION).order_by("available_at", "pk").values_list("pk", flat=True)[:50]
+    ).filter(stage__in=(SUMMARY, CONFIRMATION, CELEBRATION, REPOST)).order_by("available_at", "pk").values_list("pk", flat=True)[:50]
     for delivery_id in list(pending):
         with transaction.atomic():
             row = PointsRequestDelivery.objects.select_for_update().select_related("request").get(pk=delivery_id)

@@ -64,6 +64,14 @@ def slack_confirmation_text(request):
 def approve_locked_request(request, user, *, admin_slack_id=None, admin=None, recover_slack=False):
     """Award an already locked pending request and persist its notifications."""
     user = lock_member(user)
+    if request.manual_time_key:
+        ledger, _ = PointsService.credit_volunteer(
+            user, request.manual_time["amount_microroo"],
+            idempotency_key=f"points_request:{request.pk}:approve",
+            reference_id=str(request.pk), reference_type="POINTS_REQUEST",
+            description=request.reason, actor_id=admin_slack_id,
+        )
+        return finalize_request(request, ledger, admin_slack_id)
     native = request.native_channel_id is not None
     bridge = None
     if getattr(settings, "ROO_POINTS_LEVEL_UP_ENABLED", False) and not native:
@@ -77,14 +85,7 @@ def approve_locked_request(request, user, *, admin_slack_id=None, admin=None, re
         idempotency_key=f"points_request:{request.pk}:approve",
         reference_type="POINTS_REQUEST", reference_id=str(request.pk),
     )
-    record_volunteer_credit(ledger)
-    request.status = "approved"
-    request.approved_at = timezone.now()
-    request.approved_by_slack_id = admin_slack_id
-    request.ledger_entry = ledger
-    request.save(update_fields=[
-        "status", "approved_at", "approved_by_slack_id", "ledger_entry", "updated_at",
-    ])
+    finalize_request(request, ledger, admin_slack_id)
     if not capture:
         return ledger
 
@@ -114,4 +115,16 @@ def approve_locked_request(request, user, *, admin_slack_id=None, admin=None, re
     channel_id = request.native_channel_id if native else bridge.destination_channel_id
     enqueue(request, CELEBRATION, channel_id, request.native_root_id, text, keys, transition)
     enqueue(request, REPOST, ROO_POINTS_CHANNEL_ID, "", text, keys, transition)
+    return ledger
+
+
+def finalize_request(request, ledger, admin_slack_id):
+    record_volunteer_credit(ledger)
+    request.status = "approved"
+    request.approved_at = timezone.now()
+    request.approved_by_slack_id = admin_slack_id
+    request.ledger_entry = ledger
+    request.save(update_fields=[
+        "status", "approved_at", "approved_by_slack_id", "ledger_entry", "updated_at",
+    ])
     return ledger
