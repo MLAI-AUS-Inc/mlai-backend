@@ -837,16 +837,26 @@ class PointsService:
         )
 
         # Sum points awarded by this admin this week
-        used = Ledger.objects.filter(
+        from django.db.models.functions import Cast, Coalesce
+
+        credits = Ledger.objects.filter(
             kind='EARN',
             created_by_slack_id=slack_id,
-            created_at__gte=start_of_week_dt
-        ).aggregate(total=db_models.Sum('delta'))['total'] or 0
+            created_at__gte=start_of_week_dt,
+        )
+        used_microroo = credits.aggregate(total=db_models.Sum(Coalesce(
+            "delta_microroo", "points_delta_microroo",
+            Cast("delta", db_models.BigIntegerField()) * db_models.Value(1_000_000),
+            Cast("points_delta", db_models.BigIntegerField()) * db_models.Value(1_000_000),
+            output_field=db_models.BigIntegerField(),
+        )))["total"] or 0
+        remaining_microroo = admin.weekly_allowance * 1_000_000 - used_microroo
         
         return {
             'allowance': admin.weekly_allowance,
-            'used': used,
-            'remaining': admin.weekly_allowance - used,
+            'used': -(-used_microroo // 1_000_000),
+            'remaining': remaining_microroo // 1_000_000,
+            'remaining_microroo': remaining_microroo,
         }
     
     @staticmethod
@@ -958,6 +968,7 @@ class PointsService:
         description: str,
         actor_id: str,
         level_bonus: bool = False,
+        reference_type: str | None = None,
     ) -> Tuple[Ledger, bool]:
         """Credit exact Volunteer Roo, keeping milestone bonuses wallet-only.
 
@@ -967,7 +978,7 @@ class PointsService:
         """
         if isinstance(delta_microroo, bool) or not isinstance(delta_microroo, int) or delta_microroo <= 0:
             raise ValueError("Award must be positive integer microroo")
-        reference_type = "VOLUNTEER_LEVEL_BONUS" if level_bonus else "VOLUNTEER_CONTRIBUTION"
+        reference_type = reference_type or ("VOLUNTEER_LEVEL_BONUS" if level_bonus else "VOLUNTEER_CONTRIBUTION")
         account, _ = PointsAccount.objects.get_or_create(user=user)
         account = PointsAccount.objects.select_for_update().get(pk=account.pk)
         PointsService._ensure_microroo_account(account)
