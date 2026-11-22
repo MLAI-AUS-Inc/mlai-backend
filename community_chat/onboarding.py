@@ -11,6 +11,7 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
 
+from .deletion_tasks import deletion_pending
 from .models import (
     CommunityChatAccountSession, CommunityChatDevice,
     CommunityMemberConsent, CommunityMemberProfile, CommunityMemberReviewRule,
@@ -56,9 +57,13 @@ def join_next(intent):
 
 def has_community_access(user):
     """An account's activation does not bypass a community admission decision."""
-    if not user or not user.is_active:
+    if not user or not user.is_active or deletion_pending(user.pk):
         return False
     profile = CommunityMemberProfile.objects.filter(user=user).first()
+    return _admitted_to_chat(user, profile)
+
+
+def _admitted_to_chat(user, profile):
     if profile is not None:
         return profile.status == CommunityMemberProfile.Status.APPROVED
     if not settings.COMMUNITY_CHAT_SIGNUP_ENABLED:
@@ -70,6 +75,11 @@ def has_community_access(user):
 def require_community_access(user):
     """Reject protected account and bootstrap operations before admission."""
     if not has_community_access(user):
+        if user and deletion_pending(user.pk):
+            raise PermissionDenied({
+                "error": "account_deletion_pending",
+                "detail": "Chat access is paused while your deletion request is processed.",
+            })
         raise PermissionDenied({
             "error": "onboarding_required",
             "detail": "Complete your community application before joining MLAI Chat.",
@@ -79,12 +89,16 @@ def require_community_access(user):
 def onboarding_payload(user):
     """Project private answers only to their signed-in owner."""
     profile = CommunityMemberProfile.objects.filter(user=user).first()
-    allowed = has_community_access(user)
+    pending = deletion_pending(user.pk)
+    allowed = user.is_active and not pending and _admitted_to_chat(user, profile)
     one_step = one_step_join_enabled()
     payload = {
         "available": settings.COMMUNITY_CHAT_SIGNUP_ENABLED or profile is not None,
         "required": not allowed,
-        "status": profile.status if profile else ("approved" if allowed else "incomplete"),
+        "status": CommunityMemberProfile.Status.SUSPENDED if pending else (
+            profile.status if profile else ("approved" if allowed else "incomplete")
+        ),
+        "deletion_pending": pending,
         "basics_complete": bool(profile and profile.adult_confirmed_at
                                 and name_is_complete(profile.first_name, profile.last_name)
                                 and "correction_requested" not in profile.review_reasons
@@ -242,6 +256,8 @@ def save_onboarding(*, authenticated_session, values):
 def _save_onboarding_step(*, authenticated_session, values):
     with transaction.atomic():
         user, session = _locked_session_user(authenticated_session)
+        if deletion_pending(user.pk):
+            raise PermissionDenied("Chat access is paused while your deletion request is processed.")
         if not settings.COMMUNITY_CHAT_SIGNUP_ENABLED:
             raise PermissionDenied("Community signup is temporarily unavailable.")
         existing_access = has_community_access(user)

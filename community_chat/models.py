@@ -57,6 +57,34 @@ class AccountDeletionRequest(models.Model):
         indexes = [models.Index(fields=("status", "requested_at"), name="chat_deletion_queue_idx")]
 
 
+class AccountDeletionCompletionNotice(models.Model):
+    """Short-lived email delivery data for one deletion receipt."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACCEPTED = "accepted", "Accepted by email provider"
+        NEEDS_ATTENTION = "needs_attention", "Needs attention"
+
+    request = models.OneToOneField(
+        AccountDeletionRequest, primary_key=True, on_delete=models.CASCADE,
+        related_name="completion_notice",
+    )
+    encrypted_recipient = models.TextField(blank=True)
+    expires_at = models.DateTimeField()
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    first_attempt_at = models.DateTimeField(null=True, blank=True)
+    next_attempt_at = models.DateTimeField(null=True, blank=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    failure_code = models.CharField(max_length=32, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=("status", "next_attempt_at"), name="chat_deletion_notice_queue_idx"),
+            models.Index(fields=("status", "expires_at"), name="chat_del_notice_expiry_idx"),
+        ]
+
+
 class AccountDeletionTask(models.Model):
     """Resumable cleanup work; a receipt is complete only after verified erasure."""
 
