@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule the isolated MLAI Chat staging discovery tick
+
+[Timer]
+OnBootSec=60s
+OnUnitInactiveSec=60s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

@@ -16,3 +16,14 @@ On host restart, reviewed `mlai-staging-network-policy.service` restores owned a
 The API has Docker restart policy `no`. Its installed `mlai-backend-staging-api.service` starts only after Docker and successful firewall installation, and `start-api.py` verifies the complete installed helper inventory, network identity, effective rule order and peer recovery under the shared lock before starting the pinned current image. A45second readiness timer repairs that same approved image; it never fetches/builds code. This also covers a process exit without permitting Docker to bypass the gate after reboot. Stop both readiness timer and service before intentional API maintenance. Full host reboot remains outside the focused acceptance run; inspect actual restart policy/systemd dependencies and exercise the startup gate directly instead.
 
 Both isolated profiles explicitly disable Tokenmaxer federation and real Apple purchases. Hosted reporter/callback URLs point to api-staging; local reporter/API/relay URLs are loopback. Read-only digital wallet GET is authenticated and returns real seeded balances with available:false; transaction verification/notifications stay unavailable. Client destination guards accept canonical same-origin `/api/` namespaces (including v2); existing relative paths still use v1.
+
+The hosted Chat API readiness probe requires a recent successful `run_scheduled_discovery` tick in its own database. Install the reviewed scheduler alongside the installed controller from the approved staging source:
+
+```sh
+install -o root -g root -m 0644 ops/staging-chat/scheduler-tick.py /etc/mlai-backend-staging-auto-deploy/scheduler-tick.py
+install -o root -g root -m 0644 ops/staging-chat/systemd/mlai-backend-staging-scheduler.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now mlai-backend-staging-scheduler.timer
+```
+
+The timer runs one bounded tick per minute inside the pinned API instance and picks up its replacement after a deploy. It takes the same deployment locks, verifies the installed image and network policy, and checks the effective staging database, cache and mail backend before running. External job crawling is disabled for these ticks. Check the service journal, advancement of the `scheduled_discovery` heartbeat, and public `https://api-staging.mlai.au/healthz/ready` after installation. Stop the timer and wait for any current tick before maintenance or replacement with another scheduler.
