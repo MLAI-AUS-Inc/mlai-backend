@@ -4,9 +4,11 @@ from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from types import SimpleNamespace
-from unittest.mock import Mock
+from io import StringIO
+from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.db import IntegrityError, transaction, connection, close_old_connections
 from django.urls import reverse
@@ -14,11 +16,17 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework.exceptions import AuthenticationFailed
 
+from community_chat import deletion_access, deletion_tasks
 from community_chat.account_sessions import rotate_account_session
-from community_chat.models import AccountDeletionRequest, AiConsentRecord, CommunityChatAccountSession, ChatRole
+from community_chat.deletion_account import finish_account
+from community_chat.models import (
+    AccountDeletionCompletionNotice, AccountDeletionRequest, AiConsentRecord,
+    CommunityChatAccountSession, ChatRole,
+)
 from community_chat.privacy import ai_disclosure, has_ai_consent, set_ai_consent, request_account_deletion
 from community_chat.tests.test_account_profiles import credentials_for, ORIGIN
 from integrations.services.slack_dm_mirror import _verify_ai_recipients_before_send, SlackDmMirrorAuthorizationError
+from system_email import transport_resend
 
 PROVIDERS = [{"name": "Test provider", "purpose": "Answer Roo requests",
               "data": "Messages, attachments and conversation context", "privacy_url": "https://example.com/privacy"}]
@@ -112,6 +120,47 @@ class AccountPrivacyTests(TestCase):
         self.assertEqual(AccountDeletionRequest.objects.count(), 1)
         self.user.refresh_from_db()
         self.assertTrue(self.user.is_active)
+
+    @override_settings(
+        COMMUNITY_CHAT_ACCOUNT_DELETION_NOTICE_ENABLED=True,
+        CONNECTOR_CREDENTIAL_KEYS='{"test":"MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="}',
+        CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID="test",
+        SYSTEM_EMAIL_RESEND_API_KEY="synthetic-resend-key",
+        MLAI_SYSTEM_FROM_EMAIL="privacy@example.test",
+    )
+    def test_deletion_sends_one_completion_notice_after_verified_erasure(self):
+        first, second = self.deletion(), self.deletion()
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        request_id = first.data["request"]["id"]
+        record = AccountDeletionRequest.objects.get(pk=request_id)
+        notice = AccountDeletionCompletionNotice.objects.get(request=record)
+        self.assertTrue(notice.encrypted_recipient)
+        self.assertNotIn(self.user.email, notice.encrypted_recipient)
+        self.assertEqual(AccountDeletionCompletionNotice.objects.count(), 1)
+
+        with patch.object(transport_resend, "send", return_value="synthetic-provider-receipt") as send:
+            call_command("send_account_deletion_notices", stdout=StringIO())
+            send.assert_not_called()
+            self.assertTrue(deletion_access.execute_task(record.tasks.get(target=deletion_access.TARGET).pk))
+            for pending in record.tasks.filter(target__in=deletion_tasks.CHAT_TARGETS).exclude(
+                target=deletion_access.TARGET,
+            ):
+                task = deletion_tasks.claim_task(pending.pk)
+                self.assertTrue(deletion_tasks.complete_task(
+                    task.pk, attempt=task.attempts, verified_counts={"remaining_rows": 0, "verified_targets": 1},
+                ))
+            self.assertEqual(finish_account(record.pk, apply=True)["status"], "completed")
+            call_command("send_account_deletion_notices", stdout=StringIO())
+            call_command("send_account_deletion_notices", stdout=StringIO())
+            send.assert_called_once()
+            self.assertEqual(send.call_args.args[0]["to"], [self.user.email])
+            self.assertEqual(send.call_args.kwargs["idempotency_key"], f"chat_deletion_complete/{request_id}")
+
+        notice.refresh_from_db()
+        self.assertEqual(notice.status, AccountDeletionCompletionNotice.Status.ACCEPTED)
+        self.assertEqual(notice.encrypted_recipient, "")
+        self.assertFalse(get_user_model().objects.filter(pk=self.user.pk).exists())
 
     def test_owner_must_transfer_ownership_before_account_or_chat_deletion(self):
         ChatRole.objects.create(user=self.user, role="owner")

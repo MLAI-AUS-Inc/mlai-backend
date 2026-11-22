@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .authentication import CommunityChatOnboardingAuthentication
+from .deletion_tasks import deletion_deadline, live_erasure_deadline
 from .models import AccountDeletionRequest, AiConsentRecord
 from .privacy import ai_disclosure, deletion_policy, has_ai_consent, request_account_deletion, set_ai_consent
 from .throttles import CommunityChatScopedThrottle
@@ -40,7 +41,9 @@ class DeletionSerializer(StrictSerializer):
 def deletion_receipt(record):
     """Return a minimal owner-only receipt, never operator notes or credentials."""
     return {"id": str(record.pk), "scope": record.scope, "status": record.status,
-            "requested_at": record.requested_at, "completed_at": record.completed_at}
+            "requested_at": record.requested_at, "completed_at": record.completed_at,
+            "live_erasure_target_at": live_erasure_deadline(record),
+            "completion_target_at": deletion_deadline(record)}
 
 
 class PrivacyView(APIView):

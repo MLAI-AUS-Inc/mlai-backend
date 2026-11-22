@@ -15,6 +15,8 @@ from datetime import date as calendar_date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.db.models import CharField, Count, Sum, Value
 from django.db.models.functions import Concat
 from django.utils import timezone
@@ -30,6 +32,7 @@ from .authentication import (
 )
 from core.authentication import CustomJWTAuthentication
 
+from .deletion_tasks import deletion_pending
 from .models import (
     CommunityChatDevice,
     DeviceBindingStatus,
@@ -200,13 +203,17 @@ class _TokenUsageIngestBase(APIView):
 
         if rows:
             reported_at = timezone.now()
-            upsert_sessions(
-                account,
-                source,
-                rows,
-                reported_at=reported_at,
-                attribute_daily=self.attribute_daily,
-            )
+            try:
+                upsert_sessions(
+                    account,
+                    source,
+                    rows,
+                    reported_at=reported_at,
+                    attribute_daily=self.attribute_daily,
+                )
+            except TokenUsageAccount.DoesNotExist:
+                # Deletion or leaving the board won the race after authentication.
+                return Response({"error": "unauthorized"}, status=401)
             TokenUsageAccount.objects.filter(pk=account.pk).update(
                 last_report_at=reported_at
             )
@@ -250,12 +257,16 @@ class TokenUsageTokenView(APIView):
             }
         )
 
+    @transaction.atomic
     def post(self, request):
         """Mint or rotate. The raw token is shown exactly once."""
+        user = get_user_model().objects.select_for_update().filter(pk=request.user.pk, is_active=True).first()
+        if user is None or deletion_pending(user.pk):
+            return Response({"error": "Token reporting is unavailable."}, status=403)
         raw_token = USAGE_TOKEN_PREFIX + secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
         account, created = TokenUsageAccount.objects.update_or_create(
-            user=request.user,
+            user=user,
             defaults={"token_hash": token_hash},
         )
         return Response(

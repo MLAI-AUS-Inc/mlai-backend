@@ -1050,6 +1050,11 @@ jobs:
           community_chat.tests.test_account_email_change.AccountEmailChangeConcurrencyTests \
           community_chat.tests.test_account_profiles.AccountProfileConcurrencyTests \
           community_chat.tests.test_account_privacy.AccountPrivacyConcurrencyTests \
+          community_chat.tests.test_deletion_account \
+          community_chat.tests.test_deletion_notice \
+          community_chat.tests.test_deletion_profile \
+          community_chat.tests.test_deletion_slack_copy \
+          community_chat.tests.test_deletion_startup \
           roo.tests_apple_iap.AppleConcurrencyTests \
           community_chat.tests.test_onboarding.MemberOnboardingConcurrencyTests \
           integrations.tests_coworking_handoff.CoworkingConsentConcurrencyTests \

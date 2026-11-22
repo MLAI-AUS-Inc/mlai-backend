@@ -60,6 +60,9 @@ The authenticated `/community-chat/profiles/batch/` response includes
 `mentionable` for every resolved key. It is true only for a currently verified,
 non-revoked device of an active account. Historical verified keys still return
 their public profile for message attribution, with `mentionable: false`.
+An open account-deletion request suppresses public profile resolution. After a
+completed Chat-only deletion, a new verified device can resolve the profile.
+Device bindings verified before completion stay ineligible for resolution.
 Clients can group active keys by the returned `public_id` in mention pickers,
 preferring a key already in the current channel. Display names and self-published
 profile metadata do not prove that two keys belong to the same person. This is

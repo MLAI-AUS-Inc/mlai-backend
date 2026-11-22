@@ -17,7 +17,7 @@ from django.contrib.auth.models import update_last_login
 from django.core import signing
 from django.core.cache import cache
 from django.db import IntegrityError, connection, transaction
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 from django.http import HttpResponse
 from django.urls import reverse
 from django.utils import timezone
@@ -64,6 +64,7 @@ from .account_profiles import ProfileVersionConflict, update_account_profile
 from . import device_auth_v2
 from .inbox_accounts import bind_verified_device
 from .models import (
+    AccountDeletionRequest,
     CommunityChatAccountSession,
     CommunityChatBootstrapToken,
     CommunityChatChallenge,
@@ -1119,6 +1120,7 @@ class PublicProfileBatchView(APIView):
     Revoking a device removes its access, but it must not erase attribution on
     messages and membership events that the key signed while it was verified.
     Pending or otherwise never-verified keys remain private and unresolved.
+    A deletion request removes old keys from public profile resolution.
     """
 
     authentication_classes = (CommunityChatAccountAuthentication,)
@@ -1130,6 +1132,10 @@ class PublicProfileBatchView(APIView):
         serializer = CommunityChatPublicProfileBatchSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         public_keys = serializer.validated_data["public_keys"]
+        deletion = AccountDeletionRequest.objects.filter(user_id=OuterRef("user_id")).filter(
+            ~Q(status=AccountDeletionRequest.Status.COMPLETED)
+            | Q(completed_at__gte=OuterRef("verified_at")),
+        )
 
         devices = (
             CommunityChatDevice.objects.select_related("user")
@@ -1142,6 +1148,7 @@ class PublicProfileBatchView(APIView):
                 verified_at__isnull=False,
                 user__is_active=True,
             )
+            .filter(~Exists(deletion))
             .order_by("public_key", "-verified_at", "-created_at")
         )
         devices_by_key = {}
