@@ -132,6 +132,10 @@ def delivery_settlement(contract, evidence, expected_audit_id, pricing, costs, *
         # The original basic receipt remains untouched. Provider costs are the
         # operator's responsibility if the purchased upgrade was not delivered.
         amounts = {'basis': 'upgrade_not_delivered', 'charge_microroo': 0, 'refund_microroo': points*1_000_000}
+    elif isinstance(pricing, dict) and pricing.get('sponsored') is True and (
+            existing is None or isinstance(existing, dict) and existing.get('basis') == 'sponsored_not_delivered'):
+        # No customer points were spent. Usage can still be incomplete for the operator.
+        amounts = {'basis': 'sponsored_not_delivered', 'charge_microroo': 0, 'refund_microroo': 0}
     else:
         if not isinstance(costs, dict) or costs.get('auditId') != expected_audit_id:
             raise CheckoutError('SETTLEMENT_REVIEW_REQUIRED', 'Actual usage for this audit is required.')
