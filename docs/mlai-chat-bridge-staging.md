@@ -57,6 +57,17 @@ linked public key and unlinked-user messages do not. In both cases the event
 signer must remain the dedicated bridge key; the UI must never imply that the
 human signed it.
 
+For voice acceptance, use a linked staging channel with a posting identity
+authorized for `files:write`. Add only that channel to
+`SLACK_VOICE_UPLOAD_CHANNELS`. For a member-token test, enable the Slack user
+scope in the staging Slack app, add it to the staging `SLACK_OAUTH_USER_SCOPES`,
+and reconnect the test account. For a bot-token test, use a staging bot grant
+with the Slack bot scope. Record a synthetic spoken clip in Chat and verify
+that Slack opens and plays its hosted audio, including after reload. Record a
+different clip in Slack and verify that Chat plays it through the Slack
+attachment player. Repeat in a thread and confirm one destination file, one
+message and no reverse echo for each create.
+
 ## Retry, dead-letter, echo, and mapping controls
 
 1. Replay the same Slack `event_id`; confirm one receipt and one destination

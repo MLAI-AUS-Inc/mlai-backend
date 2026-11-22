@@ -32,7 +32,7 @@ from integrations.services.message_sync.slack_client import budgeted_client
 from integrations.services.slack_chat_catalog import public_channels_enabled
 from integrations.services.slack_member_devices import member_device_key_allowed
 
-from . import member_delivery as member, member_attempts as attempts
+from . import member_delivery as member, member_attempts as attempts, voice
 from .ai_consent import PublicBridgeConsentRequired
 from .coworking import is_coworking_request
 from .formatting import build_mirrored_text, emoji_to_slack_reaction
@@ -344,6 +344,26 @@ class _BotClient(member._Client):
             error.member_delivery_observed_at = self.started_at
             raise
 
+    def voice_call(self, method, **kwargs):
+        if (
+            self.read_only or method not in voice.METHODS
+            or "channels" in kwargs
+            or method == voice.COMPLETE and kwargs.get("channel_id") != self.channel.slack_channel_id
+        ):
+            raise MemberDeliveryUnavailable("invalid_voice_destination")
+
+        def before_request():
+            guard_delivery(self.row)
+            self.started_at = timezone.now()
+            if method != voice.ALLOCATE:
+                self.mutation_started = True
+
+        client = budgeted_client(
+            WebClient(token=getattr(settings, "SLACK_BRIDGE_BOT_TOKEN", ""), timeout=20),
+            workspace_id=self.channel.slack_workspace_id, before_request=before_request,
+        )
+        return getattr(client, method)(**kwargs)
+
     def call(self, method, **kwargs):
         if self.read_only and method in member.WRITES.values():
             raise MemberDeliveryUnavailable("reconciliation_must_be_read_only")
@@ -531,6 +551,7 @@ def execute(delivery):
                 info = client.verify()
                 wire = (member._wire(row, channel, actor, client, info, identity_key=IDENTITY, emoji_catalog=catalog) if authority is not None
                         else _bot_wire(row, channel, actor, client, info, user.full_name or "MLAI member", emoji_catalog=catalog))
+                wire = voice.prepare(row, channel, client, wire)
                 command = {"version": 1, "actor": actor, "mapping": _identity(channel), "wire": wire}
                 guard_delivery(row)
                 existing = (row.payload or {}).get(MEMBER_STAMP)
@@ -555,7 +576,11 @@ def execute(delivery):
                 response, outcome = attempts.reconcile(client, row, channel, actor, wire, attempt)
             else:
                 try:
-                    response = client.call(wire["method"], **wire["kwargs"])
+                    if wire.get("voice_file_id"):
+                        voice.share(client, wire)
+                        response = voice.reconcile(client, channel, actor, wire, attempt)
+                    else:
+                        response = client.call(wire["method"], **wire["kwargs"])
                 except dm.SlackApiError as error:
                     code = str(error.response.get("error") or "")
                     if (row.delivery_type == "reaction_add" and code == "already_reacted"

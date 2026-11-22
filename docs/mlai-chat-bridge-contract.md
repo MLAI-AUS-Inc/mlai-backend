@@ -19,6 +19,26 @@ MLAI Chat is another client surface, not a one-time data migration.
 
 ## MVP scope
 
+### Voice messages in linked public Slack channels
+
+Slack-origin audio shares use the existing authenticated attachment preview and
+streaming path. MLAI Chat-origin voice messages can share one Slack-hosted WAV in
+the mapped channel or thread. Add that Slack channel ID to
+`SLACK_VOICE_UPLOAD_CHANNELS` after the adapter supports `POST /v1/voice-media`
+and the channel's existing posting actor has Slack `files:write`. The setting
+is empty by default. A member's existing grant needs the scope from a new
+authorization where it is missing. Keep the room's existing bridge identity and
+membership policy.
+
+The adapter matches the signed create event, author, current channel
+registration and attachment hash before returning the WAV to the backend.
+The worker stores the Slack upload's file ID in its frozen command before
+sharing. A lost share response reconciles by the exact file ID in the
+destination, with the same author and thread. A second upload is never used to
+resolve an uncertain share. This upload path applies to linked public channels.
+
+Use [the staging matrix](mlai-chat-bridge-staging.md) before enabling a channel.
+
 - Operators explicitly map a public Slack channel to one MLAI Chat channel.
 - New messages, replies, edits, deletes, the full emoji-mart Unicode 15 reaction catalog
   (including Slack aliases, flags, ZWJ sequences and skin tones), and safe Slack shortcode reactions are mirrored after

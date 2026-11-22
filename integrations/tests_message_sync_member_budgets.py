@@ -20,7 +20,8 @@ class MemberPostingBudgetTests(SimpleTestCase):
                     "integrations.services.message_sync.slack_client.admit_request"
                 ) as admit:
                     client = budgeted_client(MagicMock(), workspace_id="T1", app_id="AUSER")
-                    client.api_call(method, **{argument: {"channel": "CONE"}})
+                    key = "channel_id" if method == "files.completeUploadExternal" else "channel"
+                    client.api_call(method, **{argument: {key: "CONE"}})
                     self.assertEqual(admit.call_args_list, [
                         call(app_id="AUSER", workspace_id="T1", method=method,
                              interval_seconds=3.0, priority="foreground"),
