@@ -595,6 +595,13 @@ class ContentFactoryOrgConfigView(APIView):
             response_data["publish_targets"] = worker_publish_targets(config)
             response_data["website_connection"] = {**contract_for(website), "state": website.state, "capabilities": website.capabilities}
             response_data.update(contract_for(website))
+            merge_sha = request.query_params.get("static_setup_source_sha")
+            if (merge_sha and domain and github_repo and self._normalize_domain(domain) == org.domain
+                    and github_repo.casefold() == website.github_repo.casefold()):
+                from .website_static_setup_review import current_review
+                review = current_review(website, merge_sha)
+                if review:
+                    response_data["static_setup_review"] = review
             latest_inventory = website.scan_snapshots.filter(generation=website.generation, evidence__has_key="repository_inventory").order_by("-created_at").first()
             response_data["repository_inventory"] = (latest_inventory.evidence or {}).get("repository_inventory") if latest_inventory else None
         return Response(response_data, status=status.HTTP_200_OK)

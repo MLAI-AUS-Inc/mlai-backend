@@ -513,6 +513,12 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         snapshot = (candidate.generation, candidate.configuration_version, candidate.state, candidate.installation_id, candidate.authorized_by_id, observed)
         needs_head = not cleanup and action != "portable" and (bool(expected and observed and expected != observed) or action in {"publish", "merge"} or (action == "preview" and bool(expected)))
         targets = payload.get("publish_targets") if isinstance(payload.get("publish_targets"), list) else []
+        static_proposals = [item for item in targets if action == "config_write" and isinstance(item, dict)
+                            and item.get("delivery_adapter") == "static_dropin_v1" and (item.get("provisional") is True
+                            or (isinstance(item.get("verification"), dict)
+                                and item["verification"].get("status") == "awaiting_live_proof"))]
+        if len(static_proposals) > 1:
+            raise WebsiteAuthorityError("website_configuration_changed", "Recheck the selected static directory.")
         target_promotion = action == "config_write" and any(isinstance(item, dict) and (item.get("verification") or {}).get("status") in {"passed", "verified", "preview_verified"} for item in targets)
         needs_native = action in {"setup", "publish", "merge", "preview"} or target_promotion
         # Partial checkpoints can retain an accepted publishing proof even when
@@ -521,7 +527,7 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
         retains_publication_proof = action == "config_write" and bool(expected) and candidate.targets.filter(
             generation=candidate.generation, source_sha=expected, verified_at__isnull=False,
             capabilities__publishingReady=True).exists()
-        needs_head = needs_head or target_promotion or retains_publication_proof or require_current_head
+        needs_head = needs_head or target_promotion or retains_publication_proof or require_current_head or bool(static_proposals)
         # A reviewed child may pin an independently verified working branch.
         # This never replaces the selected default branch consent/observation.
         from .run_review_source import review_source_preflight, reviewed_source_scope
@@ -541,9 +547,25 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
                     raise
                 # The run's pin is now stale: never record it as GitHub's head.
                 followed = True
+        if static_proposals:
+            from .website_static_setup_review import validate_provisional_target
+            if followed or reviewed_source is not None:
+                raise WebsiteAuthorityError("website_source_changed", "The reviewed directory is not on the selected branch head.")
+            validate_provisional_target(candidate, static_proposals[0], expected, payload)
         with transaction.atomic():
             Organization.objects.select_for_update().get(pk=candidate.organization_id)
             connection = WebsiteConnection.objects.select_for_update().select_related("organization").get(pk=candidate.pk)
+            if static_proposals:
+                proposed_id = static_proposals[0].get("target_id")
+                selected_id = OrganizationContentConfig.objects.filter(website_connection=connection,
+                    organization_id=connection.organization_id).values_list("default_publish_target_id", flat=True).first()
+                if (selected_id and (payload.get("default_publish_target_id") or selected_id) != selected_id
+                        and connection.targets.filter(generation=connection.generation, target_key=selected_id,
+                                                      verified_at__isnull=False).exists()):
+                    raise WebsiteAuthorityError("website_target_changed", "The selected publishing target changed.")
+                if connection.targets.filter(generation=connection.generation, target_key=proposed_id,
+                                             verified_at__isnull=False).exists():
+                    raise WebsiteAuthorityError("website_target_changed", "This target already has independent verification.")
             if action in {"setup", "publish", "merge", "config_write", "preview"}:
                 require_run_not_stopped(payload, lock=True)
             current = (connection.generation, connection.configuration_version, connection.state, connection.installation_id, connection.authorized_by_id, observed_source_sha(connection))
@@ -1819,6 +1841,7 @@ def record_scan_evidence(connection, data):
         # Direct publishing needs an adapter's verification evidence at this SHA;
         # a detected file/legacy scaffold cache alone is not verification.
         targets = data.get("publish_targets") if isinstance(data.get("publish_targets"), list) else []
+        from .website_content_files import has_static_deployment_proof
         verified = False
         preview = False
         native_allowed = True
@@ -1848,6 +1871,8 @@ def record_scan_evidence(connection, data):
                 from .website_live_verification import accepted as live_url_accepted
                 accepted_proof = (not required(connection, previous) or live_url_accepted(connection, previous)
                     or current_ci_attestation(connection, previous) is not None)
+                if previous.adapter == "static_dropin_v1" and not has_static_deployment_proof(connection, previous):
+                    continue
                 verified |= bool(native_allowed and accepted_proof and previous.source_sha == sha and previous.capabilities.get("publishingReady"))
                 preview |= bool(native_allowed and accepted_proof and previous.source_sha == sha and (previous.contract.get("verification") or {}).get("preview_capable"))
                 continue
@@ -1859,8 +1884,11 @@ def record_scan_evidence(connection, data):
                 # Worker flags and copied legacy proof cannot attest the new
                 # execution inputs. Store this proposal without certification.
                 ready = preview_ready = False
-            verified |= bool(ready and target.get("publish_capability") in {"direct", "hook"})
-            preview |= bool((ready or preview_ready) and proof.get("preview_capable"))
+            # A static build can become eligible for deployment verification. Only
+            # the second pass below can promote the website after that separate proof.
+            if target.get("delivery_adapter") != "static_dropin_v1":
+                verified |= bool(ready and target.get("publish_capability") in {"direct", "hook"})
+                preview |= bool((ready or preview_ready) and proof.get("preview_capable"))
             custom_certified = bool(previous and previous.adapter == "custom_contract_v1" and previous.capabilities.get("adapterCertified")
                 and previous.contract.get("contract_digest") == target.get("contract_digest"))
             WebsiteConnectionTarget.objects.update_or_create(connection=connection, target_key=str(target["target_id"]), generation=connection.generation, defaults={
@@ -1874,6 +1902,8 @@ def record_scan_evidence(connection, data):
         accepted_targets = connection.targets.filter(generation=connection.generation, source_sha=sha, verified_at__isnull=False)
         from .website_publishing_inputs import has_candidate
         for accepted in accepted_targets:
+            if accepted.adapter == "static_dropin_v1" and not has_static_deployment_proof(connection, accepted):
+                continue
             from .website_sealed_workflow import required
             from .website_verification import current_ci_attestation
             from .website_live_verification import accepted as live_url_accepted
