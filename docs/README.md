@@ -213,3 +213,5 @@ identified as current by a maintained architecture document.
 - [Shared update benefits](shared-update-benefits.md): sharing requirements, grandfathered discounts, points and rollout dependencies.
 
 - [Website connection lifecycle and repository consent](website-connections.md) — schema, API, revocation, reviewed cleanup, and local verification.
+
+- [Managed Chat channels](managed-channel-sections.md) covers scoped Linear, Plane and Luma sync, durable room identity and optional Slack event conversations.

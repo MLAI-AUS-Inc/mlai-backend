@@ -1297,6 +1297,8 @@ jobs:
           integrations.tests_gmail_service \
           integrations.tests_luma \
           integrations.tests_luma_connector \
+          integrations.tests_managed_event_channels \
+          integrations.tests_managed_channel_projects \
           integrations.tests_reconciliation \
           integrations.tests_reconciliation_knowledge \
           integrations.tests_reconciliation_reporting \
