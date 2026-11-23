@@ -9,7 +9,7 @@ def _percentile(values, fraction):
     return round(ordered[max(0, ceil(len(ordered) * fraction) - 1)], 3) if ordered else None
 
 
-def _article_roots(rows):
+def article_request_groups(rows):
     """Group revisions/restarts by their recorded spend or original request lineage."""
     by_id = {row.get("run_id"): row for row in rows if row.get("run_id")}
     groups = {}
@@ -29,8 +29,12 @@ def _article_roots(rows):
             root = parent
         key = (row.get("organization_id"), "spend", spend) if len(spend) <= 19 and spend.isdecimal() and int(spend) > 0 else (row.get("organization_id"), "root", root)
         groups.setdefault(key, []).append(row)
+    return groups.values()
+
+
+def _article_roots(rows):
     roots = []
-    for group in groups.values():
+    for group in article_request_groups(rows):
         reviews = [row for row in group if row.get("status") in REVIEW_STATUSES]
         selected = max(reviews or group, key=lambda row: row.get("updated_at").isoformat() if row.get("updated_at") else "")
         results = [row.get("result") if isinstance(row.get("result"), dict) else {} for row in group]

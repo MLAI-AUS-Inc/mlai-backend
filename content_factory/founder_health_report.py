@@ -249,8 +249,37 @@ def _one_click(*, now, using, limit, test_ids):
              if (row["draft_ready_at"] or packaged.get(row["pk"])) is not None]
     within = sum(delta <= FIRST_DRAFT_WITHIN for delta in timed)
     return {"summary": summary, "prepareStopped": stopped, "truncated": articles_truncated or prepares_truncated,
+            "draftDeliveryEvidence": _draft_delivery_evidence(
+                articles, packaged, now=now, truncated=articles_truncated),
             "firstDraftWithin2h": {"within": within, "reviewed": len(timed), "unknown": len(reviewed) - len(timed),
                                    "share": _share(within, len(timed))}}
+
+
+def _draft_delivery_evidence(articles, packaged, *, now, truncated):
+    """Count requests with a complete observation window, including undelivered drafts."""
+    from .one_click_metrics import REVIEW_STATUSES, article_request_groups
+
+    counts = {"eligible": 0, "within": 0, "late": 0, "undelivered": 0, "unknown": 0}
+    for group in article_request_groups(articles):
+        starts = [row["created_at"] for row in group
+                  if row["created_at"] and row["workflow"] != "article_revision"]
+        if not starts:
+            continue
+        started = min(starts)
+        if now - started < FIRST_DRAFT_WITHIN:
+            continue
+        counts["eligible"] += 1
+        ready = [row["draft_ready_at"] or packaged.get(row["pk"]) for row in group]
+        dates = [at for at in ready if at and started <= at <= now]
+        if dates:
+            bucket = "within" if min(dates) - started <= FIRST_DRAFT_WITHIN else "late"
+        else:
+            bucket = "unknown" if any(row["status"] in REVIEW_STATUSES for row in group) else "undelivered"
+        counts[bucket] += 1
+    share = _share(counts["within"], counts["eligible"])
+    status = "inconclusive" if truncated or not counts["eligible"] or counts["unknown"] else (
+        "passing" if share >= FIRST_DRAFT_TARGET else "below_target")
+    return {**counts, "share": share, "status": status}
 
 
 def _setup_ready(*, now, using, limit, test_ids):
@@ -552,6 +581,10 @@ def render_lines(report) -> list[str]:
     lines.append(f"Articles (7 days): {summary['articlesReachingReview']} of {summary['articleRuns']} requests reached "
                  f"review; first draft within 2 h: {one_click['firstDraftWithin2h']['within']} of "
                  f"{one_click['firstDraftWithin2h']['reviewed']} timed, {one_click['firstDraftWithin2h']['unknown']} unknown")
+    if evidence := one_click.get("draftDeliveryEvidence"):
+        lines.append(f"Draft delivery qualification: {evidence['status'].replace('_', ' ')}. "
+                     f"{evidence['within']} of {evidence['eligible']} within 2 h, {evidence['late']} late, "
+                     f"{evidence['undelivered']} without a draft, {evidence['unknown']} with unknown timing.")
     publish = report["publish"]
     lines.append(f"Publish success (7 days): {publish['published']} of {publish['attempted']} merged or live, "
                  f"{publish['live']} live")
