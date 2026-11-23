@@ -29,6 +29,10 @@ MLAI Chat is another client surface, not a one-time data migration.
   General historical backfill is out of scope for mapped public channels. A
   bounded, operator-confirmed repair command exists only for pre-cutover messages
   whose retained Slack receipts still contain resolvable user/channel references.
+- For a mapped public MLAI Chat channel, Slack can delete a mirrored post by
+  workspace, channel and the original message timestamp. The bridge handles
+  deletion events with no original author payload. A later edit revision
+  cannot override the deletion or update a deleted mirror.
 - Direct messages, private channels, huddles, workflow payloads, ephemeral
   messages, and Slack Connect channels fail closed unless separately approved.
 - Attachments remain represented as safe provider-hosted links in the durable

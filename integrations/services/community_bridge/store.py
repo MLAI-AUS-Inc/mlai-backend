@@ -250,6 +250,20 @@ def ingest_inbound_event(
             return {"status": "community_source_pending"}
         if policy == "retire" and not retired_bot_source:
             return {"status": "community_source_pending"}
+        if normalized_event and normalized_event.get("delivery_type") == CommunityBridgeDeliveryType.DELETE:
+            event = raw_payload.get("event") or {}
+            if (not normalized_event.get("source_author_id") or not event.get("channel_type")) and (
+                channel is None
+                or channel.slack_workspace_id != raw_payload.get("team_id")
+                or channel.slack_visibility != "public"
+                or channel.slack_archived
+                or channel.slack_deleted
+                or channel.mirror_decision != "mirror"
+                or channel.hold_reason
+                or channel.destination_platform != CommunityBridgePlatform.BUZZ
+            ):
+                normalized_event = None
+                ignore_detail = "unverified_public_deletion"
 
     if normalized_event:
         try:
@@ -510,6 +524,7 @@ def resolve_message_link(
         "destination_channel_id": link.destination_channel_id,
         "destination_message_id": link.destination_message_id,
         "destination_parent_message_id": link.destination_parent_message_id,
+        "source_author_id": link.source_author_id,
         "source_payload": link.source_payload or {},
         "destination_payload": link.destination_payload or {},
     }
@@ -928,12 +943,15 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
         return _normalize_slack_reaction(event, event_type=event_type)
     if event_type != "message":
         return None
-    if str(event.get("channel_type") or "").strip() not in BRIDGEABLE_SLACK_CHANNEL_TYPES:
+    subtype = str(event.get("subtype") or "").strip()
+    channel_type = str(event.get("channel_type") or "").strip()
+    if channel_type not in BRIDGEABLE_SLACK_CHANNEL_TYPES and not (
+        subtype == "message_deleted" and not channel_type
+    ):
         return None
     if bool(event.get("is_ext_shared_channel")) or bool(event.get("is_shared")):
         return None
 
-    subtype = str(event.get("subtype") or "").strip()
     if bool(event.get("hidden")) and subtype not in {"message_changed", "message_deleted"}:
         return None
     bridge_bot_user_id = str(getattr(settings, "SLACK_BRIDGE_BOT_USER_ID", "") or "").strip()
@@ -1013,11 +1031,26 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
         }
 
     if subtype == "message_deleted":
-        previous = dict(event.get("previous_message") or {})
+        previous = event.get("previous_message")
+        previous = previous if isinstance(previous, dict) else {}
         source_message_id = str(event.get("deleted_ts") or previous.get("ts") or "").strip()
         user_id = str(previous.get("user") or "").strip()
-        if not source_message_id or not user_id or user_id == bridge_bot_user_id:
+        if not source_message_id or (user_id and user_id == bridge_bot_user_id):
             return None
+        if not user_id or not channel_type:
+            from .member_channel_events import _external, _private_hint
+
+            # Slack's documented delete envelope can omit the original message
+            # and the channel type. Bind that event to the exact public mapping
+            # at intake. It carries no actor authority.
+            if (
+                channel_type not in {"", "channel"}
+                or not _SLACK_RECEIPT_TS.fullmatch(source_message_id)
+                or not channel_id.startswith("C")
+                or _external(payload, event)
+                or _private_hint(event)
+            ):
+                return None
         source_parent_message_id = _normalize_parent_message_id(
             thread_ts=str(previous.get("thread_ts") or "").strip(),
             source_message_id=source_message_id,
