@@ -74,6 +74,37 @@ class CompletionTests(SimpleTestCase):
             self.assertEqual(notices.completed(CHECKOUT, str(AUDIT), proof(row)), {'status': 'disabled'})
             self.assertEqual(insert.call_count, 2)
 
+    @override_settings(APP_ENV='chat-staging', CYBERTEST_ENTRY_STAGING_ENABLED=True,
+                       CYBERTEST_BILLING_MODE='test', CYBERTEST_STAGING_COMPLETION_NOTICES_ENABLED=True,
+                       CYBERTEST_STAGING_COMPANY_IDS=[COMPANY], COMMUNITY_CHAT_FRONTEND_URL='https://chat-staging.mlai.au')
+    def test_staging_notices_require_the_designated_test_receipt_and_sender(self):
+        item = receipt()
+        with patch.object(notices.ContentFactoryCallbackEvent.objects, 'get_or_create') as insert:
+            self.assertEqual(notices.enqueue(item), {'status': 'disabled'})
+            item.test_mode = True
+            self.assertEqual(notices.enqueue(item), {'status': 'queued'})
+            item.binding['mlai_company_id'] = str(WORKSPACE)
+            self.assertEqual(notices.enqueue(item), {'status': 'disabled'})
+            insert.assert_called_once()
+        from agent_runtime.native_crypto import signing_key
+        row = SimpleNamespace(event_id=notices.PREFIX+str(AUDIT), job_id='', created_at=timezone.now())
+        with (patch.object(notices, 'recipient', return_value=(COMPANY, (KEY,))),
+              patch.object(notices.transport, 'notifier_key', return_value=signing_key('2'*64)) as key,
+              patch.object(notices.transport, 'open_dm', return_value=CHANNEL) as open_dm,
+              patch.object(notices.transport, 'post_event') as post):
+            self.assertEqual(notices.send_claimed(row, MagicMock()), 'sent')
+            key.assert_called_once_with(staging=True)
+            self.assertTrue(open_dm.call_args.kwargs['staging'])
+            self.assertTrue(post.call_args.kwargs['staging'])
+            self.assertIn('https://chat-staging.mlai.au/', post.call_args.args[0]['content'])
+        with override_settings(COMMUNITY_CHAT_RELAY_URL='wss://chat.mlai.au'):
+            with self.assertRaises(notices.transport.NotificationTransportError):
+                notices.transport.relay_origin(staging=True)
+        with override_settings(COMMUNITY_CHAT_RELAY_URL='wss://chat-staging.mlai.au'):
+            self.assertEqual(notices.transport.relay_origin(staging=True), 'https://chat-staging.mlai.au')
+            with self.assertRaises(notices.transport.NotificationTransportError):
+                notices.transport.relay_origin()
+
     def test_membership_and_workspace_are_revalidated_before_device_selection(self):
         row = receipt()
         company = SimpleNamespace(pk=COMPANY, organization_id='org', organization='active-org')
