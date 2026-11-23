@@ -290,7 +290,7 @@ class NativeSecurityResultsTests(SimpleTestCase):
         with patch.object(results, 'authorize', return_value={
             'user_id': 'owner', 'company_id': COMPANY, 'workspace_id': WORKSPACE,
         }) as authorize, patch.object(results.CybertestCheckout.objects, 'filter') as receipts:
-            selection = receipts.return_value
+            selection = receipts.return_value.values.return_value
             selection.filter.return_value.first.return_value = None
             with self.assertRaises(NotFound):
                 view.get(request, audit_id)
@@ -303,23 +303,16 @@ class NativeSecurityResultsTests(SimpleTestCase):
             selection.order_by.assert_not_called()
 
     def test_projection_exposes_only_saved_receipt_summary(self):
-        receipt = SimpleNamespace(
-            audit_id=UUID('30000000-0000-4000-8000-000000000001'),
-            binding={'repository': 'example/project', 'scope': ['private_function']},
-            phase_contract={'phase': 'basic'},
-            status='started',
-            settled_at=True,
-            created_at=SimpleNamespace(isoformat=lambda: '2026-11-23T00:00:00+00:00'),
-            points=24,
-            pricing_snapshot={'sponsored': True},
-            settlement={
-                'charge_microroo': 0, 'refund_microroo': 0,
-                'delivery': {'completedChecks': 2, 'plannedChecks': 3, 'incompleteCheckIds': ['private']},
-            },
-            delivery_evidence={'report': {'persisted': True, 'sha256': 'private'}},
-        )
+        receipt = {
+            'audit_id': UUID('30000000-0000-4000-8000-000000000001'),
+            'repository': 'example/project', 'phase': 'basic', 'status': 'started',
+            'settled_at': True, 'points': 24, 'sponsored': True,
+            'created_at': SimpleNamespace(isoformat=lambda: '2026-11-23T00:00:00+00:00'),
+            'charge_microroo': 0, 'refund_microroo': 0, 'completed_checks': 2,
+            'planned_checks': 3, 'report_saved': True, 'private': 'extra field',
+        }
         self.assertEqual(results.result_summary(receipt), {
-            'audit_id': str(receipt.audit_id), 'repository': 'example/project',
+            'audit_id': str(receipt['audit_id']), 'repository': 'example/project',
             'phase': 'basic', 'status': 'started', 'created_at': '2026-11-23T00:00:00+00:00',
             'settled': True, 'sponsored': True, 'quoted_points': 24, 'charge_microroo': 0,
             'refund_microroo': 0, 'report_saved': True, 'completed_checks': 2, 'planned_checks': 3,
