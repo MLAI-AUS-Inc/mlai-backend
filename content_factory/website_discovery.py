@@ -96,6 +96,10 @@ def discovery_snapshot(value):
     raw_paths = normalized.get("support_paths") if isinstance(normalized.get("support_paths"), list) else []
     support_paths = [{key: item[key][:1000] for key in ("id", "label", "status", "reason", "action") if isinstance(item.get(key), str)}
         for item in raw_paths[:8] if isinstance(item, dict) and item.get("id") in {"native", "custom_contract", "bring_ci", "provider", "portable"}]
+    # Older inventory snapshots keep the detected framework inside tech_stack.
+    legacy_framework = mapping(inventory.get("tech_stack")).get("framework")
+    if not isinstance(legacy_framework, str) or len(legacy_framework) > 64:
+        legacy_framework = None
     result = {"version": 1, "complete": inventory.get("discovery_complete") is True or payload.get("scan_complete") is True or normalized.get("discovery_complete") is True,
         "sourceSha": inventory.get("source_sha") or inventory.get("repo_head_sha") or payload.get("repo_head_sha") or payload.get("commit_sha") or normalized.get("source_sha") or None,
         "githubRepo": inventory.get("github_repo") or payload.get("github_repo") or "",
@@ -103,7 +107,7 @@ def discovery_snapshot(value):
         "branch": inventory.get("branch") or payload.get("default_branch") or payload.get("branch") or "",
         "appRoot": inventory.get("app_root") or payload.get("app_root") or "",
         "framework": inventory.get("detected_framework") or inventory.get("framework")
-            or payload.get("detected_framework") or payload.get("framework") or normalized.get("framework"),
+            or payload.get("detected_framework") or payload.get("framework") or normalized.get("framework") or legacy_framework,
         "resolution": resolution, "candidates": candidates, "publishReady": False,
         "supportPaths": support_paths}
     complete = result["complete"]
