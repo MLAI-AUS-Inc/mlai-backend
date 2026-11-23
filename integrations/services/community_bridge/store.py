@@ -291,9 +291,15 @@ def ingest_inbound_event(
             return {"status": "community_source_pending"}
         if policy == "retire" and not retired_bot_source:
             return {"status": "community_source_pending"}
-        if normalized_event and normalized_event.get("delivery_type") == CommunityBridgeDeliveryType.DELETE:
-            event = raw_payload.get("event") or {}
-            if (not normalized_event.get("source_author_id") or not event.get("channel_type")) and (
+        event = raw_payload.get("event")
+        if (
+            isinstance(event, dict)
+            and event.get("subtype") == "message_deleted"
+            and normalized_event
+            and normalized_event.get("delivery_type") == CommunityBridgeDeliveryType.DELETE
+            and (not normalized_event.get("source_author_id") or not event.get("channel_type"))
+        ):
+            if (
                 channel is None
                 or channel.slack_workspace_id != raw_payload.get("team_id")
                 or channel.slack_visibility != "public"
@@ -1087,7 +1093,8 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
             if (
                 channel_type not in {"", "channel"}
                 or not _SLACK_RECEIPT_TS.fullmatch(source_message_id)
-                or not channel_id.startswith("C")
+                or not (_SLACK_RECEIPT_ID.fullmatch(workspace_id) and workspace_id.startswith("T"))
+                or not (_SLACK_RECEIPT_ID.fullmatch(channel_id) and channel_id.startswith("C"))
                 or _external(payload, event)
                 or _private_hint(event)
             ):

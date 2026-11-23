@@ -31,6 +31,28 @@ class PublicDeletionOrderTests(SimpleTestCase):
             {**payload, "event": {**payload["event"], "channel_type": "group"}}
         ))
 
+    def test_normalized_internal_delete_does_not_require_a_slack_callback_envelope(self):
+        normalized = {
+            "delivery_type": "delete", "source_channel_id": "CBOOST",
+            "source_message_id": "1700000000.000001", "source_author_id": "UPOSTER",
+        }
+        with (
+            patch.object(store, "_get_enabled_channel", return_value=SimpleNamespace(
+                slack_workspace_id="TBOOST", audience="community",
+            )),
+            patch.object(store, "_canonicalize_event", wraps=store._canonicalize_event) as canonicalize,
+            patch.object(store.transaction, "atomic", return_value=nullcontext()),
+            patch.object(store.CommunityBridgeReceipt.objects, "create",
+                         side_effect=RuntimeError("receipt write reached")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "receipt write reached"):
+                store.ingest_inbound_event.__wrapped__(
+                    source_platform="slack", source_channel_id="CBOOST",
+                    receipt_key="internal-delete", event_type="message",
+                    normalized_event=normalized, raw_payload={},
+                )
+        canonicalize.assert_called_once()
+
     def test_delete_is_not_superseded_by_a_newer_completed_edit(self):
         row = SimpleNamespace(
             source_platform="slack", delivery_type="delete",
