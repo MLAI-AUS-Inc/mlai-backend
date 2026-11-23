@@ -906,6 +906,7 @@ jobs:
     - name: Verify Founder recovery policy and authority on PostgreSQL
       run: |
         python manage.py test \
+          content_factory.tests_article_preview_recovery.SavedPreviewRecoveryTests.test_postgres_authority_locks_only_the_historical_run_and_selected_operation \
           content_factory.tests_p2_registry_alerts \
           content_factory.tests_p2_registry_contract \
           content_factory.tests_p2_registry_foundation \

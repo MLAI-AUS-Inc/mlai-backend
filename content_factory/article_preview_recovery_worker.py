@@ -19,7 +19,7 @@ from .website_models import WebsiteConnectionOperation
 def _claim(identifier, now):
     with transaction.atomic():
         op = (
-            WebsiteConnectionOperation.objects.select_for_update()
+            WebsiteConnectionOperation.objects.select_for_update(of=("self",))
             .filter(pk=identifier, action=recovery.ACTION, state="pending")
             .first()
         )
@@ -150,7 +150,7 @@ def advance(identifier, *, now=None):
     except (http_client.RequestException, ValueError):
         pass
     with transaction.atomic():
-        updated = WebsiteConnectionOperation.objects.select_for_update().get(pk=identifier)
+        updated = WebsiteConnectionOperation.objects.select_for_update(of=("self",)).get(pk=identifier)
         if updated.state != "pending" or updated.attempts != op.attempts:
             return updated.state
         if result:
@@ -171,7 +171,7 @@ def callback(run_id, payload):
     wire = {k: v for k, v in payload.items() if k not in {"state", "reason"}}
     with transaction.atomic():
         op = (
-            WebsiteConnectionOperation.objects.select_for_update()
+            WebsiteConnectionOperation.objects.select_for_update(of=("self",))
             .filter(
                 action=recovery.ACTION,
                 payload__source_run_id=run_id,

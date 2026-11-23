@@ -13,6 +13,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.crypto import salted_hmac, constant_time_compare
 from workflow_runs.models import ContentFactoryRun
+from organizations.models import Organization
 from .article_preview_recovery_state import effective, instant, mapping, terminal
 from .models import OrganizationContentConfig
 from .website_connections import authority_guard, contract_for
@@ -71,7 +72,7 @@ def current(run, *, lock=False):
         connection__organization_id=run.organization_id,
         payload__source_run_id=run.run_id,
     )
-    return (rows.select_for_update() if lock else rows).order_by("-created_at", "-pk").first()
+    return (rows.select_for_update(of=("self",)) if lock else rows).order_by("-created_at", "-pk").first()
 
 
 def _safe_parent(run):
@@ -355,8 +356,10 @@ def reserve(run, user, snapshot, *, automatic=False, offer_id=None, replaces=Non
     ):
         raise Refused()
     with transaction.atomic():
-        WebsiteConnection.objects.select_for_update().get(pk=site.pk)
-        locked = ContentFactoryRun.objects.select_for_update().get(pk=run.pk)
+        # The authority guard also locks the tenant before its connection and run.
+        Organization.objects.select_for_update(of=("self",)).get(pk=run.organization_id)
+        WebsiteConnection.objects.select_for_update(of=("self",)).get(pk=site.pk)
+        locked = ContentFactoryRun.objects.select_for_update(of=("self",)).get(pk=run.pk)
         if scoped(locked, user, confirmed=confirmed)[1] != scope:
             raise Refused()
         previous = current(locked, lock=True)
@@ -457,7 +460,11 @@ def authority(run_id, wire):
         "configuration_revision": wire["configuration_version"],
     }
     with authority_guard(binding, action="preview", require_current_head=True):
-        run = ContentFactoryRun.objects.select_for_update().select_related("organization").get(pk=run.pk)
+        run = (
+            ContentFactoryRun.objects.select_for_update(of=("self",))
+            .select_related("organization")
+            .get(pk=run.pk)
+        )
         locked = current(run, lock=True)
         deadline = instant(wire.get("expires_at"))
         if (
@@ -702,7 +709,7 @@ def remember_review(run, snapshot, started):
         saved["sourceDiagnostics"] = diagnostics
     key = f"preview-review-observation:{run.pk}"
     with transaction.atomic():
-        record, created = WebsiteConnectionOperation.objects.select_for_update().get_or_create(
+        record, created = WebsiteConnectionOperation.objects.select_for_update(of=("self",)).get_or_create(
             idempotency_key=key,
             defaults={
                 "connection": site,

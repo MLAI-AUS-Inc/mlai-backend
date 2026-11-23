@@ -5,7 +5,9 @@ from datetime import timedelta
 from unittest.mock import patch, Mock
 from uuid import uuid4
 
-from django.test import TestCase, override_settings
+from django.db import connection
+from django.test import TestCase, override_settings, skipUnlessDBFeature
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -498,3 +500,21 @@ class SavedPreviewRecoveryTests(TestCase):
         wire = recovery.current(self.run).payload["wire"]
         with self.settings(ARTICLES_SAVED_PREVIEW_RECOVERY_DOMAINS="mlai.au"):
             self.assertEqual(self.effect("authorize", wire).status_code, 409)
+
+    @skipUnlessDBFeature("has_select_for_update_of")
+    def test_postgres_authority_locks_only_the_historical_run_and_selected_operation(self):
+        self.get()
+        op = recovery.current(self.run)
+        with CaptureQueriesContext(connection) as queries:
+            response = self.effect("authorize", op.payload["wire"])
+        self.assertEqual(response.status_code, 200, response.content)
+        from workflow_runs.models import ContentFactoryRun
+
+        run_table = connection.ops.quote_name(ContentFactoryRun._meta.db_table)
+        operation_table = connection.ops.quote_name(op._meta.db_table)
+        locks = [row["sql"] for row in queries.captured_queries if "FOR UPDATE" in row["sql"]]
+        for table in (run_table, operation_table):
+            applicable = [sql for sql in locks if f"FROM {table} " in sql]
+            self.assertTrue(applicable, table)
+            for sql in applicable:
+                self.assertEqual(sql.split(" FOR UPDATE ", 1)[1], f"OF {table}")

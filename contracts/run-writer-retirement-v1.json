@@ -42,7 +42,7 @@
         "record"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "5774336836188e1af1502e1363cc98091009024c2899c43fca503679ae921975",
+      "function_sha256": "b010bd44519e0cba9e7fb7bbd2d55eab3c1174b796dd3dc7b95b602bc23fe656",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_article_preview_recovery.py"
@@ -67,7 +67,7 @@
         "locked"
       ],
       "local_guard_mentioned": false,
-      "function_sha256": "b2f92be53280d0f5190664bb06fc76558fd42b0de70d62bf2481e037cc8a8e02",
+      "function_sha256": "6451cc27332c8285764e9c6fb42af96e33775feabf92f6f1506ec82d28729754",
       "classification": "non_cf_model",
       "test_refs": [
         "content_factory/tests_article_preview_recovery.py"
