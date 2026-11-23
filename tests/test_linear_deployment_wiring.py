@@ -262,6 +262,7 @@ class LinearDeploymentWiringTests(unittest.TestCase):
             "MESSAGE_SYNC_TARGETED_STAGED_ROUTING": "false",
             "COMMUNITY_BRIDGE_DEPENDENCY_VERDICTS_ENABLED": "false",
             "SLACK_MEMBER_CHANNEL_ALLOWED_IDS": "",
+            "SLACK_VOICE_UPLOAD_CHANNELS": "CVOICE1",
             "SLACK_AGENT_BOTS_ENABLED": "false",
             "SLACK_AGENT_BOTS": '[{"workspace_id": "TTEST", "bot_user_id": "UDOT", "owner_user_id": 7, "name": "Maek"}]',
             "SLACK_OWNER_INVENTORY_ENABLED": "false",
