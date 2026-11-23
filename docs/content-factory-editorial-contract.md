@@ -26,6 +26,23 @@ the shared operation attempt. Missing or changed approval, unrelated children,
 portable drafts and cancelled or failed source operations retain the terminal
 gate.
 
+## Sparse article profile
+
+An owner can request the first-article card with `profile_intake=1`. Its optional
+`profileIntake.missingFields` names the missing startup description, target
+audience or reader objective. The existing card route without the query
+retains its original response. The company-scoped
+`POST /api/v1/my-startup/first-article/profile-intake/` accepts the listed
+fields as `oneLiner`, `targetAudience` and `readerTask`. Each supplied answer
+is 3–280 characters after whitespace normalization. The response is the
+refreshed card.
+
+Saving records the founder and timestamp for each supplied fact. Once the
+facts are complete, an eligible fresh catalog can retain a draft audience
+and a no-offer reader objective. Starting the article still requires its
+ordinary confirmation. Repeating the same save retains the original facts,
+and a conflicting change to an existing value requires refreshing the card.
+
 ## Approved article files download
 
 The existing owner-scoped `runs/:runId/article/download` ZIP retains its

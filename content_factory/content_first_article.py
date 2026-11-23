@@ -262,7 +262,10 @@ def approved_card_action(organization, config, audience, country):
     """In a private first draft, only show a previously approved offer to its approved audience."""
     from .portable_drafts import portable_starts_for_all
     cta = call_to_action(organization, config)
-    if not cta or not portable_starts_for_all():
+    from .article_profile_intake import KEY as intake_key
+    intake = _mapping(_strategy(config).get(intake_key))
+    intake_audience = bool(audience and audience.get("id") and intake.get("draftAudienceId") == audience["id"])
+    if not cta or not (portable_starts_for_all() or intake_audience):
         return cta
     if not audience or audience.get("status") != "approved":
         return None
@@ -526,7 +529,7 @@ def _in_flight_article_run(organization):
     return run if run is not None and run.status in ACTIVE_STATUSES else None
 
 
-def card_payload(context, user, config=None) -> dict:
+def card_payload(context, user, config=None, *, include_profile_intake=False) -> dict:
     """The GET body of IF-P1-09. Reads only; never creates a run or calls Content Factory."""
     from .activation import first_article_capability
     from .first_article_entitlement import entitlement_state
@@ -542,6 +545,8 @@ def card_payload(context, user, config=None) -> dict:
     price, balance = article_price_and_balance(organization, user)
     free = bool(first_article["free"])
     available = _in_flight_article_run(organization) is None and first_article["status"] != "in_progress"
+    from .article_profile_intake import intake_hint
+    intake = intake_hint(config, facts) if include_profile_intake and _first_article_write_allowed(user, organization, config) else {}
     return {
         "version": VERSION,
         "available": available,
@@ -556,6 +561,7 @@ def card_payload(context, user, config=None) -> dict:
         "profile": {"name": facts["name"], "oneLiner": facts["oneLiner"], "logoUrl": facts["logoUrl"],
                     "authorName": facts["authorName"]},
         "firstArticle": first_article,
+        **intake,
         **({"access": {"canStart": _first_article_write_allowed(user, organization, config)}}
             if cohorts.is_new_journey(organization, config) else {}),
     }
