@@ -849,6 +849,16 @@ class CommunityBridgeDiscordClient(discord.Client):
             # same durable dependency machinery used by thread replies.
             raise ParentMappingPending(delivery["source_message_id"])
 
+        if operation == CommunityBridgeDeliveryType.DELETE and not source_author_id:
+            # Slack can omit previous_message. The bridge already knows the
+            # author of this exact copy from its create acknowledgement.
+            source_author_id = link["source_author_id"]
+            if link["destination_channel_id"] != delivery["target_channel_id"]:
+                raise UnsupportedDeliveryError("Slack deletion target mapping changed")
+            if not source_author_id:
+                raise UnsupportedDeliveryError("Missing author on the Slack message link")
+            provenance["source_author_id"] = source_author_id
+
         await self._freeze_and_send_buzz_delivery(
             delivery,
             delivery_id=str(delivery["id"]),

@@ -601,6 +601,38 @@ class SlackCommunityBridgeEventViewTests(TestCase):
             [CommunityBridgeDeliveryType.EDIT, CommunityBridgeDeliveryType.DELETE],
         )
 
+    def test_public_slack_delete_without_original_message_is_enqueued_only_for_its_workspace(self):
+        channel = CommunityBridgeChannel.objects.create(
+            audience="community",
+            slack_workspace_id="TBOOST",
+            slack_channel_id="CBOOST",
+            slack_visibility="public",
+            destination_platform=CommunityBridgePlatform.BUZZ,
+            destination_channel_id="922c3b22-8002-4c3c-a37b-ce406a5e606e",
+        )
+        event = {
+            "type": "message",
+            "subtype": "message_deleted",
+            "hidden": True,
+            "channel": channel.slack_channel_id,
+            "ts": "1710000009.000001",
+            "deleted_ts": "1710000000.000001",
+        }
+        wrong_workspace = self._post({
+            "type": "event_callback", "event_id": "EvWrongWorkspace",
+            "team_id": "TWRONG", "event": event,
+        })
+        self.assertEqual(wrong_workspace.data["status"], "ignored")
+        accepted = self._post({
+            "type": "event_callback", "event_id": "EvModeratorDelete",
+            "team_id": channel.slack_workspace_id, "event": event,
+        })
+        self.assertEqual(accepted.data["status"], "enqueued")
+        delivery = CommunityBridgeDelivery.objects.get(channel=channel)
+        self.assertEqual(delivery.delivery_type, CommunityBridgeDeliveryType.DELETE)
+        self.assertEqual(delivery.source_message_id, event["deleted_ts"])
+        self.assertEqual(delivery.payload["source_author_id"], "")
+
     def test_hidden_plain_message_is_ignored(self):
         response = self._post(
             {
