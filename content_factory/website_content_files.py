@@ -93,10 +93,21 @@ def verified_static_target(connection, candidate):
 
 def has_static_deployment_proof(connection, target):
     """The provider-verified live listing linked the real detail page at this exact head."""
-    return connection.operations.filter(generation=connection.generation, action="deployment-verify", state="completed",
+    rows = connection.operations.filter(generation=connection.generation, action="deployment-verify", state="completed",
         receipt__target_id=target.target_key, receipt__source_sha=target.source_sha,
-        receipt__contract_digest=target.contract.get("contract_digest"), receipt__provider_verified=True,
-        receipt__static_directory_link_verified=True).exists()
+        receipt__contract_digest=target.contract.get("contract_digest"), receipt__static_directory_link_verified=True)
+    if rows.filter(receipt__provider_verified=True).exists():
+        return True
+    from .reviewed_article_pr_verify import ORIGIN
+    from .reviewed_article_pr import ACTION, canonical, sha256
+    proof = _mapping(target.contract.get("verification"))
+    if proof.get("attestation_origin") != ORIGIN or not proof.get("operation_id"):
+        return False
+    observed = rows.filter(receipt__attestation_origin=ORIGIN, receipt__operation_id=proof["operation_id"]).first()
+    return bool(observed and sha256(canonical(observed.receipt).encode()) == proof.get("evidence_digest")
+        and connection.operations.filter(action=ACTION, generation=connection.generation, state="completed",
+            payload__wire__operation_id=proof["operation_id"], receipt__status="verified_live",
+            receipt__merge_sha=target.source_sha, receipt__target_id=target.target_key).exists())
 
 
 def setup_delivered_not_live(result) -> dict | None:

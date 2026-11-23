@@ -239,12 +239,16 @@ def founder_draft_review(*, context, run, user):
     return {"allow_preview_pending": copy_while_pending, "copy_formats": copy_without_preview_enabled()}, founder_draft
 
 
-def current_export(context, run, *, content_files=False):
+def current_export(context, run, *, content_files=False, clear_claims=False):
     """``(export, error_response)``: the run's current export, read the way the review view reads it."""
     from .article_review_views import remote_review
     review = remote_review(run, include_content_files=True) if content_files else remote_review(run)
     if isinstance(review, Response):
         return None, review
+    if clear_claims:
+        from .publish_reviewed_draft import claim_count
+        if claim_count(run, review) != 0:
+            return None, _refusal(NOT_READY_DOWNLOAD, "claims_open", 409)
     latest = views._latest_review_ready_component_revision(run, context)
     allow_pending = copy_without_preview_enabled() and is_content_only(run)
     export = article_export(review, run_id=run.run_id, latest_run_id=latest.run_id if latest else None,

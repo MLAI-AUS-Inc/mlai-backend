@@ -9,7 +9,11 @@ from .website_runtime_observation import WebsiteRuntimeObservationView
 from .preview_domain_claim import PreviewDomainClaimServiceView
 from .run_execution_control_views import RunExecutionTicketView
 
+from .reviewed_article_pr_views import ReviewedArticlePRAuthorityView
+
 urlpatterns = [
+    path("reviewed-article-pr/authorize", ReviewedArticlePRAuthorityView.as_view()),
+    path("reviewed-article-pr/token", ReviewedArticlePRAuthorityView.as_view(credential=True)),
     path("repo-health/authorize", RepoHealthProbeView.as_view()),
     path("repo-health/result", RepoHealthProbeView.as_view(complete=True)),
     path('articles/runtime-observation/', WebsiteRuntimeObservationView.as_view(), name='articles_runtime_observation'),

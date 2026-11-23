@@ -852,6 +852,14 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        from .reviewed_article_pr_worker import ACTION as reviewed_pr_action, advance as advance_reviewed_pr
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action=reviewed_pr_action).exists():
+            outcome = advance_reviewed_pr(identifier, now=now)
+            if outcome:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                result["operations"].append({"id": str(identifier), "action": reviewed_pr_action, "outcome": outcome})
+            continue
         from .article_publication_observation import ACTION as publication_action, advance as advance_publication
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action=publication_action).exists():
             outcome = advance_publication(identifier, now=now)
