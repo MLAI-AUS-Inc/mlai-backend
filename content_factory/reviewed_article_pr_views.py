@@ -46,8 +46,6 @@ class FounderReviewedArticlePRView(APIView):
             if error is not None:
                 return error
             op = reviewed.reserve(ctx, run, request.user, request.data)
-            worker.advance(op.pk)
-            op.refresh_from_db()
             return Response(reviewed.summary(op), headers={"Cache-Control": "private, no-store"})
         except reviewed.Unavailable as exc:
             return Response({"reason": str(exc)}, status=exc.status)

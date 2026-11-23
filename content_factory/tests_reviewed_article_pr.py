@@ -92,11 +92,24 @@ class ReviewedArticlePRTests(TestCase):
         self.assertEqual(value["deliveryKind"], "content_files")
         self.assertFalse(self.site.operations.exists())
         self.git_head.assert_not_called()
-        first = self.accept(value)
-        self.assertEqual(first.status_code, 200, first.content)
-        self.assertEqual(first.json()["status"], "draft_pr_open")
-        self.assertEqual(self.accept(value).json(), first.json())
-        self.assertEqual(self.offer(), first.json())
+        with patch("content_factory.website_wakeups.submit_operation") as submit:
+            with self.captureOnCommitCallbacks(execute=True):
+                first = self.accept(value)
+                self.assertEqual(first.status_code, 200, first.content)
+                self.assertEqual(first.json()["status"], "pending")
+                self.assertEqual(self.offer(), first.json())
+                submit.assert_not_called()
+                self.remote.reset_mock()
+                self.git_head.reset_mock()
+                self.assertEqual(self.accept(value).json(), first.json())
+                self.remote.assert_not_called()
+                self.git_head.assert_not_called()
+                self.transport.assert_not_called()
+            op = self.site.operations.get(action=pr.ACTION)
+            submit.assert_called_once_with(worker.advance, op.pk)
+        worker.advance(op.pk)
+        self.assertEqual(self.offer()["status"], "draft_pr_open")
+        self.assertEqual(self.accept(value).json(), self.offer())
         self.transport.assert_called_once()
         self.assertFalse(WrittenArticle.objects.exists())
         self.run.refresh_from_db()
@@ -110,7 +123,8 @@ class ReviewedArticlePRTests(TestCase):
             return response
         self.transport.side_effect = merge_before_ack
         with patch("content_factory.failure_policy_engine.record_pull_request") as count:
-            self.assertEqual(self.accept().json()["status"], "draft_pr_open")
+            self.assertEqual(self.accept().json()["status"], "pending")
+            worker.advance(self.site.operations.get(action=pr.ACTION).pk)
             self.assertEqual(self.offer()["status"], "draft_pr_open")
         self.assertEqual(count.call_count, 1)
 
@@ -163,6 +177,8 @@ class ReviewedArticlePRTests(TestCase):
         pending = self.accept().json()
         self.assertEqual(pending["status"], "pending")
         op = self.site.operations.get(action=pr.ACTION)
+        self.transport.assert_not_called()
+        worker.advance(op.pk)
         wire = self.transport.call_args.kwargs["json"]
         self.transport.side_effect = self.deliver
         worker.advance(op.pk, now=timezone.now()+timedelta(hours=1))
@@ -170,6 +186,19 @@ class ReviewedArticlePRTests(TestCase):
         self.assertEqual(self.offer()["status"], "draft_pr_open")
         op.refresh_from_db()
         self.assertEqual(op.state, "completed")
+
+    @override_settings(ARTICLES_WEBSITE_EVENT_WAKES_ENABLED=False)
+    def test_unavailable_executor_leaves_work_for_the_periodic_reconciler(self):
+        from .website_reconciliation import process_website_connection_operations
+        with patch("content_factory.website_wakeups._POOL.submit", side_effect=RuntimeError("shutting down")) as rejected:
+            with self.captureOnCommitCallbacks(execute=True):
+                self.assertEqual(self.accept().json()["status"], "pending")
+            rejected.assert_called_once()
+        self.transport.assert_not_called()
+        process_website_connection_operations(connection_id=self.site.pk)
+        self.assertEqual(self.offer()["status"], "draft_pr_open")
+        process_website_connection_operations(connection_id=self.site.pk)
+        self.transport.assert_called_once()
 
     def test_service_ledger_accepts_only_exact_branch_and_owned_chain_across_files(self):
         self.transport.side_effect = TimeoutError()
@@ -268,7 +297,9 @@ class ReviewedArticlePRTests(TestCase):
 
     def test_changed_source_review_after_merge_cannot_activate_a_static_target(self):
         self.static()
-        self.assertEqual(self.accept().json()["status"], "draft_pr_open")
+        self.assertEqual(self.accept().json()["status"], "pending")
+        worker.advance(self.site.operations.get(action=pr.ACTION).pk)
+        self.assertEqual(self.offer()["status"], "draft_pr_open")
         op = self.site.operations.get(action=pr.ACTION)
         self.git_head.return_value = self.merge
         self.review["approved"] = False
@@ -283,7 +314,9 @@ class ReviewedArticlePRTests(TestCase):
     def test_empty_static_opens_then_certifies_only_merged_source_and_exact_live_files(self):
         self.static()
         self.assertEqual(self.offer()["directoryRoute"], "/stories/")
-        self.assertEqual(self.accept().json()["status"], "draft_pr_open")
+        self.assertEqual(self.accept().json()["status"], "pending")
+        worker.advance(self.site.operations.get(action=pr.ACTION).pk)
+        self.assertEqual(self.offer()["status"], "draft_pr_open")
         self.assertFalse(self.site.capabilities.get("publishingReady"))
         op = self.site.operations.get(action=pr.ACTION)
         self.git_head.return_value = self.merge

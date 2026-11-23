@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
+from django.utils import timezone
 from django.utils.crypto import constant_time_compare, salted_hmac
 
 from founder_tools.services import get_founder_company_context
@@ -156,6 +157,16 @@ def offer(context, run, user):
 def reserve(context, run, user, data):
     if not isinstance(data, dict) or set(data) != {"deliveryKind", "reviewedRevision", "articleSha256", "offerId"}:
         raise Unavailable("invalid_request", 400)
+    # A lost founder response must not wait on CF's article lock while the
+    # first dispatch is still assembling files. This returns only an existing receipt.
+    _, selected = _selected(context.organization)
+    if may_publish(user, context.organization) and all(isinstance(v, str) for v in data.values()):
+        saved = selected.operations.filter(action=ACTION, generation=selected.generation,
+            payload__wire__source_run_id=run.run_id, payload__wire__reviewed_revision=data["reviewedRevision"],
+            payload__wire__delivery_kind=data["deliveryKind"], payload__wire__article_sha256=data["articleSha256"],
+            payload__offer_id=data["offerId"], payload__requested_by=user.pk).first()
+        if saved:
+            return saved
     site, dest, binding, public, export = _offer(context, run, user)
     if any(not isinstance(data.get(k), str) or not constant_time_compare(data[k], public[k]) for k in data):
         raise Unavailable()
@@ -178,11 +189,16 @@ def reserve(context, run, user, data):
         key = sha256(canonical([str(site.pk), site.generation, run.run_id, binding["reviewed_revision"]]).encode())
         op, created = WebsiteConnectionOperation.objects.get_or_create(idempotency_key=f"{ACTION}:{key}", defaults={
             "pk": identifier, "action": ACTION, "connection": site, "generation": site.generation, "receipt": {"status": "pending"},
-            "payload": {"wire": wire, "requested_by": user.pk, "company_id": str(context.company.pk), "destination": dest,
+            "next_attempt_at": timezone.now(),
+            "payload": {"wire": wire, "offer_id": public["offerId"], "requested_by": user.pk, "company_id": str(context.company.pk), "destination": dest,
                         "installation_id": site.installation_id, "slug": handoff["slug"],
                         "title": str(export["metadata"].get("title") or "")[:500], "images": [i["name"] for i in handoff["images"]]}})
         if not created and any(op.payload["wire"].get(k) != v for k, v in binding.items()):
             raise Unavailable()
+        if created:
+            from .reviewed_article_pr_worker import advance
+            from .website_wakeups import submit_operation
+            transaction.on_commit(lambda: submit_operation(advance, op.pk), robust=True)
     return op
 
 
