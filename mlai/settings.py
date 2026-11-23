@@ -2993,3 +2993,7 @@ from roo.cybertest_production_config import production_entry_settings
 globals().update(production_entry_settings({
     **os.environ, 'APP_ENV': APP_ENV, 'DEBUG': str(DEBUG).lower(),
 }))
+
+# Each entry explicitly binds a provider installation to a Chat community.
+MANAGED_CHANNEL_SOURCES = json.loads(os.environ.get("MANAGED_CHANNEL_SOURCES", "{}"))
+MANAGED_CHANNEL_SLACK_SECTIONS = json.loads(os.environ.get("MANAGED_CHANNEL_SLACK_SECTIONS", "{}"))
