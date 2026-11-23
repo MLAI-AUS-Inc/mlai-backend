@@ -4,12 +4,14 @@ from . import api_views_bridge
 from .api_views_bridge_actor import CommunityBridgeRooActorView, PrivateBridgeRooActorView
 from . import api_views_connectors
 from . import api_views_finance
+from .api_views_managed_channels import managed_channel_webhook
 from . import api_views_luma
 from . import api_views_reconciliation
 from .api_views_studio_reports import StudioReportPrepareView
 from startup_updates import api_views as startup_update_api_views
 
 urlpatterns = [
+    path("managed-channels/webhooks/<slug:installation>", managed_channel_webhook, name="managed_channel_webhook"),
     path('studio-reports/prepare', StudioReportPrepareView.as_view(), name='studio_reports_prepare'),
     # GitHub Integration
     path('github/', api_views.GithubTokenIdentityView.as_view(), name='github_integration_list'),  # POST create/update

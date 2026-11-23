@@ -8,6 +8,7 @@ native_agent_runtime_services=(native-agent-worker)
 community_agent_runtime_services=(community-agent-worker)
 event_discount_runtime_services=(event-discount-worker)
 roo_points_runtime_services=(roo-points-worker)
+managed_channel_runtime_services=(managed-channel-worker)
 # The transient handoff slot is managed explicitly, never normal startup.
 handoff_runtime_services=(web-candidate)
 all_runtime_writer_services=(
@@ -19,5 +20,6 @@ all_runtime_writer_services=(
     "${community_agent_runtime_services[@]}"
     "${event_discount_runtime_services[@]}"
     "${roo_points_runtime_services[@]}"
+    "${managed_channel_runtime_services[@]}"
 )
 runtime_services=("${required_runtime_services[@]}")
