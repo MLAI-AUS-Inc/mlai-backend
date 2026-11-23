@@ -1397,6 +1397,13 @@
       "expiry": "2027-02-28"
     },
     {
+      "name": "CYBERTEST_STAGING_COMPLETION_NOTICES_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Allows private completion notices for allowlisted test receipts on the isolated staging Chat relay."
+    },
+    {
       "name": "DAILY_RESEARCH_BILL_WITHOUT_SLACK_ENABLED",
       "default": "true",
       "owner": "platform",
