@@ -875,6 +875,10 @@ def _wire(row, channel, actor, client, info, *, identity_key=SLACK_STAMP, emoji_
     from .identity import verified_identity_for_slack
 
     source_author = str(payload.get("source_author_id") or "")
+    if operation == "delete" and not source_author:
+        source_author = direct.source_author_id
+        if not source_author:
+            raise MemberDeliveryUnavailable("source_author_missing")
     identity = (
         verified_identity_for_slack(
             slack_workspace_id=channel.slack_workspace_id, slack_user_id=source_author
@@ -916,7 +920,7 @@ def _wire(row, channel, actor, client, info, *, identity_key=SLACK_STAMP, emoji_
         "source_message_id": str(
             metadata.get("slack_message_id") or row.source_message_id
         ),
-        "source_author_id": str(payload.get("source_author_id") or ""),
+        "source_author_id": source_author,
         "source_author_display_name": str(
             payload.get("source_author_display_name") or ""
         ),
