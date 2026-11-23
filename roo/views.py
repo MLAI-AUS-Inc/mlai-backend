@@ -1657,6 +1657,29 @@ class BoostPostAdmissionView(APIView):
         )
 
 
+class BoostPostMirrorRemovalView(APIView):
+    """Accept Roo's confirmation that a rejected boost's Slack root was removed."""
+
+    permission_classes = [HasStrictRooApiKey]
+
+    @transaction.atomic
+    def post(self, request, admission_id):
+        from integrations.services.community_bridge.store import enqueue_boost_mirror_removal
+
+        admission = get_object_or_404(
+            BoostPostAdmission.objects.select_for_update(),
+            pk=admission_id,
+            submission_key=str(request.data.get("submission_key") or ""),
+            channel_id=settings.ROO_LINK_LOVE_SLACK_CHANNEL_ID,
+        )
+        result = enqueue_boost_mirror_removal(admission)
+        if result["status"] == "not_rejected_boost":
+            return Response(result, status=status.HTTP_409_CONFLICT)
+        if result["status"] not in {"enqueued", "duplicate", "no_active_mirror"}:
+            return Response({"status": "retry"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(result)
+
+
 class LedgerViewSet(viewsets.ReadOnlyModelViewSet):
     """Read-only view of ledger entries."""
     queryset = Ledger.objects.all()

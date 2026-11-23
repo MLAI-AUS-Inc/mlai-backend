@@ -33,6 +33,9 @@ MLAI Chat is another client surface, not a one-time data migration.
   workspace, channel and the original message timestamp. The bridge handles
   deletion events with no original author payload. A later edit revision
   cannot override the deletion or update a deleted mirror.
+- When Roo confirms a rejected Boost My Startup root is gone from Slack, it
+  also queues the deletion directly using the recorded admission. The bridge
+  can remove the mirror without a Slack callback. Retries use the same receipt.
 - Direct messages, private channels, huddles, workflow payloads, ephemeral
   messages, and Slack Connect channels fail closed unless separately approved.
 - Attachments remain represented as safe provider-hosted links in the durable

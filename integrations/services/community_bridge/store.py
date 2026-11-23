@@ -219,6 +219,47 @@ def ingest_discord_event(
 
 
 @transaction.atomic
+def enqueue_boost_mirror_removal(admission) -> dict:
+    """Queue the Chat removal of one rejected boost whose Slack root is gone."""
+    if (
+        admission.status not in {"insufficient_points", "member_unlinked"}
+        or admission.channel_id != settings.ROO_LINK_LOVE_SLACK_CHANNEL_ID
+    ):
+        return {"status": "not_rejected_boost"}
+    channel = CommunityBridgeChannel.objects.select_for_update().filter(
+        slack_workspace_id=admission.workspace_id,
+        slack_channel_id=admission.channel_id,
+        destination_platform=CommunityBridgePlatform.BUZZ,
+        enabled=True,
+        sync_deletes=True,
+        slack_visibility="public",
+        slack_archived=False,
+        slack_deleted=False,
+        mirror_decision="mirror",
+        hold_reason="",
+    ).first()
+    if channel is None:
+        return {"status": "no_active_mirror"}
+
+    key = f"roo-boost-removal:{admission.pk}:{channel.pk}"
+    return ingest_inbound_event(
+        source_platform=CommunityBridgePlatform.SLACK,
+        receipt_key=key,
+        source_channel_id=channel.slack_channel_id,
+        event_type="roo_boost_removal",
+        raw_payload={"team_id": channel.slack_workspace_id, "boost_admission_id": admission.pk},
+        normalized_event={
+            "delivery_type": CommunityBridgeDeliveryType.DELETE,
+            "source_channel_id": channel.slack_channel_id,
+            "source_message_id": admission.root_message_ts,
+            "source_author_id": admission.poster_slack_id,
+            "text": "",
+            "attachments": [],
+        },
+    )
+
+
+@transaction.atomic
 def ingest_inbound_event(
     *,
     source_platform: str,
