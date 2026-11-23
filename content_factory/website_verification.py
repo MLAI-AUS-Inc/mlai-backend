@@ -363,6 +363,27 @@ def route_requires_marker(kind, path, marker_routes):
     return kind == "listing" or marker_routes is None or (str(path).rstrip("/") or "/") in marker_routes
 
 
+def static_listing_links_to(listing_url, body, detail_path):
+    """Check an actual anchor, resolving HTML base and requiring the selected HTTPS origin."""
+    from bs4 import BeautifulSoup
+    from urllib.parse import urljoin, urlsplit
+    page = BeautifulSoup(body, "html.parser")
+    base = page.find("base", href=True)
+    try:
+        expected = urlsplit(urljoin(listing_url, detail_path))
+        base_url = urljoin(listing_url, base["href"]) if base else listing_url
+        for anchor in page.find_all("a", href=True):
+            if anchor.find_parent(["template", "noscript"]):
+                continue
+            url = urlsplit(urljoin(base_url, anchor["href"]))
+            if (url.scheme, url.netloc, url.path.rstrip("/")) == (
+                    expected.scheme, expected.netloc, expected.path.rstrip("/")):
+                return True
+    except ValueError:
+        pass
+    return False
+
+
 def verify_live_deployment(config, *, data):
     """Check selected source, provider CI receipt and same-site source marker."""
     from .website_live_fetch import fetch_live_route
@@ -397,19 +418,25 @@ def verify_live_deployment(config, *, data):
     ensure_fingerprint(website, binding)
     marker_routes = kit_marker_routes(website, data["source_sha"], artifact_digest)
     observations = []
+    static = target.contract.get("delivery_adapter") == "static_dropin_v1"
     for kind in ("listing", "detail", "unknown_slug"):
         public_url = f"https://{website.organization.domain}{routes[kind]}"
         expected_status = 404 if kind == "unknown_slug" else 200
         body, headers = fetch_live_route(public_url, website.organization.domain, expected_status=expected_status)
-        if kind == "listing":observe_headers(website, binding, headers)
+        if kind == "listing":
+            observe_headers(website, binding, headers)
+            if static and not static_listing_links_to(public_url, body, routes["detail"]):
+                raise WebsiteAuthorityError("live_route_unavailable", "The public directory must link to the reviewed article.")
         marker = headers.get("x-mlai-artifact-digest") or ""
-        if (expected_status == 200 and route_requires_marker(kind, routes[kind], marker_routes)
+        if (expected_status == 200 and (static or route_requires_marker(kind, routes[kind], marker_routes))
                 and marker != artifact_digest and not re.search(rb'<meta\s+name=["\x27]mlai-artifact-digest["\x27]\s+content=["\x27]' + artifact_digest.encode() + rb'["\x27]', body)):
             raise WebsiteAuthorityError("live_route_unavailable", "The public listing or article detail has not deployed this reviewed integration artifact yet.")
         observations.append({"kind": kind, "path": routes[kind], "status": expected_status})
     receipt = {"status": "passed", "source_sha": data["source_sha"], "connection_generation": website.generation,
         "target_id": data["target_id"], "public_url": url, "checked_at": timezone.now().isoformat(), "ci_evidence_digest": data["evidence_digest"],
         "artifact_digest": artifact_digest, "contract_digest": data["contract_digest"], "verified_routes": observations, "provider_verified": True}
+    if static:
+        receipt["static_directory_link_verified"] = True
     with authority_guard(binding, action="read") as website:
         current_target = website.targets.filter(generation=website.generation, target_key=data.get("target_id")).first()
         current_ci = ci_attestation_for(website, data)

@@ -254,6 +254,10 @@ def summary_for(config, *, company_id=None):
     if connection.repository_mutations.exists():
         actions.append("cleanup")
     selected = connection.targets.filter(generation=connection.generation, target_key=config.default_publish_target_id).first() if config.default_publish_target_id else None
+    from .website_content_files import has_static_deployment_proof
+    if selected and selected.adapter == "static_dropin_v1" and not has_static_deployment_proof(connection, selected):
+        capabilities.update(generationReady=False, publishingReady=False)
+        actions = [action for action in actions if action not in {"generate", "publish"}]
     custom_target = bool(selected and selected.adapter == "custom_contract_v1")
     custom_certified = bool(custom_target and selected.capabilities.get("adapterCertified") and selected.source_sha == connection.verified_sha)
     if custom_target:
@@ -569,6 +573,10 @@ def authority_guard(data, *, action="read", domain="", github_repo="", require_s
                 if (required(connection, target) and not live_url_accepted(connection, target)
                         and current_ci_attestation(connection, target) is None):
                     raise WebsiteAuthorityError("ci_attestation_required", "The selected target needs its current execution proof.")
+            if action in {"publish", "merge"} and target and target.adapter == "static_dropin_v1":
+                from .website_content_files import has_static_deployment_proof
+                if not has_static_deployment_proof(connection, target):
+                    raise WebsiteAuthorityError("live_route_unavailable", "Verify the deployed articles directory and its article before publishing.")
             if action in {"publish", "merge"} and target and target.adapter == "custom_contract_v1":
                 raise WebsiteAuthorityError("publishing_adapter_required", "A verified build contract needs an implemented article publishing adapter. Portable drafts remain available.")
             if action in {"publish", "merge"} and (target is None or not target.verified_at or not target.capabilities.get("publishingReady") or target.source_sha != connection.verified_sha):
@@ -1276,6 +1284,7 @@ def prepare_website_binding(config, *, user, repo, app_root="", branch="", site_
 
 def bind_verified_website(config, prepared, *, user, reconnect=False, expected=None):
     """Persist the result of prepare_website_binding without calling GitHub."""
+    from .repo_health_operations import queue as queue_build_probe
     metadata = prepared.metadata
     repo = metadata["github_repo"]
     app_root, branch, site_url = prepared.app_root, prepared.branch, prepared.site_url
@@ -1298,6 +1307,7 @@ def bind_verified_website(config, prepared, *, user, reconnect=False, expected=N
             # and cleared publish targets, auto-publish and discovery. "Reset
             # saved setup" starts over.
             _refresh_same_repository(config, current, metadata, user=user, reconnect=reconnect)
+            queue_build_probe(current)
             return current
         if same and current.state != "connected" and not reconnect:
             # Choosing the same repository again is the explicit reconnect.
@@ -1305,7 +1315,9 @@ def bind_verified_website(config, prepared, *, user, reconnect=False, expected=N
         if same and current.state == "paused" and _same_owner(current, metadata, user):
             # B20: resume keeps generation, proof, targets and runs. Pushes were
             # tracked while paused, so the verified source is still current.
-            return _resume_paused(config, current, metadata, user=user)
+            resumed = _resume_paused(config, current, metadata, user=user)
+            queue_build_probe(resumed)
+            return resumed
         restorable = revoked_proof(current, metadata, user) if same else None
         kept_config = ({name: getattr(config, name) for name in REPOSITORY_CONFIG_FIELDS if hasattr(config, name)}
             if restorable else None)
@@ -1340,6 +1352,7 @@ def bind_verified_website(config, prepared, *, user, reconnect=False, expected=N
         config.github_repo = metadata["github_repo"]
         config.github_installation_id = metadata["installation_id"]
         config.save(update_fields=["website_connection", "github_repo", "github_installation_id", "updated_at"])
+        queue_build_probe(connection)
     if restorable:
         # D17: the same repository, installation and owner reconnected after a
         # revoke. Proof comes back only after a fresh head read; runs never do.
@@ -2082,6 +2095,9 @@ def settled_setup_run(connection, *, source_sha):
 
 def _verified_setup_run_base(run, head_sha, website, *, automatic_approval=False, merged=False):
     """Read the worker's exact approved setup proof before a target exists."""
+    from .website_content_files import requires_independent_verification
+    if requires_independent_verification(run.result):
+        return ""
     from .website_contract import SHA_PATTERN
     saved = scoped_run_contract(run)
     result = run.result if isinstance(run.result, dict) else {}

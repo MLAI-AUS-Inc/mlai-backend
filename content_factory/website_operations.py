@@ -340,7 +340,7 @@ def prepare_receipt(op):
     """
     from .website_prepare_counters import at_cap, owner_can_retry, same_failure_stops
     receipt = dict(op.receipt or {})
-    if receipt.get("status") in {"staff_fixing", "cant_be_done_yet", "delivered_not_live"}:
+    if receipt.get("status") in {"staff_fixing", "cant_be_done_yet", "delivered_not_live", "handoff_prepared"}:
         # B11/B25: ours to fix, or an honest closed-list answer; never "Try again".
         # C7: delivered as content files, not yet live; a retry cannot change that.
         # Project the B4 owner flag too: the stored failure envelope can still

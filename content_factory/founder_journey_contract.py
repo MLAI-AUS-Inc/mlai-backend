@@ -233,7 +233,7 @@ def enrich_journey(payload, *, organization, company, config, user, run, connect
     payload.setdefault("holdingReason", None)
     from . import repo_health
     if repo_health.enabled():
-        health = repo_health.journey_block(connection)
+        health = repo_health.journey_block(connection, target_key=getattr(config, "default_publish_target_id", None))
         if health is not None:
             payload["repoHealth"] = health
     return payload

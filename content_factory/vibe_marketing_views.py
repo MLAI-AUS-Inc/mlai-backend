@@ -843,7 +843,7 @@ def _reserve_article_start_connection(context, payload, *, reserve_operation=Tru
             payload.update(contract_for(website), connection_target_id=selected, expected_source_sha=website.verified_sha)
             from . import repo_health
             # Workstream 3: no article is charged until the current head builds.
-            repo_health.require_green_build(website)
+            repo_health.require_green_build(website, target_key=selected)
             if reserve_operation:
                 from .website_operations import reserve_workflow_operation
                 reserve_workflow_operation(website, workflow="article_generation", payload=payload)
@@ -6608,7 +6608,9 @@ def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, 
     pending["updatedAt"] = timezone.now().isoformat()
     pending["updated_at"] = pending["updatedAt"]
     article_system["pending_article_system_setup"] = pending
-    if not scoped:
+    from .website_content_files import requires_independent_verification
+    if not scoped and not (requires_independent_verification(result)
+                           or requires_independent_verification(getattr(run, "result", None))):
         pending["generationReady"] = True
         pending["generation_ready"] = True
         article_system["generationReady"] = True
@@ -19089,7 +19091,7 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
         "topic": topic,
         "target_keyword": target_keyword or topic,
         "context": str(command.data.get("context") or ""),
-        "github_repo": config.github_repo,
+        "github_repo": "" if delivery_mode == "content_only" else config.github_repo,
         "delivery_mode_explicit": delivery_mode_explicit,
         "delivery_mode_confirmed": bool(delivery_mode_explicit),
         "source_run_id": source_run_id,
@@ -19153,7 +19155,7 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
     article_voice = article_voice_for_dispatch(config.pillar_strategy)
     if article_voice:
         payload["article_voice"] = article_voice
-    if website_contract:
+    if website_contract and delivery_mode != "content_only":
         payload.update(website_contract)
     if request_hash:
         payload["mcp_request_hash"] = request_hash

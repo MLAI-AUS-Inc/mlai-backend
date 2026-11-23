@@ -584,7 +584,14 @@ class SourceChangedRepinTests(SimpleTestCase):
         cleanup.assert_not_called()
         self.assertNotIn("source_repins", self.op.receipt)
         self.assertEqual(self.op.receipt["scan_run_id"], "old-scan")
-        self.assertNotEqual(self.op.state, "pending")
+        self.assertEqual(self.op.state, "pending")
+        self.assertIn("source_wait_until", self.op.receipt)
+        running.status = "completed"
+        with patch("workflow_runs.models.ContentFactoryRun.objects.filter",
+                   return_value=SimpleNamespace(first=lambda: running)):
+            self.assertTrue(prepare._repin_to_current_source(self.op, now=self.op.next_attempt_at))
+        self.assertEqual(self.op.receipt["source_repins"], 1)
+        self.assertNotIn("source_wait_until", self.op.receipt)
 
     def test_re_pins_are_bounded_then_try_again_restarts_from_a_fresh_scan(self):
         for repin in range(1, prepare.SOURCE_REPIN_LIMIT + 1):

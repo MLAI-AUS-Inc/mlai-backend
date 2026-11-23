@@ -2,6 +2,7 @@ from django.urls import path
 
 from . import service_views as views
 from .website_views import WebsiteConnectionAuthorizeView, WebsiteMutationView
+from .repo_health_views import RepoHealthProbeView
 from .website_current import WebsiteCurrentConnectionView
 from .website_verification import WebsiteCiAttestationView
 from .website_runtime_observation import WebsiteRuntimeObservationView
@@ -9,6 +10,8 @@ from .preview_domain_claim import PreviewDomainClaimServiceView
 from .run_execution_control_views import RunExecutionTicketView
 
 urlpatterns = [
+    path("repo-health/authorize", RepoHealthProbeView.as_view()),
+    path("repo-health/result", RepoHealthProbeView.as_view(complete=True)),
     path('articles/runtime-observation/', WebsiteRuntimeObservationView.as_view(), name='articles_runtime_observation'),
     path('preview-domain-claim/', PreviewDomainClaimServiceView.as_view(), name='content_factory_preview_domain_claim'),
     path('preview-domain-claim', PreviewDomainClaimServiceView.as_view()),

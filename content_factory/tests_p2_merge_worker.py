@@ -197,6 +197,16 @@ class MergeWorkerTests(TransactionTestCase):
             self.assertEqual(self.sweep()["checked"], 0)
         self.assertEqual(self.tokens, [])
 
+    def test_private_draft_annotations_can_block_but_never_authorize_a_merge(self):
+        identity = {"articleKey": "reviewed-draft"}
+        valid = {"reviewFindingsIdentity": {**identity, "revision": 2}, "reviewFindings": []}
+        for additions, expected in (({"draftReviewFindings": [{"kind": "claim"}]}, 1),
+                                    ({"reviewFindingsIdentity": {}, "draftReviewFindings": []}, None),
+                                    ({"draftReviewFindings": []}, 0)):
+            with self.subTest(additions=additions), patch("content_factory.article_review_views.remote_review",
+                                                        return_value={**valid, **additions}):
+                self.assertEqual(worker._claims(None, identity), expected)
+
     def test_m11_unreadable_or_open_claims_and_body_mismatch_never_merge(self):
         for claims in (None, 1, False):
             run = self.run_fixture()

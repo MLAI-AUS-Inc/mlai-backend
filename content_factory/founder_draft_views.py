@@ -211,7 +211,13 @@ def founder_draft_review(*, context, run, user):
     organization = getattr(context, "organization", None)
     if not (copy_without_preview_enabled() or tools_enabled()):
         return {}, None
-    if organization is None or not cohort.is_new_journey(organization):
+    if organization is None:
+        return {}, None
+    if not cohort.is_new_journey(organization):
+        from .portable_drafts import portable_starts_for_all
+        if portable_starts_for_all() and is_content_only(run):
+            return {"allow_preview_pending": copy_without_preview_enabled(),
+                    "copy_formats": copy_without_preview_enabled()}, None
         return {}, None
     config = _config(organization)
     from .founder_journey_p2 import ready_before_preview

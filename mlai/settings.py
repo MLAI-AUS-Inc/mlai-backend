@@ -2763,6 +2763,7 @@ ARTICLES_FIRST_ARTICLE_CARD_ENABLED = _env_is_true("ARTICLES_FIRST_ARTICLE_CARD_
 # only once its website is connected through GitHub with a verified articles page.
 ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE = _env_is_true(
     "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE", False)
+ARTICLES_PORTABLE_START_ALL_COHORTS_ENABLED = _env_is_true("ARTICLES_PORTABLE_START_ALL_COHORTS_ENABLED", False)
 ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED = _env_is_true("ARTICLES_COPY_READY_BEFORE_VERIFICATION_ENABLED", False)
 ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED = _env_is_true("ARTICLES_DRAFT_READY_NOTIFICATIONS_ENABLED", False)
 ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED = _env_is_true("ARTICLES_COPY_WITHOUT_PREVIEW_ENABLED", False)
@@ -2856,6 +2857,7 @@ ARTICLES_SINGLE_SOURCE_RESOLVER_ENABLED = _env_is_true("ARTICLES_SINGLE_SOURCE_R
 # Workstream 3: repo health at connect. Stores host/build probe results on the
 # website connection, shows them in the journey, re-runs the host probe on push
 # and requires a green build probe for the current head before an article charge.
+ARTICLES_REPO_HEALTH_SHADOW_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_SHADOW_ENABLED", False)
 ARTICLES_REPO_HEALTH_ENABLED = _env_is_true("ARTICLES_REPO_HEALTH_ENABLED", False)
 # Opening a fix pull request on the founder's repo (lockfile or patch bump). Held
 # off until the owner approves a write to founder repositories.

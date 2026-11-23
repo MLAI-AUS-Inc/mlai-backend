@@ -491,6 +491,15 @@ class ConnectedWebsiteGateTests(CardFixture, TestCase):
         self.assertFalse(self.runs().exists())
         self.assertFalse(free_rows(self.org).exists())
 
+    @override_settings(ARTICLES_PORTABLE_START_ALL_COHORTS_ENABLED=True)
+    def test_explicit_private_first_draft_starts_while_website_gate_is_enabled(self):
+        with self.connected(False):
+            response = self.press()
+        self.assertEqual(response.status_code, 201, response.data)
+        run = self.runs().get()
+        self.assertEqual(run.run_request["delivery_mode"], "content_only")
+        self.assertFalse(run.run_request.get("website_connection_id"))
+
     def test_once_the_website_is_connected_the_press_starts(self):
         with self.connected(True):
             response = self.press()

@@ -483,6 +483,18 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
     allows_accepted_update_retries = True
     """Read or edit the canonical article using the existing ownership boundary."""
 
+    def finalize_response(self, request, response, *args, **kwargs):
+        # The old canonical clients validate a closed schema, including command replays.
+        from .founder_article_review_contract import project_draft_findings
+        data = getattr(response, "data", None)
+        if isinstance(data, dict):
+            opted_in = request.query_params.get("draft_review_findings") == "1"
+            project_draft_findings(data, opted_in=opted_in)
+            canonical = data.get("articleReview")
+            if isinstance(canonical, dict):
+                project_draft_findings(canonical.get("review"), opted_in=opted_in)
+        return super().finalize_response(request, response, *args, **kwargs)
+
     def get(self, request, run_id):
         context, run, error = self._resolve_run(request, run_id)
         if error is not None:

@@ -115,6 +115,8 @@ P2_REASON_LABELS = {
     # E7: founder_transitions, one per ask that waited past its per-action threshold.
     "ask_waiting": "A founder ask has waited past its staff threshold",
     # Workstream 5: content_factory.staff_hold_alerts, behind ARTICLES_STAFF_HOLD_ALERTS_ENABLED.
+    "repo_health_probe_stalled": "A website build probe needs staff reconciliation",
+    "resume_reconciliation_required": "An article recovery needs staff to reconcile its dispatch",
     "article_staff_hold": "An article's final check is held for staff",
     "article_staff_hold_24h": "An article has been held for staff for 24 hours",
 }

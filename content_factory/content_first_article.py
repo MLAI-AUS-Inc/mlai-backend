@@ -480,7 +480,9 @@ def _public_topic(topic) -> dict:
 
 def requires_connected_website() -> bool:
     """True when ``ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE`` is on (code default off)."""
-    return bool(getattr(settings, "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE", False))
+    from .portable_drafts import portable_starts_for_all
+    # This card requests a private content-only article; it never grants repo authority.
+    return bool(getattr(settings, "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE", False)) and not portable_starts_for_all()
 
 
 def website_gate_open(organization) -> bool:

@@ -661,8 +661,8 @@ def _repin_to_current_source(op, *, now):
     head, as "Try again" does: a new attempt and request identity, no replayed
     scan or setup run, and the owner's saved consent and company kept. A
     failed or blocked setup child has its branch queued for cleanup, as a
-    retry would; a child still running is never doubled, so the stop stands
-    with "Try again" (which fences it). Bounded by ``SOURCE_REPIN_LIMIT``; after that the
+    retry would. An active child retains its lease and a bounded poll waits
+    for settlement before another dispatch. Bounded by ``SOURCE_REPIN_LIMIT``; after that the
     stop stands with "Try again". Goal-owned preparations are left to the goal
     runner, which re-pins them itself on a source change.
     """
@@ -677,9 +677,21 @@ def _repin_to_current_source(op, *, now):
         for identifier in dict.fromkeys(identifier for identifier in (op.receipt.get("hosted_verification_run_id"),
             op.receipt.get("child_run_id") or op.payload.get("run_id")) if identifier)]
     if any(child is not None and child.status not in SETTLED_CHILD_STATUSES for child in children):
-        # A child still running owns the repository and its spend. Never start
-        # a second setup beside it; "Try again" fences it first.
-        return False
+        from django.utils.dateparse import parse_datetime
+        # An active child still owns its effects. Wait on that same child and
+        # re-read the current head only when it has actually settled.
+        deadline = parse_datetime(str(op.receipt.get("source_wait_until") or "")) or now + timedelta(minutes=30)
+        if now >= deadline:
+            from .website_staff_fixing import enter
+            enter(op, now=now, code="website_source_changed", step="setup",
+                  repair_receipt={"stop": "source_child_unsettled", "rounds": 0},
+                  run_id=str(op.receipt.get("child_run_id") or ""))
+            return True
+        op.state, op.next_attempt_at = "pending", min(now + timedelta(minutes=1), deadline)
+        op.receipt.update(status="working", source_wait_until=deadline.isoformat(), user_action=None,
+                          message="Your website changed. We are checking the existing setup before continuing.")
+        return True
+    op.receipt.pop("source_wait_until", None)
     for child in children:
         if child is not None and child.status in {"failed", "blocked"}:
             _queue_superseded_setup_cleanup(op, child)
@@ -1157,11 +1169,42 @@ def advance_prepare(identifier, *, now=None, handlers=None):
         return _advance_claimed_prepare(op, now=now, handlers=handlers)
 
 
+def _finish_ready(op, *, now):
+    """Check the setup that this operation actually prepared before copying readiness."""
+    from .website_content_files import (requires_independent_verification, setup_delivered_not_live, settle_prepare,
+                                        static_candidate, verified_static_target)
+    from workflow_runs.models import ContentFactoryRun
+    setup_id = op.receipt.get("setup_run_id") or op.receipt.get("child_run_id")
+    child = ContentFactoryRun.objects.filter(organization_id=op.connection.organization_id,
+        workflow="article_system_setup", run_id=setup_id).first() if setup_id else None
+    ladder = setup_delivered_not_live(child.result) if child else None
+    if (child and requires_independent_verification(child.result)
+            and (ladder or not verified_static_target(op.connection, static_candidate(child.result)))):
+        if ladder:
+            settle_prepare(op, child, ladder, now=now)
+        else:
+            setup = (child.result or {}).get("article_system_setup") or {}
+            action = _setup_owner_action(child, setup, op.connection)
+            if action:
+                op.state, op.next_attempt_at = "needs_user", None
+                op.receipt.update(status="needs_you", user_action=action, message="Review the articles setup.")
+            else:
+                from .website_staff_fixing import enter
+                enter(op, now=now, code="setup_preview_verification_required", step="verify",
+                      repair_receipt={"stop": "lower_tier_directory_proof_required", "rounds": 0}, run_id=child.run_id)
+        return _finish_prepare(op, now=now)
+    op.state, op.next_attempt_at = "completed", None
+    op.receipt.update(status="ready", message="Your website is ready for articles.", current_step="ready", user_action=None)
+    return _finish_prepare(op, now=now)
+
+
 def _advance_claimed_prepare(op, *, now, handlers):
     """Advance the original lease inside its saved organization's B1 scope."""
     step = op.receipt.get("current_step") or "verify-access"
     try:
         context, config, user = _prepare_context(op)
+        if op.receipt.get("source_wait_until") and _repin_to_current_source(op, now=now):
+            return _finish_prepare(op, now=now)
         from .website_first_article_billing import reservation_ready
         if not reservation_ready(op):
             op.state,op.next_attempt_at="pending",now+timedelta(minutes=1)
@@ -1176,9 +1219,7 @@ def _advance_claimed_prepare(op, *, now, handlers):
             if getattr(op, "_goal_wait", False):
                 return _finish_prepare(op, now=now)
         if ready(op, journey):
-            op.state, op.next_attempt_at = "completed", None
-            op.receipt.update(status="ready", message="Your website is ready for articles.", current_step="ready", user_action=None)
-            return _finish_prepare(op, now=now)
+            return _finish_ready(op, now=now)
         if (journey.get("nextAction") or {}).get("id")=="first-article":
             from .website_first_article import advance as advance_first_article
             step="first-article"
@@ -1389,9 +1430,7 @@ def _advance_claimed_prepare(op, *, now, handlers):
                     journey = goal_journey(op, context, config, journey, now=now)
                 digest = evidence_digest({"prerequisites": journey.get("prerequisites"), "capabilities": journey.get("capabilities")})
             if ready(op, journey):
-                op.state, op.next_attempt_at = "completed", None
-                op.receipt.update(status="ready", message="Your website is ready for articles.", current_step="ready", user_action=None)
-                return _finish_prepare(op, now=now)
+                return _finish_ready(op, now=now)
             op.receipt["last_completed"] = {"step": step, "facts_digest": digest}
             if forced is not None and (journey.get("nextAction") or {}).get("id") != step:
                 continue
@@ -1469,6 +1508,14 @@ def wake_prepare_for_source(connection_id, *, organization_id, owned_merge_run_i
     if latest:
         from .website_run_authority import owned_goal_child
         if owned_goal_child(latest, include_completed=False) is not None:
+            return latest
+    if latest and not owned_merge_run_id and not owns_goal(latest) and latest.state in {"running", "pending"}:
+        child_ids = {value for value in (latest.receipt.get("hosted_verification_run_id"),
+                                        latest.receipt.get("child_run_id") or latest.payload.get("run_id")) if value}
+        if child_ids and ContentFactoryRun.objects.filter(organization_id=organization_id, run_id__in=child_ids).exclude(
+                status__in=SETTLED_CHILD_STATUSES).exists():
+            # The current child still owns its lease. Its source guard will either
+            # finish on the latest head or start a bounded re-pin after settlement.
             return latest
     if enrolled(connection.organization_id) and latest and owns_goal(latest):
         return wake_goal_for_source(config, company_id=company.pk, user=connection.authorized_by, now=timezone.now())

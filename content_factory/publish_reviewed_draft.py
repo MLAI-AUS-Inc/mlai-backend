@@ -121,6 +121,13 @@ def claim_count(run, review):
         return None
     if strict_count:
         return strict_count
+    annotations = _mapping(review).get('draftReviewFindings')
+    if annotations is not None:
+        if not isinstance(annotations, list) or any(not isinstance(item, dict) for item in annotations):
+            return None
+        open_claims = sum(item.get('kind') == 'claim' for item in annotations)
+        if open_claims:
+            return open_claims
     findings, known = [], strict_count == 0
     for source in [result, _mapping(review), *(_mapping(review).get('fields') or [])]:
         if not isinstance(source, dict) or 'reviewFindings' not in source:

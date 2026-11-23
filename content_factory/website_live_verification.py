@@ -75,7 +75,10 @@ def applicable(target) -> bool:
     from .website_publishing_inputs import has_candidate
     from .website_sealed_workflow import REQUIRED_VERSION
     contract = mapping(getattr(target, "contract", None))
-    return not has_candidate(contract) and REQUIRED_VERSION not in mapping(getattr(target, "capabilities", None))
+    # The standalone static recipe has to prove the listing anchor, detail and
+    # missing route on the deployed source. The listing-only check below cannot.
+    return (contract.get("delivery_adapter") != "static_dropin_v1" and not has_candidate(contract)
+            and REQUIRED_VERSION not in mapping(getattr(target, "capabilities", None)))
 
 
 def build_proof(target) -> bool:

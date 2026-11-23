@@ -3265,6 +3265,20 @@
             }
           ]
         },
+        "draftReviewFindings": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/FounderReviewFinding"
+              },
+              "maxItems": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "reviewFindingsIdentity": {
           "anyOf": [
             {
