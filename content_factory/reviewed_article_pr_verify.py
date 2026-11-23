@@ -63,7 +63,7 @@ def _live(op, site, merged, target):
 
 def observe(op, now):
     """No publication admission exists until the owner merges and the real site serves both pages."""
-    ctx, _, cfg = pr.authorized_context(op, require_pending=False)
+    ctx, source, cfg = pr.authorized_context(op, require_pending=False)
     site = op.connection
     receipt = op.receipt
     pull = _provider(site, f"pulls/{receipt['pr_number']}")
@@ -98,6 +98,13 @@ def observe(op, now):
         if exc.status >= 500:
             return waiting, "pending"
         raise
+    from .founder_draft_views import current_export
+    export, error = current_export(ctx, source, content_files=True, clear_claims=True)
+    if error is not None and error.status_code >= 500:
+        return waiting, "pending"
+    manifest = (export or {}).get("reviewedContentFilesV1")
+    if not manifest or pr.sha256(pr.canonical(manifest).encode()) != op.payload["wire"]["manifest_sha256"]:
+        raise pr.Unavailable("reviewed_article_changed")
     if pr.read_head(site) != merged:
         return waiting, "pending"
     with transaction.atomic():

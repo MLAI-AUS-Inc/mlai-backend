@@ -103,6 +103,31 @@ class ReviewedArticlePRTests(TestCase):
         self.assertEqual(self.run.result, before)
         self.assertFalse(self.site.operations.filter(action="deployment-verify").exists())
 
+    def test_fast_merge_before_ack_does_not_lose_the_scoped_pr_receipt(self):
+        def merge_before_ack(url, **kwargs):
+            response = self.deliver(url, **kwargs)
+            self.git_head.return_value = self.merge
+            return response
+        self.transport.side_effect = merge_before_ack
+        with patch("content_factory.failure_policy_engine.record_pull_request") as count:
+            self.assertEqual(self.accept().json()["status"], "draft_pr_open")
+            self.assertEqual(self.offer()["status"], "draft_pr_open")
+        self.assertEqual(count.call_count, 1)
+
+    def test_authenticated_manifest_certifies_older_missing_empty_findings_only(self):
+        del self.review["reviewFindings"]
+        self.assertTrue(self.offer()["available"])
+        self.review["reviewFindings"] = "unreadable"
+        self.assertFalse(self.offer()["available"])
+        self.review["reviewFindings"] = [{"kind":"claim"}]
+        self.assertFalse(self.offer()["available"])
+
+    def test_malformed_payloads_return_a_bounded_error(self):
+        self.assertEqual(self.client.post(self.url, ["not an object"], format="json").status_code, 400)
+        self.assertEqual(APIClient().post("/api/content-factory/reviewed-article-pr/authorize",
+            ["not an object"], format="json", HTTP_X_API_KEY="fixture-service").status_code, 400)
+        self.transport.assert_not_called()
+
     def test_missing_approval_claims_and_old_destination_cannot_dispatch(self):
         offer = self.offer()
         self.review["draftReviewFindings"] = [{"kind": "claim"}]
@@ -240,6 +265,20 @@ class ReviewedArticlePRTests(TestCase):
                 raise WebsiteAuthorityError("live_route_unavailable", "No negative route.")
             return b"missing", {}
         return (b"old detail" if self.bad_detail else self.detail, {}) if "how-to-start" in url else (self.directory, {})
+
+    def test_changed_source_review_after_merge_cannot_activate_a_static_target(self):
+        self.static()
+        self.assertEqual(self.accept().json()["status"], "draft_pr_open")
+        op = self.site.operations.get(action=pr.ACTION)
+        self.git_head.return_value = self.merge
+        self.review["approved"] = False
+        with patch.object(verify, "_provider", side_effect=self.provider), patch.object(verify, "commit_tree_sha", return_value="4"*40), \
+                patch.object(verify, "fetch_live_route", side_effect=self.live):
+            worker.advance(op.pk, now=timezone.now()+timedelta(hours=1))
+        self.assertEqual(self.offer()["status"], "needs_attention")
+        self.site.refresh_from_db()
+        self.assertFalse(self.site.capabilities.get("publishingReady"))
+        self.assertFalse(WrittenArticle.objects.exists())
 
     def test_empty_static_opens_then_certifies_only_merged_source_and_exact_live_files(self):
         self.static()

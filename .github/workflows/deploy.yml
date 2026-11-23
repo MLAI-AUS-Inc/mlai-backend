@@ -405,7 +405,7 @@ jobs:
       run: python manage.py validate_prod_urls
 
     - name: Run founder journey API tests
-      run: python manage.py test content_factory.tests_content_first_article content_factory.tests_founder_journey_api content_factory.tests_founder_journey_integration content_factory.tests_founder_journey_unit content_factory.tests_founder_setup_state content_factory.tests_founder_funnel_setup content_factory.tests_startup_onboarding --noinput --verbosity 2
+      run: python manage.py test content_factory.tests_content_first_article content_factory.tests_article_profile_intake content_factory.tests_founder_journey_api content_factory.tests_founder_journey_integration content_factory.tests_founder_journey_unit content_factory.tests_founder_setup_state content_factory.tests_founder_funnel_setup content_factory.tests_startup_onboarding --noinput --verbosity 2
 
     - name: Verify private Slack delivery payloads without database access
       run: python -m unittest integrations.tests_slack_dm_payload_contract integrations.tests_slack_catalog_queries integrations.tests_slack_history_scheduling integrations.tests_slack_recent_activity -v
@@ -438,7 +438,7 @@ jobs:
           tests.test_bootstrap_setup_merge_fact
 
     - name: Run draft ready and copy tests
-      run: python manage.py test content_factory.tests_founder_draft_export content_factory.tests_founder_draft_tools content_factory.tests_founder_notification_outbox --noinput --verbosity 2
+      run: python manage.py test content_factory.tests_founder_draft_export content_factory.tests_reviewed_article_pr content_factory.tests_founder_draft_tools content_factory.tests_founder_notification_outbox --noinput --verbosity 2
 
     - name: Check chat background retries and preview failure caches without database access
       run: python scripts/test_without_database.py integrations.tests_community_bridge_backoff integrations.tests_slack_voice_bridge community_chat.tests.test_preview_failure_cache
@@ -621,6 +621,8 @@ jobs:
           content_factory.tests_founder_health_report \
           content_factory.tests_hosted_articles \
           content_factory.tests_preview_domain_claim \
+          content_factory.tests_repo_health_operations \
+          content_factory.tests_website_static_setup_review \
           content_factory.tests_website_portable \
           content_factory.tests_website_portable_wire \
           integrations.tests_content_factory_website_reads \

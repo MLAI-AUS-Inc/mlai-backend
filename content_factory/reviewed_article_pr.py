@@ -95,7 +95,7 @@ def check_source(context, run, user, cfg):
             (("website_connection_id", str(cfg.website_connection_id)), ("connection_generation", cfg.website_connection.generation),
              ("repository_id", cfg.website_connection.repository_id))):
         raise Unavailable("website_changed")
-    if claim_count(run, {}) not in (None, 0):
+    if claim_count(run, {}, attested_clear=True) != 0:
         raise Unavailable("article_unavailable")
     latest = views._latest_review_ready_component_revision(run, context)
     if latest and latest.run_id != run.run_id:
@@ -154,9 +154,10 @@ def offer(context, run, user):
 
 
 def reserve(context, run, user, data):
+    if not isinstance(data, dict) or set(data) != {"deliveryKind", "reviewedRevision", "articleSha256", "offerId"}:
+        raise Unavailable("invalid_request", 400)
     site, dest, binding, public, export = _offer(context, run, user)
-    if set(data) != {"deliveryKind", "reviewedRevision", "articleSha256", "offerId"} or any(
-            not isinstance(data.get(k), str) or not constant_time_compare(data[k], public[k]) for k in data):
+    if any(not isinstance(data.get(k), str) or not constant_time_compare(data[k], public[k]) for k in data):
         raise Unavailable()
     sha = read_head(site)
     if not sha:
@@ -186,6 +187,8 @@ def reserve(context, run, user, data):
 
 
 def _operation(data):
+    if not isinstance(data, dict):
+        raise Unavailable("invalid_request", 400)
     try:
         identifier = UUID(str(data.get("operation_id", "")))
     except (TypeError, ValueError):
@@ -233,11 +236,20 @@ def authority(data):
         raise Unavailable("source_temporarily_unavailable", 503)
     if head != data["expected_source_sha"]:
         raise Unavailable("source_changed")
+    with saved_approval(op, data) as locked:
+        yield locked
+
+
+@contextmanager
+def saved_approval(op, wire):
+    """Fence the DB receipt against withdrawals, independently of a remote ref advancing."""
     with transaction.atomic():
         WebsiteConnection.objects.select_for_update().get(pk=op.connection_id)
-        op = WebsiteConnectionOperation.objects.select_for_update().select_related("connection__organization").get(pk=op.pk)
-        authorized_context(op)
-        yield op
+        locked = WebsiteConnectionOperation.objects.select_for_update().select_related("connection__organization").get(pk=op.pk)
+        if canonical(wire) != canonical(locked.payload["wire"]):
+            raise Unavailable()
+        authorized_context(locked)
+        yield locked
 
 
 def package_paths(op, target):

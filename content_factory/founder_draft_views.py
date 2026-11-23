@@ -245,10 +245,6 @@ def current_export(context, run, *, content_files=False, clear_claims=False):
     review = remote_review(run, include_content_files=True) if content_files else remote_review(run)
     if isinstance(review, Response):
         return None, review
-    if clear_claims:
-        from .publish_reviewed_draft import claim_count
-        if claim_count(run, review) != 0:
-            return None, _refusal(NOT_READY_DOWNLOAD, "claims_open", 409)
     latest = views._latest_review_ready_component_revision(run, context)
     allow_pending = copy_without_preview_enabled() and is_content_only(run)
     export = article_export(review, run_id=run.run_id, latest_run_id=latest.run_id if latest else None,
@@ -260,6 +256,13 @@ def current_export(context, run, *, content_files=False, clear_claims=False):
                 or not _valid_reviewed_files(handoff, export)):
             return None, _refusal(NOT_READY_DOWNLOAD, "not_ready", 409)
         export["reviewedContentFilesV1"] = handoff
+    if clear_claims:
+        from .publish_reviewed_draft import claim_count
+        # CF issues this exact-revision manifest only after inspecting the body for
+        # unresolved claims. Older native snapshots may omit an empty findings array.
+        checked = "reviewedContentFilesV1" in export
+        if not checked or claim_count(run, review, attested_clear=checked) != 0:
+            return None, _refusal(NOT_READY_DOWNLOAD, "claims_open", 409)
     return export, None
 
 

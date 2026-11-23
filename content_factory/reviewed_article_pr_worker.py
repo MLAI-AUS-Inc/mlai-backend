@@ -142,7 +142,9 @@ def dispatch(op):
     response = http_client.post(url, headers=_content_factory_headers(), json=wire, timeout=(3, 75))
     if response.status_code not in (200, 201):
         raise pr.Unavailable("worker_unavailable", 503 if response.status_code >= 500 or response.status_code == 429 else 409)
-    with pr.authority(wire) as locked:
+    # The PR may already have been merged by its owner. Persisting its receipt
+    # performs no repository write; the observer verifies the merged head separately.
+    with pr.saved_approval(op, wire) as locked:
         return _receipt(locked, response.json())
 
 
@@ -178,6 +180,9 @@ def advance(identifier, *, now=None):
         state, receipt = "needs_attention", {**receipt, "status": "needs_attention", "reason": "confirmation_delayed"}
     updated = WebsiteConnectionOperation.objects.filter(pk=op.pk, state="pending", attempts=op.attempts).update(
         state=state, receipt=receipt, next_attempt_at=now + delay if state == "pending" else None, updated_at=now)
+    if updated and op.receipt.get("status") == "pending" and receipt.get("status") == "draft_pr_open":
+        from .failure_policy_engine import record_pull_request
+        record_pull_request(op.connection.organization, pr_url=receipt["pr_url"], now=now)
     if updated and state == "needs_attention" and receipt.get("reason") in {"confirmation_delayed", "receipt_invalid"}:
         from .founder_journey_alerts import queue_founder_journey_alert
         queue_founder_journey_alert(organization=op.connection.organization, alert_reason="self_heal_capped", slot=str(op.pk),
