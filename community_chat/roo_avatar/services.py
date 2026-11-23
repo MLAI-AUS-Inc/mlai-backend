@@ -84,6 +84,11 @@ def _owned(row):
     )
 
 
+def owned_items_for(user):
+    """Include previously equipped items saved before wardrobe pricing."""
+    return _owned(CommunityRooAvatar.objects.filter(user=user, community=community_id()).first())
+
+
 def _snapshot(user, scope, relay_url, row, rank):
     outfit = {slot: getattr(row, slot) for slot in SLOTS} if row else empty_outfit()
     level = rank["level"] if rank else None

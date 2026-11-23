@@ -17,13 +17,13 @@ ORIGIN = "mlai_arcade"
 FALLBACK_POINTS = 5
 
 
-def _earn_round(user, key, source):
+def _earn_round(user, key, source, *, metadata=None):
     # The scoped source key is unique even when a publication or award is replayed.
     round_, _ = VolunteerSourceReceipt.objects.get_or_create(
         community=community_id(),
         source_key=f"arcade:{key}",
         defaults=dict(actor=user, origin=ORIGIN, kind="round", source=source,
-                      occurred_at=timezone.now(), status="ready"),
+                      occurred_at=timezone.now(), status="ready", metadata=metadata or {}),
     )
     return round_
 
@@ -33,13 +33,18 @@ def earn_pulse_round(user, draft_id):
     return _earn_round(user, f"pulse:{draft_id}", {"trigger": "pulse"})
 
 
-def earn_level_rounds(user, after, gained):
+def earn_level_rounds(user, after, gained, *, action=None):
     """Grant each newly crossed member-facing ladder level once, including jumps."""
     if after is None or gained <= 0:
         return
     previous = level_for(max(0, after - gained))
     for level in range(previous + 1, level_for(after) + 1):
-        _earn_round(user, f"level:{user.pk}:{level}", {"trigger": "level", "level": level})
+        _earn_round(
+            user,
+            f"level:{user.pk}:{level}",
+            {"trigger": "level", "level": level},
+            metadata={"level_celebration": {"action": action}},
+        )
 
 
 def earn_ledger_levels(user, ledger):
@@ -128,7 +133,7 @@ def spin(user, round_id):
                 reference_type="MLAI_ARCADE", reference_id=str(row.pk),
             )
             result.update(points=points, ledgerId=ledger.pk)
-        row.metadata = {**result, "prize": prize}
+        row.metadata = {**row.metadata, **result, "prize": prize}
         row.status = "revealed"
         row.save(update_fields=("metadata", "status", "updated_at"))
     return round_payload(row)
