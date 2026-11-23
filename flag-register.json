@@ -188,6 +188,18 @@
       "expiry": "2027-02-28"
     },
     {
+      "name": "ARTICLES_SAVED_PREVIEW_RECOVERY_DOMAINS",
+      "default": "mlai.au",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
+      "name": "ARTICLES_SAVED_PREVIEW_RECOVERY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "2027-02-28"
+    },
+    {
       "name": "ARTICLES_ARTICLE_RECOVERY_ENABLED",
       "default": "false",
       "owner": "platform",

@@ -27,6 +27,56 @@
       "pending_owner": null
     },
     {
+      "identity": "content_factory/article_preview_recovery.py:remember_review:ef103d6f240c63b4dbc87bebf6c6025d52d9fbfc60a48c729ca7f5834fa846f6:1",
+      "path": "content_factory/article_preview_recovery.py",
+      "function": "remember_review",
+      "line": 706,
+      "kind": "inferred_run_save",
+      "fields": [
+        "updated_at"
+      ],
+      "statement_sha256": "ef103d6f240c63b4dbc87bebf6c6025d52d9fbfc60a48c729ca7f5834fa846f6",
+      "duplicate_ordinal": 1,
+      "direct_model_chain": false,
+      "inferred_receivers": [
+        "record"
+      ],
+      "local_guard_mentioned": false,
+      "function_sha256": "5774336836188e1af1502e1363cc98091009024c2899c43fca503679ae921975",
+      "classification": "non_cf_model",
+      "test_refs": [
+        "content_factory/tests_article_preview_recovery.py"
+      ],
+      "reason": "The selected receiver is a completed WebsiteConnectionOperation containing only bounded read evidence. The original article Run remains immutable.",
+      "guard": "The tenant and connection match the saved request. A later observed snapshot fences an older response.",
+      "pending_owner": null
+    },
+    {
+      "identity": "content_factory/article_preview_recovery_worker.py:advance:ecf6ac9febb314ab118cf31c0dde66cb36129fdf8c5aeac008edc16e2423ec6d:1",
+      "path": "content_factory/article_preview_recovery_worker.py",
+      "function": "advance",
+      "line": 118,
+      "kind": "inferred_run_save",
+      "fields": [
+        "updated_at"
+      ],
+      "statement_sha256": "ecf6ac9febb314ab118cf31c0dde66cb36129fdf8c5aeac008edc16e2423ec6d",
+      "duplicate_ordinal": 1,
+      "direct_model_chain": false,
+      "inferred_receivers": [
+        "locked"
+      ],
+      "local_guard_mentioned": false,
+      "function_sha256": "b2f92be53280d0f5190664bb06fc76558fd42b0de70d62bf2481e037cc8a8e02",
+      "classification": "non_cf_model",
+      "test_refs": [
+        "content_factory/tests_article_preview_recovery.py"
+      ],
+      "reason": "The selected and locked model is WebsiteConnectionOperation. Saved preview leases and readback receipts never change the historical article Run.",
+      "guard": "The scoped operation ID, attempt, source, principal, and current revision are fenced before storing independently read proof.",
+      "pending_owner": null
+    },
+    {
       "identity": "content_factory/article_publication_observation.py:advance:f55182c22a98189b0b264d4d9d6d2473889a3b752a054d0a66949460633d552e:1",
       "path": "content_factory/article_publication_observation.py",
       "function": "advance",
@@ -6903,35 +6953,38 @@
     {
       "path": "content_factory/article_review_views.py",
       "function": "remote_review",
-      "function_sha256": "b814b86ffcc2b1a4c0d92cb62a7e52bda1471126427216b4556526e8e559e1e3",
-      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. The download negotiates an approved files manifest on scoped GET only. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "function_sha256": "dd56e722e62083f932fc4cf067f079f93935d4e132a349b74540a5890b652070",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. The download negotiates an approved files manifest on scoped GET only. No new Run lifecycle, budgets, grants, or historical enrollment. Negotiated recovery GETs carry no execution credentials; actual edits fence superseded preview-only leases.",
       "test_refs": [
         "content_factory/tests_founder_review_commands.py",
         "content_factory/tests_article_review_update_unit.py",
         "content_factory/tests_run_review_metadata_clocks.py",
-        "content_factory/tests_founder_draft_tools.py"
+        "content_factory/tests_founder_draft_tools.py",
+        "content_factory/tests_article_preview_recovery.py"
       ]
     },
     {
       "path": "content_factory/article_review_views.py",
       "function": "VibeMarketingArticleReviewView.post",
-      "function_sha256": "85e35e091a3c2c1c8709717319dc0c9e2536aa67872f2fec6c42bf54dc3abdc0",
-      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "function_sha256": "89c6e0c4736784931eaca7768e76a5c7daa9533010835306f57c5ffb849a24c9",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment. Saved-preview commands reserve a distinct scoped operation and never reopen or publish the historical source Run.",
       "test_refs": [
         "content_factory/tests_founder_review_commands.py",
         "content_factory/tests_article_review_update_unit.py",
-        "content_factory/tests_run_review_metadata_clocks.py"
+        "content_factory/tests_run_review_metadata_clocks.py",
+        "content_factory/tests_article_preview_recovery.py"
       ]
     },
     {
       "path": "content_factory/article_review_views.py",
       "function": "VibeMarketingArticleReviewView._post_review",
-      "function_sha256": "4e01e3d6d928000216a783c2650e6a4b3f9b4f672fec880bb872d925a51cdade",
-      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment.",
+      "function_sha256": "0116035b37e01010d5df504480c371314a203875b9e7e02f07ad3fb4031c221a",
+      "reason": "Exact original HTTP body/key/company/principal/current ticket and active review permission fence durable command acceptance. Accepted direct review replays only authorized current data; comments commit local row and receipt atomically and never recreate a deleted row. Dispatching/unknown external effects never become retryable by age. The organization guard spans image debit and permission is rechecked before provider POST. No new Run lifecycle, budgets, grants, or historical enrollment. Saved-preview commands reserve a distinct scoped operation and never reopen or publish the historical source Run.",
       "test_refs": [
         "content_factory/tests_founder_review_commands.py",
         "content_factory/tests_article_review_update_unit.py",
-        "content_factory/tests_run_review_metadata_clocks.py"
+        "content_factory/tests_run_review_metadata_clocks.py",
+        "content_factory/tests_article_preview_recovery.py"
       ]
     },
     {

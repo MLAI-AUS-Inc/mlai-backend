@@ -12210,6 +12210,13 @@ def _serialize_run(
     result = _run_mapping(run.result)
     from .publish_merge_worker import run_fields
     p2_fields = run_fields(run, organization=getattr(context, "organization", None) or getattr(run, "organization", None))
+    from .article_preview_recovery_state import terminal as preview_terminal, settle_stale_artifacts
+    from .article_preview_recovery import run_view as recovery_run_view
+    recovery_view = (recovery_run_view(run, viewer=getattr(getattr(context,"profile",None),"user",None))
+                     if run.workflow in ARTICLE_WORKFLOWS else None)
+    settle_preview = run.workflow in ARTICLE_WORKFLOWS and preview_terminal(run)
+    if settle_preview:
+        result = settle_stale_artifacts(result)
     section_issues = public_section_issues(_nested_run_result_value(result, "section_issues", "sectionIssues"))
     raw_quality = _nested_run_result_value(result, "article_preview_quality", "articlePreviewQuality")
     needs_hosted_issues = _run_mapping(raw_quality).get("status") == "blocking_findings"
@@ -12244,6 +12251,14 @@ def _serialize_run(
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
     pr_url = result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url")
     live_preview = _live_preview_from_run(run)
+    if settle_preview:
+        preview_url = ""
+        live_preview = {**live_preview,"available":False,"status":"unavailable","platformStatus":"unavailable",
+                        "previewUrl":"","internalPreviewUrl":"","proxyPath":""}
+    if recovery_view and recovery_view["state"] == "site_ready":
+        preview_url = recovery_view["previewUrl"]
+        live_preview = {**live_preview, "available": True, "status": "running", "platformStatus": "ready",
+                        "previewUrl": preview_url}
     article_setup_state = (
         copy.deepcopy(precomputed_article_setup_state)
         if precomputed_article_setup_state is not None
@@ -12268,6 +12283,10 @@ def _serialize_run(
         "provenance_status": "recorded" if saved_request.get("editorial_admission") else "partial"} if saved_brief else None)
     if compact:
         compact_result = _compact_result_for_run(run)
+        if settle_preview:
+            compact_result = settle_stale_artifacts(compact_result)
+        if recovery_view:
+            compact_result = {**compact_result, "previewRecovery":recovery_view}
         if run.workflow in ARTICLE_WORKFLOWS and isinstance(raw_quality, dict):
             compact_result["article_preview_quality"] = raw_quality
         return {
@@ -12353,6 +12372,8 @@ def _serialize_run(
         artifacts=artifacts,
         diagnostics=diagnostics,
     ) if run.workflow in ARTICLE_WORKFLOWS else result
+    if recovery_view:
+        response_result = {**response_result,"previewRecovery":recovery_view}
     return {
         "runId": run.run_id,
         **p2_fields,

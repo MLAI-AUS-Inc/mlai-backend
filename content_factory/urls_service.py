@@ -11,7 +11,12 @@ from .run_execution_control_views import RunExecutionTicketView
 
 from .reviewed_article_pr_views import ReviewedArticlePRAuthorityView
 
+from .article_preview_recovery_views import PreviewRecoveryServiceView
+
 urlpatterns = [
+    path("runs/<str:run_id>/preview-recovery/authorize", PreviewRecoveryServiceView.as_view()),
+    path("runs/<str:run_id>/preview-recovery/token", PreviewRecoveryServiceView.as_view(operation="token")),
+    path("runs/<str:run_id>/preview-recovery/result", PreviewRecoveryServiceView.as_view(operation="result")),
     path("reviewed-article-pr/authorize", ReviewedArticlePRAuthorityView.as_view()),
     path("reviewed-article-pr/token", ReviewedArticlePRAuthorityView.as_view(credential=True)),
     path("repo-health/authorize", RepoHealthProbeView.as_view()),

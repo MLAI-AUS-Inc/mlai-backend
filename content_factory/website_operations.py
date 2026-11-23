@@ -126,6 +126,8 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
     op = connection.operations.filter(pk=identifier).first()
     if op is None:
         raise WebsiteAuthorityError("website_operation_changed", "The operation does not belong to this website.")
+    if op.action in {"saved-preview-recovery","preview-review-observation"}:
+        raise WebsiteAuthorityError("website_operation_changed", "This operation only restores a read-only saved preview.")
     if op.action == "reviewed-article-pr":
         raise WebsiteAuthorityError("website_operation_changed", "This approval only stages the reviewed article pull request.")
     parent_id=op.payload.get("first_article_goal_operation_id")
