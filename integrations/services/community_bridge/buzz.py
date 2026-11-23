@@ -630,6 +630,39 @@ class BuzzBridgeClient:
         ]
 
     @classmethod
+    def read_voice(cls, **reference) -> bytes:
+        """Read one attachment through the authenticated, event-scoped adapter."""
+        api_token = cls._api_token()
+        if not api_token:
+            raise BuzzBridgePermanentError("BUZZ_BRIDGE_ADAPTER_TOKEN is not configured")
+        size = reference["size"]
+        try:
+            with requests.post(
+                urljoin(cls._validated_adapter_url(), "v1/voice-media"),
+                headers={"Authorization": f"Bearer {api_token}", "Accept": "audio/wav",
+                         "Accept-Encoding": "identity"},
+                json=reference,
+                stream=True,
+                allow_redirects=False,
+                timeout=(4, 20),
+            ) as response:
+                if response.status_code in {400, 401, 403}:
+                    raise BuzzBridgePermanentError("MLAI Chat rejected the linked voice attachment")
+                if response.status_code != 200:
+                    raise BuzzBridgeError("MLAI Chat voice attachment unavailable")
+                if (response.headers.get("Content-Type") != "audio/wav"
+                        or response.headers.get("Content-Length") != str(size)):
+                    raise BuzzBridgeError("MLAI Chat returned invalid voice attachment metadata")
+                content = bytearray()
+                for chunk in response.iter_content(chunk_size=65_536):
+                    if len(chunk) > size - len(content):
+                        raise BuzzBridgeError("MLAI Chat returned an oversized voice attachment")
+                    content.extend(chunk)
+        except requests.RequestException:
+            raise BuzzBridgeError("MLAI Chat voice attachment transfer failed") from None
+        return bytes(content)
+
+    @classmethod
     def _post_adapter(cls, path: str, payload: dict) -> dict:
         adapter_url = cls._validated_adapter_url()
         api_token = cls._api_token()

@@ -72,6 +72,28 @@ def is_public_slack_echo(channel, event, raw):
         delivery_type=operation,
     ).filter(_command_lookup("actor__slack_user_id", actor))
     if operation == "create":
+        # A Slack-hosted upload does not carry our chat.postMessage client ID.
+        # Its one-time ticket is frozen before sharing and identifies the echo.
+        from .voice import FILE_ID
+
+        ids = metadata.get("slack_file_ids")
+        if isinstance(ids, list):
+            for file_id in ids[:20]:
+                if not isinstance(file_id, str) or not FILE_ID.fullmatch(file_id):
+                    continue
+                for row in rows.filter(_command_lookup("wire__voice_file_id", file_id)):
+                    command = _command(row.payload)
+                    attempt = (row.payload or {}).get(ATTEMPT_KEY)
+                    kwargs = command["wire"]["kwargs"]
+                    poster = command["actor"]
+                    if (isinstance(attempt, dict)
+                            and attempt.get("status") in {"armed", "uncertain", "acknowledged"}
+                            and attempt.get("command_hash") == command_hash(command)
+                            and command["wire"].get("voice_file_id") == file_id
+                            and poster.get("kind") == "member"
+                            and poster.get("workspace_id") == channel.slack_workspace_id
+                            and kwargs.get("channel") == channel.slack_channel_id):
+                        return True
         client_id = metadata.get("slack_client_msg_id")
         if not isinstance(client_id, str) or not client_id:
             return False
