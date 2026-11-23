@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 from . import ladder
 from .access import community_id, flag
+from .badge_counts import COUNT_KIND, COUNT_ORIGIN, PUBLISHED, count_key, public_count
 from .credits import one_record_enabled
 from .models import VolunteerMemberState, VolunteerSourceReceipt
 from .policy import roo
@@ -52,10 +53,11 @@ def public_position(total):
     )}
 
 
-def _badge(key, reason, evidence=None):
+def _badge(key, reason, grant, count):
     definition = badge_catalogue()[key]
     return dict(id=key, name=definition["name"], track=definition["track"],
-                criterion=definition["criterion"], reason=reason, evidence_url=public_evidence_url(evidence))
+                criterion=definition["criterion"], reason=reason, evidence_url=public_evidence_url(grant.metadata.get("public_url")),
+                **public_count(grant, key, count))
 
 
 def profile_progressions(users):
@@ -75,6 +77,9 @@ def profile_progressions(users):
     states = {
         state.user_id: state for state in VolunteerMemberState.objects.filter(community=scope, user_id__in=published_ids)
     }
+    counts = {receipt.source_key: receipt for receipt in VolunteerSourceReceipt.objects.filter(
+        community=scope, origin=COUNT_ORIGIN, kind=COUNT_KIND, status=PUBLISHED, actor_id__in=published_ids,
+    ).only("source_key", "actor_id", "metadata")}
     badges = defaultdict(dict)
     for grant in VolunteerSourceReceipt.objects.filter(
         community=scope, origin=BADGE_ORIGIN, kind=BADGE_KIND, status=BADGE_STATUS, actor_id__in=published_ids,
@@ -82,7 +87,7 @@ def profile_progressions(users):
         key = grant.metadata.get("badge_id")
         reason = grant.metadata.get("public_reason")
         if key in badge_catalogue() and isinstance(reason, str) and reason.strip():
-            badges[grant.actor_id][key] = _badge(key, reason, grant.metadata.get("public_url"))
+            badges[grant.actor_id][key] = _badge(key, reason, grant, counts.get(count_key(grant.actor_id, key)))
     result = {}
     for uid, state in states.items():
         total = contribution_total(users[uid], state)
