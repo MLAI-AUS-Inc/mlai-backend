@@ -9,6 +9,34 @@ from scripts.validate_inbox_deploy_config import FLAGS, validate as validate_inb
 
 
 class MessageSyncDeployConfigTests(unittest.TestCase):
+    def test_voice_upload_allowlist_is_optional_and_can_be_cleared(self):
+        key = "SLACK_VOICE_UPLOAD_CHANNELS"
+        root = Path(__file__).resolve().parents[1]
+        self.assertIn(key + ": ${{ vars." + key + " || '' }}", (root / ".github/workflows/deploy.yml").read_text())
+        self.assertIn(f'install_remote_env_value {key} "${key}"', (root / "deploy.sh").read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            sandbox = Path(directory)
+            (sandbox / "scripts").mkdir()
+            for name in ("upsert_env_value_from_stdin.sh", "validate_message_sync_deploy_config.py"):
+                shutil.copy(root / "scripts" / name, sandbox / "scripts")
+            env_file = sandbox / ".env"
+            env_file.write_text("KEEP_ME=yes\n")
+            for value, accepted in (
+                ("CSTAGING1, CSTAGING2", True),
+                ("DSTAGING1", False),
+                ("CSTAGING1\nOTHER=true", False),
+                ("CSTAGING1\x00", False),
+                ("", True),
+            ):
+                with self.subTest(value=value):
+                    before = env_file.read_text()
+                    outcome = subprocess.run(
+                        ["bash", "scripts/upsert_env_value_from_stdin.sh", key],
+                        cwd=sandbox, input=value, text=True, capture_output=True, timeout=5,
+                    )
+                    self.assertEqual(outcome.returncode == 0, accepted, outcome.stderr)
+                    self.assertEqual(env_file.read_text(), f"KEEP_ME=yes\n{key}={value}\n" if accepted else before)
+
     def test_inbox_activation_requires_valid_flags_sync_and_distinct_account_secret(self):
         validate_inbox({})
         valid = {"MESSAGE_SYNC_ENABLED": "true", "MLAI_CHAT_ACCOUNT_KEY_SECRET": "a" * 32,

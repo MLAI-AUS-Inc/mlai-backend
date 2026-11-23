@@ -30,6 +30,13 @@ is empty by default. A member's existing grant needs the scope from a new
 authorization where it is missing. Keep the room's existing bridge identity and
 membership policy.
 
+Deploy the Chat adapter before the backend. Keep the backend workflow variable
+`SLACK_VOICE_UPLOAD_CHANNELS` empty for the first deployment. After the linked
+staging channel passes [voice acceptance](mlai-chat-bridge-staging.md#bidirectional-message-matrix),
+set the variable to the approved public Slack channel IDs for the canary.
+Clearing it stops new hosted voice uploads. Use the existing reconciliation
+path for any share already in flight.
+
 The adapter matches the signed create event, author, current channel
 registration and attachment hash before returning the WAV to the backend.
 The worker stores the Slack upload's file ID in its frozen command before
