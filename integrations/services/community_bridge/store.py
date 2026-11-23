@@ -1005,7 +1005,11 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
     workspace_id = str(payload.get("team_id") or "")
     channel_id = str(event.get("channel") or "")
 
-    if subtype in {"", "bot_message", "thread_broadcast"}:
+    from .voice import file_ids, is_audio_share
+
+    if subtype in {"", "bot_message", "thread_broadcast"} or (
+        subtype == "file_share" and is_audio_share(event)
+    ):
         source_message_id = str(event.get("ts") or "").strip()
         user_id = str(event.get("user") or "").strip()
         if not source_message_id or not user_id or user_id == bridge_bot_user_id:
@@ -1030,6 +1034,7 @@ def _normalize_slack_event(payload: dict) -> Optional[dict]:
                 or bool(event.get("reply_broadcast")),
                 "slack_created_at": _slack_timestamp_seconds(source_message_id),
                 "slack_client_msg_id": str(event.get("client_msg_id") or ""),
+                "slack_file_ids": file_ids(event),
                 "slack_raw_text": raw_text,
                 "slack_display_markdown": sanitize_slack_message(
                     event,

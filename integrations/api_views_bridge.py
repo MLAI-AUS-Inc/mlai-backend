@@ -144,6 +144,12 @@ class BuzzCommunityBridgeEventView(APIView):
             return Response({"error": "invalid_native_mentions"}, status=status.HTTP_400_BAD_REQUEST)
         source_metadata = normalized_event.get("metadata")
         source_metadata = source_metadata if isinstance(source_metadata, dict) else {}
+        from integrations.services.community_bridge import voice
+
+        source_metadata = {key: value for key, value in source_metadata.items() if key != voice.META}
+        voice_attachment = voice.from_callback(normalized_event, raw_event)
+        if voice_attachment:
+            source_metadata[voice.META] = voice_attachment
         normalized_event = {**normalized_event, "metadata": {
             **source_metadata, "mlai_mention_tags": person_tags,
             "mlai_mention_bindings": native_mention_bindings(

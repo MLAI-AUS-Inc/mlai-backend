@@ -194,17 +194,21 @@ def receipt(response, channel, actor, wire, operation, *, outcome="accepted"):
         verified = verified and target == kwargs["ts"]
     message = response.get("message")
     if operation == "create":
-        verified = bool(
-            verified
-            and actor_proven(message, actor, response)
-            and message.get("client_msg_id") in (None, "", kwargs["client_msg_id"])
-            and message.get("ts", target) == target
-            and (
+        verified = bool(verified and actor_proven(message, actor, response)
+                        and message.get("ts", target) == target)
+        if wire.get("voice_file_id"):
+            from .voice import message_has_file
+
+            verified = verified and message_has_file(message, wire["voice_file_id"])
+        else:
+            verified = verified and (
+                message.get("client_msg_id") in (None, "", kwargs["client_msg_id"])
+                and (
                 "text" not in message
                 or isinstance(message["text"], str)
                 and m.text_hash(message["text"]) == wire["text_hash"]
+                )
             )
-        )
     fact = {
         "version": 1,
         "channel": actual_channel,
@@ -216,6 +220,8 @@ def receipt(response, channel, actor, wire, operation, *, outcome="accepted"):
     }
     if operation == "create":
         fact["client_msg_id"] = kwargs["client_msg_id"]
+        if wire.get("voice_file_id"):
+            fact["voice_file_id"] = wire["voice_file_id"]
     return fact
 
 
@@ -232,6 +238,8 @@ def response_from_receipt(fact, actor, wire, operation):
     }
     if operation == "create":
         allowed.add("client_msg_id")
+        if wire.get("voice_file_id"):
+            allowed.add("voice_file_id")
     outcomes = {"accepted"}
     if operation == "reaction_add":
         outcomes.add("already_reacted")
@@ -256,7 +264,8 @@ def response_from_receipt(fact, actor, wire, operation):
         return None
     if (
         operation == "create"
-        and fact.get("client_msg_id") != wire["kwargs"]["client_msg_id"]
+        and (fact.get("client_msg_id") != wire["kwargs"]["client_msg_id"]
+             or fact.get("voice_file_id") != wire.get("voice_file_id"))
     ):
         return None
     if operation in {"edit", "delete"} and fact["ts"] != wire["kwargs"]["ts"]:
@@ -270,6 +279,7 @@ def response_from_receipt(fact, actor, wire, operation):
         "message": {
             "user": actor["slack_user_id"],
             "client_msg_id": wire["kwargs"].get("client_msg_id"),
+            **({"files": [{"id": fact["voice_file_id"]}]} if "voice_file_id" in fact else {}),
         },
     }
 
@@ -294,6 +304,10 @@ def reconcile(client, row, channel, actor, wire, attempt):
     response = response_from_receipt(cached, actor, wire, operation)
     if response is not None:
         return response, cached.get("outcome", "accepted")
+    if wire.get("voice_file_id"):
+        from . import voice
+
+        return voice.reconcile(client, channel, actor, wire, attempt), "accepted"
     options = {"channel": channel.slack_channel_id, "limit": 100}
     if wire.get("parent"):
         method = "conversations_replies"

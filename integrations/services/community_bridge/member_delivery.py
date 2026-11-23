@@ -562,6 +562,28 @@ class _Client:
         self.mutation_started = False
         self.read_only = read_only
 
+    def voice_call(self, method, **kwargs):
+        from . import voice
+
+        if (
+            self.read_only or method not in voice.METHODS
+            or "channels" in kwargs
+            or method == voice.COMPLETE and kwargs.get("channel_id") != self.channel.slack_channel_id
+        ):
+            raise MemberDeliveryUnavailable("invalid_voice_destination")
+        if "files:write" not in self.authority.scopes:
+            raise MemberDeliveryUnavailable("voice_upload_scope_unavailable")
+
+        def before_request():
+            guard_delivery(self.row)
+            self.started_at = timezone.now()
+            if method != voice.ALLOCATE:
+                self.mutation_started = True
+
+        return dm._invoke_slack_with_locked_connection(
+            self.authority, self.connection, method, before_request=before_request, **kwargs,
+        )
+
     def call(self, method, **kwargs):
         if self.read_only and method in WRITES.values():
             raise MemberDeliveryUnavailable("reconciliation_must_be_read_only")
@@ -1007,6 +1029,8 @@ def _prepare(delivery, original, authority, actor, saved):
         (delivery.get("source_platform") == "slack" or delivery.get("delivery_type") == "reaction_add")
         and needs_catalog((delivery.get("payload") or {}).get("text"))
     ) else {}
+    from . import voice
+
     with _fence(delivery, original, authority, actor) as (row, channel, grant, client):
         info = client.verify()
         command = {
@@ -1020,6 +1044,8 @@ def _prepare(delivery, original, authority, actor, saved):
             wire["text"], emojis = present(wire["text"], catalog)
             if emojis:
                 wire["emojis"] = emojis
+        else:
+            command["wire"] = voice.prepare(row, channel, client, command["wire"])
         payload = dict(row.payload or {})
         existing = payload.get(MEMBER_STAMP)
         if row.canonical_envelope and existing is None:
@@ -1054,7 +1080,7 @@ def execute(delivery):
     succeeded = False
     adapter_started = False
     provider_error = None
-    from . import member_attempts as attempts
+    from . import member_attempts as attempts, voice
 
     try:
         command = _prepare(delivery, original, authority, actor, saved)
@@ -1137,7 +1163,11 @@ def execute(delivery):
                     )
                 else:
                     try:
-                        response = client.call(wire["method"], **wire["kwargs"])
+                        if wire.get("voice_file_id"):
+                            voice.share(client, wire)
+                            response = voice.reconcile(client, channel, actor, wire, attempt)
+                        else:
+                            response = client.call(wire["method"], **wire["kwargs"])
                     except dm.SlackApiError as error:
                         code = str(error.response.get("error") or "")
                         if (
@@ -1269,6 +1299,7 @@ def execute(delivery):
 def _finish_slack(row, channel, actor, wire, response, *, outcome="accepted", verified_receipt=None):
     from .store import complete_create_delivery, complete_delivery, mark_link_deleted
     from .member_attempts import actor_proven, response_from_receipt, command_hash, ATTEMPT_KEY
+    from .voice import message_has_file
 
     if outcome == "accepted" and (
         not hasattr(response, "get") or response.get("ok") is not True
@@ -1305,8 +1336,8 @@ def _finish_slack(row, channel, actor, wire, response, *, outcome="accepted", ve
                 not isinstance(message, dict)
                 or message.get("user") != actor["slack_user_id"]
                 or not (actor_proven(message, actor, response) or recorded_actor)
-                or message.get("client_msg_id")
-                not in (None, "", kwargs["client_msg_id"])
+                or (not message_has_file(message, wire["voice_file_id"]) if wire.get("voice_file_id")
+                    else message.get("client_msg_id") not in (None, "", kwargs["client_msg_id"]))
             ):
                 raise MemberDeliveryUnavailable("invalid_slack_actor_ack")
     if operation in {"create", "reaction_add"}:
@@ -1335,6 +1366,7 @@ def _finish_slack(row, channel, actor, wire, response, *, outcome="accepted", ve
                 "reaction": wire["reaction"],
                 "poster": actor,
                 "text_hash": wire["text_hash"],
+                **({"voice_file_id": wire["voice_file_id"]} if wire.get("voice_file_id") else {}),
             },
         )
     else:
