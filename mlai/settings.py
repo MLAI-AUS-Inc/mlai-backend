@@ -2966,6 +2966,7 @@ if "idempotency-key" not in CORS_ALLOW_HEADERS:
     CORS_ALLOW_HEADERS = (*CORS_ALLOW_HEADERS, "idempotency-key")
 
 # Vibe Security remains opt-in; production and staging authority are separate.
+CYBERTEST_COMPLETION_NOTICES_ENABLED = _env_is_true('CYBERTEST_COMPLETION_NOTICES_ENABLED', False)
 CYBERTEST_BILLING_MODE = os.getenv('CYBERTEST_BILLING_MODE', 'disabled').strip()
 CYBERTEST_PHASED_SCANS_ENABLED = _env_is_true('CYBERTEST_PHASED_SCANS_ENABLED', False)
 CYBERTEST_LIVE_BILLING_ENABLED = False

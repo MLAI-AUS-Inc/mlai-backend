@@ -95,9 +95,11 @@ class QuoteStatusView(ServiceView):
 
 class RecoverQuoteView(ServiceView):
     def post(self,request):
-        data=_body(request,['binding','token','parent_checkout_id'])
+        data=_body(request,['binding','token','parent_checkout_id','backend_answer'])
+        if 'backend_answer' in data and data['backend_answer'] not in ('yes', 'no', 'unsure'):
+            raise CheckoutError('INVALID_BACKEND_ANSWER','Choose a valid answer for the basic security check.',400)
         result=checkout.recover_quote(data.get('binding'),data.get('token'),
-            **({'parent_checkout_id':data['parent_checkout_id']} if 'parent_checkout_id' in data else {}))
+            **{key: data[key] for key in ('parent_checkout_id','backend_answer') if key in data})
         if result and result['status']=='quoted':
             frontend=_origin('COMMUNITY_CHAT_FRONTEND_URL')
             result={**result,'checkout_url':f"{frontend}/my-startup/cybertest#{result['checkout_id']}.{data['token']}"}
@@ -176,3 +178,10 @@ class DeliverySettlementView(ServiceView):
     def post(self, request, checkout_id):
         data = _body(request, ['audit_id', 'evidence', 'costs'])
         return Response(checkout.settle_delivery(checkout_id, data.get('audit_id'), data.get('evidence'), data.get('costs')))
+
+
+class CompletionNotificationView(ServiceView):
+    def post(self, request, checkout_id):
+        from .cybertest_notifications import completed
+        data = _body(request, ['audit_id', 'evidence'])
+        return Response(completed(checkout_id, data.get('audit_id'), data.get('evidence')))

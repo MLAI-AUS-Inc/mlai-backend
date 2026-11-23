@@ -166,3 +166,30 @@ quotes, duplicated charge/dispatch and simultaneous upgrade refunds using local
 synthetic shared-ledger rows. A successful SQLite run must not be reported as
 evidence for these PostgreSQL locks. The disposable container/network must be
 removed after the run; do not point this runner at an existing shared service.
+
+## Founder report delivery
+
+New Basic plans use `basic-source-v2` and store one `backendAnswer` of
+`yes`, `no` or `unsure`. Version 1 plans retain their original schema.
+Basic recovery accepts an optional `backend_answer`. A changed answer cancels
+only an unaccepted quote. A previously approved or dispatched check returns
+409 `BACKEND_ANSWER_LOCKED` and keeps its original scope.
+
+A full, persisted report queues one private MLAI Chat message for the original
+payer when `CYBERTEST_COMPLETION_NOTICES_ENABLED=true` on the web service and
+discovery scheduler. Use the existing verified Chat notifier configuration.
+The default is off. Test receipts never send a private message.
+
+After a free continuation, the authenticated scanner can post cumulative
+evidence to `/api/v1/points/cybertest/quotes/{checkout_id}/notify-complete/`
+with `X-Cybertest-Key`. The body contains `audit_id` (the original audit) and
+`evidence` (as for settlement with that root audit's ID). History must have
+acknowledged the saved report. Every planned check, including evidence review
+when present, must be completed. The callback returns `queued` or `disabled`
+in its `status` field. Retrying it is safe. Charges and refunds continue to
+use only their existing settlement endpoint.
+
+The minute scheduler retries private messages for up to two days. The report
+link checks company, workspace and account access when opened. The sender
+rechecks recipient membership and verified devices immediately before delivery.
+The message contains only a fixed completion sentence and the report link.

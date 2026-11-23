@@ -135,7 +135,7 @@ jobs:
         python -m unittest tests.test_flag_register tests.test_prevention_watch -v
 
     - name: Check Cybertest authority and phase contracts without database access
-      run: python scripts/test_without_database.py roo.test_cybertest_entry roo.tests_cybertest_entry_views roo.tests_cybertest_github roo.test_cybertest_phase_api roo.test_cybertest_policy roo.test_cybertest_delivery roo.test_cybertest_plan roo.test_cybertest_production_config roo.test_cybertest_staging_config
+      run: python scripts/test_without_database.py roo.test_cybertest_entry roo.tests_cybertest_entry_views roo.tests_cybertest_github roo.test_cybertest_phase_api roo.test_cybertest_notifications roo.test_cybertest_policy roo.test_cybertest_delivery roo.test_cybertest_plan roo.test_cybertest_production_config roo.test_cybertest_staging_config
 
     - name: Validate selected test labels without database access
       run: python scripts/test_without_database.py --collect-ci-selection
