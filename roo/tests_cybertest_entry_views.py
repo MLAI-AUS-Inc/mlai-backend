@@ -1,14 +1,17 @@
 """No-database endpoint contracts; real identity/storage is explicitly mocked."""
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import UUID
 from django.test import SimpleTestCase, override_settings
 from django.core.cache import cache
 from rest_framework.test import APIRequestFactory, force_authenticate
+from rest_framework.exceptions import NotFound
 from roo.cybertest_entry import EntryError
 from roo import cybertest_entry_views as views
 from roo.cybertest_checkout import _payer
 from roo import cybertest_checkout as checkout
 from roo.cybertest_policy import CheckoutError
+from roo import cybertest_results as results
 
 COMPANY='10000000-0000-4000-8000-000000000001'
 WORKSPACE='20000000-0000-4000-8000-000000000001'
@@ -70,7 +73,7 @@ class ProductionEntryViewTests(SimpleTestCase):
             companies.return_value.filter.assert_called_once_with(pk=COMPANY, profile__user=user)
             device.assert_called_once_with(session)
             access.assert_called_once_with(user)
-            workspace.assert_called_once_with(company)
+            workspace.assert_called_once_with(company, provision=True)
             companies.return_value.filter.return_value.first.return_value = None
             with self.assertRaises(EntryError) as caught:
                 views.authorize('session', COMPANY)
@@ -96,7 +99,7 @@ class ProductionEntryViewTests(SimpleTestCase):
             result = views.authorize('session', COMPANY)
             self.assertTrue(result['workspace_provisioning'])
             companies.return_value.filter.assert_called_with(pk=COMPANY, profile__user=user)
-            workspace.assert_called_once_with(company)
+            workspace.assert_called_once_with(company, provision=True)
 
     @override_settings(CYBERTEST_PRODUCTION_ALL_COMPANIES=True)
     def test_existing_workspace_lookup_preserves_revocation_without_reprovisioning(self):
@@ -108,6 +111,16 @@ class ProductionEntryViewTests(SimpleTestCase):
             self.assertEqual(views.workspace_for_company(company), WORKSPACE)
             row.is_active = False
             with self.assertRaises(EntryError): views.workspace_for_company(company)
+            create.assert_not_called()
+
+    @override_settings(CYBERTEST_PRODUCTION_ALL_COMPANIES=True)
+    def test_reading_results_never_provisions_a_workspace(self):
+        with patch.object(views.CybertestCompanyBinding.objects, 'filter') as rows, \
+             patch.object(views.CybertestCompanyBinding.objects, 'get_or_create') as create:
+            rows.return_value.first.return_value = None
+            with self.assertRaises(EntryError) as denied:
+                views.workspace_for_company(SimpleNamespace(pk=COMPANY), provision=False)
+            self.assertEqual(denied.exception.code, 'COMPANY_UNMAPPED')
             create.assert_not_called()
 
     @override_settings(CYBERTEST_PRODUCTION_ALL_COMPANIES=True)
@@ -261,3 +274,53 @@ class EntryViewTests(SimpleTestCase):
             with self.assertRaises(CheckoutError): checkout._get(COMPANY)
         with self.settings(CYBERTEST_BILLING_MODE='live', CYBERTEST_LIVE_BILLING_ENABLED=True), self.assertRaises(CheckoutError):
             checkout.configured_mode()
+
+
+@override_settings(CYBERTEST_ENTRY_PRODUCTION_ENABLED=True)
+class NativeSecurityResultsTests(SimpleTestCase):
+    def test_detail_requires_current_payer_company_workspace_and_audit(self):
+        view = results.ResultsView()
+        view.company = SimpleNamespace(pk=UUID(COMPANY))
+        request = SimpleNamespace(
+            user=SimpleNamespace(pk='owner'),
+            query_params=APIRequestFactory().get('/').GET,
+            community_chat_account_session=SimpleNamespace(pk='session'),
+        )
+        audit_id = UUID('30000000-0000-4000-8000-000000000001')
+        with patch.object(results, 'authorize', return_value={
+            'user_id': 'owner', 'company_id': COMPANY, 'workspace_id': WORKSPACE,
+        }) as authorize, patch.object(results.CybertestCheckout.objects, 'filter') as receipts:
+            selection = receipts.return_value
+            selection.filter.return_value.first.return_value = None
+            with self.assertRaises(NotFound):
+                view.get(request, audit_id)
+            authorize.assert_called_once_with('session', COMPANY, provision=False)
+            receipts.assert_called_once_with(
+                user_id='owner', audit_id__isnull=False, binding__mlai_user_id='owner',
+                binding__mlai_company_id=COMPANY, binding__workspace_id=WORKSPACE, test_mode=False,
+            )
+            selection.filter.assert_called_once_with(audit_id=audit_id)
+            selection.order_by.assert_not_called()
+
+    def test_projection_exposes_only_saved_receipt_summary(self):
+        receipt = SimpleNamespace(
+            audit_id=UUID('30000000-0000-4000-8000-000000000001'),
+            binding={'repository': 'example/project', 'scope': ['private_function']},
+            phase_contract={'phase': 'basic'},
+            status='started',
+            settled_at=True,
+            created_at=SimpleNamespace(isoformat=lambda: '2026-11-23T00:00:00+00:00'),
+            points=24,
+            pricing_snapshot={'sponsored': True},
+            settlement={
+                'charge_microroo': 0, 'refund_microroo': 0,
+                'delivery': {'completedChecks': 2, 'plannedChecks': 3, 'incompleteCheckIds': ['private']},
+            },
+            delivery_evidence={'report': {'persisted': True, 'sha256': 'private'}},
+        )
+        self.assertEqual(results.result_summary(receipt), {
+            'audit_id': str(receipt.audit_id), 'repository': 'example/project',
+            'phase': 'basic', 'status': 'started', 'created_at': '2026-11-23T00:00:00+00:00',
+            'settled': True, 'sponsored': True, 'quoted_points': 24, 'charge_microroo': 0,
+            'refund_microroo': 0, 'report_saved': True, 'completed_checks': 2, 'planned_checks': 3,
+        })
