@@ -30,8 +30,10 @@ with ``reason`` in ``not_ready``, ``revision_changed``, ``invalid_url`` and
 from __future__ import annotations
 
 import html as html_lib
+import hashlib
 import http.client
 import ipaddress
+import json
 import logging
 import re
 import socket
@@ -237,17 +239,53 @@ def founder_draft_review(*, context, run, user):
     return {"allow_preview_pending": copy_while_pending, "copy_formats": copy_without_preview_enabled()}, founder_draft
 
 
-def current_export(context, run):
+def current_export(context, run, *, content_files=False):
     """``(export, error_response)``: the run's current export, read the way the review view reads it."""
     from .article_review_views import remote_review
-    review = remote_review(run)
+    review = remote_review(run, include_content_files=True) if content_files else remote_review(run)
     if isinstance(review, Response):
         return None, review
     latest = views._latest_review_ready_component_revision(run, context)
     allow_pending = copy_without_preview_enabled() and is_content_only(run)
     export = article_export(review, run_id=run.run_id, latest_run_id=latest.run_id if latest else None,
                             allow_preview_pending=allow_pending, copy_formats=True)
+    if content_files and isinstance(review, dict) and "reviewedContentFilesV1" in review and export.get("status") == "ready":
+        handoff = review["reviewedContentFilesV1"]
+        if (run.status in {"failed", "cancelled", "denied"} or review.get("approved") is not True
+                or review.get("previewPending") is not False or review.get("pendingUpdate") or review.get("revisionRunId")
+                or not _valid_reviewed_files(handoff, export)):
+            return None, _refusal(NOT_READY_DOWNLOAD, "not_ready", 409)
+        export["reviewedContentFilesV1"] = handoff
     return export, None
+
+
+def _valid_reviewed_files(handoff, export):
+    """Only allow fixed entry names, the same approved body, and its own bounded image list."""
+    if not isinstance(handoff, dict) or type(handoff.get("version")) is not int or handoff["version"] != 1:
+        return False
+    slug = export["metadata"].get("slug") or ""
+    if (not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+){0,15}", slug) or len(slug) > 80
+            or handoff.get("slug") != slug or handoff.get("runId") != export["runId"]
+            or handoff.get("revision") != export["revision"]
+            or handoff.get("markdownSha256") != hashlib.sha256(export["markdown"].encode()).hexdigest()):
+        return False
+    front = handoff.get("frontMatter")
+    wiring = handoff.get("wiring")
+    docs = handoff.get("jsonLd")
+    if (not isinstance(front, str) or len(front) > 65536 or not front.startswith("---\n") or not front.endswith("\n---\n")
+            or not isinstance(wiring, str) or not 0 < len(wiring) <= 65536 or not isinstance(docs, list)
+            or not 1 <= len(docs) <= 2 or not all(isinstance(doc, dict) for doc in docs)
+            or docs[0].get("@type") != "Article" or docs[0].get("headline") != export["metadata"].get("title")
+            or len(json.dumps(docs)) > 2_000_000):
+        return False
+    assets = handoff.get("images")
+    if not isinstance(assets, list) or len(assets) != len(export["media"]) or len(assets) > MAX_IMAGES:
+        return False
+    return all(isinstance(asset, dict) and asset.get("url") == medium["url"]
+               and (urlsplit(medium["url"]).hostname or "").lower() in IMAGE_HOSTS
+               and re.fullmatch(r"[a-f0-9]{64}", str(asset.get("sha256") or ""))
+               and re.fullmatch(rf"image-{i}\.(?:jpg|png|gif|avif|webp)", str(asset.get("name") or ""))
+               for i, (asset, medium) in enumerate(zip(assets, export["media"]), 1))
 
 
 def _record_time(record):
@@ -637,17 +675,23 @@ def fetch_image(url, *, limit, deadline):
 def article_zip(export, *, fetch=None) -> bytes:
     """The zip: ``article.md``, ``article.html``, ``images/<n>.<ext>`` and ``images/README.txt``.
 
-    Only MLAI storage images, at most 10, 8 MB each and 25 MB in total. Every
-    image left out is listed in the README with the reason.
+    An approved files-only handoff also includes the ready-to-wire article directory.
+    MLAI storage images are limited to 10, 8 MB each and 25 MB in total. The standard
+    ZIP lists skipped images. An approved handoff requires all its exact image bytes.
     """
     fetch = fetch or fetch_image
     buffer = BytesIO()
     included, skipped, total = [], [], 0
+    handoff = export.get("reviewedContentFilesV1")
+    if handoff:
+        from .website_content_files import CONTENT_ROOT
+        folder = f"{CONTENT_ROOT}/{handoff['slug']}"
     deadline = time.monotonic() + IMAGE_DEADLINE_SECONDS
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("article.md", export.get("markdown") or "")
         archive.writestr("article.html", article_document(export))
-        for item in export.get("media") or []:
+        verified_assets = []
+        for index, item in enumerate(export.get("media") or []):
             url = item.get("url") if isinstance(item, dict) else None
             if not isinstance(url, str) or not url:
                 continue
@@ -666,15 +710,31 @@ def article_zip(export, *, fetch=None) -> bytes:
             except _ImageSkipped as exc:
                 skipped.append((url, exc.reason))
                 continue
+            if handoff:
+                asset = handoff["images"][index]
+                if (not asset["name"].endswith("." + extension)
+                        or hashlib.sha256(data).hexdigest() != asset["sha256"]):
+                    skipped.append((url, "the approved image changed"))
+                    continue
+                verified_assets.append((asset["name"], data))
             name = f"images/{len(included) + 1}.{extension}"
             archive.writestr(name, data)
             total += len(data)
             included.append((name, item.get("alt") or "", url))
+        if handoff and len(verified_assets) == len(handoff["images"]):
+            archive.writestr(f"{CONTENT_ROOT}/WIRING.md", handoff["wiring"])
+            body = export["markdown"]
+            archive.writestr(f"{folder}/index.md", handoff["frontMatter"] + body + ("" if body.endswith("\n") else "\n"))
+            archive.writestr(f"{folder}/article.jsonld", json.dumps(handoff["jsonLd"], ensure_ascii=False, indent=2) + "\n")
+            for name, data in verified_assets:
+                archive.writestr(f"{folder}/{name}", data)
         if included or skipped:
             lines = ["Images for your article.", ""]
             for name, alt, _url in included:
                 short = name.removeprefix("images/")
                 lines.append(f"{short}: {alt}" if alt else short)
+            if skipped and handoff:
+                lines += ["", "Retry the download for the complete website files once all approved images are available."]
             if skipped:
                 lines += ["", "Not included:"] + [f"{url} ({reason})" for url, reason in skipped]
             archive.writestr("images/README.txt", "\n".join(lines) + "\n")
@@ -694,10 +754,12 @@ class FounderDraftDownloadView(_FounderDraftToolView):
         context, run, error = self._resolve(request, run_id)
         if error is not None:
             return error
-        export, error = current_export(context, run)
+        from .website_content_files import enabled
+        export, error = current_export(context, run, content_files=enabled())
         if error is not None or export.get("status") != "ready":
             return _refusal(NOT_READY_DOWNLOAD, "not_ready", 409)
-        response = HttpResponse(article_zip(export), content_type="application/zip")
+        archive = article_zip(export)
+        response = HttpResponse(archive, content_type="application/zip")
         response["Content-Disposition"] = f'attachment; filename="{_filename(export)}"'
         response["Cache-Control"] = "private, no-store"
         logger.info("founder_draft_downloaded org=%s run=%s", context.organization.pk, run.run_id)

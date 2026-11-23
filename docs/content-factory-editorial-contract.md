@@ -26,6 +26,20 @@ the shared operation attempt. Missing or changed approval, unrelated children,
 portable drafts and cancelled or failed source operations retain the terminal
 gate.
 
+## Approved article files download
+
+The existing owner-scoped `runs/:runId/article/download` ZIP retains its
+root Markdown, HTML and images. With the setup ladder enabled on both services,
+the worker can also supply the files for a website under
+`mlai-content-files/<slug>/`. The directory contains Markdown with front matter,
+Article and applicable FAQ structured data, and the approved image files. Its
+parent directory includes the wiring instructions. The backend verifies the
+run, revision, body digest and each downloaded image before returning the ZIP.
+When an approved image is unavailable or changed, the standard ZIP remains
+downloadable. Its image notes explain the omission and how to retry. Older reviews without this
+manifest retain their existing ZIP. Downloading writes no website files,
+publication receipt or points transaction.
+
 ## Component review updates (8 October 2026)
 
 Next.js private previews route `/_next/` stylesheet, script, image-optimizer and

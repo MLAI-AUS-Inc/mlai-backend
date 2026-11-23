@@ -15,7 +15,7 @@ from .article_export import article_export
 from .founder_article_review_contract import scoped_review_response
 
 
-def remote_review(run, *, payload=None, child_operation=False):
+def remote_review(run, *, payload=None, child_operation=False, include_content_files=False):
     """Forward a scoped review operation without passing browser credentials.
 
     ``child_operation`` marks a payload carrying the separate operation that
@@ -85,6 +85,8 @@ def remote_review(run, *, payload=None, child_operation=False):
     if not config["enabled"]:
         return Response({"detail": "Article editing is temporarily unavailable."}, status=503)
     url = f"{config['base_url']}/api/runs/{quote(run.run_id, safe='')}/article-review"
+    if include_content_files and payload is None:
+        url += "?include_content_files=true"
     if payload is not None:
         from .founder_review_commands import require_current_effect, ReviewCommandRefusal
         try:
