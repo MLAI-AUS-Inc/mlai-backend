@@ -8,7 +8,12 @@ from django.db import transaction
 from django.db.models import Exists, F, OuterRef, Q
 from django.utils import timezone
 
-from integrations.models import BridgeSyncState, CommunityBridgeChannel, CommunityBridgeDelivery
+from integrations.models import (
+    BridgeSyncState,
+    CommunityBridgeChannel,
+    CommunityBridgeDelivery,
+    CommunityBridgeMessageLink,
+)
 from .scheduler import LeaseLost
 
 _current_delivery = ContextVar("message_sync_delivery", default=None)
@@ -132,19 +137,33 @@ def recover_public_leases():
 
 @transaction.atomic
 def supersede_stale_mutation(delivery_id):
-    """A delayed older edit cannot overwrite an already delivered newer edit."""
+    """Order edits by revision while keeping message deletion irreversible."""
     from django.db.models import DecimalField
     from django.db.models.functions import Cast
     from decimal import Decimal
     from integrations.services.community_bridge.store import complete_delivery
     row = CommunityBridgeDelivery.objects.select_for_update().get(pk=delivery_id)
     guard_delivery(row)
-    if row.source_platform != "slack" or row.delivery_type not in {"edit", "delete", "reaction_add", "reaction_remove"} or not row.source_revision:
+    if row.source_platform != "slack" or row.delivery_type not in {"edit", "reaction_add", "reaction_remove"}:
         return False
+    if row.delivery_type == "edit" and CommunityBridgeMessageLink.objects.filter(
+        channel_id=row.channel_id,
+        source_platform=row.source_platform,
+        source_channel_id=row.source_channel_id,
+        source_message_id=row.source_message_id,
+        destination_platform=row.target_platform,
+        destination_channel_id=row.target_channel_id,
+        destination_deleted_at__isnull=False,
+    ).exists():
+        complete_delivery(delivery_id=row.pk)
+        return True
+    if not row.source_revision:
+        return False
+    competing_types = ("edit",) if row.delivery_type == "edit" else ("reaction_add", "reaction_remove")
     peers = CommunityBridgeDelivery.objects.filter(
         channel_id=row.channel_id, source_platform=row.source_platform,
         source_channel_id=row.source_channel_id, source_message_id=row.source_message_id,
-        target_platform=row.target_platform, status="completed", delivery_type__in=["edit", "delete", "reaction_add", "reaction_remove"],
+        target_platform=row.target_platform, status="completed", delivery_type__in=competing_types,
         source_revision__regex=r"^[0-9]{1,20}\.[0-9]{1,6}$",
     ).exclude(pk=row.pk).annotate(revision=Cast("source_revision", DecimalField(max_digits=26, decimal_places=6)))
     if peers.filter(revision__gt=Decimal(row.source_revision)).exists():

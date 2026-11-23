@@ -7,6 +7,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from core.models import User
+from integrations.models import CommunityBridgeChannel, CommunityBridgeDelivery
 from roo.models import BoostPostAdmission, Ledger, PointsAccount
 from roo.services import PointsService
 
@@ -130,6 +131,45 @@ class BoostPostAdmissionAPITests(APITestCase):
         self.assertEqual(response.data['new_balance'], 7)
         self.assertFalse(Ledger.objects.filter(reference_type='BOOST_POST').exists())
         self.assertEqual(PointsAccount.objects.get(user=self.user).balance, 7)
+
+    @override_settings(ROO_LINK_LOVE_SLACK_CHANNEL_ID="CBOOST123")
+    def test_roo_confirmation_queues_one_mirror_delete_without_slack_callback(self):
+        from integrations.services.community_bridge.store import ingest_slack_event
+
+        PointsAccount.objects.filter(user=self.user).update(balance=7, earned_balance=7)
+        decision = self.client.post(self.url, self.payload, format="json")
+        self.assertEqual(decision.status_code, status.HTTP_402_PAYMENT_REQUIRED)
+        mapping = CommunityBridgeChannel.objects.create(
+            slack_workspace_id=self.payload["workspace_id"],
+            slack_channel_id=self.payload["channel_id"],
+            slack_visibility="public",
+            destination_platform="buzz",
+            destination_channel_id="922c3b22-8002-4c3c-a37b-ce406a5e606e",
+            audience="community",
+        )
+        removal_url = reverse("boost-post-mirror-removal", args=[decision.data["admission_id"]])
+        body = {"submission_key": self.payload["submission_key"]}
+        bad_key = self.client.post(removal_url, {"submission_key": "unrelated"}, format="json")
+        self.assertEqual(bad_key.status_code, status.HTTP_404_NOT_FOUND)
+
+        first = self.client.post(removal_url, body, format="json")
+        self.assertEqual(first.data["status"], "enqueued")
+        replay = self.client.post(removal_url, body, format="json")
+        self.assertEqual(replay.data["status"], "duplicate")
+        deletion = CommunityBridgeDelivery.objects.get(channel=mapping)
+        self.assertEqual(deletion.delivery_type, "delete")
+        self.assertEqual(deletion.source_message_id, self.payload["root_message_ts"])
+        self.assertEqual(deletion.target_channel_id, mapping.destination_channel_id)
+        self.assertEqual(ingest_slack_event({
+            "team_id": mapping.slack_workspace_id,
+            "event_id": "EvLateBoostCreate",
+            "event": {
+                "type": "message", "channel_type": "channel",
+                "channel": mapping.slack_channel_id,
+                "ts": self.payload["root_message_ts"], "user": self.user.slack_id,
+                "text": "Late create after the confirmed removal",
+            },
+        })["reason"], "duplicate_source_message")
 
     def test_insufficient_admission_can_be_atomically_rechecked_after_earning_points(self):
         account = PointsAccount.objects.get(user=self.user)

@@ -376,6 +376,22 @@ The response includes `contributions` only for published, reconciled profiles.
 It contains qualifying Roo, the `mlai-volunteer-v6` ladder position, and reviewed
 badges with member-safe descriptions and optional public event links.
 
+Each awarded badge includes `earn_count` (positive integer or null),
+`earn_count_status` (`exact`, `at_least` or `unresolved`) and
+`earn_count_progress`. The progress object is empty for most badges.
+`hello.steady` may include `months` and `accepted_deliverables`.
+`event.series` may include `months` and `events_led`. An existing patch with
+unverified repeat history has a null count and an empty progress object.
+
+For count publication, provide the reviewed file and its independently approved
+SHA-256 digest to `manage.py import_volunteer_badge_counts <manifest> --sha256
+<digest> --reviewer-id <account>`. The preview validates the exact existing
+grant identities, evidence anchors, publication status and scoped account history.
+Add `--apply` to publish the complete batch atomically. Repeating it reports the
+existing rows. To withdraw that batch, preview with `--rollback` and add
+`--apply` when ready. A withdrawn count stays unresolved if a stale publisher
+retries. The original badge grant and its public reason survive withdrawal.
+
 Preview the reviewed batch with
 `manage.py import_volunteer_badges <manifest> --reviewer-id <account>`.
 The private manifest contains `community`, `evidence_sha256`, an explicit
