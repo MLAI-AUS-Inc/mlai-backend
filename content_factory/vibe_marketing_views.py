@@ -19126,6 +19126,10 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
     except ValueError as exc:
         return Response({"detail": str(exc), "field": "editorialBrief"}, status=status.HTTP_400_BAD_REQUEST)
     if start.state == "ask":
+        from .portable_drafts import portable_starts_for_all
+        if portable_starts_for_all() and requests_content_only(command.data):
+            from .editorial_default_brief import sparse_proposal
+            start = sparse_proposal(start, config=config, context=context)
         logger.info("vibe_marketing_article_brief_question org_id=%s audience_id=%s",
                     context.organization.pk, start.audience_id or "")
         return Response(start.ask_payload(), status=status.HTTP_409_CONFLICT)

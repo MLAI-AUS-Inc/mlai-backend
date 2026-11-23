@@ -191,7 +191,7 @@ def infer_audience(one_liner) -> str | None:
 def _catalog(config):
     from .editorial_catalog import review_payload
     try:
-        return review_payload(_strategy(config))
+        return review_payload(getattr(config, "pillar_strategy", None))
     except ValueError:
         return None
 
@@ -255,6 +255,25 @@ def call_to_action(organization, config) -> dict | None:
     if parts.username or parts.password or not domain or not (host == domain or host.endswith("." + domain)):
         return None
     return {"label": label, "url": url}
+
+
+
+def approved_card_action(organization, config, audience, country):
+    """In a private first draft, only show a previously approved offer to its approved audience."""
+    from .portable_drafts import portable_starts_for_all
+    cta = call_to_action(organization, config)
+    if not cta or not portable_starts_for_all():
+        return cta
+    if not audience or audience.get("status") != "approved":
+        return None
+    catalog = _catalog(config)
+    if not catalog:
+        return None
+    for offer in catalog["cta_options"]:
+        if (offer.get("status") == "approved" and offer.get("button_href") == cta["url"]
+                and audience.get("id") in offer.get("audience_ids", []) and country in offer.get("countries", [])):
+            return {"url": offer["button_href"], "label": offer["button_text"]}
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -516,6 +535,7 @@ def card_payload(context, user, config=None) -> dict:
     config = config if config is not None else (cohorts._config_for(organization) or cohorts._EmptyConfig)
     facts = profile_facts(company, organization, config)
     audience = audience_for(organization, config, facts)
+    from .editorial_first_audience import country_from_location
     topics = topics_for(organization=organization, config=config, facts=facts, audience=audience)
     entitlement = entitlement_state(organization, user, config=config)
     first_article = first_article_capability(entitlement)
@@ -528,7 +548,7 @@ def card_payload(context, user, config=None) -> dict:
         "topic": _public_topic(topics[0]) if topics else None,
         "alternatives": [_public_topic(topic) for topic in topics[1:TOPIC_COUNT]],
         "audience": audience,
-        "callToAction": call_to_action(organization, config),
+        "callToAction": approved_card_action(organization, config, audience, country_from_location(facts["location"])),
         "label": FREE_LABEL if free else PAID_LABEL.format(price=price),
         "free": free,
         "pricePoints": 0 if free else price,
@@ -945,13 +965,20 @@ def _approve(context, user, config, prepared) -> dict:
     """Approve the audience (and the call to action's offer, falling back to IF-08) and return the brief."""
     organization = context.organization
     brief = None
-    cta = call_to_action(organization, config)
+    cta = approved_card_action(organization, config, prepared["audience"], prepared["country"])
     if cta is not None:
         brief = _approve_with_offer(context, user, config, prepared["audience"], cta, country=prepared["country"],
                                     topic_title=prepared["topic"]["title"])
         config.refresh_from_db()
     if brief is None:
         brief = _approve_without_offer(context, user, config, prepared["audience"], country=prepared["country"])
+    from .portable_drafts import portable_starts_for_all
+    if portable_starts_for_all() and brief.get("conversion_intent") == "none":
+        from .editorial_catalog import article_brief_for_catalog
+        brief = article_brief_for_catalog(config.pillar_strategy, {"editorial_brief": {**brief,
+            "acceptance_criteria": [*brief["acceptance_criteria"],
+                "Support company-specific claims with founder-confirmed facts or a cited source. "
+                "Leave unsupported capabilities, results and offers out of the article."]}})
     return _with_existing_posts(brief, config)
 
 
