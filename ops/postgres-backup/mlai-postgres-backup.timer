@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly off-host backup of Backend PostgreSQL
+
+[Timer]
+OnCalendar=*-*-* 03:35:00 Australia/Melbourne
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
