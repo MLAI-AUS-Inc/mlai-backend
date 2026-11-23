@@ -68,7 +68,7 @@ def settle_delivery(checkout_id, audit_id, evidence, costs):
     row.delivery_evidence = evidence
     row.settled_at = timezone.now()
     row.failure_code = '' if result['delivery']['minimumMet'] else 'DELIVERY_MINIMUM_NOT_MET'
-    if result['charge_microroo'] == 0:
+    if result['charge_microroo'] == 0 and result['basis'] != 'sponsored_not_delivered':
         row.status = 'refunded'
     row.save(update_fields=['settlement', 'delivery_evidence', 'settled_at', 'failure_code', 'status', 'refund_ledger', 'updated_at'])
     return checkout.receipt_status(row)
