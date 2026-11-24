@@ -9,7 +9,6 @@ from django.conf import settings
 from .models import PointsAdmin
 
 
-POINTS_SUPER_ADMIN_SLACK_ID = "U05QPB483K9"
 FULL_POINTS_ADMIN_ROLES = ("admin", "committee", "portfolio_lead")
 COWORKING_REPORT_ROLES = (*FULL_POINTS_ADMIN_ROLES, "partner")
 LUMA_EXPORT_ROLES = ("admin", "committee", "partner")
@@ -168,9 +167,18 @@ def can_list_committee_candidate_emails(slack_id: str) -> bool:
     return _active_admin_with_role_exists(slack_id, COMMITTEE_CANDIDATE_EMAIL_ROLES)
 
 
-def is_points_super_admin(slack_id: str) -> bool:
-    """Return True only for the Roo points super-admin requester."""
-    return bool(slack_id and slack_id.strip() == POINTS_SUPER_ADMIN_SLACK_ID)
+def is_points_super_admin(slack_id: str, slack_team_id: str = "") -> bool:
+    """Match the configured Slack manager and workspace, independently of Django roles."""
+    user = getattr(settings, 'POINTS_SUPER_ADMIN_SLACK_ID', '')
+    team = getattr(settings, 'POINTS_SUPER_ADMIN_SLACK_TEAM_ID', '')
+    return bool(
+        isinstance(user, str)
+        and isinstance(team, str)
+        and re.fullmatch(r'[UW][A-Z0-9]+', user)
+        and re.fullmatch(r'T[A-Z0-9]+', team)
+        and slack_id == user
+        and slack_team_id == team
+    )
 
 
 def get_admin_role(slack_id: str) -> Optional[str]:

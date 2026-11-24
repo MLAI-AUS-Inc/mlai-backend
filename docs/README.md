@@ -164,6 +164,7 @@ rollout sequence.
 
 - [`roo-points-gst.md`](roo-points-gst.md) — inclusive GST checkout, payment evidence and release configuration
 
+- [Points Admin management](roo-points-admin-management.md) — environment-specific Slack authority and workspace checks
 - [Roo rate-card reads](roo-rate-card.md) — authentication, active rates, and empty/error responses
 - [`meeting-room-booking.md`](meeting-room-booking.md)
 - [`coworking-booking.md`](coworking-booking.md)

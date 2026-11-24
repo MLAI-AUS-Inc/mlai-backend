@@ -177,7 +177,7 @@ jobs:
       run: python scripts/test_event_discounts.py roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency
 
     - name: Check coworking report channel permissions without database access
-      run: python scripts/test_without_database.py roo.tests_coworking_report_access
+      run: python scripts/test_without_database.py roo.tests_coworking_report_access roo.tests_points_admin_authorization
 
     - name: Check personal agent gateway without database access
       # SQL suites skip here; they require the separately reviewed disposable runner.
@@ -1486,6 +1486,8 @@ jobs:
         XERO_OAUTH_SCOPES: ${{ vars.XERO_OAUTH_SCOPES || '' }}
         ROO_SIM_PATIENT_KEY: ${{ secrets.ROO_SIM_PATIENT_KEY }}
         ROO_API_KEY: ${{ secrets.ROO_API_KEY }}
+        POINTS_SUPER_ADMIN_SLACK_ID: ${{ vars.POINTS_SUPER_ADMIN_SLACK_ID }}
+        POINTS_SUPER_ADMIN_SLACK_TEAM_ID: ${{ vars.POINTS_SUPER_ADMIN_SLACK_TEAM_ID }}
         ROO_POINTS_LEVEL_UP_ENABLED: ${{ vars.ROO_POINTS_LEVEL_UP_ENABLED || 'false' }}
         ROO_POINTS_NATIVE_ACTIVE_FROM: ${{ vars.ROO_POINTS_NATIVE_ACTIVE_FROM || '' }}
         ROO_MANUAL_TIME_ENABLED: ${{ vars.ROO_MANUAL_TIME_ENABLED || 'false' }}

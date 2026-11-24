@@ -593,6 +593,12 @@ class PointsAdminViewSet(mixins.CreateModelMixin, mixins.UpdateModelMixin, views
             return ""
         return str(value).strip()
 
+    def get_permissions(self):
+        # Only Roo may assert a Slack actor for mutations. Preserve read access.
+        if self.action in {'create', 'update', 'partial_update', 'destroy'}:
+            return [HasIsolatedRooApiKey()]
+        return super().get_permissions()
+
     def _require_super_admin_requester(self, request):
         requester_slack_id = self._clean_slack_id(
             request.data.get('requester_slack_id') or request.query_params.get('requester_slack_id')
@@ -603,7 +609,10 @@ class PointsAdminViewSet(mixins.CreateModelMixin, mixins.UpdateModelMixin, views
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if not is_points_super_admin(requester_slack_id):
+        # Roo supplies this from verified Slack ingress, over its authenticated
+        # service boundary. Query parameters and Django roles cannot grant it.
+        slack_team_id = request.data.get('slack_team_id', '')
+        if not is_points_super_admin(requester_slack_id, slack_team_id):
             return None, Response(
                 {'error': 'Only the Roo points super admin can manage points admins'},
                 status=status.HTTP_403_FORBIDDEN,

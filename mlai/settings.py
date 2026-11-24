@@ -1977,6 +1977,9 @@ GITHUB_OAUTH_REDIRECT_URI = os.environ.get(
 GITHUB_WEBHOOK_SECRET = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 
 # Points System Configuration
+# Shared with Roo; no default grant when the identity is not configured.
+POINTS_SUPER_ADMIN_SLACK_ID = os.getenv('POINTS_SUPER_ADMIN_SLACK_ID', '')
+POINTS_SUPER_ADMIN_SLACK_TEAM_ID = os.getenv('POINTS_SUPER_ADMIN_SLACK_TEAM_ID', '')
 POINTS_BOOTSTRAP_ADMIN_SLACK_IDS = [s.strip() for s in os.getenv('POINTS_BOOTSTRAP_ADMIN_SLACK_IDS', '').split(',') if s.strip()]
 DEFAULT_COWORKING_CAPACITY = int(os.getenv('DEFAULT_COWORKING_CAPACITY', '24'))
 # Standard coworking cost. The active 'COWORKING_DAY' RewardsCatalog row takes

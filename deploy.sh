@@ -252,6 +252,11 @@ if [ -z "${REDIS_URL:-}" ]; then
     echo "❌ REDIS_URL must be supplied by the deployment secret store."
     exit 1
 fi
+# Production must explicitly preserve its Points Admin manager/workspace.
+if ! [[ "${POINTS_SUPER_ADMIN_SLACK_ID:-}" =~ ^[UW][A-Z0-9]+$ ]] || ! [[ "${POINTS_SUPER_ADMIN_SLACK_TEAM_ID:-}" =~ ^T[A-Z0-9]+$ ]]; then
+    echo "❌ Configure valid POINTS_SUPER_ADMIN_SLACK_ID and POINTS_SUPER_ADMIN_SLACK_TEAM_ID before deployment."
+    exit 1
+fi
 for service_secret_name in ROO_API_KEY INTERNAL_API_KEY; do
     service_secret_value="${!service_secret_name:-}"
     if [ "${#service_secret_value}" -lt 32 ]; then
@@ -488,6 +493,8 @@ if [ -n "$SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET" ]; then
     install_remote_env_secret SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET "$SYSTEM_EMAIL_RESEND_WEBHOOK_SECRET"
 fi
 echo "🔐 Updating distinct Roo and internal service credentials (values redacted)..."
+install_remote_env_secret POINTS_SUPER_ADMIN_SLACK_ID "$POINTS_SUPER_ADMIN_SLACK_ID"
+install_remote_env_secret POINTS_SUPER_ADMIN_SLACK_TEAM_ID "$POINTS_SUPER_ADMIN_SLACK_TEAM_ID"
 install_remote_env_secret ROO_API_KEY "$ROO_API_KEY"
 install_remote_env_secret INTERNAL_API_KEY "$INTERNAL_API_KEY"
 case "${LINEAR_CHANNEL_ISSUE_WRITES_ENABLED:-false}" in
