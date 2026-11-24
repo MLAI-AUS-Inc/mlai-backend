@@ -613,6 +613,11 @@ COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED = _env_is_true(
     'COMMUNITY_CHAT_VOLUNTEER_PROFILE_CONTRIBUTIONS_ENABLED', True
 )
 COMMUNITY_CHAT_VOLUNTEER_COMMUNITY = os.getenv('COMMUNITY_CHAT_VOLUNTEER_COMMUNITY', '')
+COMMUNITY_CHAT_MEMBER_PROGRESS_LOCATION_ACCOUNT_IDS = {
+    value.strip()
+    for value in os.getenv('COMMUNITY_CHAT_MEMBER_PROGRESS_LOCATION_ACCOUNT_IDS', '').split(',')
+    if value.strip().isdecimal()
+}
 COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM = os.getenv('COMMUNITY_CHAT_VOLUNTEER_ACTIVE_FROM', '')
 COMMUNITY_CHAT_VOLUNTEER_RECEIPT_TOKEN = os.getenv('COMMUNITY_CHAT_VOLUNTEER_RECEIPT_TOKEN', '')
 COMMUNITY_CHAT_VOLUNTEER_REVIEWER_ID = os.getenv('COMMUNITY_CHAT_VOLUNTEER_REVIEWER_ID') or None
@@ -2995,3 +3000,7 @@ from roo.cybertest_production_config import production_entry_settings
 globals().update(production_entry_settings({
     **os.environ, 'APP_ENV': APP_ENV, 'DEBUG': str(DEBUG).lower(),
 }))
+
+# Each entry explicitly binds a provider installation to a Chat community.
+MANAGED_CHANNEL_SOURCES = json.loads(os.environ.get("MANAGED_CHANNEL_SOURCES", "{}"))
+MANAGED_CHANNEL_SLACK_SECTIONS = json.loads(os.environ.get("MANAGED_CHANNEL_SLACK_SECTIONS", "{}"))

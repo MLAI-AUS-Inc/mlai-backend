@@ -125,6 +125,28 @@ class WebsiteJourneyContractTests(SimpleTestCase):
         result = project_journey(company_id="42", domain="example.test", target={"adapter": "react_component"}, proof={"buildVerified": True})
         self.assertTrue(result["support"]["native"]["certified"])
 
+    def test_legacy_inventory_framework_guides_setup_for_its_source(self):
+        from .website_strategy import RUNGS, initial_rung
+
+        sha = "a" * 40
+        inventory = {"discovery_complete": True, "repo_head_sha": sha, "tech_stack": {"framework": "astro"}}
+        discovery = discovery_snapshot({"repository_inventory": inventory})
+
+        def project(source):
+            return project_journey(company_id="42", domain="example.test", discovery=discovery,
+                capabilities={"repositorySourceSha": source})
+
+        current = project(sha)
+        self.assertEqual(current["repository"]["framework"], "astro")
+        self.assertEqual(RUNGS[initial_rung(current)], "deterministic")
+        self.assertFalse(current["capabilities"]["canPublishArticle"])
+        self.assertIsNone(project("b" * 40)["repository"]["framework"])
+        self.assertEqual(discovery_snapshot({"repository_inventory": inventory,
+            "repository_discovery": {"framework": "nextjs"}})["framework"], "nextjs")
+        for invalid in (None, ["astro"], {"framework": ["astro"]}, {"framework": "a" * 65}):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(discovery_snapshot({"repository_inventory": {"tech_stack": invalid}})["framework"])
+
     def test_discovery_support_paths_preserve_bounded_framework_evidence(self):
         discovery = discovery_snapshot({"repository_discovery": {"discovery_complete": True, "source_sha": "a" * 40,
             "support_level": "supported", "support_paths": [{"id": "native", "status": "available", "reason": "Framework detected", "private_key": "not public"}]}})

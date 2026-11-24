@@ -91,11 +91,10 @@ def contribution_rows(user):
     return roo(max(0, total)), list(reversed(results))
 
 
-def wallet_page(user, offset, limit):
-    """List earned wallet credits without counting purchases or balance transfers."""
-    rows = (
-        Ledger.objects.filter(user=user)
-        .filter(Q(kind="EARN") | Q(kind__isnull=True))
+def earned_wallet_credits(queryset):
+    """Filter positive earned wallet credits across both ledger formats."""
+    return (
+        queryset.filter(Q(kind="EARN") | Q(kind__isnull=True))
         .exclude(source="purchased_topup")
         .exclude(reference_type__in=("POINTS_PURCHASE", "APPLE_IAP", "ACCOUNT_MERGE"))
         .annotate(amount=Coalesce(
@@ -105,6 +104,11 @@ def wallet_page(user, offset, limit):
         ))
         .filter(amount__gt=0)
     )
+
+
+def wallet_page(user, offset, limit):
+    """List earned wallet credits without counting purchases or balance transfers."""
+    rows = earned_wallet_credits(Ledger.objects.filter(user=user))
     total = rows.aggregate(total=Sum("amount"))["total"] or 0
     page = rows.order_by("-created_at", "-pk")[offset:offset + limit + 1]
     results = []

@@ -1095,6 +1095,11 @@ ssh "$DEPLOY_SSH_TARGET" <<EOF | tee "$remote_deploy_log"
     unset retired_committee_container_ids
 
     source scripts/runtime-services.sh
+    if [ "\$(read_env_value MANAGED_CHANNEL_WORKER_ENABLED)" = "true" ]; then
+        runtime_services+=("\${managed_channel_runtime_services[@]}")
+    else
+        docker compose stop managed-channel-worker || true
+    fi
     # The reconciler remains independent from issuance so uncertain coupon
     # writes continue to drain when new quotes are switched off.
     if [ "\$(read_env_value ROO_EVENT_DISCOUNT_WORKER_ENABLED)" = "true" ]; then

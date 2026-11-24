@@ -12,6 +12,31 @@ x-logging: &default-logging
     max-file: "5"
 
 services:
+  managed-channel-worker:
+    profiles: [managed-channels]
+    image: mlai-backend-web
+    logging: *default-logging
+    command: >-
+      sh -ec 'python manage.py migrate --check --noinput;
+      exec python manage.py run_periodic_command run_managed_channel_tick
+      --poll-seconds 20 --health-file /tmp/mlai-managed-channels.ok --continue-on-error'
+    env_file:
+      - .env
+      - path: .managed-channel-worker.env
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      RUN_MIGRATIONS_ON_START: "0"
+    depends_on: [db]
+    restart: unless-stopped
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time; p='/tmp/mlai-managed-channels.ok'; raise SystemExit(0 if os.path.isfile(p) and time.time()-os.path.getmtime(p)<600 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+
   # Opt-in; keep running when issuance is disabled so uncertain writes drain.
   event-discount-worker:
     profiles: [event-discounts]
