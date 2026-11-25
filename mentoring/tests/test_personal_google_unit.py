@@ -200,15 +200,16 @@ class PersonalCalendarOAuthTests(unittest.TestCase):
         self.addCleanup(cache.clear)
 
     @override_settings(MENTOR_CALENDAR_GOOGLE_CLIENT_ID='cid',MENTOR_CALENDAR_GOOGLE_REDIRECT_URI='https://api.example/callback')
-    def start(self):
+    def start(self, *, platform='web', native_return=False):
         owner=SimpleNamespace(pk=7)
-        session=SimpleNamespace(user_id=7,pk=uuid.uuid4(),origin='https://chat.example')
+        session=SimpleNamespace(user_id=7,pk=uuid.uuid4(),origin='https://chat.example',platform=platform)
         with patch.object(service,'_require_configured'),patch.object(service,'_profile'):
-            result=service.begin_authorization(owner,account_session=session)
-        return parse_qs(urlparse(result['authorization_url']).query)
+            result=service.begin_authorization(owner,account_session=session,native_return=native_return)
+        query = parse_qs(urlparse(result['authorization_url']).query)
+        return query, result.get('native_return', False)
 
     def test_pkce_s256_and_owner_bound_state(self):
-        query=self.start()
+        query,_=self.start()
         data=service._consume_state(query['state'][0])
         verifier=data['verifier']
         challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
@@ -219,18 +220,18 @@ class PersonalCalendarOAuthTests(unittest.TestCase):
         self.assertEqual(data['origin'],'https://chat.example')
 
     def test_oauth_nonce_cannot_be_replayed(self):
-        query=self.start()
+        query,_=self.start()
         service._consume_state(query['state'][0])
         with self.assertRaises(CalendarError):
             service._consume_state(query['state'][0])
 
     def test_signature_tampering_rejected(self):
-        state=self.start()['state'][0]
+        state=self.start()[0]['state'][0]
         with self.assertRaises(CalendarError):
             service._consume_state(state+'tampered')
 
     def test_expired_state_rejected(self):
-        state=self.start()['state'][0]
+        state=self.start()[0]['state'][0]
         with patch.object(service.signing,'loads',side_effect=signing.SignatureExpired),self.assertRaises(CalendarError):
             service._consume_state(state)
 
@@ -239,6 +240,18 @@ class PersonalCalendarOAuthTests(unittest.TestCase):
         with patch.object(service,'_require_configured'),patch.object(service,'_profile'),self.assertRaises(Exception) as out:
             service.begin_authorization(owner,'https://evil.example')
         self.assertEqual(out.exception.code,'invalid_return_path')
+
+    def test_native_return_requires_mobile_session_and_is_bound_to_nonce(self):
+        for platform, expected in [('ios', True), ('android', True), ('web', False), ('macos', False)]:
+            with self.subTest(platform=platform):
+                query, advertised = self.start(platform=platform, native_return=True)
+                raw = query['state'][0]
+                self.assertIs(advertised, expected)
+                with patch.object(service,'_require_configured'):
+                    self.assertIs(service.consume_authorization(raw)['native_return'], expected)
+                    with self.assertRaises(CalendarError) as replay:
+                        service.consume_authorization(raw)
+                self.assertEqual(replay.exception.code, 'invalid_oauth_state')
 
     @override_settings(MENTOR_CALENDAR_GOOGLE_ENABLED=False)
     def test_default_feature_is_not_ready(self):
@@ -276,8 +289,6 @@ class PersonalCalendarCallbackTests(unittest.TestCase):
         if refresh:
             token['refresh_token']=refresh
         with ExitStack() as stack:
-            stack.enter_context(patch.object(service,'_require_configured'))
-            stack.enter_context(patch.object(service,'_consume_state',return_value={'user_id':7,'account_session_id':str(uuid.uuid4()),'origin':'https://chat.example','intent':'mentoring_calendar','verifier':'pkce-verifier'}))
             stack.enter_context(patch.object(service,'_profile'))
             stack.enter_context(patch.object(service,'get_user_model',return_value=model))
             stack.enter_context(patch('community_chat.onboarding.has_community_access',return_value=True))
@@ -288,7 +299,10 @@ class PersonalCalendarCallbackTests(unittest.TestCase):
             stack.enter_context(patch.object(service.MentorProfile,'objects',MagicMock()))
             network=stack.enter_context(patch.object(google,'send',side_effect=[token,{'sub':'google-subject','email':'mentor@example.com','email_verified':True}]))
             stack.enter_context(patch.object(google.GoogleCalendarClient,'list_calendars',return_value=[]))
-            result=service.finish_authorization('signed-state','private-code')
+            result=service.finish_authorization({
+                'user_id':7,'account_session_id':str(uuid.uuid4()),'origin':'https://chat.example',
+                'intent':'mentoring_calendar','verifier':'pkce-verifier',
+            },'private-code')
             return result,network.call_args_list
 
     def test_expired_or_revoked_original_session_blocks_exchange(self):

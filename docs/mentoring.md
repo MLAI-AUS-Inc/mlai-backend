@@ -54,6 +54,7 @@ Everything returns 404 `mentor_booking_disabled` while the flag is off.
 | GET `mentors/` | List active mentors (no email or Slack id) |
 | GET `mentors/<id>/availability/?from=&to=` | Free slots (UTC ISO times), up to 31 days, default next 14, plus `busy_check` (`ok`, `failed` or `off`) |
 | GET, PUT `mentor/profile/` | The mentor's own profile, weekly `availability` list and optional `busy_calendar_email` |
+| POST `mentor/calendar-connections/google/authorize/` | Start Google consent. A signed-in mobile client may request `native_return: true` while retaining `/mentoring/settings` as the web fallback. When the response advertises `native_return: true`, the callback uses `mlaichat://connections?intent=mentoring_calendar` with status only. The app refreshes its own connections. |
 | POST `mentor/sessions/` | Founder request: `mentor_id` (whole number), `starts_at`, `brief`, `client_request_id`, and `expected_price` (required, the whole-number price the founder was shown) |
 | GET `mentor/sessions/?role=founder\|mentor&status=` | My sessions |
 | POST `mentor/application/check/` | Invited user checks an invite `{token}`: `state` ready, submitted or approved. 404 `invite_invalid`, 403 `invite_wrong_user` (the detail names the invited address, masked, for an address-only invite), 410 `invite_expired` or `invite_revoked` |
