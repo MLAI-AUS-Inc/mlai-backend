@@ -234,6 +234,10 @@ class ContractFixtureTests(JourneyFixture, TestCase):
         run = make_run(self.org, status="completed", step="deliver", approval_state="approved",
                        request={"delivery_mode": "review_draft"},
                        result={"content_files_delivery": {"state": STATE}})
+        prepared = self.journey(run_id=run.run_id)
+        self.assertNotEqual(prepared["headline"], "Your article files are on GitHub")
+        run.result["content_files_delivery"]["pr_url"] = "https://github.com/fixture/site/pull/1"
+        run.save(update_fields=["result"])
         draft = self.journey(run_id=run.run_id)
         self.assertStep(draft, "done", "done", next_kind="view_draft")
         self.assertEqual(draft["headline"], "Your article files are on GitHub")

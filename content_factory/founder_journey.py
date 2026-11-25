@@ -1218,6 +1218,11 @@ def _files_only_delivery(organization, run):
     from .website_content_files import run_delivered_as_content_files
     if run is None or not run_delivered_as_content_files(run):
         return None
+    result = _result(run)
+    receipt = _mapping(result.get("content_files_delivery"))
+    pr_url = _pull_request_url(run) or _https_or_none(receipt.get("pr_url"))
+    if not pr_url or not pr_url.startswith("https://github.com/"):
+        return None
     live = _live_article(organization, run)
     live_url = _https_or_none(getattr(live, "live_url", None))
     if live_url:
