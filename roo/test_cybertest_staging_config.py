@@ -73,6 +73,19 @@ class StagingEntryConfigurationTests(unittest.TestCase):
                 staging_entry_settings(self.configured(**changes))
             self.assertNotIn(key, str(caught.exception))
 
+    def test_private_notice_sender_is_opt_in_and_staging_only(self):
+        values = self.configured(CYBERTEST_APP_ORIGIN='https://chat-staging.mlai.au',
+                                 CYBERTEST_BASE_PATH='/cybertest',
+                                 CYBERTEST_STAGING_COMPLETION_NOTICES_ENABLED='true',
+                                 CYBERTEST_STAGING_NOTIFIER_PRIVATE_KEY='1' * 64)
+        self.assertTrue(staging_entry_settings(values)['CYBERTEST_STAGING_COMPLETION_NOTICES_ENABLED'])
+        for change in ({'CYBERTEST_APP_ORIGIN':'https://audit.staging.example'},
+                       {'CYBERTEST_BILLING_MODE':'disabled'},
+                       {'CYBERTEST_STAGING_NOTIFIER_PRIVATE_KEY':'0' * 64},
+                       {'ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY':'1' * 64}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                staging_entry_settings({**values, **change})
+
 
 if __name__ == '__main__':
     unittest.main()

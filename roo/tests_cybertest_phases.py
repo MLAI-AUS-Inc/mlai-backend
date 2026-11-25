@@ -106,6 +106,30 @@ class PhaseCheckoutTests(TestCase):
         self.assertEqual(checkout.balance(self.user, test_mode=True), 1000)
         self.assertNotIn('executionPlan', restored['phase_contract'])
 
+    def test_architecture_change_replaces_only_unaccepted_basic_quote(self):
+        from roo.test_cybertest_plan import plan
+        legacy, token = uuid.uuid4(), secrets.token_urlsafe(32)
+        intent = self.purchase(basic())
+        checkout.create_quote(legacy, token, intent, execution_plan=plan())
+        self.assertIsNone(checkout.recover_quote(self.intent, token, backend_answer='no'))
+        self.assertEqual(CybertestCheckout.objects.get(pk=legacy).status, 'cancelled')
+        new, token = uuid.uuid4(), secrets.token_urlsafe(32)
+        updated = {**plan(), 'algorithm': 'basic-source-v2', 'backendAnswer': 'no'}
+        checkout.create_quote(new, token, intent, execution_plan=updated)
+        self.assertEqual(checkout.recover_quote(self.intent, token, backend_answer='no')['checkout_id'], str(new))
+        checkout.confirm(new, token, self.user, expected_points=24)
+        audit = uuid.uuid4()
+        for status in ('authorized', 'charged', 'started'):
+            if status == 'charged':
+                checkout.charge(new, audit, intent)
+            elif status == 'started':
+                checkout.start_dispatch(new, audit)
+            with self.assertRaises(CheckoutError) as error:
+                checkout.recover_quote(self.intent, token, backend_answer='yes')
+            self.assertEqual(error.exception.code, 'BACKEND_ANSWER_LOCKED')
+            self.assertEqual(CybertestCheckout.objects.get(pk=new).status, status)
+        self.assertEqual(CybertestCheckout.objects.count(), 2)
+
     def test_unconfirmed_recovery_rotates_link_without_changing_scope_or_allowing_other_payer(self):
         from roo.test_cybertest_plan import plan
         quote, old_token, new_token = uuid.uuid4(), secrets.token_urlsafe(32), secrets.token_urlsafe(32)
@@ -343,6 +367,45 @@ class FreeRepositoryCheckTests(TestCase):
         self.intent['repository_id'] = FREE_REPOSITORY
         # An empty account: a paid check would fail with INSUFFICIENT_ROO_POINTS.
         self.account = PointsAccount.objects.create(user=self.user, microroo_initialized=True)
+
+    @override_settings(CYBERTEST_COMPLETION_NOTICES_ENABLED=True,
+                       COMMUNITY_CHAT_FRONTEND_URL='https://chat.mlai.au',
+                       ARTICLES_GOAL_NOTIFIER_PRIVATE_KEY='2'*64)
+    def test_continued_report_queues_one_private_replayable_notice_and_keeps_receipt(self):
+        from community_chat.models import CommunityChatDevice, DeviceBindingStatus
+        from content_factory.models import ContentFactoryCallbackEvent
+        from founder_tools.models import VibeRaisingCompany, VibeRaisingProfile
+        from roo import cybertest_notifications as notices
+        from roo.cybertest_models import CybertestCompanyBinding
+        company = VibeRaisingCompany.objects.create(
+            profile=VibeRaisingProfile.objects.create(user=self.user), name='Test team')
+        self.intent['mlai_company_id'] = str(company.pk)
+        CybertestCompanyBinding.objects.create(company=company, created_by=self.user,
+            workspace_id=self.intent['workspace_id'], is_active=True, verified_at=timezone.now())
+        CommunityChatDevice.objects.create(user=self.user, public_key='1'*64,
+            status=DeviceBindingStatus.VERIFIED, verified_at=timezone.now())
+        quote, audit, _ = self.start(basic(), 24)
+        checkout.settle_delivery(quote, audit, self.result(audit, basic(), missing_required=True), None)
+        queued = ContentFactoryCallbackEvent.objects.filter(event_type=notices.EVENT_TYPE)
+        self.assertFalse(queued.exists())
+        previous = checkout.status(quote)['settlement']
+        full = self.result(audit, basic())
+        for _ in range(2):
+            self.assertEqual(notices.completed(quote, audit, full), {'status': 'queued'})
+        self.assertEqual(queued.count(), 1)
+        with (patch.object(notices.transport, 'open_dm', return_value=str(uuid.uuid4())),
+              patch.object(notices.transport, 'post_event',
+                  side_effect=[notices.transport.NotificationTransportError('reply_lost'), {}]) as post):
+            self.assertEqual(notices.drain()['retry'], 1)
+            self.assertIsNone(queued.get().processed_at)
+            queued.update(claimed_at=timezone.now()-timedelta(hours=1))
+            self.assertEqual(notices.drain()['sent'], 1)
+            self.assertEqual(post.call_args_list[0].args[0]['id'], post.call_args_list[1].args[0]['id'])
+            self.assertIn(f'/my-startup/security/checks/{audit}?company_id={company.pk}', post.call_args.args[0]['content'])
+            self.assertEqual(notices.drain()['sent'], 0)
+        self.assertIsNotNone(queued.get().processed_at)
+        self.assertEqual(checkout.status(quote)['settlement'], previous)
+        self.assertFalse(Ledger.objects.exists())
 
     def test_free_basic_and_upgrade_cost_nothing_and_settle_without_ledger_rows(self):
         quote, audit, _ = self.start(basic(), 24)
