@@ -1,5 +1,27 @@
 # Private Studio report preparation
 
+## On-demand contributor reports
+
+A signed `mode: "work"` request exports the configured owner's recorded work,
+contractor invoice quantities and related evidence. It does not acquire a Xero
+connection. The worker verifies the signed mode, scope, timestamps and source
+rows before rendering. The backend withholds the export if work discovery fails.
+Missing coverage and unresolved contractor records qualify a partial export
+when the included work has sufficient evidence. The reviewer coverage date does
+not advance when an individual later submission is accepted.
+
+## Verified customer credits
+
+A worker that supports credit allocations may add `"credit_notes": "verified"`
+to strict and latest requests. The backend reads each referenced Xero credit
+note from the same connection and verifies contact, currency, invoice, date and
+amount. It checks the notes and invoice list again before accepting the source.
+Ambiguous same-day allocations and unmatched credits continue to require
+review. Purchased hours come from eligible reconciled receipts. Credit notes
+reduce the invoice balance and are absent from the receipt ledger. Finance cache
+entries are separate for clients of the old and new source contracts.
+[Xero credit notes](https://developer.xero.com/documentation/api/accounting/creditnotes)
+
 ## Daily/latest projections
 
 The private Roo worker can request `mode: "latest"` for its daily refresh and
@@ -109,8 +131,8 @@ resolve replacements, then add those message IDs to the manifest. Do not clear
 a gap merely by advancing a date or adding an ID. Contractor money never
 becomes work hours. Multi-project and ambiguous invoices require review.
 
-The request has exactly `owner`, `team`, timezone-aware `cutoff` and random
-64-hex `nonce`. It cannot override paths, projects, account or mailbox. Send
+The request requires `owner`, `team`, timezone-aware `cutoff` and random
+64-hex `nonce`. It accepts the documented `mode` and `credit_notes` options. It cannot override paths, projects, account or mailbox. Send
 `X-Studio-Source-Key` over HTTPS. Response signatures are HMAC-SHA256 over sorted,
 compact JSON, binding scope, cutoff, nonce, per-stream checks and status.
 

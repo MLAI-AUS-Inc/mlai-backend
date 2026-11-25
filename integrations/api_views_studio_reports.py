@@ -31,9 +31,11 @@ class StudioReportPrepareView(APIView):
     def post(self, request):
         data = request.data
         try:
-            if (not isinstance(data, dict) or set(data) not in ({"owner", "team", "cutoff", "nonce"},
-                                                              {"owner", "team", "cutoff", "nonce", "mode"})
-                    or data.get('mode', 'strict') not in {'strict', 'latest', 'contract_cash'}
+            required = {"owner", "team", "cutoff", "nonce"}
+            if (not isinstance(data, dict) or not required <= set(data) <= required | {"mode", "credit_notes"}
+                    or data.get('mode', 'strict') not in {'strict', 'latest', 'contract_cash', 'work'}
+                    or ('credit_notes' in data and (data['credit_notes'] != 'verified'
+                        or data.get('mode', 'strict') not in {'strict', 'latest'}))
                     or any(not isinstance(data[key], str) for key in data)
                     or re.fullmatch(r"[a-f0-9]{64}", data["nonce"]) is None):
                 raise ValueError
@@ -46,25 +48,31 @@ class StudioReportPrepareView(APIView):
         except (KeyError, TypeError, ValueError, OSError):
             return Response({"error": "invalid_source_scope"}, status=400)
         try:
-            from .models import ExternalServiceConnection
-            from .services.external_connectors import _xero_get_json
-            from django.db import transaction
-            deadline = time.monotonic() + 120
-            # Serialize with other source requests; re-read encrypted tokens
-            # inside the lock. The existing token owner remains the backend.
-            with transaction.atomic():
-                connection = ExternalServiceConnection.objects.select_for_update().get(
-                    id=scope["xero_connection_id"], organization_id=scope["organization_id"], provider="xero")
-                def get(path, **kwargs):
-                    if not (path == '/Invoices' or re.fullmatch(r'/(Payments|BankTransactions)/[a-fA-F0-9-]{36}', path)):
-                        raise SourceIncomplete('finance_read_path_invalid')
-                    if time.monotonic() >= deadline:
-                        raise SourceIncomplete("finance_time_limit")
-                    return _xero_get_json(connection, path, **kwargs)
-                if data.get('mode') == 'contract_cash':
-                    result = contract_cash(scope, data, get)
-                else:
-                    result = prepare(scope, data, get=get, mail=mailbox_ids)
+            if data.get('mode') == 'work':
+                result = prepare(scope, data, mail=mailbox_ids)
+            else:
+                from .models import ExternalServiceConnection
+                from .services.external_connectors import _xero_get_json
+                from django.db import transaction
+                deadline = time.monotonic() + 120
+                # Serialize with other source requests; re-read encrypted tokens
+                # inside the lock. The existing token owner remains the backend.
+                with transaction.atomic():
+                    connection = ExternalServiceConnection.objects.select_for_update().get(
+                        id=scope["xero_connection_id"], organization_id=scope["organization_id"], provider="xero")
+                    def get(path, **kwargs):
+                        allowed = 'Payments|BankTransactions'
+                        if data.get('credit_notes') == 'verified':
+                            allowed += '|CreditNotes'
+                        if not (path == '/Invoices' or re.fullmatch(rf'/({allowed})/[a-fA-F0-9-]{{36}}', path)):
+                            raise SourceIncomplete('finance_read_path_invalid')
+                        if time.monotonic() >= deadline:
+                            raise SourceIncomplete("finance_time_limit")
+                        return _xero_get_json(connection, path, **kwargs)
+                    if data.get('mode') == 'contract_cash':
+                        result = contract_cash(scope, data, get)
+                    else:
+                        result = prepare(scope, data, get=get, mail=mailbox_ids)
         except Exception:
             return Response({"error": "source_preparation_failed"}, status=503)
         body = json.dumps(result, sort_keys=True, separators=(",", ":"))
