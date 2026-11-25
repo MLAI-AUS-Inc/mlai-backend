@@ -2324,3 +2324,9 @@ class LinearProjectSizingItem(models.Model):
 from .message_sync_models import (  # noqa: E402,F401
     BridgeApiBudget, BridgeSyncInbox, BridgeSyncJob, BridgeSyncState, BridgeWorkerHeartbeat,
 )
+
+# Register the managed channel models with the integrations app.
+from .managed_channel_models import (
+    ManagedChannelScope, ManagedDelivery, ManagedEntity, ManagedReceipt,
+    ManagedReference, ManagedRoom, ManagedSlackEventChannel,
+)

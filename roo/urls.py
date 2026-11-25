@@ -9,7 +9,7 @@ from .views import (
     LedgerViewSet, CoworkingViewSet, RewardsViewSet, ManualAwardView,
     RateCardView, AdminAllowanceView, PointsRequestViewSet, PointsPurchaseViewSet,
     PointsPacksView, CurrentUserPurchaseView,
-    StripeWebhookView, SystemAwardView, BoostPostAdmissionView,
+    StripeWebhookView, SystemAwardView, BoostPostAdmissionView, BoostPostMirrorRemovalView,
     CommitteeCandidateEmailsView,
     # Activity views
     ChannelActivityView, FirstChannelPostAwardView,
@@ -53,6 +53,8 @@ urlpatterns = [
     path('kimi/calls/fail/', CodingCallFailView.as_view(), name='kimi-call-fail'),
     path('stripe/webhook/', StripeWebhookView.as_view(), name='points-stripe-webhook'),
     path('boost-posts/admissions/', BoostPostAdmissionView.as_view(), name='boost-post-admission'),
+    path('boost-posts/admissions/<int:admission_id>/mirror-removal/',
+         BoostPostMirrorRemovalView.as_view(), name='boost-post-mirror-removal'),
     path('', include(router.urls)),
     
     # ============================================================

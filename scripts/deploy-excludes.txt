@@ -36,3 +36,5 @@ output
 .codex-work
 
 .roo-points-worker.env
+
+.managed-channel-worker.env

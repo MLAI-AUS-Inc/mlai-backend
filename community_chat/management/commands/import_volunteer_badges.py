@@ -2,6 +2,7 @@
 
 import json
 import re
+from datetime import date
 from pathlib import Path
 
 from django.contrib.auth import get_user_model
@@ -11,6 +12,7 @@ from django.utils import timezone
 
 from community_chat.volunteer.access import community_id, require_capability
 from community_chat.volunteer.models import VolunteerMemberState, VolunteerSourceReceipt
+from community_chat.volunteer.policy import MELBOURNE
 from community_chat.volunteer.profile_progression import (
     BADGE_KIND, BADGE_ORIGIN, BADGE_STATUS, PROFILE_KIND, PROFILE_STATUS,
     badge_catalogue, profile_contributions_enabled, public_evidence_url,
@@ -82,6 +84,7 @@ class Command(BaseCommand):
         )
         catalogue = badge_catalogue()
         seen = set()
+        today = timezone.localdate(timezone=MELBOURNE)
         for row in rows:
             if not isinstance(row, dict):
                 raise CommandError("Invalid badge entry")
@@ -93,11 +96,23 @@ class Command(BaseCommand):
                     or not isinstance(anchor, str) or not 3 <= len(anchor) <= 100
                     or (url and not public_evidence_url(url))):
                 raise CommandError(f"Invalid badge entry for account {uid}")
+            metadata = dict(
+                **audit, badge_id=key, public_reason=reason.strip(),
+                public_url=url or None, evidence_ref=anchor,
+            )
+            if "awarded_on" in row:
+                value = row["awarded_on"]
+                try:
+                    award_date = date.fromisoformat(value)
+                except (TypeError, ValueError):
+                    raise CommandError(f"Invalid badge achievement date for account {uid}") from None
+                if value != award_date.isoformat() or award_date > today:
+                    raise CommandError(f"Invalid badge achievement date for account {uid}")
+                metadata["awarded_on"] = value
             seen.add((uid, key))
             prepare(
                 uid, f"volunteer-badge:{uid}:{key}", BADGE_KIND, BADGE_STATUS,
-                dict(**audit, badge_id=key, public_reason=reason.strip(),
-                     public_url=url or None, evidence_ref=anchor),
+                metadata,
             )
         badges_new = len(creates) - profiles_new
         if options["apply"]:

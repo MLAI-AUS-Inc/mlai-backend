@@ -42,7 +42,8 @@ def applies(organization, config=None) -> bool:
     if organization is None or not no_website_articles_enabled():
         return False
     from .founder_journey_cohort import is_new_journey, organization_has_website
-    return not organization_has_website(organization) and is_new_journey(organization, config)
+    from .portable_drafts import portable_starts_for_all
+    return not organization_has_website(organization) and (portable_starts_for_all() or is_new_journey(organization, config))
 
 
 def one_line_description(organization) -> str:

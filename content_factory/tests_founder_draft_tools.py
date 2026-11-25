@@ -4,6 +4,7 @@ All three sit behind ARTICLES_DRAFT_TOOLS_ENABLED and the new-journey cohort,
 are scoped to the selected company's runs, are for the startup owner only, and
 never approve or charge a run. Legacy orgs get 404 with every P1 flag on.
 """
+import hashlib
 import io
 import json
 import zipfile
@@ -124,6 +125,7 @@ class DraftToolTests(TestCase):
         with remote as patched:
             response = client.post(url, body or {}, format="json") if method == "post" else client.get(url)
         response.remote_calls = patched.call_count
+        response.remote_options = patched.call_args.kwargs if patched.called else {}
         return response
 
     # -- scoping -----------------------------------------------------------
@@ -317,6 +319,55 @@ class DraftToolTests(TestCase):
                 self.assertEqual(link["check"], expected)
 
     # -- zip ----------------------------------------------------------------
+
+    @override_settings(**{**FLAGS, "ARTICLES_SETUP_LADDER_ENABLED": True})
+    def test_approved_download_contains_extractable_wiring_structured_data_and_exact_images(self, _latest):
+        data = b"approved PNG fixture"
+        review = snapshot(self.run.run_id, pending=False)
+        review["approved"] = True
+        export = review["articleExport"]
+        docs = [{"@type": "Article", "headline": export["metadata"]["title"]}, {"@type": "FAQPage"}]
+        front = '---\ntitle: "How to start"\nimages: ["image-1.png"]\n---\n'
+        review["reviewedContentFilesV1"] = {
+            "version": 1, "runId": self.run.run_id, "revision": export["revision"], "slug": "how-to-start",
+            "markdownSha256": hashlib.sha256(export["markdown"].encode()).hexdigest(), "frontMatter": front,
+            "wiring": "Read each Markdown file into your /stories/ directory.", "jsonLd": docs,
+            "images": [{"url": export["media"][0]["url"], "name": "image-1.png", "sha256": hashlib.sha256(data).hexdigest()}]}
+        before = (self.run.status, self.run.approval_state, deepcopy(self.run.result), Ledger.objects.count())
+        with mock.patch.object(tools, "fetch_image", return_value=(data, "png")) as fetch:
+            response = self.call("get", "article/download", review=review)
+        self.assertEqual(response.status_code, 200)
+        fetch.assert_called_once()
+        self.assertEqual(response.remote_options, {"include_content_files": True})
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            folder = "mlai-content-files/how-to-start/"
+            self.assertEqual(archive.read("article.md").decode(), export["markdown"])
+            self.assertEqual(archive.read(folder + "index.md").decode(), front + export["markdown"] + "\n")
+            self.assertEqual(json.loads(archive.read(folder + "article.jsonld")), docs)
+            self.assertEqual(archive.read("mlai-content-files/WIRING.md").decode(), review["reviewedContentFilesV1"]["wiring"])
+            self.assertEqual(archive.read(folder + "image-1.png"), data)
+            self.assertEqual(archive.read("images/1.png"), data)
+            self.assertIn("article.html", archive.namelist())
+        for failure in ({"return_value": (b"changed", "png")}, {"side_effect": tools._ImageSkipped("could not be downloaded")}):
+            with self.subTest(failure=failure), mock.patch.object(tools, "fetch_image", **failure):
+                incomplete = self.call("get", "article/download", review=review)
+                self.assertEqual(incomplete.status_code, 200)
+                with zipfile.ZipFile(io.BytesIO(incomplete.content)) as archive:
+                    self.assertEqual(set(archive.namelist()), {"article.md", "article.html", "images/README.txt"})
+                    self.assertEqual(archive.read("article.md").decode(), export["markdown"])
+                    self.assertIn(b"Retry the download", archive.read("images/README.txt"))
+        for key, value in (("runId", "different-run"), ("revision", "older"), ("slug", "../old"), ("markdownSha256", "f" * 64)):
+            invalid = deepcopy(review)
+            invalid["reviewedContentFilesV1"][key] = value
+            with self.subTest(key=key), mock.patch.object(tools, "fetch_image") as fetch:
+                self.assertEqual(self.call("get", "article/download", review=invalid).status_code, 409)
+                fetch.assert_not_called()
+        with override_settings(ARTICLES_SETUP_LADDER_ENABLED=False), mock.patch.object(tools, "fetch_image", return_value=(data, "png")):
+            previous = self.call("get", "article/download", review=review)
+        with zipfile.ZipFile(io.BytesIO(previous.content)) as archive:
+            self.assertEqual(set(archive.namelist()), {"article.md", "article.html", "images/1.png", "images/README.txt"})
+        self.run.refresh_from_db()
+        self.assertEqual((self.run.status, self.run.approval_state, self.run.result, Ledger.objects.count()), before)
 
     @override_settings(**FLAGS)
     def test_zip_holds_the_article_and_allowed_images_and_lists_the_rest(self, _latest):

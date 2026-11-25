@@ -149,14 +149,14 @@ def _superseded_rule(row, request):
     to that version (only approved entries; never a draft, a retired entry or a
     changed offer), because the worker admits a new run against today's
     catalogue. A request already bound to a backend admission, or one with a
-    provisional local run holding the original brief, keeps the exact rule:
+    provisional local run holding the original brief, keeps its approved snapshot:
     its stored brief is part of that admission's identity and cannot change.
     """
     from workflow_runs.models import ContentFactoryRun
     from .run_ownership import WIRE_REQUEST_KEY
-    from .editorial_catalog import SUPERSEDED_UPGRADE
+    from .editorial_catalog import SUPERSEDED_KEEP, SUPERSEDED_UPGRADE
     if WIRE_REQUEST_KEY in request or ContentFactoryRun.objects.filter(run_id=row.client_request_id).exists():
-        return None
+        return SUPERSEDED_KEEP
     return SUPERSEDED_UPGRADE
 
 

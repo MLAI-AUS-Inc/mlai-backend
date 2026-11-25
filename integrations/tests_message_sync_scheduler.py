@@ -420,3 +420,33 @@ class PublicDeliveryLeaseTests(TransactionTestCase):
         self.assertTrue(supersede_stale_mutation(old.pk))
         old.refresh_from_db()
         self.assertEqual(old.status, "completed")
+
+    def test_delete_wins_over_a_newer_edit_in_both_delivery_orders(self):
+        from integrations.models import CommunityBridgeDelivery, CommunityBridgeMessageLink
+        from integrations.services.message_sync.delivery import supersede_stale_mutation
+
+        state = self.state("A")
+        fields = dict(
+            channel_id=state.public_channel_id, source_platform="slack",
+            source_channel_id="A", source_message_id="1700000000.000001",
+        )
+        edit = CommunityBridgeDelivery.objects.create(
+            **fields, target_platform="buzz", target_channel_id="room",
+            delivery_type="edit", source_revision="1700000001.000002",
+            status="completed", available_at=timezone.now(),
+        )
+        delete = CommunityBridgeDelivery.objects.create(
+            **fields, target_platform="buzz", target_channel_id="room",
+            delivery_type="delete", source_revision="1700000001.000001",
+            available_at=timezone.now(),
+        )
+        self.assertFalse(supersede_stale_mutation(delete.pk))
+        edit.status = "pending"
+        edit.save(update_fields=["status"])
+        CommunityBridgeMessageLink.objects.create(
+            **fields, destination_platform="buzz", destination_channel_id="room",
+            destination_message_id="a" * 64, destination_deleted_at=timezone.now(),
+        )
+        self.assertTrue(supersede_stale_mutation(edit.pk))
+        edit.refresh_from_db()
+        self.assertEqual(edit.status, "completed")

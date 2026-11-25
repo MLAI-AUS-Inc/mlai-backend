@@ -34,6 +34,7 @@ def crm_routes():
 
 
 @crm_enabled
+@override_settings(COMMUNITY_CHAT_MEMBER_PROGRESS_LOCATION_ACCOUNT_IDS=set())
 class AdminAccessMatrixDatabaseTests(CrmApiMixin, TestCase):
     """One read and one write, for every kind of account the plan names."""
 
@@ -43,10 +44,15 @@ class AdminAccessMatrixDatabaseTests(CrmApiMixin, TestCase):
         access = client.get(ADMIN_ACCESS)
         return overview, preview, access
 
-    def assert_admin(self, client):
+    def assert_admin(self, client, *, progress=False, locations=False):
         overview, preview, access = self.requests(client)
         self.assertEqual((overview.status_code, preview.status_code), (200, 200))
-        self.assertEqual((access.status_code, access.json()), (200, {"is_admin": True, "sections": ["crm", "team"]}))
+        sections = ["crm", "team"]
+        if progress:
+            sections.append("member_progress")
+        if locations:
+            sections.append("member_progress_locations")
+        self.assertEqual((access.status_code, access.json()), (200, {"is_admin": True, "sections": sections}))
 
     def assert_refused(self, client):
         overview, preview, access = self.requests(client)
@@ -57,11 +63,15 @@ class AdminAccessMatrixDatabaseTests(CrmApiMixin, TestCase):
 
     def test_committee_admin_and_superusers_get_in(self):
         self.assert_admin(self.client)
-        self.assert_admin(self.account_client(self.chat_user("role-admin@example.test", "c", role="admin")))
+        admin = self.chat_user("role-admin@example.test", "c", role="admin")
+        admin_client = self.account_client(admin)
+        self.assert_admin(admin_client, progress=True)
+        with override_settings(COMMUNITY_CHAT_MEMBER_PROGRESS_LOCATION_ACCOUNT_IDS={str(admin.pk)}):
+            self.assert_admin(admin_client, progress=True, locations=True)
         root = self.chat_user("root@example.test", "d")
         root.is_superuser = True
         root.save(update_fields=["is_superuser"])
-        self.assert_admin(self.account_client(root))
+        self.assert_admin(self.account_client(root), progress=True)
 
     def test_other_points_admin_roles_are_refused(self):
         for key, role in (("e", "portfolio_lead"), ("f", "partner")):

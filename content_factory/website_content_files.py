@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 # Mirrors Content Factory's content_files_delivery.CONTENT_ROOT and STATE.
 CONTENT_ROOT = "mlai-content-files"
 STATE = "delivered_not_live"
+HANDOFF = "handoff_prepared"
 TIER = "content_files"
 RECEIPT_KEY = "content_files"
 # Founder copy; clients show a server sentence only up to 240 characters.
@@ -53,6 +54,62 @@ def _mapping(value):
     return value if isinstance(value, dict) else {}
 
 
+def requires_independent_verification(result):
+    """A lower-tier change cannot turn its own merge into website publication authority."""
+    for source in (_mapping(result), _mapping(_mapping(result).get("article_system_setup"))):
+        ladder = _mapping(source.get("setup_ladder"))
+        if ladder.get("tier") in ("content_files", "static_dropin"):
+            return True
+    return False
+
+
+def static_candidate(result):
+    for source in (_mapping(result), _mapping(_mapping(result).get("article_system_setup"))):
+        ladder = _mapping(source.get("setup_ladder"))
+        if ladder.get("tier") == "static_dropin":
+            return _mapping(ladder.get("candidate_publish_target"))
+    return {}
+
+
+def verified_static_target(connection, candidate):
+    """Only a certified, deployed target with the exact reviewed replay recipe qualifies."""
+    from .models import OrganizationContentConfig
+    digest = candidate.get("contract_digest")
+    recipe = _mapping(_mapping(candidate.get("registration_strategy")).get("recipe"))
+    key = candidate.get("target_id")
+    if (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not key or recipe.get("kind") != "static_dropin_v1" or not connection.verified_sha):
+        return False
+    if not OrganizationContentConfig.objects.filter(website_connection=connection,
+            organization_id=connection.organization_id, default_publish_target_id=key).exists():
+        return False
+    target = connection.targets.filter(generation=connection.generation, source_sha=connection.verified_sha,
+                                       target_key=key, verified_at__isnull=False).first()
+    if (not target or target.contract.get("contract_digest") != digest or
+            _mapping(target.contract.get("registration_strategy")).get("recipe") != recipe):
+        return False
+    return has_static_deployment_proof(connection, target)
+
+
+def has_static_deployment_proof(connection, target):
+    """The provider-verified live listing linked the real detail page at this exact head."""
+    rows = connection.operations.filter(generation=connection.generation, action="deployment-verify", state="completed",
+        receipt__target_id=target.target_key, receipt__source_sha=target.source_sha,
+        receipt__contract_digest=target.contract.get("contract_digest"), receipt__static_directory_link_verified=True)
+    if rows.filter(receipt__provider_verified=True).exists():
+        return True
+    from .reviewed_article_pr_verify import ORIGIN
+    from .reviewed_article_pr import ACTION, canonical, sha256
+    proof = _mapping(target.contract.get("verification"))
+    if proof.get("attestation_origin") != ORIGIN or not proof.get("operation_id"):
+        return False
+    observed = rows.filter(receipt__attestation_origin=ORIGIN, receipt__operation_id=proof["operation_id"]).first()
+    return bool(observed and sha256(canonical(observed.receipt).encode()) == proof.get("evidence_digest")
+        and connection.operations.filter(action=ACTION, generation=connection.generation, state="completed",
+            payload__wire__operation_id=proof["operation_id"], receipt__status="verified_live",
+            receipt__merge_sha=target.source_sha, receipt__target_id=target.target_key).exists())
+
+
 def setup_delivered_not_live(result) -> dict | None:
     """Content Factory's setup-ladder receipt when the setup ended on tier 4, else None.
 
@@ -62,7 +119,7 @@ def setup_delivered_not_live(result) -> dict | None:
     """
     for source in (_mapping(result), _mapping(_mapping(result).get("article_system_setup"))):
         ladder = _mapping(source.get("setup_ladder"))
-        if (ladder.get("outcome") == STATE and ladder.get("tier") == TIER
+        if (ladder.get("outcome") in (STATE, HANDOFF) and ladder.get("tier") == TIER
                 and ladder.get("counts_as_published") is False):
             return ladder
     return None
@@ -75,7 +132,8 @@ def run_delivered_as_content_files(run) -> bool:
         marker = _mapping(source.get("content_files_delivery"))
         if marker.get("state") == STATE or marker.get("tier") == TIER:
             return True
-        if setup_delivered_not_live(source) is not None:
+        ladder = setup_delivered_not_live(source)
+        if ladder and ladder.get("outcome") == STATE:
             return True
     return False
 
@@ -139,6 +197,9 @@ def settle_prepare(op, child, ladder, *, now):
                            run_id=getattr(child, "run_id", ""))
         return op
     pull = _pull_request(ladder)
+    if pull.get("pr_url") and not pull["pr_url"].casefold().startswith(
+            f"https://github.com/{op.connection.github_repo}/pull/".casefold()):
+        pull = {"content_root": CONTENT_ROOT}
     receipt = dict(op.receipt or {})
     first = _mapping(receipt.get(RECEIPT_KEY)).get("since")
     receipt[RECEIPT_KEY] = {"version": 1, "since": first or now.isoformat(), "run_id": str(getattr(child, "run_id", ""))[:120],
@@ -146,12 +207,22 @@ def settle_prepare(op, child, ladder, *, now):
     # Not a failure: no failure envelope or code may project as a stop or a fix.
     for key in ("child_resume_pending", "user_action", "hold_owner", "failure", "reason_code", "failure_fingerprint"):
         receipt.pop(key, None)
-    receipt.update(status=STATE, current_step="setup", message=MESSAGE, retryable=False, failure_class="needs_user")
+    status = ladder["outcome"]
+    if status == HANDOFF:
+        message = ("The website needs a change to display articles. Review the wiring instructions in the pull request."
+                   if pull.get("pr_url") else
+                   "The website needs a change to display articles. Wiring instructions have been prepared for review.")
+    else:
+        message = MESSAGE
+    receipt.update(status=status, current_step="setup", message=message, retryable=False, failure_class="needs_user")
     op.receipt = receipt
     # Terminal for the automatic path: nothing more runs by itself, and the
     # receipt's status (not a failure code) tells clients what to show. The
     # pull request link travels in receipt["content_files"]["pr_url"].
     op.state, op.next_attempt_at = "needs_attention", None
+    if status == HANDOFF and not pull.get("pr_url") and child.status in {"needs_review", "awaiting_approval", "approval_required"}:
+        op.state = "needs_user"
+        receipt["user_action"] = {"id": "review_setup", "label": "Review wiring instructions", "run_id": child.run_id}
     from .website_staff_fixing import DELIVERED_NOT_LIVE, active as staff_fixing_active, close as close_staff_fixing
     if staff_fixing_active(op):
         # The bounded staff fix ends: the founder has an honest answer now.

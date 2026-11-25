@@ -50,6 +50,22 @@ class _NoSideEffects:
 
 
 class ReadingTheLadderReceiptTests(SimpleTestCase):
+    def test_lower_tiers_do_not_vouch_for_merge_readiness(self):
+        from .website_connections import _verified_setup_run_base
+        from .website_reconciliation import _owner_merge_recordable
+        for tier in ("static_dropin", "content_files"):
+            run = _child({"article_system_setup": {"setup_ladder": {"tier": tier}}})
+            self.assertEqual(_verified_setup_run_base(run, "a" * 40, None, merged=True), "")
+            self.assertFalse(_owner_merge_recordable(None, run, {}))
+
+    def test_static_live_check_resolves_real_same_site_directory_anchor(self):
+        from .website_verification import static_listing_links_to
+        listing, article = "https://example.test/blog/", "/blog/news/"
+        self.assertTrue(static_listing_links_to(listing, b'<a href="news/">News</a>', article))
+        for body in (b'/blog/news/', b'<template><a href="news/">News</a></template>',
+                     b'<base href="https://other.test/blog/"><a href="news/">News</a>'):
+            self.assertFalse(static_listing_links_to(listing, body, article))
+
     def test_tier_four_is_read_from_the_result_or_its_setup(self):
         self.assertEqual(content_files.setup_delivered_not_live({"setup_ladder": LADDER}), LADDER)
         self.assertEqual(content_files.setup_delivered_not_live({"article_system_setup": {"setup_ladder": LADDER}}), LADDER)
@@ -91,6 +107,16 @@ class DeliveredNotLivePreparationTests(SimpleTestCase):
         self.assertLessEqual(len(content_files.MESSAGE), 240)
         self.assertIn("not live yet", content_files.MESSAGE)
 
+    def test_setup_handoff_without_an_article_preserves_the_review_action_and_free_entitlement(self):
+        ladder = {**LADDER, "outcome": content_files.HANDOFF, "content_files": {"paths": ["mlai-content-files/WIRING.md"]}}
+        op, child = _operation(), _child({"setup_ladder": ladder})
+        child.status = "awaiting_approval"
+        content_files.settle_prepare(op, child, ladder, now=NOW)
+        self.assertEqual(op.receipt["status"], "handoff_prepared")
+        self.assertEqual(op.receipt["user_action"]["id"], "review_setup")
+        self.assertNotIn("pr_url", op.receipt["content_files"])
+        self.assertFalse(content_files.run_delivered_as_content_files(child))
+
     def test_a_pull_request_url_off_github_is_never_shown(self):
         op = _operation()
         ladder = {**LADDER, "content_files": {"pr_url": "https://evil.example/acme/site/pull/1"}}
@@ -116,6 +142,19 @@ class DeliveredNotLivePreparationTests(SimpleTestCase):
         self.assertEqual(op.receipt["status"], "staff_fixing")
         self.assertEqual(op.state, "needs_attention")
         self.assertNotIn("content_files", op.receipt)
+
+    def test_old_readiness_cannot_settle_a_files_only_handoff_or_static_setup(self):
+        for tier, expected in (("content_files", "handoff_prepared"), ("static_dropin", "staff_fixing")):
+            with self.subTest(tier=tier):
+                op = _operation()
+                op.receipt.update(setup_run_id="setup-run-1")
+                child = _child({"setup_ladder": {**LADDER, "tier": tier, "outcome": "handoff_prepared"}})
+                with patch("workflow_runs.models.ContentFactoryRun.objects") as runs, \
+                        patch.object(prepare, "_setup_owner_action", return_value=None), \
+                        patch.object(prepare, "_finish_prepare", side_effect=lambda op, **_:op):
+                    runs.filter.return_value.first.return_value = child
+                    prepare._finish_ready(op, now=NOW)
+                self.assertEqual((op.state, op.receipt["status"]), ("needs_attention", expected))
 
     def test_prepare_routes_a_tier_four_setup_child_here_and_never_merges_it(self):
         op = _operation()
