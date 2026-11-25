@@ -191,7 +191,7 @@ def infer_audience(one_liner) -> str | None:
 def _catalog(config):
     from .editorial_catalog import review_payload
     try:
-        return review_payload(_strategy(config))
+        return review_payload(getattr(config, "pillar_strategy", None))
     except ValueError:
         return None
 
@@ -255,6 +255,28 @@ def call_to_action(organization, config) -> dict | None:
     if parts.username or parts.password or not domain or not (host == domain or host.endswith("." + domain)):
         return None
     return {"label": label, "url": url}
+
+
+
+def approved_card_action(organization, config, audience, country):
+    """In a private first draft, only show a previously approved offer to its approved audience."""
+    from .portable_drafts import portable_starts_for_all
+    cta = call_to_action(organization, config)
+    from .article_profile_intake import KEY as intake_key
+    intake = _mapping(_strategy(config).get(intake_key))
+    intake_audience = bool(audience and audience.get("id") and intake.get("draftAudienceId") == audience["id"])
+    if not cta or not (portable_starts_for_all() or intake_audience):
+        return cta
+    if not audience or audience.get("status") != "approved":
+        return None
+    catalog = _catalog(config)
+    if not catalog:
+        return None
+    for offer in catalog["cta_options"]:
+        if (offer.get("status") == "approved" and offer.get("button_href") == cta["url"]
+                and audience.get("id") in offer.get("audience_ids", []) and country in offer.get("countries", [])):
+            return {"url": offer["button_href"], "label": offer["button_text"]}
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +502,9 @@ def _public_topic(topic) -> dict:
 
 def requires_connected_website() -> bool:
     """True when ``ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE`` is on (code default off)."""
-    return bool(getattr(settings, "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE", False))
+    from .portable_drafts import portable_starts_for_all
+    # This card requests a private content-only article; it never grants repo authority.
+    return bool(getattr(settings, "ARTICLES_FIRST_ARTICLE_REQUIRES_CONNECTED_WEBSITE", False)) and not portable_starts_for_all()
 
 
 def website_gate_open(organization) -> bool:
@@ -505,7 +529,7 @@ def _in_flight_article_run(organization):
     return run if run is not None and run.status in ACTIVE_STATUSES else None
 
 
-def card_payload(context, user, config=None) -> dict:
+def card_payload(context, user, config=None, *, include_profile_intake=False) -> dict:
     """The GET body of IF-P1-09. Reads only; never creates a run or calls Content Factory."""
     from .activation import first_article_capability
     from .first_article_entitlement import entitlement_state
@@ -514,19 +538,22 @@ def card_payload(context, user, config=None) -> dict:
     config = config if config is not None else (cohorts._config_for(organization) or cohorts._EmptyConfig)
     facts = profile_facts(company, organization, config)
     audience = audience_for(organization, config, facts)
+    from .editorial_first_audience import country_from_location
     topics = topics_for(organization=organization, config=config, facts=facts, audience=audience)
     entitlement = entitlement_state(organization, user, config=config)
     first_article = first_article_capability(entitlement)
     price, balance = article_price_and_balance(organization, user)
     free = bool(first_article["free"])
     available = _in_flight_article_run(organization) is None and first_article["status"] != "in_progress"
+    from .article_profile_intake import intake_hint
+    intake = intake_hint(config, facts) if include_profile_intake and _first_article_write_allowed(user, organization, config) else {}
     return {
         "version": VERSION,
         "available": available,
         "topic": _public_topic(topics[0]) if topics else None,
         "alternatives": [_public_topic(topic) for topic in topics[1:TOPIC_COUNT]],
         "audience": audience,
-        "callToAction": call_to_action(organization, config),
+        "callToAction": approved_card_action(organization, config, audience, country_from_location(facts["location"])),
         "label": FREE_LABEL if free else PAID_LABEL.format(price=price),
         "free": free,
         "pricePoints": 0 if free else price,
@@ -534,6 +561,7 @@ def card_payload(context, user, config=None) -> dict:
         "profile": {"name": facts["name"], "oneLiner": facts["oneLiner"], "logoUrl": facts["logoUrl"],
                     "authorName": facts["authorName"]},
         "firstArticle": first_article,
+        **intake,
         **({"access": {"canStart": _first_article_write_allowed(user, organization, config)}}
             if cohorts.is_new_journey(organization, config) else {}),
     }
@@ -943,13 +971,20 @@ def _approve(context, user, config, prepared) -> dict:
     """Approve the audience (and the call to action's offer, falling back to IF-08) and return the brief."""
     organization = context.organization
     brief = None
-    cta = call_to_action(organization, config)
+    cta = approved_card_action(organization, config, prepared["audience"], prepared["country"])
     if cta is not None:
         brief = _approve_with_offer(context, user, config, prepared["audience"], cta, country=prepared["country"],
                                     topic_title=prepared["topic"]["title"])
         config.refresh_from_db()
     if brief is None:
         brief = _approve_without_offer(context, user, config, prepared["audience"], country=prepared["country"])
+    from .portable_drafts import portable_starts_for_all
+    if portable_starts_for_all() and brief.get("conversion_intent") == "none":
+        from .editorial_catalog import article_brief_for_catalog
+        brief = article_brief_for_catalog(config.pillar_strategy, {"editorial_brief": {**brief,
+            "acceptance_criteria": [*brief["acceptance_criteria"],
+                "Support company-specific claims with founder-confirmed facts or a cited source. "
+                "Leave unsupported capabilities, results and offers out of the article."]}})
     return _with_existing_posts(brief, config)
 
 

@@ -126,6 +126,8 @@ def validate_operation(connection, payload, *, worker_cleanup=False, restoration
     op = connection.operations.filter(pk=identifier).first()
     if op is None:
         raise WebsiteAuthorityError("website_operation_changed", "The operation does not belong to this website.")
+    if op.action == "reviewed-article-pr":
+        raise WebsiteAuthorityError("website_operation_changed", "This approval only stages the reviewed article pull request.")
     parent_id=op.payload.get("first_article_goal_operation_id")
     if parent_id and not (worker_cleanup or restoration or cancellation or cancellation_receipt):
         from . import website_goal as goals
@@ -340,7 +342,7 @@ def prepare_receipt(op):
     """
     from .website_prepare_counters import at_cap, owner_can_retry, same_failure_stops
     receipt = dict(op.receipt or {})
-    if receipt.get("status") in {"staff_fixing", "cant_be_done_yet", "delivered_not_live"}:
+    if receipt.get("status") in {"staff_fixing", "cant_be_done_yet", "delivered_not_live", "handoff_prepared"}:
         # B11/B25: ours to fix, or an honest closed-list answer; never "Try again".
         # C7: delivered as content files, not yet live; a retry cannot change that.
         # Project the B4 owner flag too: the stored failure envelope can still

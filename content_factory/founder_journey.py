@@ -745,6 +745,11 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
             decision = _decide("done", "done", "done_copy_ready", next_kind="view_draft", run_id=run.run_id)
         else:
             decision = _decide("review", "your_turn", "review", action="review_draft", run_id=run.run_id)
+    pending = _mapping(_mapping(_mapping(getattr(run, "result", None)).get("self_heal_v1")).get("pending_action"))
+    if (decision is None and run is not None and pending.get("state") == "reconciliation_required"
+            and run.status not in {"cancelled", "denied", "completed"}):
+        decision = _decide("writing", "working", "still_working", next_kind="view_progress",
+                           run_id=run.run_id, holding="slow")
     if decision is None and policy_v2_applies(organization):
         queue = writing_facts(run, now=now) if run is not None and run.status == "queued" else None
         decision = p2.run_decision(organization, run, config=config, user=user, now=now, queue=queue)
@@ -852,6 +857,10 @@ def project_founder_journey(organization, *, user, company, now=None, run_id=Non
         elif not approved:
             decision = _decide("review", "your_turn", "review", action="review_draft", run_id=run.run_id)
 
+    from .portable_drafts import portable_starts_for_all
+    if decision is None and run is None and portable_starts_for_all() and (has_website or _one_liner(organization)):
+        decision = _first_article_decision(organization=organization, company=company, config=config,
+                                           user=user, first_article=first_article)
     if decision is None:
         decision = _setup_decision(organization=organization, company=company, config=config, user=user,
                                    marker=marker, connection=connection, setup_run=setup_run, run=run)

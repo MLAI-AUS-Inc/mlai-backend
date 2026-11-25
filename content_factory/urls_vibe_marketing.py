@@ -63,7 +63,11 @@ from .vibe_marketing_views import (
 )
 
 
+from .reviewed_article_pr_views import FounderReviewedArticlePRView
+
 urlpatterns = [
+    path("runs/<str:run_id>/article/reviewed-pr", FounderReviewedArticlePRView.as_view()),
+    path("runs/<str:run_id>/article/reviewed-pr/", FounderReviewedArticlePRView.as_view(), name="founder-reviewed-article-pr"),
     path("website-metrics", WebsiteMetricsView.as_view()),
     path("website-metrics/", WebsiteMetricsView.as_view()),
     path("company-billing", CompanyBillingView.as_view()),

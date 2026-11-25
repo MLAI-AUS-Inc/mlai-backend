@@ -158,7 +158,7 @@ class ProofReaderTests(SimpleTestCase):
         config = OrganizationContentConfig(organization=org, website_connection=connection, default_publish_target_id="articles")
         context = SimpleNamespace(company=SimpleNamespace(pk=9))
         op = SimpleNamespace(receipt={}, connection=connection)
-        workflow = SimpleNamespace(pk=operation_id, payload={"attempt": 1}, state="completed", generation=3)
+        workflow = SimpleNamespace(pk=operation_id, action="workflow", payload={"attempt": 1}, state="completed", generation=3)
         deployment = SimpleNamespace(receipt={"status": "passed", "provider_verified": True, "checked_at": now.isoformat(),
             "source_sha": sha, "connection_generation": 3, "target_id": "articles", "contract_digest": "c" * 64,
             "ci_evidence_digest": "e" * 64, "artifact_digest": "f" * 64})

@@ -275,6 +275,9 @@ def _owner_merge_recordable(website, run, evidence):
     commit is never replaced.
     """
     from .vibe_marketing_views import _pull_request_number_from_run
+    from .website_content_files import requires_independent_verification
+    if requires_independent_verification(run.result):
+        return False
     result = run.result if isinstance(run.result, dict) else {}
     setup = result.get("article_system_setup") if isinstance(result.get("article_system_setup"), dict) else {}
     response = result.get("merge_response") if isinstance(result.get("merge_response"), dict) else {}
@@ -813,7 +816,8 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     # The live-status watch is advanced only by its own sweep; the generic
     # cancellation branch below would close it and restart its clock.
     from .website_live_status import ACTION as live_status_action
-    excluded.append(live_status_action)
+    from .repo_health_operations import ACTION as probe_action
+    excluded.extend((live_status_action, probe_action))
     if not accounting_enabled():
         excluded.append(usage_action)
     if not getattr(settings, "ARTICLES_OPERATIONAL_ALERTS_ENABLED", False):
@@ -848,6 +852,14 @@ def process_website_connection_operations(*, limit=20, now=None, connection_id=N
     monitor_cleanup_pull_requests(limit=limit, connection_id=connection_id)
     from .website_wakeups import enabled as event_wakes_enabled
     for identifier in ids:
+        from .reviewed_article_pr_worker import ACTION as reviewed_pr_action, advance as advance_reviewed_pr
+        if WebsiteConnectionOperation.objects.filter(pk=identifier, action=reviewed_pr_action).exists():
+            outcome = advance_reviewed_pr(identifier, now=now)
+            if outcome:
+                result["processed"] += 1
+                result["pending" if outcome == "pending" else "completed"] += 1
+                result["operations"].append({"id": str(identifier), "action": reviewed_pr_action, "outcome": outcome})
+            continue
         from .article_publication_observation import ACTION as publication_action, advance as advance_publication
         if WebsiteConnectionOperation.objects.filter(pk=identifier, action=publication_action).exists():
             outcome = advance_publication(identifier, now=now)

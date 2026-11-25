@@ -8,7 +8,7 @@ The report is bounded: each section stops at its row limit and says so, and
 its own queries do not grow with the number of startups. The scheduler posts
 only with ARTICLES_FOUNDER_HEALTH_REPORT_ENABLED on, through a fake client.
 """
-from datetime import timedelta
+from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
 from unittest.mock import patch
 from uuid import uuid4
@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import connection
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -32,6 +32,33 @@ from . import founder_test_orgs
 from .founder_journey_alerts import SCHEDULER_REQUEST_SOURCE
 from .models import WrittenArticle
 from .website_models import WebsiteConnection, WebsiteConnectionOperation, WebsiteConnectionTarget
+
+
+class DraftDeliveryEvidenceTests(SimpleTestCase):
+    def test_counts_original_requests_and_earliest_saved_drafts(self):
+        now = datetime(2026, 11, 23, tzinfo=dt_timezone.utc)
+        started = now - timedelta(hours=5)
+
+        def row(run_id, *, status, parent=None, draft=None, workflow="article_generation", at=started):
+            return {
+                "pk": run_id, "run_id": run_id, "organization_id": 1, "status": status,
+                "workflow": workflow, "created_at": at, "draft_ready_at": draft,
+                "run_request": {"restart_source_run_id": parent},
+            }
+
+        rows = [
+            row("start", status="failed"),
+            row("restart", status="failed", parent="start", draft=started + timedelta(minutes=55)),
+            row("revision", status="completed", parent="restart", workflow="article_revision",
+                draft=now - timedelta(minutes=30)),
+            row("no-draft", status="failed"),
+            row("old-review", status="approval_required"),
+            row("new-request", status="running", at=now - timedelta(minutes=5)),
+        ]
+        self.assertEqual(health._draft_delivery_evidence(rows, {}, now=now, truncated=False), {
+            "eligible": 3, "within": 1, "late": 0, "undelivered": 1, "unknown": 1,
+            "share": 0.3333, "status": "inconclusive",
+        })
 
 MELBOURNE = ZoneInfo("Australia/Melbourne")
 CHANNEL = "C0123456789"
@@ -195,6 +222,8 @@ class FounderHealthReportTests(HealthFixture):
             "Time to first article (sign-up to first draft): p50 456.5 h, p90 651.0 h; 2 timed, 0 unknown",
             "Setup success (7 days): 0 of 2 preparations Ready, 2 stopped; Ready within 24 h: 4 of 5 connected",
             "Articles (7 days): 3 of 10 requests reached review; first draft within 2 h: 1 of 2 timed, 1 unknown",
+            "Draft delivery qualification: inconclusive. 1 of 10 within 2 h, 1 late, "
+            "7 without a draft, 1 with unknown timing.",
             "Publish success (7 days): 1 of 2 merged or live, 1 live",
             "Generic stops shown (24 h): 1 for 1 founders",
             "Top codes by founders affected (7 days): DIRECTORY_DEPENDENCY_VALIDATION_FAILED 1, "

@@ -27,6 +27,7 @@ SWEEPS: tuple[tuple[str, str, str], ...] = (
     ("failure_policy", "content_factory.failure_policy_engine", "run_policy_sweep"),                # be-policy
     ("no_delivery_refunds", "content_factory.no_delivery_refunds", "run_refund_sweep"),             # be-runs
     ("merge_worker", "content_factory.publish_merge_worker", "run_merge_sweep"),                    # be-merge
+    ("repo_health", "content_factory.repo_health_operations", "sweep"),
     ("deployment_watch", "content_factory.publish_merge_worker", "run_deployment_watch_sweep"),     # be-merge
     ("staff_fixing", "content_factory.website_staff_fixing", "run_staff_fixing_sweep"),            # B25
     ("capability_record", "content_factory.website_capability_record", "run_capability_record_sweep"),  # C10

@@ -15,7 +15,7 @@ from .article_export import article_export
 from .founder_article_review_contract import scoped_review_response
 
 
-def remote_review(run, *, payload=None, child_operation=False):
+def remote_review(run, *, payload=None, child_operation=False, include_content_files=False):
     """Forward a scoped review operation without passing browser credentials.
 
     ``child_operation`` marks a payload carrying the separate operation that
@@ -85,6 +85,8 @@ def remote_review(run, *, payload=None, child_operation=False):
     if not config["enabled"]:
         return Response({"detail": "Article editing is temporarily unavailable."}, status=503)
     url = f"{config['base_url']}/api/runs/{quote(run.run_id, safe='')}/article-review"
+    if include_content_files and payload is None:
+        url += "?include_content_files=true"
     if payload is not None:
         from .founder_review_commands import require_current_effect, ReviewCommandRefusal
         try:
@@ -482,6 +484,18 @@ class VibeMarketingArticleReviewView(views.VibeMarketingRunCommentsMixin, APIVie
     allows_setup_review_updates = True
     allows_accepted_update_retries = True
     """Read or edit the canonical article using the existing ownership boundary."""
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        # The old canonical clients validate a closed schema, including command replays.
+        from .founder_article_review_contract import project_draft_findings
+        data = getattr(response, "data", None)
+        if isinstance(data, dict):
+            opted_in = request.query_params.get("draft_review_findings") == "1"
+            project_draft_findings(data, opted_in=opted_in)
+            canonical = data.get("articleReview")
+            if isinstance(canonical, dict):
+                project_draft_findings(canonical.get("review"), opted_in=opted_in)
+        return super().finalize_response(request, response, *args, **kwargs)
 
     def get(self, request, run_id):
         context, run, error = self._resolve_run(request, run_id)

@@ -132,8 +132,8 @@ class DelayedDispatchRuleTests(unittest.TestCase):
 
     def test_admission_bound_or_provisional_requests_keep_the_exact_rule(self):
         from .run_ownership import WIRE_REQUEST_KEY
-        self.assertIsNone(self.rule({"editorial_brief": NO_OFFER_BRIEF, WIRE_REQUEST_KEY: {}}))
-        self.assertIsNone(self.rule({"editorial_brief": NO_OFFER_BRIEF}, provisional=True))
+        self.assertEqual(self.rule({"editorial_brief": NO_OFFER_BRIEF, WIRE_REQUEST_KEY: {}}), "keep")
+        self.assertEqual(self.rule({"editorial_brief": NO_OFFER_BRIEF}, provisional=True), "keep")
 
     def test_deliver_passes_the_rule_to_the_policy_recheck(self):
         tree = ast.parse((ROOT / "content_factory/dispatch_outbox.py").read_text())

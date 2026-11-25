@@ -1,6 +1,7 @@
 """Event hints never grant milestone authority or discard a running claim."""
 from copy import deepcopy
 from datetime import timedelta
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from django.test import SimpleTestCase, override_settings
@@ -11,6 +12,24 @@ from . import tests_prepare_journey_unit as query_fixtures
 
 
 class EventHintTests(SimpleTestCase):
+    @override_settings(ARTICLES_WEBSITE_EVENT_WAKES_ENABLED=False)
+    def test_committed_operation_returns_while_background_work_is_still_running(self):
+        started, release, finished = Event(), Event(), Event()
+
+        def busy(_identifier):
+            started.set()
+            release.wait(10)
+            finished.set()
+
+        with patch.object(wakes, "close_old_connections"):
+            try:
+                self.assertTrue(wakes.submit_operation(busy, "reviewed-pr"))
+                self.assertTrue(started.wait(5))
+                self.assertFalse(finished.is_set())
+            finally:
+                release.set()
+            self.assertTrue(finished.wait(5))
+
     def test_supported_event_shapes_and_malformed_inputs(self):
         base={"repository":{"id":12},"installation":{"id":4}}
         payloads=(("installation",{**base,"action":"new_permissions_accepted"},"access"),
