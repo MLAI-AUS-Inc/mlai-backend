@@ -146,6 +146,9 @@ jobs:
     - name: Test private Studio source preparation without database access
       run: python scripts/test_without_database.py integrations.tests_studio_report_source
 
+    - name: Test Studio invoice and calendar source boundaries without database access
+      run: python scripts/test_without_database.py integrations.test_studio_payment_rules integrations.test_studio_treasury_sources
+
     - name: Run isolated refactor checks without database access
       run: python scripts/test_without_database.py content_factory.tests_hosting_retirement_unit content_factory.tests_staff_quality_recheck_unit content_factory.tests_staff_safety_verification_unit content_factory.tests_hosted_safety_presentation_unit content_factory.tests_quality_staff_fixing_unit content_factory.tests_ws5_final_check_unit content_factory.tests_run_sync_authority_unit content_factory.tests_snapshot_meaning_unit content_factory.tests_run_events_unit content_factory.tests_run_job_parity_unit content_factory.tests_pulse_sync_unit startup_updates.tests_source_throughput_unit startup_updates.tests_pulse_drafting_unit content_factory.tests_current_connection_unit content_factory.tests_journey_saved_access_unit tests.test_refactor_unit tests.test_refactor_django_unit tests.test_refactor_migration_inventory roo.test_event_ticket_price
 
@@ -763,6 +766,7 @@ jobs:
           integrations.tests_smart_scan \
           integrations.tests_http_client \
           integrations.tests_linear_meeting_actions \
+          integrations.tests_studio_treasury \
           tests.test_teardown_company \
           tests.test_editorial_learning_loop \
           startup_updates.tests_monthly_update_reminders \
@@ -887,6 +891,9 @@ jobs:
 
     - name: Verify event discount row locks and service boundaries on PostgreSQL
       run: python manage.py test roo.tests_event_discounts roo.tests_event_discount_api roo.tests_event_discount_concurrency --verbosity 2
+
+    - name: Verify Studio pooled payment locks and meeting persistence on PostgreSQL
+      run: python manage.py test integrations.tests_studio_treasury --noinput --verbosity 2
 
     - name: Run Pulse source cache and Linear cursor PostgreSQL tests
       run: python manage.py test startup_updates.tests_source_cache_database --verbosity 2

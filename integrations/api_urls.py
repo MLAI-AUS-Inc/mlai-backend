@@ -8,11 +8,14 @@ from .api_views_managed_channels import managed_channel_webhook
 from . import api_views_luma
 from . import api_views_reconciliation
 from .api_views_studio_reports import StudioReportPrepareView
+from .api_views_studio_treasury import StudioTreasuryView, StudioMeetingCalendarView
 from startup_updates import api_views as startup_update_api_views
 
 urlpatterns = [
     path("managed-channels/webhooks/<slug:installation>", managed_channel_webhook, name="managed_channel_webhook"),
     path('studio-reports/prepare', StudioReportPrepareView.as_view(), name='studio_reports_prepare'),
+    path('studio-treasury/action', StudioTreasuryView.as_view(), name='studio_treasury_action'),
+    path('linear/meeting-actions/calendar', StudioMeetingCalendarView.as_view(), name='studio_meeting_calendar'),
     # GitHub Integration
     path('github/', api_views.GithubTokenIdentityView.as_view(), name='github_integration_list'),  # POST create/update
     path('github/<str:slack_user_id>/', api_views.GithubTokenIdentityView.as_view(), name='github_integration_detail'), # GET, PATCH

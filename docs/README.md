@@ -5,6 +5,7 @@ Start with the repository [`README`](../README.md) and
 subsystem-specific contracts and runbooks.
 
 - [Private Studio report source](studio-report-source.md) — scoped hours/invoice/payment refresh and missing-data barriers
+- [Studio treasury and meetings](studio-treasury.md) — approved work, customer coverage, private payment reviews and calendar occurrences
 - [Contacts store](crm.md) — MLAI Luma guest sync, CSV opt-in import, consent rules and the `crm` migration
 - [System email](system-email.md) — sign-in, reset and notification email through Resend on `notify.mlai.au`, per-message switch off Customer.io
 

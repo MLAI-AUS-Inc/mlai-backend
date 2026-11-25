@@ -1919,10 +1919,24 @@
       "expiry": "2027-02-28"
     },
     {
+      "name": "STUDIO_MEETINGS_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Controls the rollout of Studio calendar and attendance actions."
+    },
+    {
       "name": "STUDIO_REPORT_SOURCE_ENABLED",
       "default": "false",
       "owner": "platform",
       "expiry": "2027-02-28"
+    },
+    {
+      "name": "STUDIO_TREASURY_ENABLED",
+      "default": "false",
+      "owner": "platform",
+      "expiry": "permanent",
+      "reason": "Controls access to the private Studio Treasury worker endpoint."
     },
     {
       "name": "TOKENMAXER_FEDERATION_ENABLED",
