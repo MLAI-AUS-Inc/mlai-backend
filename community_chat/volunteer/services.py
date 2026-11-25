@@ -722,7 +722,7 @@ def award_milestones(user, recognition=None, *, new_contribution=True):
     # Reconciled openings and wallet-only bonuses never create arcade pulls.
     if gained and (recognition.ledger_id is None or recognition.ledger_id > state.historical_ledger_cutoff):
         from community_chat.arcade import earn_level_rounds
-        earn_level_rounds(user, total, gained)
+        earn_level_rounds(user, total, gained, action=recognition.action_key)
     if not bonuses_enabled:
         return
     store_level(state, total)
