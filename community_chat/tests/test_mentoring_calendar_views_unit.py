@@ -57,7 +57,7 @@ class CalendarViewsTests(unittest.TestCase):
 
     @override_settings(MENTOR_CALENDAR_CHAT_ORIGIN='https://chat.mlai.au')
     def test_callback_returns_no_tokens_or_codes_in_redirect(self):
-        with patch.object(views.service,'finish_authorization',return_value=None):
+        with patch.object(views.service,'consume_authorization',return_value={}),patch.object(views.service,'finish_authorization',return_value=None):
             result=views.MentorCalendarCallbackView.as_view()(self.factory.get('/',{'state':'signed','code':'private-code'}))
         self.assertEqual(result.status_code,302)
         self.assertEqual(result['Location'],'https://chat.mlai.au/mentoring/settings?calendar=connected')
@@ -66,7 +66,7 @@ class CalendarViewsTests(unittest.TestCase):
 
     @override_settings(MENTOR_CALENDAR_CHAT_ORIGIN='https://chat.mlai.au/evil')
     def test_callback_rejects_non_origin_return_configuration(self):
-        with patch.object(views.service,'finish_authorization',return_value=None):
+        with patch.object(views.service,'consume_authorization',return_value={}),patch.object(views.service,'finish_authorization',return_value=None):
             result=views.MentorCalendarCallbackView.as_view()(self.factory.get('/',{'state':'signed','code':'code'}))
         self.assertEqual(result.status_code,400)
 
@@ -75,3 +75,24 @@ class CalendarViewsTests(unittest.TestCase):
             result=views.MentorCalendarCallbackView.as_view()(self.factory.get('/'))
         self.assertEqual(result.status_code,400)
         call.assert_not_called()
+
+    def test_mobile_callback_uses_fixed_credential_free_destination(self):
+        state = {'native_return':True}
+        view = views.MentorCalendarCallbackView.as_view()
+        for provider_error, query in [
+            (None, 'calendar=connected'),
+            (CalendarError('authorization_denied'), 'calendar=error&code=authorization_denied'),
+        ]:
+            with patch.object(views.service,'consume_authorization',return_value=state),patch.object(views.service,'finish_authorization',side_effect=provider_error) as finish:
+                result = view(self.factory.get('/',{'state':'signed','code':'private-code','next':'https://example.net'}))
+            finish.assert_called_once_with(state,'private-code',denied=False)
+            self.assertEqual(result['Location'],'mlaichat://connections?intent=mentoring_calendar&'+query)
+            self.assertEqual(result['Cache-Control'],'private, no-store')
+            self.assertEqual(result['Referrer-Policy'],'no-referrer')
+
+    @override_settings(MENTOR_CALENDAR_CHAT_ORIGIN='https://chat.mlai.au')
+    def test_invalid_state_cannot_choose_mobile_redirect(self):
+        with patch.object(views.service,'consume_authorization',side_effect=CalendarError('invalid_oauth_state')),patch.object(views.service,'finish_authorization') as finish:
+            result = views.MentorCalendarCallbackView.as_view()(self.factory.get('/',{'state':'replayed','native_return':'true'}))
+        finish.assert_not_called()
+        self.assertEqual(result['Location'],'https://chat.mlai.au/mentoring/settings?calendar=error&code=invalid_oauth_state')
