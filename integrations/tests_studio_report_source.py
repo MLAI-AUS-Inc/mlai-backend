@@ -104,6 +104,42 @@ class FinanceTests(SimpleTestCase):
         with self.assertRaisesRegex(SourceIncomplete, "cash_allocation_requires_review"):
             refresh_finance(snapshot(), "UMARK", [row], get, CUTOFF)
 
+    def test_verified_credit_settles_invoice_without_cash(self):
+        note_id = 'f322f537-fb5d-4a56-a827-bf3281602c10'
+        row = invoice(payment=None)
+        row.update(AmountCredited=5000, AmountDue=0, CreditNotes=[{'CreditNoteID': note_id}])
+        note = {'CreditNoteID': note_id, 'Contact': {'ContactID': 'contact'}, 'CurrencyCode': 'AUD',
+                'Type': 'ACCRECCREDIT', 'Status': 'PAID', 'Date': '2026-10-10', 'Total': 5000,
+                'Allocations': [{'Invoice': {'InvoiceID': 'i1'}, 'Date': '2026-10-24', 'Amount': 5000}]}
+        get = Mock(return_value={'CreditNotes': [note]})
+        historical = refresh_finance(snapshot(), 'UMARK', [row], get, CUTOFF, contact_id='contact',
+                                     verified_credits=True)
+        self.assertEqual(historical['clients']['UMARK']['invoices'][0]['status'], 'authorised')
+        self.assertNotIn('credited_cents', historical['clients']['UMARK']['invoices'][0])
+        note['Allocations'][0]['Date'] = '2026-10-14'
+        data = refresh_finance(snapshot(), 'UMARK', [row], get, CUTOFF, contact_id='contact',
+                               verified_credits=True)['clients']['UMARK']
+        self.assertEqual(data['payments'], [])
+        self.assertEqual(data['invoices'][0]['paid_cents'], 0)
+        self.assertEqual(data['invoices'][0]['credited_cents'], 500000)
+        self.assertEqual(data['invoices'][0]['status'], 'paid')
+        row.update(Status='AUTHORISED', AmountCredited=700, AmountDue=4300)
+        note['Allocations'][0]['Amount'] = 700
+        data = refresh_finance(snapshot(), 'UMARK', [row], get, CUTOFF, contact_id='contact',
+                               verified_credits=True)['clients']['UMARK']
+        self.assertEqual(data['invoices'][0]['credited_cents'], 70000)
+        for mismatch in ({'Status': 'VOIDED'}, {'Contact': {'ContactID': 'wrong'}},
+                         {'Allocations': [{**note['Allocations'][0], 'IsDeleted': True}]}):
+            get.return_value = {'CreditNotes': [{**note, **mismatch}]}
+            with self.assertRaisesRegex(SourceIncomplete, 'cash_allocation_requires_review'):
+                refresh_finance(snapshot(), 'UMARK', [row], get, CUTOFF, contact_id='contact',
+                                verified_credits=True)
+        note['Allocations'][0]['Date'] = '2026-10-23'
+        get.return_value = {'CreditNotes': [note]}
+        with self.assertRaisesRegex(SourceIncomplete, 'credit_cutoff_time_unknown'):
+            refresh_finance(snapshot(), 'UMARK', [row], get, CUTOFF, contact_id='contact',
+                            verified_credits=True)
+
     def test_missing_previously_mapped_invoice_is_not_zero(self):
         old = snapshot()
         old["clients"]["UMARK"]["invoices"] = [{"id": "missing", "number": "INV-OLD"}]
@@ -161,6 +197,36 @@ class PreparationTests(SimpleTestCase):
     def run_prepare(self, **kwargs):
         return prepare(self.scope, self.request, get=Mock(return_value={"Invoices": []}),
                        mail=kwargs.pop("mail", Mock(return_value={"reviewed"})), now=kwargs.pop("now", NOW), **kwargs)
+
+    def test_work_mode_exports_only_reconciled_work_and_does_not_read_cash(self):
+        self.request['mode'] = 'work'
+        self.manifest['hours_complete_through'] = '2026-10-11T00:00:00Z'
+        data = self.manifest['snapshot']['clients']['UMARK']
+        data.update(hours_reporting=True, payments=[{'id': 'private-payment'}],
+                    invoices=[{'id': 'private-credit'}], limitations=['private finance note'])
+        self.manifest['snapshot']['evidence']['cash'] = {'reference': 'private cash'}
+        data['hours'] = [{'id': 'work', 'work_end': '2026-10-10', 'evidence_ids': ['work']}]
+        self.manifest['snapshot']['evidence']['work'] = {'reference': 'work evidence'}
+        self.path.write_text(json.dumps(self.manifest))
+
+        get = Mock(side_effect=SourceIncomplete('cash_allocation_requires_review'))
+        result = prepare(self.scope, self.request, get=get, mail=Mock(return_value={'reviewed', 'new'}), now=NOW)
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(result['missing'], ['hours_coverage_missing', 'new_invoices_require_review'])
+        self.assertEqual(set(result['checks']), {'hours', 'contractor_invoices'})
+        work = result['snapshot']['clients']['UMARK']
+        self.assertEqual(work['hours'], data['hours'])
+        self.assertEqual(work['invoices'], [])
+        self.assertEqual(work['payments'], [])
+        self.assertEqual(work['limitations'], [])
+        self.assertEqual(set(result['snapshot']['evidence']), {'work'})
+        get.assert_not_called()
+
+        result = prepare(self.scope, self.request, get=get, mail=Mock(side_effect=OSError), now=NOW)
+        self.assertEqual(result['status'], 'waiting_data')
+        self.assertNotIn('snapshot', result)
+        self.assertIn('contractor_invoice_sync_failed', result['missing'])
+        get.assert_not_called()
 
     def test_ready_only_after_all_streams_close(self):
         result = self.run_prepare()
@@ -275,6 +341,25 @@ class EndpointTests(SimpleTestCase):
                 manager.select_for_update.return_value.get.assert_called_once_with(id=2, organization_id=7, provider='xero')
                 signature = hmac.new(('k' * 32).encode(), json.dumps(result, sort_keys=True, separators=(',', ':')).encode(), hashlib.sha256).hexdigest()
                 self.assertEqual(response.data['signature'], signature)
+
+    def test_authenticated_work_export_does_not_touch_xero_connection(self):
+        scope = {'team': 'T123'}
+        with TemporaryDirectory() as directory:
+            config = Path(directory) / 'clients.json'
+            config.write_text(json.dumps({'UMARK': scope}))
+            with (override_settings(STUDIO_REPORT_SOURCE_ENABLED=True, STUDIO_REPORT_SOURCE_KEY='k' * 32,
+                                    STUDIO_REPORT_SOURCE_CONFIG=str(config)),
+                  patch('integrations.api_views_studio_reports.prepare', return_value={'mode': 'work'}) as prepare_work,
+                  patch('django.db.transaction.atomic') as atomic):
+                request = {'owner': 'UMARK', 'team': 'T123', 'cutoff': CUTOFF,
+                           'nonce': 'a' * 64, 'mode': 'work'}
+                response = StudioReportPrepareView.as_view()(APIRequestFactory().post(
+                    '/', request, format='json', HTTP_X_STUDIO_SOURCE_KEY='k' * 32))
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.data['result']['mode'], 'work')
+                self.assertIn('signature', response.data)
+                self.assertEqual(prepare_work.call_args.args, (scope, request))
+                atomic.assert_not_called()
 
     @override_settings(STUDIO_REPORT_SOURCE_ENABLED=False, STUDIO_REPORT_SOURCE_KEY="k" * 32)
     def test_disabled_endpoint_rejects_correct_key(self):

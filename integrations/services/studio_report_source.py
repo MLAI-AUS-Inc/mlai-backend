@@ -76,8 +76,61 @@ def all_invoices(get, contact):
     raise SourceIncomplete("invoice_page_limit")
 
 
+def invoice_credits(invoice, get_note, cutoff, contact_id):
+    """Verify applied Xero credit notes, using their allocations rather than refunds."""
+    amount = cents(invoice['AmountCredited'])
+    stubs = invoice.get('CreditNotes')
+    if not isinstance(stubs, list) or not stubs or not contact_id:
+        raise SourceIncomplete('cash_allocation_requires_review')
+    invoice_id = invoice['InvoiceID']
+    invoice_day = xero_day(invoice.get('DateString') or invoice['Date'])
+    cutoff_day = cutoff.astimezone(TZ).date().isoformat()
+    seen, allocations, total = set(), [], 0
+    for stub in stubs:
+        note_id = stub.get('CreditNoteID')
+        if not isinstance(note_id, str) or not re.fullmatch(r'[a-fA-F0-9-]{36}', note_id) or note_id in seen:
+            raise SourceIncomplete('cash_allocation_requires_review')
+        seen.add(note_id)
+        note = get_note(note_id)
+        if (note.get('CreditNoteID') != note_id or note.get('Type') != 'ACCRECCREDIT'
+                or note.get('Status') not in {'AUTHORISED', 'PAID'}
+                or note.get('CurrencyCode') != invoice['CurrencyCode']
+                or note.get('Contact', {}).get('ContactID') != contact_id):
+            raise SourceIncomplete('cash_allocation_requires_review')
+        note_day = xero_day(note.get('DateString') or note['Date'])
+        per_invoice = 0
+        dates = set()
+        active = [part for part in note['Allocations'] if not part.get('IsDeleted')]
+        if sum(cents(part['Amount']) for part in active) > cents(note['Total']):
+            raise SourceIncomplete('cash_allocation_requires_review')
+        for part in active:
+            if part.get('Invoice', {}).get('InvoiceID') != invoice_id:
+                continue
+            day = xero_day(part['Date'])
+            applied = cents(part['Amount'])
+            if not applied or day < max(invoice_day, note_day) or day in dates:
+                raise SourceIncomplete('cash_allocation_requires_review')
+            dates.add(day)
+            per_invoice += applied
+            if day > cutoff_day:
+                continue
+            if day == cutoff_day:
+                updated = note.get('UpdatedDateUTC', '')
+                match = re.fullmatch(r'/Date\((\d+)(?:[+-]\d{4})?\)/', updated)
+                if not match or datetime.fromtimestamp(int(match[1]) / 1000, timezone.utc) > cutoff:
+                    raise SourceIncomplete('credit_cutoff_time_unknown')
+            allocations.append({'credit_note_id': note_id, 'date': day, 'amount_cents': applied,
+                                'evidence_id': 'xero-credit-note-' + note_id})
+        if not per_invoice or per_invoice > cents(note['Total']):
+            raise SourceIncomplete('cash_allocation_requires_review')
+        total += per_invoice
+    if total != amount:
+        raise SourceIncomplete('cash_allocation_requires_review')
+    return allocations
+
+
 def refresh_finance(snapshot, owner, invoices, get, cutoff, legacy_invoice_ids=(), contact_id=None,
-                    credit_description_prefix=None):
+                    credit_description_prefix=None, *, verified_credits=False):
     """Replace the live ledger, including revisions, deleted payments and batches.
 
     Explicitly approved historical external invoices remain distinct. A missing
@@ -123,6 +176,19 @@ def refresh_finance(snapshot, owner, invoices, get, cutoff, legacy_invoice_ids=(
                                        if part["invoice_id"] == legacy_row["id"])
         legacy_row["status"] = "paid" if legacy_row["paid_cents"] == legacy_row["amount_cents"] else "authorised"
     groups, seen_payments = {}, set()
+    credit_notes = {}
+
+    def read_credit_note(identity):
+        rows = get('/CreditNotes/' + identity).get('CreditNotes')
+        if not isinstance(rows, list) or len(rows) != 1:
+            raise SourceIncomplete('cash_allocation_requires_review')
+        return rows[0]
+
+    def get_credit_note(identity):
+        if identity not in credit_notes:
+            credit_notes[identity] = read_credit_note(identity)
+        return credit_notes[identity]
+
     last_day = instant(cutoff).astimezone(TZ).date().isoformat()
     for invoice in invoices:
         if invoice.get("Type") != "ACCREC" or invoice.get("CurrencyCode") != "AUD":
@@ -184,16 +250,24 @@ def refresh_finance(snapshot, owner, invoices, get, cutoff, legacy_invoice_ids=(
             group["allocations"].append({"invoice_id": identity, "amount_cents": amount})
             group["invoice_ids"].append(identity)
             group["evidence_ids"].append(evidence)
-        # Credits/overpayments are not cash receipts. Do not turn AmountPaid
-        # into purchased hours if actual receipt attribution cannot reconcile.
-        if paid != cents(invoice.get("AmountPaid", 0)) or cents(invoice.get("AmountCredited", 0)):
+        credited = cents(invoice.get("AmountCredited", 0))
+        if paid != cents(invoice.get("AmountPaid", 0)) or (credited and not verified_credits):
             raise SourceIncomplete("cash_allocation_requires_review")
         day = xero_day(invoice.get("DateString") or invoice["Date"])
         if day > last_day:
             continue
+        face = cents(invoice['Total'])
+        credit_allocations = []
+        if credited:
+            if (status not in {'paid', 'authorised'} or
+                    face != paid + credited + cents(invoice.get('AmountDue', -1))
+                    or (status == 'paid') != (face == paid + credited)):
+                raise SourceIncomplete('cash_allocation_requires_review')
+            credit_allocations = invoice_credits(invoice, get_credit_note, instant(cutoff), contact_id)
         cutoff_paid = sum(part["amount_cents"] for group in groups.values() for part in group["allocations"]
                           if part["invoice_id"] == identity)
-        if status == "paid" and cutoff_paid != cents(invoice["Total"]):
+        cutoff_credited = sum(part['amount_cents'] for part in credit_allocations)
+        if status == "paid" and cutoff_paid + cutoff_credited != face:
             status = "authorised"
         credit_fields = {}
         if credit_description_prefix is not None:
@@ -202,8 +276,16 @@ def refresh_finance(snapshot, owner, invoices, get, cutoff, legacy_invoice_ids=(
                 str(line.get('Description', '')).startswith(credit_description_prefix)
                 and Decimal(str(line.get('LineAmount', 0))) >= 0 for line in lines)
             credit_fields = {'credit_eligible': eligible}
+        if credit_allocations:
+            credit_fields.update(credited_cents=cutoff_credited, credit_allocations=credit_allocations)
         result.append({"id": identity, "number": number, "date": day, "status": status, **credit_fields,
-            "amount_cents": cents(invoice["Total"]), "paid_cents": cutoff_paid, "evidence_ids": [evidence_id]})
+            "amount_cents": face, "paid_cents": cutoff_paid, "evidence_ids": [evidence_id]})
+    for note_id, note in credit_notes.items():
+        if digest(note) != digest(read_credit_note(note_id)):
+            raise SourceIncomplete('finance_changed_during_refresh')
+        value['evidence']['xero-credit-note-' + note_id] = {
+            'reference': 'Xero credit note ' + note_id, 'sha256': digest(note),
+        }
     data["invoices"] = result
     data["payments"] = payments + list(groups.values())
     if credit_description_prefix is not None:
@@ -328,6 +410,8 @@ def finance_cache_path(scope, request):
     binding = {key: scope.get(key) for key in ('organization_id', 'linear_organization', 'project_ids',
                'xero_connection_id', 'xero_contact_id', 'legacy_invoice_ids', 'credit_description_prefix')}
     binding.update(owner=request['owner'], team=request['team'])
+    if request.get('credit_notes') == 'verified':
+        binding['credit_notes'] = 'verified'
     return Path(scope['review_directory']) / 'finance-cache' / (digest(binding) + '.json')
 
 
@@ -349,7 +433,11 @@ def store_finance(path, snapshot, owner, checked, cutoff, count):
         Path(tmp).unlink(missing_ok=True)
 
 
-def prepare(scope, request, *, get, mail, now=None):
+WORK_GAPS = frozenset({'hours_coverage_missing', 'new_invoices_require_review',
+                       'work_allocation_requires_review', 'submitted_work_requires_review'})
+
+
+def prepare(scope, request, *, mail, get=None, now=None):
     now = now or datetime.now(timezone.utc)
     started = time.monotonic()
     cutoff = instant(request["cutoff"])
@@ -373,12 +461,15 @@ def prepare(scope, request, *, get, mail, now=None):
     if data.get("pending_work") or any(row["unresolved_hour_units"] for row in data["contractor_invoices"]):
         missing.append("work_allocation_requires_review")
     latest = request.get('mode') == 'latest'
+    work_only = request.get('mode') == 'work'
+    if work_only and data.get('hours_reporting') is not True:
+        raise SourceIncomplete('work_reporting_not_configured')
     enabled = bool(scope.get('submissions'))
     pending_issues = 0
     try:
         ids = mail(scope["gmail_credentials"], scope["gmail_query"])
         unknown = ids - set(manifest.get("reviewed_gmail_ids", []))
-        if enabled and latest:
+        if enabled and (latest or work_only):
             from .studio_submissions import collect
             handled, pending_issues = collect(scope, snapshot, owner, unknown, cutoff,
                                               open_mailbox(scope['gmail_credentials']) if unknown else None)
@@ -392,6 +483,48 @@ def prepare(scope, request, *, get, mail, now=None):
             missing.append("new_invoices_require_review")
     except Exception:
         missing.append("contractor_invoice_sync_failed")
+    if work_only:
+        if now < cutoff:
+            missing.append('closing_refresh_required')
+        if any(row['unresolved_hour_units'] for row in data['contractor_invoices']):
+            missing.append('work_allocation_requires_review')
+        missing = sorted(set(missing))
+        response = {
+            'version': 1, 'mode': 'work', 'owner': owner, 'team': request['team'],
+            'organization': scope['linear_organization'], 'project_ids': sorted(scope['project_ids']),
+            'cutoff': request['cutoff'], 'nonce': request['nonce'], 'checked_at': now.isoformat(),
+            'checks': checks, 'missing': missing, 'status': 'waiting_data',
+        }
+        # Export only work and its referenced provenance. The manifest's customer
+        # invoices, cash records and finance limitations stay private.
+        work_fields = (
+            'project_ids', 'currency', 'basis', 'allocation_rate_cents_per_hour',
+            'hours_reporting', 'coverage', 'hours', 'contractor_invoices',
+            'pending_work', 'qualifications',
+        )
+        work = {key: data[key] for key in work_fields if key in data}
+        refs = {ref for field in ('hours', 'contractor_invoices', 'pending_work')
+                for row in work.get(field, []) for ref in row['evidence_ids']}
+        work_snapshot = {key: snapshot[key] for key in ('version', 'team', 'organization', 'currency', 'basis')
+                         if key in snapshot}
+        work_snapshot.update(clients={owner: work},
+                         evidence= {ref: snapshot['evidence'][ref] for ref in sorted(refs)})
+        work.update(invoices=[], payments=[], limitations=[], as_of=now.isoformat())
+        work['coverage']['through'] = max(work['coverage']['through'], cutoff.astimezone(TZ).date().isoformat())
+        if set(missing) <= WORK_GAPS:
+            response['status'] = 'partial' if missing else 'ready'
+            work['source_freshness'] = {
+                'hours_reviewed_at': reviewed.isoformat(),
+                'hours_complete_through': hours_complete.isoformat(),
+                'latest_work_date': max((row['work_end'] for row in work['hours']), default=None),
+                'unreviewed_invoice_count': len(unknown), 'missing': missing,
+            }
+            if enabled:
+                work['source_freshness']['submissions_checked_at'] = now.isoformat()
+                work['source_freshness']['submission_exceptions'] = pending_issues
+            response['snapshot'] = work_snapshot
+        save_candidate(scope, request, response, work_snapshot, unknown)
+        return response
     if enabled and not latest and missing:
         # Finance cannot resolve missing work. Historical cutoffs keep their strict gate.
         response = {'version': 1, 'owner': owner, 'team': request['team'], 'organization': scope['linear_organization'],
@@ -424,7 +557,8 @@ def prepare(scope, request, *, get, mail, now=None):
             invoices = all_invoices(get, scope["xero_contact_id"])
             snapshot = refresh_finance(snapshot, owner, invoices, get, request["cutoff"],
                                        scope.get("legacy_invoice_ids", []), scope["xero_contact_id"],
-                                       scope.get('credit_description_prefix'))
+                                       scope.get('credit_description_prefix'),
+                                       verified_credits=request.get('credit_notes') == 'verified')
             if digest(invoices) != digest(all_invoices(get, scope["xero_contact_id"])):
                 raise SourceIncomplete("finance_changed_during_refresh")
             count = len(invoices)
