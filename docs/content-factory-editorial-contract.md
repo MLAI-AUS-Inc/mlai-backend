@@ -26,6 +26,37 @@ the shared operation attempt. Missing or changed approval, unrelated children,
 portable drafts and cancelled or failed source operations retain the terminal
 gate.
 
+## Sparse article profile
+
+An owner can request the first-article card with `profile_intake=1`. Its optional
+`profileIntake.missingFields` names the missing startup description, target
+audience or reader objective. The existing card route without the query
+retains its original response. The company-scoped
+`POST /api/v1/my-startup/first-article/profile-intake/` accepts the listed
+fields as `oneLiner`, `targetAudience` and `readerTask`. Each supplied answer
+is 3–280 characters after whitespace normalization. The response is the
+refreshed card.
+
+Saving records the founder and timestamp for each supplied fact. Once the
+facts are complete, an eligible fresh catalog can retain a draft audience
+and a no-offer reader objective. Starting the article still requires its
+ordinary confirmation. Repeating the same save retains the original facts,
+and a conflicting change to an existing value requires refreshing the card.
+
+## Approved article files download
+
+The existing owner-scoped `runs/:runId/article/download` ZIP retains its
+root Markdown, HTML and images. With the setup ladder enabled on both services,
+the worker can also supply the files for a website under
+`mlai-content-files/<slug>/`. The directory contains Markdown with front matter,
+Article and applicable FAQ structured data, and the approved image files. Its
+parent directory includes the wiring instructions. The backend verifies the
+run, revision, body digest and each downloaded image before returning the ZIP.
+When an approved image is unavailable or changed, the standard ZIP remains
+downloadable. Its image notes explain the omission and how to retry. Older reviews without this
+manifest retain their existing ZIP. Downloading writes no website files,
+publication receipt or points transaction.
+
 ## Component review updates (8 October 2026)
 
 Next.js private previews route `/_next/` stylesheet, script, image-optimizer and

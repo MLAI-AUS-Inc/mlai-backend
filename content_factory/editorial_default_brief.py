@@ -47,7 +47,7 @@ a stored run, never invented there):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .editorial_catalog import CATALOG_KEY, article_brief_for_catalog, catalog_payload
 
@@ -83,6 +83,27 @@ def _candidates(approved, preferred_audience_id):
     rest = [item for item in approved if item["id"] != preferred_audience_id]
     # Prefer a profile that can already write without an offer (as the first article does).
     return preferred + sorted(rest, key=lambda item: not item.get("allow_no_offer"))
+
+
+def sparse_proposal(start, *, config, context):
+    """Offer a draft audience for a configured, pristine catalogue without admitting it."""
+    from .content_first_article import infer_audience, profile_facts
+    from .editorial_first_audience import _reader_task
+    strategy = getattr(config, "pillar_strategy", None)
+    if start.state != "ask" or start.detail != NO_APPROVED_PROFILE or not isinstance(strategy, dict):
+        return start
+    catalog = strategy.get(CATALOG_KEY)
+    if (not isinstance(catalog, dict) or catalog.get("approval_history")
+            or any((catalog.get("approval_receipts") or {}).values())
+            or catalog.get("audience_options") or catalog.get("cta_options")):
+        return start
+    facts = profile_facts(context.company, context.organization, config)
+    audience = facts["targetAudience"] or infer_audience(facts["oneLiner"])
+    if not audience:
+        return start
+    return replace(start, extra={"suggestedAudience": audience,
+        "proposedDraft": {"readerTask": _reader_task(audience), "conversionIntent": "none",
+                          "requiresAudienceApproval": True}})
 
 
 def default_start_brief(strategy, *, country, startup_name, preferred_audience_id=None) -> StartBrief:

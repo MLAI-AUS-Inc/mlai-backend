@@ -309,6 +309,44 @@ class StartTests(CardFixture, TestCase):
         response = self.press()
         self.assertEqual((response.status_code, response.data["reason"]), (409, "in_progress"))
 
+    @override_settings(ARTICLES_PORTABLE_START_ALL_COHORTS_ENABLED=True)
+    def test_empty_catalog_proposes_a_reader_and_owner_press_approves_no_offer(self):
+        from .editorial_catalog import CATALOG_KEY
+        from .editorial_default_brief import default_start_brief, sparse_proposal
+        from types import SimpleNamespace
+        self.store(**{CATALOG_KEY: {}})
+        self.site_profile(primaryCallToAction={"label": "Guaranteed results", "url": f"https://{self.org.domain}/demo"})
+        self.config.refresh_from_db()
+        context = SimpleNamespace(organization=self.org, company=self.company)
+        start = default_start_brief(self.config.pillar_strategy, country="AU", startup_name=self.org.name)
+        proposal = sparse_proposal(start, config=self.config, context=context).ask_payload()
+        self.assertTrue(proposal["proposedDraft"]["requiresAudienceApproval"])
+        self.assertEqual(proposal["proposedDraft"]["conversionIntent"], "none")
+        card = self.card()
+        self.assertIsNone(card["callToAction"])
+        self.assertEqual(card["audience"]["description"], proposal["suggestedAudience"])
+        self.assertFalse(self.strategy().get(CATALOG_KEY))
+        run = self.assertStarted(self.press({"customTopic": "A founder's guide", "topicId": None,
+            "audience": {"description": proposal["suggestedAudience"]}}))
+        brief = run.run_request["editorial_brief"]
+        self.assertEqual((brief["conversion_intent"], brief["offer_id"]), ("none", None))
+        self.assertTrue(any("founder-confirmed" in line for line in brief["acceptance_criteria"]))
+        catalog = self.strategy()[CATALOG_KEY]
+        self.assertEqual(catalog["cta_options"], [])
+        self.assertEqual(catalog["audience_options"][0]["status"], "approved")
+        self.assertTrue(catalog["approval_receipts"]["audience"])
+
+    def test_sparse_proposal_is_never_inferred_from_a_withdrawn_or_unreadable_catalog(self):
+        from .editorial_catalog import CATALOG_KEY
+        from .editorial_default_brief import default_start_brief, sparse_proposal
+        from types import SimpleNamespace
+        context = SimpleNamespace(organization=self.org, company=self.company)
+        for strategy in ({}, {CATALOG_KEY:None}, {CATALOG_KEY:{"approval_history":[{"id":"withdrawn"}]}},
+                         {CATALOG_KEY:{"approval_receipts":{"audience":{"old":{"id":"old"}}}}}):
+            initial = default_start_brief(strategy, country="AU", startup_name=self.org.name)
+            self.assertEqual(sparse_proposal(initial, config=SimpleNamespace(pillar_strategy=strategy),
+                                             context=context), initial)
+
     def test_with_an_on_domain_call_to_action_the_press_approves_the_audience_then_the_offer(self):
         url = f"https://{self.org.domain}/book"
         self.site_profile(primaryCallToAction={"label": "Book a demo", "url": url})
@@ -490,6 +528,15 @@ class ConnectedWebsiteGateTests(CardFixture, TestCase):
         self.assertIn("GitHub", response.data["detail"])
         self.assertFalse(self.runs().exists())
         self.assertFalse(free_rows(self.org).exists())
+
+    @override_settings(ARTICLES_PORTABLE_START_ALL_COHORTS_ENABLED=True)
+    def test_explicit_private_first_draft_starts_while_website_gate_is_enabled(self):
+        with self.connected(False):
+            response = self.press()
+        self.assertEqual(response.status_code, 201, response.data)
+        run = self.runs().get()
+        self.assertEqual(run.run_request["delivery_mode"], "content_only")
+        self.assertFalse(run.run_request.get("website_connection_id"))
 
     def test_once_the_website_is_connected_the_press_starts(self):
         with self.connected(True):

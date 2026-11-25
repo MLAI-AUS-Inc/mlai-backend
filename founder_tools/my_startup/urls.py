@@ -67,6 +67,8 @@ urlpatterns = [
     path("roo-link/complete/", CompleteRooLinkView.as_view()),
     path("handoff/redeem/", RedeemStartupHandoffView.as_view()),
     path("connectors/<str:provider>/connect/", MyStartupConnectorConnectView.as_view()),
+    path("", include([item for item in marketing if any(route in str(item.pattern)
+        for route in ("/article/reviewed-pr", "/article/download"))])),
     path("vibe-marketing/", include(marketing)),
     path("companies/<uuid:startup_company_id>/vibe-marketing/", include(preview)),
     path(

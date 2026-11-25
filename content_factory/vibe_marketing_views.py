@@ -843,7 +843,7 @@ def _reserve_article_start_connection(context, payload, *, reserve_operation=Tru
             payload.update(contract_for(website), connection_target_id=selected, expected_source_sha=website.verified_sha)
             from . import repo_health
             # Workstream 3: no article is charged until the current head builds.
-            repo_health.require_green_build(website)
+            repo_health.require_green_build(website, target_key=selected)
             if reserve_operation:
                 from .website_operations import reserve_workflow_operation
                 reserve_workflow_operation(website, workflow="article_generation", payload=payload)
@@ -6608,7 +6608,9 @@ def _mark_pending_article_system_setup_merged(config, *, run=None, result=None, 
     pending["updatedAt"] = timezone.now().isoformat()
     pending["updated_at"] = pending["updatedAt"]
     article_system["pending_article_system_setup"] = pending
-    if not scoped:
+    from .website_content_files import requires_independent_verification
+    if not scoped and not (requires_independent_verification(result)
+                           or requires_independent_verification(getattr(run, "result", None))):
         pending["generationReady"] = True
         pending["generation_ready"] = True
         article_system["generationReady"] = True
@@ -12208,6 +12210,13 @@ def _serialize_run(
     result = _run_mapping(run.result)
     from .publish_merge_worker import run_fields
     p2_fields = run_fields(run, organization=getattr(context, "organization", None) or getattr(run, "organization", None))
+    from .article_preview_recovery_state import terminal as preview_terminal, settle_stale_artifacts
+    from .article_preview_recovery import run_view as recovery_run_view
+    recovery_view = (recovery_run_view(run, viewer=getattr(getattr(context,"profile",None),"user",None))
+                     if run.workflow in ARTICLE_WORKFLOWS else None)
+    settle_preview = run.workflow in ARTICLE_WORKFLOWS and preview_terminal(run)
+    if settle_preview:
+        result = settle_stale_artifacts(result)
     section_issues = public_section_issues(_nested_run_result_value(result, "section_issues", "sectionIssues"))
     raw_quality = _nested_run_result_value(result, "article_preview_quality", "articlePreviewQuality")
     needs_hosted_issues = _run_mapping(raw_quality).get("status") == "blocking_findings"
@@ -12242,6 +12251,14 @@ def _serialize_run(
     preview_url = result.get("preview_url") or result.get("article_url") or result.get("url")
     pr_url = result.get("pr_url") or result.get("pull_request_url") or result.get("draft_pr_url")
     live_preview = _live_preview_from_run(run)
+    if settle_preview:
+        preview_url = ""
+        live_preview = {**live_preview,"available":False,"status":"unavailable","platformStatus":"unavailable",
+                        "previewUrl":"","internalPreviewUrl":"","proxyPath":""}
+    if recovery_view and recovery_view["state"] == "site_ready":
+        preview_url = recovery_view["previewUrl"]
+        live_preview = {**live_preview, "available": True, "status": "running", "platformStatus": "ready",
+                        "previewUrl": preview_url}
     article_setup_state = (
         copy.deepcopy(precomputed_article_setup_state)
         if precomputed_article_setup_state is not None
@@ -12266,6 +12283,10 @@ def _serialize_run(
         "provenance_status": "recorded" if saved_request.get("editorial_admission") else "partial"} if saved_brief else None)
     if compact:
         compact_result = _compact_result_for_run(run)
+        if settle_preview:
+            compact_result = settle_stale_artifacts(compact_result)
+        if recovery_view:
+            compact_result = {**compact_result, "previewRecovery":recovery_view}
         if run.workflow in ARTICLE_WORKFLOWS and isinstance(raw_quality, dict):
             compact_result["article_preview_quality"] = raw_quality
         return {
@@ -12351,6 +12372,8 @@ def _serialize_run(
         artifacts=artifacts,
         diagnostics=diagnostics,
     ) if run.workflow in ARTICLE_WORKFLOWS else result
+    if recovery_view:
+        response_result = {**response_result,"previewRecovery":recovery_view}
     return {
         "runId": run.run_id,
         **p2_fields,
@@ -19089,7 +19112,7 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
         "topic": topic,
         "target_keyword": target_keyword or topic,
         "context": str(command.data.get("context") or ""),
-        "github_repo": config.github_repo,
+        "github_repo": "" if delivery_mode == "content_only" else config.github_repo,
         "delivery_mode_explicit": delivery_mode_explicit,
         "delivery_mode_confirmed": bool(delivery_mode_explicit),
         "source_run_id": source_run_id,
@@ -19124,6 +19147,10 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
     except ValueError as exc:
         return Response({"detail": str(exc), "field": "editorialBrief"}, status=status.HTTP_400_BAD_REQUEST)
     if start.state == "ask":
+        from .portable_drafts import portable_starts_for_all
+        if portable_starts_for_all() and requests_content_only(command.data):
+            from .editorial_default_brief import sparse_proposal
+            start = sparse_proposal(start, config=config, context=context)
         logger.info("vibe_marketing_article_brief_question org_id=%s audience_id=%s",
                     context.organization.pk, start.audience_id or "")
         return Response(start.ask_payload(), status=status.HTTP_409_CONFLICT)
@@ -19153,7 +19180,7 @@ def start_article_generation(*, user, context, data, request_hash=None, website_
     article_voice = article_voice_for_dispatch(config.pillar_strategy)
     if article_voice:
         payload["article_voice"] = article_voice
-    if website_contract:
+    if website_contract and delivery_mode != "content_only":
         payload.update(website_contract)
     if request_hash:
         payload["mcp_request_hash"] = request_hash
