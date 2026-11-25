@@ -336,6 +336,113 @@ class SavedPreviewRecoveryTests(TestCase):
         self.site.save()
         self.assertNotIn("destinationOffer", self.get()["previewRecovery"])
 
+    def _confirm(self, offer_id):
+        return self.client.post(
+            self.url + "&preview_recovery=1",
+            {"action": "confirmPreviewDestination", "expectedRevision": self.review["revision"], "offerId": offer_id},
+            format="json",
+        )
+
+    def _finish_failed_build(self):
+        op = recovery.current(self.run)
+        wire = op.payload["wire"]
+        self.review["previewRecovery"] = {
+            "runId": self.run.run_id,
+            "revision": wire["revision"],
+            "sourceSha": wire["source_sha"],
+            "operationId": str(op.pk),
+            "generation": wire["generation"],
+            "attempt": wire["attempt"],
+            "state": "unavailable",
+            "reason": "site_build_failed",
+        }
+        response = self.effect("result", {**wire, "state": "unavailable", "reason": "site_build_failed"})
+        self.assertEqual(response.status_code, 200, response.content)
+        op.refresh_from_db()
+        self.assertEqual(op.receipt, {"status": "settled", "reason": "build_failed"})
+        return op
+
+    def test_failed_build_requires_fresh_owner_consent_and_preserves_the_failed_attempt(self):
+        self.site.scan_snapshots.all().delete()
+        initial_offer = self.get()["previewRecovery"]["destinationOffer"]["offerId"]
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(self._confirm(initial_offer).status_code, 202)
+        failed = self._finish_failed_build()
+        view = self.get()["previewRecovery"]
+        self.assertEqual(view["actions"], ["review_draft", "confirm_destination"])
+        self.assertIsNone(view["pollAfterMs"])
+        self.assertEqual(view["state"], "destination_required")
+        retry_offer = view["destinationOffer"]["offerId"]
+        self.assertNotEqual(retry_offer, initial_offer)
+        self.assertEqual(self.get()["previewRecovery"], view)
+        self.assertEqual(self._confirm(initial_offer).status_code, 202)
+        self.assertEqual(self._confirm("0" * 64).status_code, 409)
+        self.assertEqual(self.site.operations.filter(action=recovery.ACTION).count(), 1)
+        self.submit.assert_called_once()
+        with self.captureOnCommitCallbacks(execute=True):
+            for _ in range(2):
+                self.assertEqual(self._confirm(retry_offer).status_code, 202)
+        self.assertEqual(self.site.operations.filter(action=recovery.ACTION).count(), 2)
+        self.assertEqual(self.submit.call_count, 2)
+        replacement = recovery.current(self.run)
+        self.assertEqual(replacement.payload["wire"]["generation"], failed.payload["wire"]["generation"] + 1)
+        self.assertEqual(self.effect("result", {**failed.payload["wire"], "state": "ready", "reason": "preview_verified"}).status_code, 200)
+        failed.refresh_from_db()
+        self.assertEqual(failed.receipt, {"status": "settled", "reason": "build_failed"})
+        result = self.get()
+        self.assertEqual(result["previewRecovery"]["job"]["id"], str(replacement.pk))
+        self.assertEqual(result["sections"], self.review["sections"])
+        self.assertFalse(result["approved"])
+        self.assertEqual(self.effect("authorize", failed.payload["wire"]).status_code, 409)
+        self.assertEqual(self.effect("authorize", replacement.payload["wire"]).status_code, 200)
+        wire = replacement.payload["wire"]
+        self.review["previewRecovery"].update(
+            operationId=str(replacement.pk),
+            generation=wire["generation"],
+            state="ready",
+            reason="preview_verified",
+            previewUrl="https://preview.fixture.example/notes/saved",
+            verifiedUntil=(timezone.now() + timedelta(minutes=5)).isoformat(),
+        )
+        self.assertEqual(self.effect("result", {**wire, "state": "ready", "reason": "preview_verified"}).status_code, 200)
+        self.assertEqual(worker.advance(replacement.pk), "completed")
+        review = self.get()
+        self.assertEqual(review["previewRecovery"]["state"], "site_ready")
+        self.assertEqual(review["previewRecovery"]["previewRevision"], self.review["revision"])
+        self.assertEqual(review["sections"], self.review["sections"])
+        self.assertFalse(review["approved"])
+
+    def test_failed_build_offer_requires_matching_provider_and_current_authority_and_is_bounded(self):
+        self.get()
+        self._finish_failed_build()
+        offer = self.get()["previewRecovery"]["destinationOffer"]["offerId"]
+        raw = self.review["previewRecovery"]
+        for field, value in (
+            ("sourceSha", "d" * 40), ("runId", "other"), ("revision", "other"),
+            ("operationId", str(uuid4())), ("generation", 9), ("attempt", True),
+            ("reason", "provider_unavailable"), ("state", "building"),
+        ):
+            with self.subTest(field=field), patch.dict(raw, {field: value}):
+                self.assertNotIn("destinationOffer", self.get()["previewRecovery"])
+                self.assertEqual(self._confirm(offer).status_code, 409)
+        self.site.configuration_version += 1
+        self.site.save()
+        self.assertNotIn("destinationOffer", self.get()["previewRecovery"])
+        self.assertEqual(self._confirm(offer).status_code, 409)
+        self.site.configuration_version -= 1
+        self.site.save()
+        self.assertEqual(self._confirm(offer).status_code, 202)
+        self._finish_failed_build()
+        next_offer = self.get()["previewRecovery"]["destinationOffer"]["offerId"]
+        self.assertNotEqual(next_offer, offer)
+        self.assertEqual(self._confirm(next_offer).status_code, 202)
+        self._finish_failed_build()
+        exhausted = self.get()["previewRecovery"]
+        self.assertNotIn("destinationOffer", exhausted)
+        self.assertEqual(exhausted["reason"], "recovery_exhausted")
+        self.assertEqual(self._confirm(offer).status_code, 409)
+        self.assertEqual(self.site.operations.filter(action=recovery.ACTION).count(), 3)
+
     def test_credential_uses_only_selected_repository_read_and_revokes_a_raced_mint(self):
         self.get()
         wire = recovery.current(self.run).payload["wire"]
