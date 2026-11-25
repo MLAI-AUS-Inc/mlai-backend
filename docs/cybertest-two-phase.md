@@ -166,3 +166,16 @@ quotes, duplicated charge/dispatch and simultaneous upgrade refunds using local
 synthetic shared-ledger rows. A successful SQLite run must not be reported as
 evidence for these PostgreSQL locks. The disposable container/network must be
 removed after the run; do not point this runner at an existing shared service.
+
+## Native Security history
+
+`GET /api/v1/my-startup/cybertest/results/?company_id=<uuid>` returns the
+50 latest check receipts for the signed-in payer and active company workspace.
+`GET /api/v1/my-startup/cybertest/results/<audit_uuid>/?company_id=<uuid>`
+returns the exact receipt in the same scope, or 404. These private account
+reads verify approved community membership and company ownership and never
+create workspace bindings. The response includes repository, phase, receipt
+status, charge/refund amounts in micro-Roo, and verified delivery counts when
+available. The full report remains in the signed-in browser workspace.
+Receipts without a matching MLAI payer, company and workspace do not appear
+in native history.
