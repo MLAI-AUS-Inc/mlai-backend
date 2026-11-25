@@ -62,8 +62,30 @@ class ExecutionPlanTests(unittest.TestCase):
 
     def test_actual_node_plan_is_accepted_without_source_or_field_loss(self):
         from roo.cybertest_plan import execution_plan
-        value = json.loads((Path(__file__).parent/'fixtures/basic-execution-plan-v1.json').read_text())
-        self.assertEqual(execution_plan(value, value['contract']), value)
+        for version in ('v1', 'v2'):
+            value = json.loads((Path(__file__).parent / f'fixtures/basic-execution-plan-{version}.json').read_text())
+            with self.subTest(version=version):
+                self.assertEqual(execution_plan(value, value['contract']), value)
+
+    def test_v2_requires_one_source_free_backend_answer_and_v1_retains_its_contract(self):
+        from roo.cybertest_plan import execution_plan
+        import hashlib
+        original = json.loads((Path(__file__).parent / 'fixtures/basic-execution-plan-v1.json').read_text())
+        ids = set()
+        for answer in ('yes', 'no', 'unsure'):
+            value = {**original, 'algorithm': 'basic-source-v2', 'backendAnswer': answer}
+            basis = {k: v for k, v in value.items() if k != 'contract'}
+            digest = hashlib.sha256(json.dumps(basis, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+            value['contract'] = {**original['contract'], 'planId': digest}
+            ids.add(digest)
+            self.assertEqual(execution_plan(value, value['contract']), value)
+        self.assertEqual(len(ids), 3)
+        for change in ({'algorithm': 'basic-source-v2'}, {'algorithm': 'basic-source-v3'},
+                       {'backendAnswer': 'yes'}, {'algorithm': 'basic-source-v2', 'backendAnswer': True},
+                       {'algorithm': 'basic-source-v2', 'backendAnswer': 'some free text'}):
+            with self.subTest(change=change), self.assertRaises(CheckoutError):
+                execution_plan({**original, **change}, original['contract'])
+        self.assertEqual(execution_plan(original, original['contract']), original)
 
     def normalize(self, value):
         from roo import cybertest_plan

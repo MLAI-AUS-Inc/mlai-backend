@@ -47,12 +47,16 @@ def execution_plan(value, contract):
         'pricing', 'execution', 'workload', 'checks'}
     require(isinstance(value, dict))
     upgrade = value.get('algorithm') == 'incremental-upgrade-v1'
+    basic_v2 = value.get('algorithm') == 'basic-source-v2'
+    if basic_v2:
+        common.add('backendAnswer')
+        require(value.get('backendAnswer') in ('yes', 'no', 'unsure'))
     require(set(value) == common | ({'parentAuditId', 'baseEvidenceSha256', 'baseReportSha256',
                                    'policy', 'runtimeTargets', 'sourceChecks', 'coverage'} if upgrade
                                   else {'contextSha256', 'batchRanges'}))
     normalized = purchase_contract(contract)
     require(normalized['phase'] == ('upgrade' if upgrade else 'basic')
-            and value['algorithm'] == ('incremental-upgrade-v1' if upgrade else 'basic-source-v1'))
+            and value['algorithm'] in ('incremental-upgrade-v1', 'basic-source-v1', 'basic-source-v2'))
     require(purchase_contract(value['contract']) == normalized)
     require(value['commitSha'] == normalized['commitSha'] and value['sourceManifestSha256'] == normalized['sourceManifestSha256'])
     require(isinstance(value['checks'], list) and all(isinstance(c, dict) and isinstance(c.get('id'), str) for c in value['checks'])

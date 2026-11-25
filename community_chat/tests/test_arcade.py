@@ -106,6 +106,51 @@ class ArcadeTests(TestCase):
         self.client.force_authenticate(user=None)
         self.assertIn(self.client.get(API).status_code, (401, 403))
 
+    @override_settings(COMMUNITY_CHAT_VOLUNTEER_ENABLED=True)
+    def test_profile_celebration_and_play_queue_have_independent_receipts(self):
+        from community_chat import level_up
+
+        endpoint = "/api/v1/community-chat/arcade/level-up/"
+        for draft in range(51):
+            arcade.earn_pulse_round(self.member, draft)
+        arcade.earn_level_rounds(
+            self.member, 106_000_000, 2_000_000, action="helpful_answer",
+        )
+        arcade.earn_level_rounds(self.other, 106_000_000, 2_000_000)
+        crossing = arcade.rounds_for(self.member).get(source__trigger="level")
+        foreign = arcade.rounds_for(self.other).get(source__trigger="level")
+        with patch.object(level_up, "contribution_total", return_value=106_000_000):
+            initial = self.client.get(endpoint).data
+            self.assertEqual(initial["available"], 52)
+            self.assertEqual(initial["unreadResults"], 0)
+            self.assertEqual(initial["level"], 7)
+            self.assertEqual(initial["celebration"]["roundIds"], [str(crossing.pk)])
+            self.assertEqual(initial["celebration"]["wardrobe"], [
+                {"name": "Honey rounds", "price": 4},
+            ])
+            self.assertEqual(initial["celebration"]["reason"], "A member marked your answer as useful.")
+            self.assertEqual(initial["celebration"]["nextPlay"]["id"], str(crossing.pk))
+            self.assertEqual(len(self.client.get(f"{API}?trigger=pulse").data["rounds"]), 50)
+            self.assertEqual(
+                self.client.post(endpoint + "acknowledge/", {"round_ids": [foreign.pk]}, format="json").status_code,
+                404,
+            )
+            for _ in range(2):
+                self.assertEqual(
+                    self.client.post(endpoint + "acknowledge/", {"round_ids": [crossing.pk]}, format="json").status_code,
+                    204,
+                )
+            seen = self.client.get(endpoint).data
+            self.assertIsNone(seen["celebration"])
+            self.assertEqual(seen["available"], 52)
+            with patch.object(arcade, "draw_prize", return_value=("roo_points", 5)):
+                spin = arcade.spin(self.member, crossing.pk)
+            recovered = self.client.get(endpoint).data
+            self.assertEqual(recovered["available"], 51)
+            self.assertEqual(recovered["unreadResults"], 1)
+            self.assertEqual(recovered["nextResult"], spin)
+            self.assertIsNone(recovered["celebration"])
+
     def test_each_roo_prize_credits_its_exact_amount_and_replays(self):
         with patch.object(arcade.secrets, "randbelow", side_effect=[9, 16, 35]) as draw:
             for draft_id, points in enumerate((10, 5, 1)):
